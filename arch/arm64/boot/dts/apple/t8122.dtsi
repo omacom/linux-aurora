@@ -489,6 +489,45 @@
 			power-domains = <&ps_avd_sys>;
 		};
 
+		/*
+		 * iBoot hands over a running SEP. Keep Linux off its DART at boot;
+		 * apple_sep enables it at module initialization. The SEP only
+		 * accepts IOVAs in this window, which carries the BIT(40) alias
+		 * the DART translates (ADT vm-base 0x10000004000).
+		 */
+		sep_dart: iommu@29cac0000 {
+			compatible = "apple,t8122-dart", "apple,t8110-dart";
+			reg = <0x2 0x9cac0000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 324 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			apple,dma-offset = /bits/ 64 <0x0>;
+			status = "disabled";
+		};
+
+		sep: sep@29e400000 {
+			compatible = "apple,sep";
+			reg = <0x2 0x9e400000 0x0 0x6c000>;
+			mboxes = <&sep_mbox>;
+			mbox-names = "mbox";
+			iommus = <&sep_dart 0>;
+			status = "disabled";
+		};
+
+		sep_mbox: mbox@29e408000 {
+			compatible = "apple,t8122-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x2 0x9e408000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 318 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 319 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 320 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 321 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+				"recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+		};
+
 		fpwm1: pwm@2a1044000 {
 			compatible = "apple,t8122-fpwm", "apple,s5l-fpwm";
 			reg = <0x2 0xa1044000 0x0 0x4000>;
@@ -510,6 +549,32 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 			status = "disabled";
+		};
+
+		/*
+		 * Touch ID. iBoot leaves the pads muxed and the controller uses
+		 * its native chip select, so there is no pinctrl here. The
+		 * 200 MHz parent is spi1's on this SoC, and the one the J613
+		 * sensor was enrolled and matched with.
+		 */
+		spi2: spi@2a1108000 {
+			compatible = "apple,t8122-spi", "apple,t8103-spi";
+			reg = <0x2 0xa1108000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 767 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clk_200m>;
+			power-domains = <&ps_spi2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+
+			mesa: fingerprint@0 {
+				compatible = "apple,mesa-fingerprint";
+				reg = <0>;
+				spi-max-frequency = <8000000>;
+				spi-cpha;
+				status = "disabled";
+			};
 		};
 
 		serial0: serial@2a1200000 {
