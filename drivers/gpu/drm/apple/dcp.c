@@ -4256,19 +4256,24 @@ static int dcp_fixed_output_error(struct apple_dcp *dcp, int err, const char *wh
  * A T6030 external processor whose Type-C routes did not register: disable
  * them in the device tree so that the ports stop waiting for them, and add
  * the processor to the DRM device as a pipe that never starts, so that the
- * panel is not held up either.
+ * panel is not held up either. The same for the internal panel's processor
+ * (J613): its route is an extra, the panel goes on without it.
  */
 static int dcp_native_routes_error(struct apple_dcp *dcp, int err)
 {
-	if (!dcp->external_native)
+	if (!dcp->external_native && !dcp_is_v14_7_panel(dcp))
 		return err;
 	if (err == -EPROBE_DEFER) {
 		err = driver_deferred_probe_check_state(dcp->dev);
 		if (err == -EPROBE_DEFER)
 			return err;
 	}
-	dev_err(dcp->dev, "Type-C display routes unusable: %d; USB-C ports go on without this processor\n",
-		err);
+	if (dcp->external_native)
+		dev_err(dcp->dev, "Type-C display routes unusable: %d; USB-C ports go on without this processor\n",
+			err);
+	else
+		dev_err(dcp->dev, "Type-C display route unusable: %d; the panel goes on without it\n",
+			err);
 	dcp_typec_routes_disable(dcp);
 	return 0;
 }
@@ -4711,6 +4716,29 @@ static int dcp_ext_route_suppliers(struct device *dev)
 }
 
 /*
+ * J613: the display gate enabled the internal processor's Type-C route, and
+ * the left-front port waits for it to register. If the probe fails (any
+ * error, not only the route's own), disable the route, so that the port goes
+ * on without it, as for a route that does not register. A deferral is not a
+ * failure: the processor may still bind, and its route register, later. The
+ * port is probed again with the next driver that binds.
+ */
+static void dcp_panel_routes_give_up(struct device *dev, int err)
+{
+	struct device_node *routes __free(device_node) =
+		of_get_child_by_name(dev->of_node, "typec-routes");
+
+	if (!of_device_is_compatible(dev->of_node, "apple,t8122-dcp") ||
+	    !routes || !of_get_available_child_count(routes))
+		return;
+	if (err == -EPROBE_DEFER)
+		return;
+	dev_err(dev, "probe failed (%d): Type-C display route disabled, the left-front port goes on without it\n",
+		err);
+	dcp_typec_routes_disable_dev(dev);
+}
+
+/*
  * The T8122 dcpext is a component of the panel's DRM device, so it must
  * always register one, or the panel stays on the boot framebuffer. Keep
  * deferring while its suppliers may still appear (bounded by the deferred
@@ -4723,8 +4751,12 @@ static int dcp_platform_probe(struct platform_device *pdev)
 	void *group;
 	int ret;
 
-	if (!of_device_is_compatible(dev->of_node, "apple,t8122-dcpext"))
-		return dcp_platform_probe_pipe(pdev);
+	if (!of_device_is_compatible(dev->of_node, "apple,t8122-dcpext")) {
+		ret = dcp_platform_probe_pipe(pdev);
+		if (ret)
+			dcp_panel_routes_give_up(dev, ret);
+		return ret;
+	}
 
 	ret = dcp_ext_route_suppliers(dev);
 	if (ret)

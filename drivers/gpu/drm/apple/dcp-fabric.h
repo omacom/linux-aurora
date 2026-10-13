@@ -106,6 +106,7 @@ int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, u32 unit, bool active);
 int dcp_register_typec_routes(struct apple_dcp *dcp);
 void dcp_typec_routes_disable(struct apple_dcp *dcp);
 void dcp_typec_retrain_work(struct work_struct *work);
+void dcp_typec_routes_disable_dev(struct device *dev);
 void dcp_fabric_init(struct apple_dcp *dcp);
 void dcp_fabric_hdmi_resume(struct apple_dcp *dcp);
 void dcp_fabric_hdmi_reinit(struct apple_dcp *dcp, const char *why);

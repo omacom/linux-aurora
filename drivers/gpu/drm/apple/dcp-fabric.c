@@ -3608,8 +3608,14 @@ static int dcp_register_typec_routes_present(void *data)
  */
 void dcp_typec_routes_disable(struct apple_dcp *dcp)
 {
+	dcp_typec_routes_disable_dev(dcp->dev);
+}
+
+/* The same for a processor whose probe ended before it had a state. */
+void dcp_typec_routes_disable_dev(struct device *dev)
+{
 	struct device_node *routes __free(device_node) =
-		of_get_child_by_name(dcp->dev->of_node, "typec-routes");
+		of_get_child_by_name(dev->of_node, "typec-routes");
 	struct device_node *route;
 	struct of_changeset *cs;
 	int ret = 0;
@@ -3630,7 +3636,7 @@ void dcp_typec_routes_disable(struct apple_dcp *dcp)
 	if (!ret)
 		ret = of_changeset_apply(cs);
 	if (ret) {
-		dev_err(dcp->dev, "could not disable the Type-C display routes: %d\n", ret);
+		dev_err(dev, "could not disable the Type-C display routes: %d\n", ret);
 		of_changeset_destroy(cs);
 		kfree(cs);
 	}
@@ -3643,6 +3649,15 @@ int dcp_register_typec_routes(struct apple_dcp *dcp)
 		of_get_child_by_name(dcp->dev->of_node, "typec-routes");
 	struct dcp_route_probe_context ctx = { .dcp = dcp, .routes = routes };
 
+	/*
+	 * The internal processor's route stays disabled in the device tree
+	 * unless the display gate enables it at boot (J613, also seen by the
+	 * 26.6 profile that includes its device tree): then it has no route.
+	 * An external processor without an enabled route still fails.
+	 */
+	if (routes && !dcp->external && !dcp->ext_failsafe &&
+	    !dcp_is_external_h17p(dcp) && !of_get_available_child_count(routes))
+		return 0;
 	return dcp_fabric_run_probe(!!routes, dcp_register_typec_routes_present, &ctx);
 }
 
