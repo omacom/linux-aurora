@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! Host tests for the production M3 admission, IO ownership, thermal policy and the T8122 start
-//! experiment's parameters.
+//! Host tests for the production M3 admission, IO ownership, thermal policy, the T8122 start
+//! experiment's parameters and the T8122 HwDataA +0x418c block.
 #![allow(dead_code)]
 
 #[path = "../../drivers/gpu/drm/asahi/t8122_admission.rs"]
@@ -20,3 +20,5 @@ use agx_resources as m3_resources;
 mod m3_firmware;
 #[path = "../../drivers/gpu/drm/asahi/t8122_knobs.rs"]
 mod t8122_knobs;
+#[path = "../../drivers/gpu/drm/asahi/t8122_hwdata.rs"]
+mod t8122_hwdata;

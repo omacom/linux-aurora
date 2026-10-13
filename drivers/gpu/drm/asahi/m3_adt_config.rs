@@ -23,7 +23,24 @@ use crate::{
     m3_memory::Buffer,
     m3_params::{self, G15Debug, InitDataParam, ThermalMode},
     m3_soc::{IoMapping, PstateTable, Soc},
+    t8122_hwdata,
     t8122_start::Experiment,
+};
+
+// The T8122 HwDataA +0x418c block (`t8122_hwdata`) covers exactly the G13-era leakage
+// coefficient fields from core_leak_coef[4] to the end of aux_leak_coef, which the G15 builder
+// leaves zero, and nothing the builder fills.
+const _: () = {
+    type A = raw::HwDataAG15V14_8_3;
+    assert!(offset_of!(A, core_leak_coef) == 0x417c);
+    assert!(offset_of!(A, sram_leak_coef) == 0x419c);
+    assert!(offset_of!(A, aux_leak_coef) == 0x41bc);
+    assert!(t8122_hwdata::OFFSET == offset_of!(A, core_leak_coef) + 4 * size_of::<F32>());
+    assert!(
+        t8122_hwdata::OFFSET + t8122_hwdata::SIZE
+            == offset_of!(A, aux_leak_coef) + size_of::<raw::AuxLeakCoef>()
+    );
+    assert!(t8122_hwdata::OFFSET + t8122_hwdata::SIZE <= size_of::<A>());
 };
 
 /// Owner indices (`m3_init_storage`) of the objects the typed builders generate.
@@ -887,6 +904,28 @@ fn build_images(
     // The SoC's own values for words the shared builder writes otherwise.
     for &(at, value) in soc.hwdata_words {
         write(&mut hwdata, at, &value.to_le_bytes())?;
+    }
+    // T8122 with the G15 14.8.3 firmware (the only image the runtime accepts there): the 20
+    // measured words at HwDataA +0x418c, unless asahi.t8122_hwdata_418c=0.
+    if crate::t8122_start::is_t8122(soc)
+        && core::ptr::eq(firmware.layout, &crate::m3_firmware::T8122_LAYOUT)
+        && cfg.gpu_gen == hw::GpuGen::G15
+    {
+        if m3_params::t8122_hwdata_418c() {
+            let a = hwdata
+                .get_mut(HWDATA_A..HWDATA_A + size_of::<raw::HwDataAG15V14_8_3>())
+                .ok_or(EINVAL)?;
+            t8122_hwdata::write(a).map_err(|()| EINVAL)?;
+            dev_info!(
+                dev,
+                "M3 G15G: HwDataA +0x418c..+0x41db: the 20 words measured on a J613 under macOS 26 (asahi.t8122_hwdata_418c=0 leaves them 0)\n"
+            );
+        } else {
+            dev_info!(
+                dev,
+                "M3 G15G: HwDataA +0x418c..+0x41db left 0 (asahi.t8122_hwdata_418c=0)\n"
+            );
+        }
     }
     // On T8122, log and require the two HwDataB words the firmware's power management depends
     // on: it powers the GPU cores up for a job only when +0xa38 and +0xa40 are both nonzero.

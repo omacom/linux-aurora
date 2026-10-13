@@ -613,6 +613,18 @@ m3_param!("t8122_unit_mask_b", T8122_UNIT_MASK_B, parse_t8122_number);
 static T8122_PSTATE_CAP: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_pstate_cap", T8122_PSTATE_CAP, parse_t8122_number);
 
+/// `asahi.t8122_hwdata_418c=0|1`: on a T8122 with the G15 14.8.3 firmware, 1 (the default)
+/// writes the 20 measured words at HwDataA +0x418c ([`crate::t8122_hwdata`]); 0 leaves the
+/// range zero, for an A/B test. Readable in sysfs.
+static T8122_HWDATA_418C: AtomicU64 = AtomicU64::new(crate::t8122_hwdata::DEFAULT);
+m3_param!("t8122_hwdata_418c", T8122_HWDATA_418C, crate::t8122_hwdata::parse, 0o444,
+    Some(get_atomic_param));
+
+/// Whether `asahi.t8122_hwdata_418c` asks for the HwDataA +0x418c words (the default).
+pub(crate) fn t8122_hwdata_418c() -> bool {
+    crate::t8122_hwdata::enabled(T8122_HWDATA_418C.load(Ordering::Relaxed))
+}
+
 /// The T8122 start-experiment parameters of this boot, as given.
 pub(crate) fn t8122_params() -> crate::t8122_knobs::Raw {
     let get = |p: &AtomicU64| p.load(Ordering::Relaxed);
