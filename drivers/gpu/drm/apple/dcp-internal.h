@@ -315,6 +315,19 @@ struct apple_dcp {
 
 	/* DCP_FIRMWARE_V_14_7 state; outlives this device once RTKit runs. */
 	struct apple_dcp_v14 *v14;
+	/*
+	 * J613: the internal panel's pipe also has a Type-C route. The driver
+	 * tells its firmware the lid state, and powers the panel off while the
+	 * lid is closed (see dcp_lid_*()). While the lid is
+	 * closed the panel's connector is reported disconnected
+	 * (clamshell_panel_away; clamshell_panel_work).
+	 */
+	bool clamshell;
+	struct work_struct clamshell_start_work;
+	bool clamshell_panel_away;
+	/* The pipe's one CRTC is on (dcp_poweron() to dcp_poweroff()). */
+	bool clamshell_crtc_on;
+	struct delayed_work clamshell_panel_work;
 	struct apple_dcp_v26 *v26;
 
 	/* Coprocessor control register */

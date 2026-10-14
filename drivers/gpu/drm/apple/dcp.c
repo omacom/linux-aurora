@@ -11,6 +11,7 @@
 #include <linux/device/driver.h>
 #include <linux/dma-mapping.h>
 #include <linux/gpio/consumer.h>
+#include <linux/input.h>
 #include <linux/iommu.h>
 #include <linux/jiffies.h>
 #include <linux/kconfig.h>
@@ -2420,6 +2421,184 @@ unsigned long* dcp_get_iomfb_surfaces(struct platform_device *pdev)
 	return dcp->iomfb_surfaces;
 }
 
+/*
+ * The lid switch, for the internal pipe that also has a Type-C route
+ * (dcp->clamshell, J613; one per machine). The driver tells the
+ * panel's firmware the lid state and powers the panel off while the lid is
+ * closed (iomfb_v14_7_set_lid()).
+ *
+ * A closed lid is a panel that is not there: its connector reads
+ * disconnected until the lid opens (clamshell_panel_away), from boot on if
+ * the lid is closed then, so that no compositor lights a panel nobody sees.
+ * That is also what keeps the firmware alive: once told the lid is closed it
+ * takes the pipe for a second external display at power-on and swallows
+ * every panel frame, which then never completes. As the lid opens, IOMFB is
+ * told first, then the panel's connector comes back.
+ */
+static DEFINE_MUTEX(dcp_lid_lock);
+static struct apple_dcp *dcp_lid_dcp;	/* dcp_lid_lock; the handler is registered */
+static atomic_t dcp_lid_closed = ATOMIC_INIT(-1);	/* -1: no lid switch yet */
+
+/* The panel's connector reads disconnected until the lid opens. */
+static void dcp_clamshell_panel_away(struct apple_dcp *dcp)
+{
+	struct apple_connector *panel = dcp->fixed_connector;
+
+	cancel_delayed_work(&dcp->clamshell_panel_work);
+	if (!panel || !READ_ONCE(panel->connected))
+		return;
+	WRITE_ONCE(dcp->clamshell_panel_away, true);
+	WRITE_ONCE(panel->connected, false);
+	dcp_queue_hotplug(panel);
+	dev_info(dcp->dev, "lid closed: %s disconnected until the lid opens\n",
+		 panel->base.name);
+}
+
+static void dcp_lid_work_fn(struct work_struct *work)
+{
+	int closed = atomic_read(&dcp_lid_closed);
+	struct apple_dcp *dcp;
+
+	guard(mutex)(&dcp_lid_lock);
+	dcp = dcp_lid_dcp;
+	if (!dcp || closed < 0)
+		return;
+	iomfb_v14_7_set_lid(dcp, closed);
+	if (closed)
+		dcp_clamshell_panel_away(dcp);
+	else if (READ_ONCE(dcp->clamshell_panel_away))
+		mod_delayed_work(system_freezable_wq, &dcp->clamshell_panel_work, 0);
+}
+
+/*
+ * Freezable: a lid change seen while the system resumes (opening the lid
+ * wakes it) is applied once the DRM device has restored its state. Applied
+ * before, it hands the internal pipe back to the panel under the restore
+ * commit, which then fails for every CRTC.
+ */
+static DECLARE_WORK(dcp_lid_work, dcp_lid_work_fn);
+
+static void dcp_clamshell_panel_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work), struct apple_dcp,
+					     clamshell_panel_work);
+	struct apple_connector *panel = dcp->fixed_connector;
+
+	/* Only once IOMFB heard the lid open. */
+	if (!panel || !READ_ONCE(dcp->clamshell_panel_away) || !iomfb_v14_7_lid_open(dcp))
+		return;
+	WRITE_ONCE(dcp->clamshell_panel_away, false);
+	WRITE_ONCE(panel->connected, true);
+	dcp_queue_hotplug(panel);
+	dev_info(dcp->dev, "lid open: %s connected again\n", panel->base.name);
+}
+
+static void dcp_lid_event(struct input_handle *handle, unsigned int type,
+			  unsigned int code, int value)
+{
+	if (type != EV_SW || code != SW_LID)
+		return;
+	atomic_set(&dcp_lid_closed, !!value);
+	queue_work(system_freezable_wq, &dcp_lid_work);
+}
+
+static int dcp_lid_connect(struct input_handler *handler, struct input_dev *dev,
+			   const struct input_device_id *id)
+{
+	struct input_handle *handle;
+	int ret;
+
+	/* A switch made from user space (uinput) has no parent: not the lid. */
+	if (!dev->dev.parent)
+		return -ENODEV;
+	handle = kzalloc_obj(*handle);
+	if (!handle)
+		return -ENOMEM;
+	handle->dev = dev;
+	handle->handler = handler;
+	handle->name = "appledrm-lid";
+	ret = input_register_handle(handle);
+	if (ret)
+		goto free;
+	ret = input_open_device(handle);
+	if (ret)
+		goto unregister;
+	atomic_set(&dcp_lid_closed, test_bit(SW_LID, dev->sw));
+	pr_info("appledrm: lid switch %s, lid %s\n", dev->name,
+		test_bit(SW_LID, dev->sw) ? "closed" : "open");
+	queue_work(system_freezable_wq, &dcp_lid_work);
+	return 0;
+
+unregister:
+	input_unregister_handle(handle);
+free:
+	kfree(handle);
+	return ret;
+}
+
+static void dcp_lid_disconnect(struct input_handle *handle)
+{
+	input_close_device(handle);
+	input_unregister_handle(handle);
+	kfree(handle);
+}
+
+static const struct input_device_id dcp_lid_ids[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_SWBIT,
+		.evbit = { BIT_MASK(EV_SW) },
+		.swbit = { [BIT_WORD(SW_LID)] = BIT_MASK(SW_LID) },
+	},
+	{}
+};
+
+static struct input_handler dcp_lid_handler = {
+	.event = dcp_lid_event,
+	.connect = dcp_lid_connect,
+	.disconnect = dcp_lid_disconnect,
+	.name = "appledrm-lid",
+	.id_table = dcp_lid_ids,
+};
+
+static void dcp_lid_start(struct apple_dcp *dcp)
+{
+	int ret;
+
+	scoped_guard(mutex, &dcp_lid_lock) {
+		if (dcp_lid_dcp)
+			return;
+		dcp_lid_dcp = dcp;
+	}
+	ret = input_register_handler(&dcp_lid_handler);
+	if (!ret)
+		return;
+	dev_err(dcp->dev, "lid switch not followed: %d\n", ret);
+	scoped_guard(mutex, &dcp_lid_lock)
+		dcp_lid_dcp = NULL;
+}
+
+static void dcp_lid_stop(struct apple_dcp *dcp)
+{
+	scoped_guard(mutex, &dcp_lid_lock) {
+		if (dcp_lid_dcp != dcp)
+			return;
+		dcp_lid_dcp = NULL;
+	}
+	input_unregister_handler(&dcp_lid_handler);
+	cancel_work_sync(&dcp_lid_work);
+	atomic_set(&dcp_lid_closed, -1);
+}
+
+/* After the panel started, which the DRM device does not wait for. */
+static void dcp_clamshell_start(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(work, struct apple_dcp, clamshell_start_work);
+
+	if (iomfb_v14_7_clamshell_start(dcp))
+		return;
+	dcp_lid_start(dcp);
+}
+
 int dcp_start(struct platform_device *pdev)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
@@ -2445,6 +2624,8 @@ int dcp_start(struct platform_device *pdev)
 		ret = iomfb_v14_7_start(dcp);
 		if (ret)
 			return ret;
+		if (dcp->clamshell)
+			schedule_work(&dcp->clamshell_start_work);
 		return 0;
 	}
 
@@ -2761,6 +2942,8 @@ void dcp_poweron(struct platform_device *pdev)
 		return;
 	}
 
+	if (dcp->clamshell)
+		WRITE_ONCE(dcp->clamshell_crtc_on, true);
 	if (dcp_uses_soft_dpms(dcp)) {
 		if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
 		    dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G &&
@@ -2918,6 +3101,12 @@ void dcp_poweroff(struct platform_device *pdev)
 
 	if (dcp->avep)
 		av_service_disconnect(dcp);
+	/* The panel's CRTC is off; with the lid open it can come back. */
+	if (dcp->clamshell) {
+		WRITE_ONCE(dcp->clamshell_crtc_on, false);
+		if (READ_ONCE(dcp->clamshell_panel_away))
+			mod_delayed_work(system_freezable_wq, &dcp->clamshell_panel_work, 0);
+	}
 
 	/*
 	 * The display this CRTC was powered on for has been unplugged since:
@@ -4083,6 +4272,11 @@ VISIBLE_IF_KUNIT void dcp_comp_unbind(struct device *dev, struct device *main, v
 			disable_delayed_work_sync(&dcp->external_retry_wq);
 			disable_delayed_work_sync(&dcp->swap_watchdog_wq);
 			disable_work_sync(&dcp->vblank_wq);
+		} else if (dcp->clamshell) {
+			cancel_work_sync(&dcp->clamshell_start_work);
+			dcp_lid_stop(dcp);
+			cancel_delayed_work_sync(&dcp->clamshell_panel_work);
+			dcp_disable_typec_work(dcp, true);
 		} else if (!dcp->external) {
 			dcp_disable_typec_work(dcp, false);
 		}
@@ -4608,6 +4802,12 @@ fixed_done:
 		if (ret)
 			return ret;
 		routes_failed = true;
+	}
+	/* J613: the panel's pipe with a Type-C route the display gate enabled. */
+	dcp->clamshell = dcp_is_v14_7_panel(dcp) && dcp->nr_typec_routes;
+	if (dcp->clamshell) {
+		INIT_WORK(&dcp->clamshell_start_work, dcp_clamshell_start);
+		INIT_DELAYED_WORK(&dcp->clamshell_panel_work, dcp_clamshell_panel_work);
 	}
 
 	/*
