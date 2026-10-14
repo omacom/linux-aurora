@@ -76,6 +76,7 @@ enum isp_firmware_version {
 	ISP_FIRMWARE_V_12_4,
 	ISP_FIRMWARE_V_13_5,
 	ISP_FIRMWARE_V_14_7,
+	ISP_FIRMWARE_V_26_6_2,
 };
 
 struct isp_surf {

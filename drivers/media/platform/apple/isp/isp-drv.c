@@ -300,6 +300,8 @@ static const char * isp_fw2str(enum isp_firmware_version version)
 		return "13.5";
 	case ISP_FIRMWARE_V_14_7:
 		return "14.7";
+	case ISP_FIRMWARE_V_26_6_2:
+		return "26.6.2";
 	default:
 		return "unknown";
 	}
@@ -329,6 +331,8 @@ static enum isp_firmware_version isp_read_fw_version(struct device *dev,
 			return ISP_FIRMWARE_V_13_5;
 		else if (ver[0] == 14 && ver[1] == 7 && ver[2] == 0)
 			return ISP_FIRMWARE_V_14_7;
+		else if (ver[0] == 26 && ver[1] == 6 && ver[2] == 2)
+			return ISP_FIRMWARE_V_26_6_2;
 
 		dev_warn(dev, "unknown %s: %d.%d.%d\n", name, ver[0], ver[1], ver[2]);
 		break;
