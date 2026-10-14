@@ -119,8 +119,13 @@ static int isp_ch_get_sensor_id(struct apple_isp *isp, u32 ch)
 		id = ISP_IMX514_2820_01;
 		break;
 	case 0x558:
-		/* The H17 firmware only parses header version 0x21 setfiles. */
-		if (isp->hw->fw_abi == ISP_FW_ABI_H17)
+		/*
+		 * The H17 firmware only parses header version 0x21 setfiles.
+		 * 26.6.2 (J613) streams with 1925_03, the header version 0x21
+		 * setfile in that release's appleh16camerad.
+		 */
+		if (isp->hw->fw_abi == ISP_FW_ABI_H17 ||
+		    isp->fw_compat >= ISP_FIRMWARE_V_26_6_2)
 			id = ISP_IMX558_1925_03;
 		else
 			id = ISP_IMX558_1921_01;
@@ -504,9 +509,19 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 	if (err)
 		return err;
 
-	err = isp_cmd_ch_mbnr_enable(isp, ch, 0, ISP_MBNR_MODE_ENABLE, 1);
-	if (err)
-		return err;
+	/*
+	 * 26.6.2 firmware on T8122 runs MBNR and the temporal filter through
+	 * the neural engine ("aneclient not ready"). With neither started,
+	 * frames go straight to the host; with them, every frame waits in
+	 * the temporal filter until the firmware asserts.
+	 */
+	bool temporal = h17 || isp->fw_compat < ISP_FIRMWARE_V_26_6_2;
+
+	if (temporal) {
+		err = isp_cmd_ch_mbnr_enable(isp, ch, 0, ISP_MBNR_MODE_ENABLE, 1);
+		if (err)
+			return err;
+	}
 
 	/* The H17 firmware faults on this face-detection metering setup. */
 	if (!h17) {
@@ -538,17 +553,20 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 			return err;
 	}
 
-	err = isp_cmd_apple_ch_temporal_filter_start(isp, ch, isp->temporal_filter);
-	if (err)
-		return err;
+	if (temporal) {
+		err = isp_cmd_apple_ch_temporal_filter_start(isp, ch,
+							     isp->temporal_filter);
+		if (err)
+			return err;
 
-	err = isp_cmd_apple_ch_motion_history_start(isp, ch);
-	if (err)
-		return err;
+		err = isp_cmd_apple_ch_motion_history_start(isp, ch);
+		if (err)
+			return err;
 
-	err = isp_cmd_apple_ch_temporal_filter_enable(isp, ch);
-	if (err)
-		return err;
+		err = isp_cmd_apple_ch_temporal_filter_enable(isp, ch);
+		if (err)
+			return err;
+	}
 
 	if (h17)
 		return isp_cmd_ch_master_slave_sync_mode_set(isp, ch, 0);
