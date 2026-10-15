@@ -125,6 +125,13 @@ case $op in
     if [[ -n ${FAKE_FAIL_QUERY:-} ]]; then echo "error: local database failed" >&2; exit 1; fi
     [[ -n ${FAKE_UPGRADES:-} ]] || exit 1
     printf '%s\n' "$FAKE_UPGRADES" ;;
+  # A repository's packages as "repo name version [installed]"; FAKE_REPO_LIST has them,
+  # and as pacman, a repository with none of them is not configured.
+  -Sl)
+    rows=$(while IFS= read -r r; do [[ ${r%% *} == "${!#}" ]] && echo "$r"; done <<<"${FAKE_REPO_LIST:-}") || true
+    [[ -n $rows ]] || { echo "error: repository \"${!#}\" was not found." >&2; exit 1; }
+    printf '%s\n' "$rows"
+    exit 0 ;;
   -Qlq)
     [[ $1 == linux-aurora ]] && grep -qx linux-aurora "$FAKE/installed" &&
       echo /usr/lib/modules/7.1.12-2-11.36-sep-ARCH/dtbs/fake.dtb
@@ -343,6 +350,7 @@ M1N1_CONF='{self.m1n1_conf}'
 UPDATE_M1N1_CONF='{self.update_conf}'
 M3GPU_MARKER='{self.tmp}/etc/default/.update-m1n1.created-by-m3gpu'
 MODPROBE_CONF='{self.tmp}/etc/aurora-sep.conf'
+OMARCHY_ARM_SOURCES='{self.tmp}/omarchy/arm-package-sources.sh'
 M1N1_BIN='{self.fake}/m1n1.bin'
 PACKAGES=(
 {pkgs}
@@ -877,6 +885,65 @@ class M3FlowTest(M3FlowBase):
         self.assertIn("first: llvm-libs", proc.stderr)
         self.assertNotIn("pacman -U", self.log())
         self.assertEqual(self.downloaded(), [])
+
+    def omarchy_arm(self, *targets):
+        # Omarchy on ARM's helper naming the packages it installs from its own repository.
+        helper = self.tmp / "omarchy/arm-package-sources.sh"
+        helper.parent.mkdir(exist_ok=True)
+        helper.write_text("omarchy_arm_package_targets() {\n  printf '%s\\n' " + " ".join(targets) + "\n}\n")
+
+    def test_omarchy_arm_repository_pins_do_not_block_install(self):
+        self.mac("j313")
+        self.omarchy_arm("omarchy/hyprland", "omarchy/hyprtoolkit", "omarchy/hyprland-guiutils")
+        self.extra_env["FAKE_REPO_LIST"] = (
+            "omarchy hyprland 0.56.2-5 [installed]\nomarchy hyprtoolkit 0.5.4-5.1 [installed]\n"
+            "omarchy hyprland-guiutils 0.2.2-3 [installed]")
+        self.extra_env["FAKE_UPGRADES"] = (
+            "hyprland-guiutils 0.2.2-3 -> 0.2.2-4\nhyprtoolkit 0.5.4-5.1 -> 0.6.0-1")
+        self.install()
+        self.assertIn("pacman -U", self.log())
+
+    def test_omarchy_arm_repository_pins_do_not_hide_other_upgrades(self):
+        self.mac("j313")
+        self.omarchy_arm("omarchy/hyprtoolkit", "omarchy/hyprland-guiutils")
+        # hyprland-guiutils has a newer build in Omarchy's repository, so 'omarchy update' installs it.
+        self.extra_env["FAKE_REPO_LIST"] = (
+            "omarchy hyprtoolkit 0.5.4-5.1 [installed]\n"
+            "omarchy hyprland-guiutils 0.2.2-4 [installed: 0.2.2-3]")
+        self.extra_env["FAKE_UPGRADES"] = (
+            "hyprland-guiutils 0.2.2-3 -> 0.2.2-4\nhyprtoolkit 0.5.4-5.1 -> 0.6.0-1\n"
+            "llvm-libs 20.1-1 -> 22.1-1")
+        proc = self.install(check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        err = " ".join(proc.stderr.split())
+        self.assertIn("2 package upgrade(s) pending (pacman -Qu; first: hyprland-guiutils llvm-libs)", err)
+        self.assertNotIn("pacman -U", self.log())
+        self.assertEqual(self.downloaded(), [])
+
+    def test_omarchy_arm_pins_need_omarchys_helper(self):
+        self.mac("j313")
+        self.extra_env["FAKE_REPO_LIST"] = "omarchy hyprtoolkit 0.5.4-5.1 [installed]"
+        self.extra_env["FAKE_UPGRADES"] = "hyprtoolkit 0.5.4-5.1 -> 0.6.0-1"
+        helper = self.tmp / "omarchy/arm-package-sources.sh"
+        # No helper, then one that fails: nothing is pinned and the usual refusal follows.
+        for body in (None, "exit 3\n"):
+            with self.subTest(helper=body):
+                if body is not None:
+                    helper.parent.mkdir(exist_ok=True)
+                    helper.write_text(body)
+                proc = self.install(check=False)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("1 package upgrade(s) pending (pacman -Qu; first: hyprtoolkit)",
+                              " ".join(proc.stderr.split()))
+
+    def test_omarchy_arm_pin_in_an_unknown_repository_is_skipped(self):
+        self.mac("j313")
+        # Last, as the loop's status is its last target's.
+        self.omarchy_arm("omarchy/hyprtoolkit", "gone/hyprland")
+        self.extra_env["FAKE_REPO_LIST"] = "omarchy hyprtoolkit 0.5.4-5.1 [installed]"
+        self.extra_env["FAKE_UPGRADES"] = "hyprtoolkit 0.5.4-5.1 -> 0.6.0-1"
+        self.install()
+        self.assertIn("pacman -U", self.log())
 
     def test_database_errors_refuse_before_download_or_install(self):
         self.mac("j516s")

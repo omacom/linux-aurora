@@ -304,6 +304,8 @@ DESKTOP_FIXES=0
 DESKTOP_FIXES_DATA=""
 DESKTOP_FIXES_PACKAGES=""
 DT=/proc/device-tree
+# Omarchy on ARM names the packages it installs from its own repository on purpose.
+OMARCHY_ARM_SOURCES=${OMARCHY_PATH:-/usr/share/omarchy}/install/helpers/arm-package-sources.sh
 
 say() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -4183,8 +4185,24 @@ FROZEN_FILES_PY
   ((${#FROZEN_TRANSACTION_FILES[@]})) || die "missing admitted package archives"
 }
 
+# The packages Omarchy on ARM keeps from its own repository ('omarchy update' installs them
+# as repo/name targets), while the installed build is that repository's current one. -Qu
+# still lists another repository's newer build of them, which no update clears.
+omarchy_arm_repo_pins() {
+  local repo name
+  [[ -r $OMARCHY_ARM_SOURCES ]] || return 0
+  # A missing repository or a helper that fails pins nothing, so -Qu decides as before.
+  # shellcheck source=/dev/null
+  { (source "$OMARCHY_ARM_SOURCES" && omarchy_arm_package_targets) 2>/dev/null || true; } |
+    while IFS=/ read -r repo name; do
+      [[ -n $repo && -n $name ]] || continue
+      { LC_ALL=C pacman -Sl --color never "$repo" 2>/dev/null || true; } |
+        awk -v n="$name" '$2 == n && $4 == "[installed]" { print n }'
+    done
+}
+
 package_database_check() {
-  local pending errors status=0 row name
+  local pending errors status=0 row name repo_pins
   local -a unheld=()
   say "Refreshing the package database"
   $sudo pacman -Sy --noconfirm || die "could not refresh the package database. Nothing was installed. Fix the mirror/network error and retry."
@@ -4197,9 +4215,11 @@ package_database_check() {
     die "could not check pending package upgrades. Nothing was installed. Fix pacman's error and retry."
   fi
   rm -f "$errors"
+  repo_pins=" $(omarchy_arm_repo_pins | tr '\n' ' ') "
   while IFS= read -r row; do
     [[ -n $row ]] || continue
     name=${row%% *}
+    if [[ $row != *" [ignored]" && $repo_pins == *" $name "* ]]; then continue; fi
     # The release replaces its pins; Mac image packages keep their deliberate hold.
     if [[ $row == *" [ignored]" ]]; then
       if [[ ${1:-} == install ]] && ((FROZEN_PACKAGES)); then continue; fi
