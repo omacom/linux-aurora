@@ -868,6 +868,7 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		fallthrough;
 	case DPTX_APCALL_GET_DOWN_SPREAD:
 	case DPTX_APCALL_SET_DOWN_SPREAD:
+	case DPTX_APCALL_SET_ACTIVE:
 		memcpy(reply, data, min(reply_size, data_size));
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
@@ -881,6 +882,9 @@ static void dptxport_init(struct apple_epic_service *service, const char *name,
 	bool v14_7 = dcp_fw_is_14_7(service->ep->dcp);
 
 	if (!name)
+		return;
+	/* The J613 internal pipe's own panel port is never bound. */
+	if (service->ep->dcp->clamshell && !strcmp(name, "dcp-lpdptx-port-epic"))
 		return;
 	if (strcmp(name, "dcpdptx-port-epic") &&
 	    (!v14_7 || strcmp(name, "dcp-lpdptx-port-epic")))

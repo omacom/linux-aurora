@@ -69,6 +69,7 @@ void dcp_typec_port_set_connector(unsigned int idx, bool secondary,
 				  struct apple_connector *connector);
 bool dcp_typec_dual_stream(void);
 void dcp_typec_reorder(void);
+bool dcp_typec_pipeline_changed(struct apple_dcp *dcp);
 bool dcp_typec_follows_crtc(struct apple_dcp *dcp);
 bool dcp_typec_follow_holder_off(struct drm_atomic_state *state, struct drm_crtc *crtc,
 				 struct apple_connector *connector, struct apple_dcp *back);
@@ -94,6 +95,7 @@ int dcp_tunnel_dpin_activate(struct apple_dcp *dcp, u32 unit, bool active);
 /* DCP probe, resume and endpoint teardown hooks. */
 int dcp_register_typec_routes(struct apple_dcp *dcp);
 void dcp_typec_routes_disable(struct apple_dcp *dcp);
+void dcp_typec_routes_disable_dev(struct device *dev);
 void dcp_fabric_init(struct apple_dcp *dcp);
 void dcp_fabric_hdmi_resume(struct apple_dcp *dcp);
 void dcp_fabric_hdmi_reinit(struct apple_dcp *dcp, const char *why);

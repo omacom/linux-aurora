@@ -573,12 +573,15 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *handle,
 
 	scoped_guard(mutex, &dcp->modes_lock) {
 		bool provisional = dcp->modes_provisional;
+		/* not while the J613 panel's pipe drives a Type-C display */
+		bool panel = dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP &&
+			     dcp->connector_type == DRM_MODE_CONNECTOR_eDP;
 
 		if (generation != dcp->modes_generation)
 			return -ESTALE;
 		ret = replace_modes(handle, &dcp->modes, &dcp->nr_modes,
-				    dcp->width_mm, dcp->height_mm, dcp->notch_height,
-				    dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP);
+				    dcp->width_mm, dcp->height_mm,
+				    panel ? dcp->notch_height : 0, panel);
 		if (!ret) {
 			dcp->modes_admitted = true;
 			dcp->modes_provisional = false;

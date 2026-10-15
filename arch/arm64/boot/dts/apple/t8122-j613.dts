@@ -335,13 +335,60 @@
 	};
 };
 
+/*
+ * With the lid closed the internal DCP's pipe can drive a second external
+ * display on the left-front port, as macOS does: in the J613 ADT the
+ * internal DCP is display-crossbar ufp0, port 0, which is crossbar state 0
+ * (dispext0,0) on ATC1's crossbar, DPTX target 1 like dcpext's route@1. The
+ * pipe's first DPTX core drives the panel otherwise, so the display driver
+ * only offers this route while the lid is closed and the panel is off, and
+ * only to a display that dcpext cannot take.
+ *
+ * The route stays disabled here, like dcpext's: the display gate enables it
+ * together with dcpext. The front connector has one endpoint per pipeline
+ * that can drive it, as on the M1 Pro/Max laptops.
+ */
+&dcp {
+	phys = <&atcphy1 PHY_TYPE_DP>;
+	phy-names = "typec0";
+	mux-controls = <&atcphy1_xbar 0>;
+	mux-control-names = "typec0";
+	apple,typec-mux-indices = <0>;
+	apple,typec-dptx-phys = <1>;
+
+	typec-routes {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		route@0 {
+			reg = <0>;
+			mode-switch;
+			status = "disabled";
+
+			port {
+				dcp_typec1: endpoint {
+					remote-endpoint = <&typec1_dcp>;
+				};
+			};
+		};
+	};
+};
+
 &typec1 {
 	ports {
 		port@3 {
 			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
 
-			typec1_dcpext: endpoint {
+			typec1_dcpext: endpoint@0 {
+				reg = <0>;
 				remote-endpoint = <&dcpext_typec1>;
+			};
+
+			typec1_dcp: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcp_typec1>;
 			};
 		};
 	};

@@ -1505,6 +1505,12 @@ static void __init gate_describe(void)
  * disabled. Without the marker, with other firmware, or if anything does not
  * check out, all of them stay disabled and the ATC power states are left
  * alone. apple_t8122_display.dcpext=0 keeps them disabled too.
+ *
+ * The same changeset enables the Type-C routes the device tree gives the
+ * internal DCP (J613: to the left-front port, for a second external display
+ * with the lid closed). They lead to ports that dcpext drives too, and only
+ * the display driver's lid handling makes them usable, so they are enabled
+ * exactly when dcpext is, and must be disabled until then.
  */
 static bool gate_t8122_dcpext_requested __initdata = true;
 
@@ -1562,12 +1568,49 @@ static bool __init gate_node_in(struct device_node *const *nodes, int n,
 	return false;
 }
 
-static void __init gate_t8122_dcpext_one(struct device_node *np)
+/*
+ * The internal DCP's Type-C routes, which the gate enables together with
+ * dcpext: they must be disabled, and every crossbar the internal DCP switches
+ * must be one of dcpext's (@xbar), which the same changeset enables. Returns
+ * why not, or NULL.
+ */
+static const char *__init gate_t8122_dcp_routes_bad(struct device_node *dcp,
+						    struct device_node *routes,
+						    struct device_node *const *xbar, int nxbar)
+{
+	struct device_node *route;
+	struct of_phandle_args args;
+	bool listed;
+	int i, n;
+
+	for_each_child_of_node(routes, route) {
+		if (!gate_disabled(route)) {
+			of_node_put(route);
+			return "the internal display's Type-C route is not disabled";
+		}
+	}
+	n = of_count_phandle_with_args(dcp, "mux-controls", "#mux-control-cells");
+	if (n < 1)
+		return "the internal display's Type-C route has no display crossbar";
+	for (i = 0; i < n; i++) {
+		if (of_parse_phandle_with_args(dcp, "mux-controls", "#mux-control-cells",
+					       i, &args))
+			return "the internal display's display crossbar is not described";
+		listed = gate_node_in(xbar, nxbar, args.np);
+		of_node_put(args.np);
+		if (!listed)
+			return "the internal display's display crossbar is not one of the dcpext's";
+	}
+	return NULL;
+}
+
+static void __init gate_t8122_dcpext_one(struct device_node *np, struct device_node *dcp)
 {
 	struct device_node *dart = NULL, *mbox = NULL, *piodma = NULL;
 	struct device_node *disp_dart = NULL, *ps = NULL, *entry = NULL;
 	struct device_node *xbar[GATE_T8122_XBARS] = {};
 	struct device_node *common[GATE_T8122_XBARS] = {};
+	struct device_node *dcp_routes = NULL;
 	struct of_phandle_args args;
 	struct of_changeset *cs;
 	const char *label;
@@ -1644,6 +1687,15 @@ static void __init gate_t8122_dcpext_one(struct device_node *np)
 		goto put;
 	}
 
+	dcp_routes = of_get_child_by_name(dcp, "typec-routes");
+	if (dcp_routes) {
+		const char *why = gate_t8122_dcp_routes_bad(dcp, dcp_routes, xbar, nxbar);
+
+		if (why) {
+			gate_ext_refuse(np, why);
+			goto put;
+		}
+	}
 	cs = gate_cs_alloc();
 	if (!cs) {
 		gate_ext_refuse(np, "out of memory");
@@ -1674,6 +1726,8 @@ static void __init gate_t8122_dcpext_one(struct device_node *np)
 		ret = of_changeset_update_prop_string(cs, np, "status", "okay");
 	if (!ret)
 		ret = gate_ext_routes(cs, np, "okay");
+	if (!ret && dcp_routes)
+		ret = gate_ext_routes(cs, dcp, "okay");
 	if (!ret)
 		ret = gate_display_add_dart(cs, disp_dart);
 	if (!ret)
@@ -1686,7 +1740,11 @@ static void __init gate_t8122_dcpext_one(struct device_node *np)
 	}
 	gate_info("enabled %pOF with its Type-C routes, DARTs, mailbox, %d display crossbar(s) with ATC common power kept on, display DART %pOF in the display subsystem, CPU power floor and PMP DISPEXT request; started by the display driver\n",
 		  np, nxbar, disp_dart);
+	if (dcp_routes)
+		gate_info("enabled the Type-C routes of %pOF with it, for a second external display with the lid closed\n",
+			  dcp);
 put:
+	of_node_put(dcp_routes);
 	for (i = 0; i < GATE_T8122_XBARS; i++) {
 		of_node_put(common[i]);
 		of_node_put(xbar[i]);
@@ -1699,12 +1757,13 @@ put:
 	of_node_put(dart);
 }
 
-static void __init gate_t8122_dcpext(bool panel)
+/* @dcp: the internal DCP, if the internal display was handed over. */
+static void __init gate_t8122_dcpext(struct device_node *dcp)
 {
 	struct device_node *np;
 
 	for_each_compatible_node(np, NULL, "apple,t8122-dcpext") {
-		if (!panel)
+		if (!dcp)
 			gate_ext_refuse(np, "the internal display was not handed over");
 		else if (!gate_t8122_dcpext_requested)
 			gate_ext_refuse(np, "disabled on the command line");
@@ -1718,7 +1777,7 @@ static void __init gate_t8122_dcpext(bool panel)
 		else if (IS_ENABLED(CONFIG_VIDEO) && video_firmware_drivers_only())
 			gate_ext_refuse(np, "nomodeset is on the command line");
 		else
-			gate_t8122_dcpext_one(np);
+			gate_t8122_dcpext_one(np, dcp);
 	}
 }
 
@@ -1754,7 +1813,7 @@ static void __init gate_run(void)
 	if (gate_soc->dcpext)
 		gate_dcpext(panel ? NULL : "the internal display was not handed over");
 	if (gate_soc == &gate_t8122)
-		gate_t8122_dcpext(panel);
+		gate_t8122_dcpext(panel ? np[GATE_DCP] : NULL);
 	of_node_put(aic);
 	for (i = 0; i < PMP_PS_NR; i++)
 		of_node_put(ps[i]);

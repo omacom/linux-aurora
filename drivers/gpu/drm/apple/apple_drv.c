@@ -100,8 +100,10 @@ apple_connector_detect(struct drm_connector *connector, bool force)
 		return connector_status_connected;
 	if (connector->force == DRM_FORCE_OFF)
 		return connector_status_disconnected;
-	return READ_ONCE(apple_connector->connected) ? connector_status_connected :
-						    connector_status_disconnected;
+	if (!READ_ONCE(apple_connector->connected) ||
+	    dcp_clamshell_hold_connector(apple_connector))
+		return connector_status_disconnected;
+	return connector_status_connected;
 }
 
 static void apple_connector_oob_hotplug(struct drm_connector *connector,
