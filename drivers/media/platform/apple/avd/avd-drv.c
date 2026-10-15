@@ -796,6 +796,31 @@ static const struct avd_variant avd_t8132_variant = {
 	.submit_queue_status_offset = 0x7c,
 };
 
+/*
+ * T6040 (M4 Pro): the T8132 decoder, but only H.264 and VP9 decode
+ * correctly there so far. An HEVC stream with wavefront parallel processing
+ * stalled the VP on its first job, and AV1 has not been tried. The decoder
+ * binds at boot, so do not offer either to V4L2 clients.
+ */
+static const struct avd_variant avd_t6040_variant = {
+	.vp_slots = {
+		[AVD_CODEC_HEVC] = 4,
+		[AVD_CODEC_H264] = 4,
+		[AVD_CODEC_VP9] = 1,
+		[AVD_CODEC_AV1] = 3,
+	},
+	.fifo_slots = 15,
+	.configure_stream = t8122_configure_stream,
+	.capabilities = AVD_CAPABILITY_H264 |
+			AVD_CAPABILITY_VP9,
+	.fw_name = "apple/avd-fw-v5-t1.bin",
+	.revision = 4,
+	.vp_slot_offset = 0xc,
+	.submit_offset = 0x40,
+	.submit_queue_max_offset = 0x44,
+	.submit_queue_status_offset = 0x7c,
+};
+
 /* can also be derived from a version register */
 static const struct of_device_id avd_of_match[] = {
 	{
@@ -817,6 +842,10 @@ static const struct of_device_id avd_of_match[] = {
 	{
 		.compatible = "apple,t8122-avd",
 		.data = &avd_t8122_variant
+	},
+	{
+		.compatible = "apple,t6041-avd",
+		.data = &avd_t6040_variant
 	},
 	{
 		.compatible = "apple,t8132-avd",
