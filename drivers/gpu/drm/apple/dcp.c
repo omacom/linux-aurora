@@ -2432,12 +2432,38 @@ unsigned long* dcp_get_iomfb_surfaces(struct platform_device *pdev)
  * the lid is closed then, so that no compositor lights a panel nobody sees.
  * That is also what keeps the firmware alive: once told the lid is closed it
  * takes the pipe for a second external display at power-on and swallows
- * every panel frame, which then never completes. As the lid opens, IOMFB is
- * told first, then the panel's connector comes back.
+ * every panel frame, which then never completes.
+ *
+ * With the lid closed and the panel and its CRTC off the pipe is free for
+ * the display on its Type-C route (dcp->clamshell_free), and ranked before
+ * dcpext then: the compositor gives that display the pipe's one CRTC, the
+ * lowest free one (see dcp_typec_pipeline_changed()). When the lid
+ * opens, that display lets go of the pipe first, then IOMFB is told; the
+ * panel's connector comes back once the compositor switched the CRTC off,
+ * or two seconds later, and at once if no display had the pipe. A display
+ * that goes to dcpext meanwhile reads disconnected until then
+ * (DCP_CLAMSHELL_HOLD_MS), so that the panel has its CRTC back first.
  */
 static DEFINE_MUTEX(dcp_lid_lock);
 static struct apple_dcp *dcp_lid_dcp;	/* dcp_lid_lock; the handler is registered */
 static atomic_t dcp_lid_closed = ATOMIC_INIT(-1);	/* -1: no lid switch yet */
+
+#define DCP_CLAMSHELL_PANEL_MS	2000
+
+/*
+ * As the lid opens, a display on the left-front port that leaves the
+ * internal pipe for a free dcpext reads disconnected until the panel's
+ * connector is connected again, for at most this long: aquamarine pairs a
+ * connector that comes up with the lowest free CRTC it can use, and until
+ * the panel's connector is back that is the internal pipe's, which the
+ * panel needs (its only one) and the display is not routed to.
+ */
+#define DCP_CLAMSHELL_HOLD_MS	3000
+
+static unsigned long dcp_clamshell_hold_until;	/* jiffies */
+static struct apple_connector *dcp_clamshell_held;
+static void dcp_clamshell_hold_work_fn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(dcp_clamshell_hold_work, dcp_clamshell_hold_work_fn);
 
 /* The panel's connector reads disconnected until the lid opens. */
 static void dcp_clamshell_panel_away(struct apple_dcp *dcp)
@@ -2457,17 +2483,40 @@ static void dcp_clamshell_panel_away(struct apple_dcp *dcp)
 static void dcp_lid_work_fn(struct work_struct *work)
 {
 	int closed = atomic_read(&dcp_lid_closed);
+	bool gave_back = false, free;
 	struct apple_dcp *dcp;
 
 	guard(mutex)(&dcp_lid_lock);
 	dcp = dcp_lid_dcp;
 	if (!dcp || closed < 0)
 		return;
+	if (!closed && READ_ONCE(dcp->clamshell_panel_away)) {
+		WRITE_ONCE(dcp_clamshell_hold_until,
+			   jiffies + msecs_to_jiffies(DCP_CLAMSHELL_HOLD_MS));
+		mod_delayed_work(system_freezable_wq, &dcp_clamshell_hold_work,
+				 msecs_to_jiffies(DCP_CLAMSHELL_HOLD_MS));
+	}
+	if (!closed && READ_ONCE(dcp->clamshell_free)) {
+		WRITE_ONCE(dcp->clamshell_free, false);
+		gave_back = dcp_typec_pipeline_changed(dcp);
+	}
 	iomfb_v14_7_set_lid(dcp, closed);
 	if (closed)
 		dcp_clamshell_panel_away(dcp);
-	else if (READ_ONCE(dcp->clamshell_panel_away))
-		mod_delayed_work(system_freezable_wq, &dcp->clamshell_panel_work, 0);
+	free = closed && iomfb_v14_7_clamshell_panel_off(dcp);
+	if (free != READ_ONCE(dcp->clamshell_free)) {
+		WRITE_ONCE(dcp->clamshell_free, free);
+		gave_back |= dcp_typec_pipeline_changed(dcp);
+	}
+	/*
+	 * A display that let go of the pipe still has the CRTC until the
+	 * compositor switches it off (dcp_poweroff() brings the panel back
+	 * then); if it has done so already, the panel comes back at once.
+	 */
+	if (!closed && READ_ONCE(dcp->clamshell_panel_away))
+		mod_delayed_work(system_freezable_wq, &dcp->clamshell_panel_work,
+				 gave_back && READ_ONCE(dcp->clamshell_crtc_on) ?
+				 msecs_to_jiffies(DCP_CLAMSHELL_PANEL_MS) : 0);
 }
 
 /*
@@ -2478,19 +2527,83 @@ static void dcp_lid_work_fn(struct work_struct *work)
  */
 static DECLARE_WORK(dcp_lid_work, dcp_lid_work_fn);
 
+/* The panel was powered off or on: the pipe may be free, or not. */
+void dcp_clamshell_changed(struct apple_dcp *dcp)
+{
+	queue_work(system_freezable_wq, &dcp_lid_work);
+}
+
+/*
+ * The route took a display, with the lid closed and the panel off (from the
+ * fabric, under its lock): the pipe drives that display now.
+ */
+void dcp_clamshell_attached(struct apple_dcp *dcp, struct device_node *connector_np)
+{
+	const char *label = NULL;
+
+	iomfb_v14_7_typec_attach(dcp);
+	of_property_read_string(connector_np, "label", &label);
+	dev_info(dcp->dev, "lid closed, panel off: the internal pipe drives the display on %s\n",
+		 label ?: "a USB-C port");
+	/* already disconnected with the lid closed; makes sure */
+	dcp_clamshell_panel_away(dcp);
+}
+
 static void dcp_clamshell_panel_work(struct work_struct *work)
 {
 	struct apple_dcp *dcp = container_of(to_delayed_work(work), struct apple_dcp,
 					     clamshell_panel_work);
 	struct apple_connector *panel = dcp->fixed_connector;
 
-	/* Only once IOMFB heard the lid open. */
-	if (!panel || !READ_ONCE(dcp->clamshell_panel_away) || !iomfb_v14_7_lid_open(dcp))
+	/* Only once the display let go and IOMFB heard the lid open. */
+	if (!panel || !READ_ONCE(dcp->clamshell_panel_away) ||
+	    READ_ONCE(dcp->active_typec_route) || !iomfb_v14_7_lid_open(dcp))
 		return;
 	WRITE_ONCE(dcp->clamshell_panel_away, false);
 	WRITE_ONCE(panel->connected, true);
 	dcp_queue_hotplug(panel);
 	dev_info(dcp->dev, "lid open: %s connected again\n", panel->base.name);
+	/* a held display after it, so that it is paired on its own */
+	if (READ_ONCE(dcp_clamshell_held))
+		mod_delayed_work(system_freezable_wq, &dcp_clamshell_hold_work,
+				 msecs_to_jiffies(200));
+}
+
+/*
+ * Should @connector, a Type-C connector that has just come up, still read
+ * disconnected (see DCP_CLAMSHELL_HOLD_MS)? Only one the compositor has
+ * not seen connected and that could be paired with the internal pipe's CRTC.
+ */
+bool dcp_clamshell_hold_connector(struct apple_connector *connector)
+{
+	struct apple_dcp *dcp = READ_ONCE(dcp_lid_dcp);
+
+	if (!dcp || !dcp->crtc || connector == dcp->fixed_connector ||
+	    connector->base.status == connector_status_connected ||
+	    !(connector->candidate_crtcs & BIT(drm_crtc_index(&dcp->crtc->base))) ||
+	    atomic_read(&dcp_lid_closed) != 0 ||
+	    !READ_ONCE(dcp->clamshell_panel_away) ||
+	    !time_before(jiffies, READ_ONCE(dcp_clamshell_hold_until)))
+		return false;
+	if (xchg(&dcp_clamshell_held, connector) != connector)
+		dev_info(dcp->dev, "lid open: %s reads disconnected until %s is connected again\n",
+			 connector->base.name,
+			 dcp->fixed_connector ? dcp->fixed_connector->base.name : "the panel");
+	return true;
+}
+
+/* The panel's connector is back, or the hold ran out: report the display. */
+static void dcp_clamshell_hold_work_fn(struct work_struct *work)
+{
+	struct apple_connector *held = xchg(&dcp_clamshell_held, NULL);
+	struct apple_dcp *dcp = READ_ONCE(dcp_lid_dcp);
+
+	if (!held)
+		return;
+	if (dcp && READ_ONCE(dcp->clamshell_panel_away))
+		dev_info(dcp->dev, "lid open: %s connected after %u ms without the panel\n",
+			 held->base.name, DCP_CLAMSHELL_HOLD_MS);
+	dcp_queue_hotplug(held);
 }
 
 static void dcp_lid_event(struct input_handle *handle, unsigned int type,
@@ -2586,6 +2699,8 @@ static void dcp_lid_stop(struct apple_dcp *dcp)
 	}
 	input_unregister_handler(&dcp_lid_handler);
 	cancel_work_sync(&dcp_lid_work);
+	cancel_delayed_work_sync(&dcp_clamshell_hold_work);
+	WRITE_ONCE(dcp_clamshell_held, NULL);
 	atomic_set(&dcp_lid_closed, -1);
 }
 
@@ -2596,6 +2711,7 @@ static void dcp_clamshell_start(struct work_struct *work)
 
 	if (iomfb_v14_7_clamshell_start(dcp))
 		return;
+	/* The bind already enabled the Type-C work (dcp_enable_typec_work()). */
 	dcp_lid_start(dcp);
 }
 
@@ -3101,7 +3217,11 @@ void dcp_poweroff(struct platform_device *pdev)
 
 	if (dcp->avep)
 		av_service_disconnect(dcp);
-	/* The panel's CRTC is off; with the lid open it can come back. */
+	/*
+	 * The CRTC a Type-C display let go of: its panel can come back now,
+	 * or, while the lid work is still taking that display's route down,
+	 * once it has (see dcp_lid_work_fn()).
+	 */
 	if (dcp->clamshell) {
 		WRITE_ONCE(dcp->clamshell_crtc_on, false);
 		if (READ_ONCE(dcp->clamshell_panel_away))
@@ -4275,6 +4395,11 @@ VISIBLE_IF_KUNIT void dcp_comp_unbind(struct device *dev, struct device *main, v
 		} else if (dcp->clamshell) {
 			cancel_work_sync(&dcp->clamshell_start_work);
 			dcp_lid_stop(dcp);
+			/* A display on the route lets go of the pipe going away. */
+			if (READ_ONCE(dcp->clamshell_free)) {
+				WRITE_ONCE(dcp->clamshell_free, false);
+				dcp_typec_pipeline_changed(dcp);
+			}
 			cancel_delayed_work_sync(&dcp->clamshell_panel_work);
 			dcp_disable_typec_work(dcp, true);
 		} else if (!dcp->external) {

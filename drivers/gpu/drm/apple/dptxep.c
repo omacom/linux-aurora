@@ -889,13 +889,15 @@ static int dptxport_call(struct apple_epic_service *service, u32 idx,
 		if (reply_size >= 4)
 			memset(reply, 0, 4);
 		return 0;
+	case DPTX_APCALL_SET_ACTIVE:
 	default:
 		if (service->ep->dcp->hw.iomfb_method_profile ==
 		    DCP_IOMFB_METHODS_H17P_EXTERNAL)
 			return -EOPNOTSUPP;
 		/* just try to ACK and hope for the best... */
-		dev_info(service->ep->dcp->dev, "DPTXPort: acking unhandled call %u\n",
-			idx);
+		if (idx != DPTX_APCALL_SET_ACTIVE)
+			dev_info(service->ep->dcp->dev,
+				 "DPTXPort: acking unhandled call %u\n", idx);
 		fallthrough;
 	case DPTX_APCALL_GET_DOWN_SPREAD:
 	case DPTX_APCALL_SET_DOWN_SPREAD:
@@ -912,6 +914,9 @@ static int dptxport_prepare(struct apple_epic_service *service, const char *name
 	struct apple_dcp *dcp = service->ep->dcp;
 	int port;
 
+	/* The J613 internal pipe's own panel port is never bound. */
+	if (dcp->clamshell && name && !strcmp(name, "dcp-lpdptx-port-epic"))
+		return -ENODEV;
 	/*
 	 * T6030 14.7 also announces the low-power port service, and may leave
 	 * its class empty.

@@ -1576,6 +1576,7 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *ctx,
 	unsigned long flags;
 	bool provisional;
 	u32 entries = 0;
+	bool panel;
 	int ret = 0;
 
 	/* A stale transfer is refused before it is parsed, as it is published. */
@@ -1595,9 +1596,11 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *ctx,
 		if (ret)
 			return ret;
 	}
+	/* Not the panel's notch and rules while the J613 panel's pipe drives a Type-C display. */
+	panel = dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP &&
+		dcp->connector_type == DRM_MODE_CONNECTOR_eDP;
 	modes = enumerate_modes(ctx, &nr_modes, dcp->width_mm, dcp->height_mm,
-				dcp->notch_height,
-				dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP,
+				panel ? dcp->notch_height : 0, panel,
 				h17p_external);
 	if (IS_ERR(modes)) {
 		ret = PTR_ERR(modes);

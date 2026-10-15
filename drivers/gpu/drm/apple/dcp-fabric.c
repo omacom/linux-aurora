@@ -143,6 +143,12 @@ static bool dcp_typec_route_fixed_output_busy(struct apple_dcp_typec_route *rout
 	if (dcp->fixed_connector_type == DRM_MODE_CONNECTOR_USB)
 		return false;
 	/*
+	 * The J613 internal pipe drives its panel, with its first DPTX core,
+	 * unless the lid is closed and the panel off (dcp->clamshell_free).
+	 */
+	if (dcp->clamshell)
+		return !READ_ONCE(dcp->clamshell_free);
+	/*
 	 * The 14.7 firmware drives the internal panel on the IOMFB path.
 	 * The DPTX service is a separate output, so the live panel does not
 	 * occupy the Type-C route. An external processor's fixed output (a
@@ -413,6 +419,8 @@ static int dcp_typec_route_activate(struct apple_dcp_typec_route *route,
 	route->selected = true;
 
 	dev_info(dcp->dev, "allocated Type-C DPTX PHY %u\n", route->dptx_phy);
+	if (dcp->clamshell)
+		dcp_clamshell_attached(dcp, route->port->connector_np);
 	return 0;
 }
 
@@ -514,6 +522,8 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 	dcp->typec_connector = NULL;
 	dcp->connector = dcp->fixed_connector;
 	WRITE_ONCE(dcp->ext_backlight, false);
+	if (dcp->clamshell && ended_attachment)
+		iomfb_v14_7_typec_detach(dcp);
 
 	if (dcp->fixed_connector_type != DRM_MODE_CONNECTOR_USB) {
 		dcp->connector_type = dcp->fixed_connector_type;
@@ -888,7 +898,16 @@ static void dcp_fabric_snapshot_port(struct apple_dcp_typec_port *port,
 		pipeline->bound = !!dcp->crtc;
 		pipeline->crtc_index =
 			dcp->crtc ? drm_crtc_index(&dcp->crtc->base) : 0;
-		pipeline->has_fixed = !!dcp->fixed_phy;
+		/*
+		 * The J613 internal pipe is a hybrid too, its panel being its
+		 * fixed output, but not while the lid is closed and the panel
+		 * off: the panel's connector reads disconnected then, and
+		 * aquamarine gives a display on the left-front port the lowest
+		 * free CRTC it can use, the internal pipe's (index 0, below
+		 * dcpext's). Ranked as a plain pipeline, the route follows.
+		 */
+		pipeline->has_fixed = !!dcp->fixed_phy ||
+			(dcp->clamshell && !READ_ONCE(dcp->clamshell_free));
 		pipeline->fixed_busy = dcp_typec_route_busy(route);
 		pipeline->owned = !!dcp->active_typec_route ||
 				  dcp_typec_safe_held(dcp);
@@ -1273,6 +1292,54 @@ void dcp_typec_reorder(void)
 
 	if (dcp_typec_keep_order())
 		dcp_typec_rebalance_locked(NULL, 0);
+}
+
+static int dcp_typec_port_busy(struct apple_dcp_typec_port *port,
+			       struct apple_dcp *dcp);
+
+/*
+ * The J613 internal pipe became free for a Type-C display (lid closed, panel
+ * off) or is its panel's again (the lid opens). Free: it takes a port left
+ * waiting for a pipeline, as any pipeline that is let go of, ranked before
+ * dcpext while it is free (see dcp_fabric_snapshot_port()). Its panel's
+ * again: the display it drives lets go of it (powered off first), and
+ * goes to another free pipeline or waits again. Returns whether
+ * a display let go.
+ */
+bool dcp_typec_pipeline_changed(struct apple_dcp *dcp)
+{
+	bool gave_back = false;
+	unsigned int i;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+
+	if (!dcp_typec_route_fixed_output_busy(&dcp->typec_routes[0])) {
+		dcp_typec_pipeline_freed();
+		return false;
+	}
+	for (i = 0; i < dcp->nr_typec_routes; i++) {
+		struct apple_dcp_typec_route *route = &dcp->typec_routes[i];
+		struct apple_dcp_typec_port *port = route->port;
+
+		if (port->owner != route || route->tunnel)
+			continue;
+		iomfb_v14_7_typec_power_off(dcp);
+		if (port->hpd || dcp->typec_cable_connected ||
+		    (dcp->typec_connector && dcp->typec_connector->connected))
+			dcp_dptx_disconnect_oob(to_platform_device(dcp->dev), 0);
+		port->hpd = false;
+		dcp_typec_route_deactivate(route);
+		port->owner = NULL;
+		port->applied_valid = false;
+		gave_back = true;
+		/* dcpext may be free by now. */
+		dcp_typec_pipeline_freed();
+		if (!port->owner && port->dp_wanted && port->dp_hpd) {
+			port->busy_noted = false;
+			dcp_typec_port_busy(port, dcp);
+		}
+	}
+	return gave_back;
 }
 
 static int dcp_typec_route_prepare(struct typec_mux_dev *mux,
