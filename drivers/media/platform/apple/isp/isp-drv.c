@@ -1028,7 +1028,7 @@ static const struct apple_isp_hw apple_isp_hw_t6020 = {
 
 static const struct apple_isp_hw apple_isp_hw_t8122 = {
 	.gen = ISP_GEN_T8112,
-	.pmu_base = 0x2d07040000,
+	.pmu_base = 0x2d0704000,
 
 	.dsid_count = 1,
 	.dsid_clr_base0 = 0x2221c4000,
