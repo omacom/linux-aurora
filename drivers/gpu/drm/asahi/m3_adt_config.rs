@@ -138,9 +138,10 @@ const _: () = assert!(storage::same_iomaps(
 ));
 
 /// Highest performance state device-tree InitData may use without the driver's thermal limit
-/// (`asahi.m3_thermal=off`), and the runtime cap the thermal limit starts at and falls back to
-/// (the "safe cap"). The InitData's fast-die temperature controller words stay 0, so the
-/// firmware does not limit the die temperature by itself.
+/// (`asahi.m3_thermal=off`), and the default thermal fallback for other SoCs. The T8122
+/// experiment uses its lower default ceiling as the thermal fallback. The InitData's
+/// fast-die temperature controller words stay 0, so the firmware does not limit the die
+/// temperature by itself.
 pub(crate) const ADT_MAX_PSTATE_LIMIT: u32 = 5;
 
 /// The performance states the runtime backend lets the firmware use.
@@ -231,10 +232,15 @@ impl PstatePolicy {
             }
         }
         // Without the thermal limit the runtime cap is the ceiling; with it, the runtime cap
-        // starts at (and never goes below) the cap used without it.
+        // starts at the board-specific no-feedback cap. The T8122 experiment may
+        // raise its ceiling, but must retain state 2 as its thermal fallback.
         let safe = match thermal {
             ThermalMode::Off => max,
-            ThermalMode::Hold | ThermalMode::On => max.min(ADT_MAX_PSTATE_LIMIT),
+            ThermalMode::Hold | ThermalMode::On => crate::m3_thermal_policy::safe_cap(
+                max,
+                ceiling.is_some(),
+                ADT_MAX_PSTATE_LIMIT,
+            ),
         };
         let boot = m3_params::boot_pstate_param()
             .unwrap_or(u64::from(safe))
