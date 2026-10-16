@@ -587,7 +587,7 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *handle,
 			 * connected through, the same display keeps its EDID,
 			 * unless that is a placeholder being retried.
 			 */
-			if (!atomic_read(&dcp->external_held) ||
+			if (!iomfb_v14_7_external_holding(dcp) ||
 			    READ_ONCE(dcp->placeholder_retried))
 				apple_connector_invalidate_edid(dcp->connector);
 			if (provisional && dcp->connector && dcp->dev &&

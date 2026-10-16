@@ -108,12 +108,18 @@ bool dcp_uses_t6020_tunnel_flow(struct apple_dcp *dcp)
 				     dcp->hw.t6020_tunnel_flow, connector_wired);
 }
 
+/* The HDMI port's HPD line reads high. */
+bool dcp_hdmi_hpd_high(struct apple_dcp *dcp)
+{
+	KUNIT_STATIC_STUB_REDIRECT(dcp_hdmi_hpd_high, dcp);
+
+	return gpiod_get_value_cansleep(dcp->hdmi_hpd) > 0;
+}
+
 bool dcp_hdmi_port_attached(struct apple_dcp *dcp)
 {
-	KUNIT_STATIC_STUB_REDIRECT(dcp_hdmi_port_attached, dcp);
-
 	return dcp->hdmi_hpd && !READ_ONCE(dcp->active_typec_route) &&
-	       gpiod_get_value_cansleep(dcp->hdmi_hpd) > 0;
+	       dcp_hdmi_hpd_high(dcp);
 }
 
 static bool dcp_typec_route_is_dp(const struct typec_mux_state *state)
@@ -3633,20 +3639,27 @@ static void dcp_hdmi_connect_failed(struct apple_dcp *dcp, int ret)
 		dcp_external_retry(dcp, "HDMI display link not set up", ret, 1000);
 }
 
+/*
+ * A new HDMI attach gets its own retries. The converter's HPD pulses also
+ * land here: while a display is kept connected through a withdrawal, keep
+ * the retry that bounds that. A hold whose connector was reported
+ * disconnected since is over, and is cleared with its retry.
+ */
+void dcp_hdmi_attach_retries(struct apple_dcp *dcp)
+{
+	if (!dcp->external_native || iomfb_v14_7_external_holding(dcp))
+		return;
+	atomic_set(&dcp->external_retries, 0);
+	cancel_delayed_work(&dcp->external_retry_wq);
+	atomic_set(&dcp->external_held, 0);
+}
+
 static void dcp_hdmi_connect_fixed(void *ctx)
 {
 	struct apple_dcp *dcp = ctx;
 	int ret = dcp_fixed_output_select(dcp);
 
-	/*
-	 * A new HDMI attach gets its own retries. The converter's HPD pulses
-	 * also land here: while a display is kept connected through a
-	 * withdrawal, keep the retry that bounds that.
-	 */
-	if (dcp->external_native && !atomic_read(&dcp->external_held)) {
-		atomic_set(&dcp->external_retries, 0);
-		cancel_delayed_work(&dcp->external_retry_wq);
-	}
+	dcp_hdmi_attach_retries(dcp);
 	if (ret)
 		dev_err(dcp->dev, "could not select the HDMI output: %d\n", ret);
 	else
@@ -3834,6 +3847,8 @@ static bool dcp_typec_hdmi_reclaim(struct apple_dcp *dcp)
 void dcp_fabric_hdmi_retry(struct apple_dcp *dcp)
 {
 	int ret;
+
+	KUNIT_STATIC_STUB_REDIRECT(dcp_fabric_hdmi_retry, dcp);
 
 	guard(mutex)(&dcp_typec_fabric_lock);
 	if (dcp->active_typec_route || gpiod_get_value_cansleep(dcp->hdmi_hpd) <= 0) {

@@ -44,11 +44,13 @@ bool iomfb_v14_7_external_showing(struct apple_dcp *dcp,
 /*
  * The attached display came or went (_hotplug), or its timings were
  * withdrawn (_withdrawn); _release() reports a display that was kept
- * connected through a withdrawal, and is not described again, gone.
+ * connected through a withdrawal, and is not described again, gone, and
+ * _holding() says whether one is kept connected now.
  */
 void dcp_v14_external_hotplug(struct apple_dcp *dcp, bool connected);
 void iomfb_v14_7_external_withdrawn(struct apple_dcp *dcp);
 bool iomfb_v14_7_external_release(struct apple_dcp *dcp);
+bool iomfb_v14_7_external_holding(struct apple_dcp *dcp);
 /* Component unbind: KMS goes away; the firmware session is kept until reboot. */
 void iomfb_v14_7_unbind(struct apple_dcp *dcp);
 /* Platform remove: the apple_dcp is freed next; the firmware session is kept. */

@@ -477,8 +477,9 @@ static void parser_replacement(struct kunit *test)
 
 /*
  * Described again after a withdrawal it was kept connected through, the same
- * display keeps its EDID; any other replacement, or a placeholder being
- * retried, drops it.
+ * display keeps its EDID; any other replacement, a placeholder being
+ * retried, or a hold whose connector was reported disconnected since drops
+ * it.
  */
 static void parser_held_keeps_edid(struct kunit *test)
 {
@@ -500,8 +501,11 @@ static void parser_held_keeps_edid(struct kunit *test)
 	dcp->connector = connector;
 	blob = make_blob(test, &record, 1);
 	KUNIT_ASSERT_NOT_NULL(test, blob);
-	/* Pass 0: not held. Pass 1: held. Pass 2: held, placeholder retried. */
-	for (pass = 0; pass < 3; pass++) {
+	/*
+	 * Pass 0: not held. Pass 1: held. Pass 2: held, placeholder retried.
+	 * Pass 3: held, but the connector was reported disconnected since.
+	 */
+	for (pass = 0; pass < 4; pass++) {
 		const struct drm_edid *edid;
 		u64 generation;
 
@@ -514,6 +518,7 @@ static void parser_held_keeps_edid(struct kunit *test)
 								     generation, edid));
 		atomic_set(&dcp->external_held, pass != 0);
 		dcp->placeholder_retried = pass == 2;
+		WRITE_ONCE(connector->connected, pass != 3);
 		KUNIT_ASSERT_EQ(test, parse(blob->data, blob->size, &ctx), 0);
 		ctx.dcp = &parser_dcp;
 		KUNIT_ASSERT_EQ(test, dcp_modes_replace(dcp, &ctx,

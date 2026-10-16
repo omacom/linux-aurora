@@ -78,6 +78,7 @@ bool dcp_t6030_ext_native(const struct device_node *np);
 void dcp_external_ready(struct apple_dcp *dcp);
 void dcp_external_retry(struct apple_dcp *dcp, const char *why, int error,
 			unsigned int base_ms);
+void dcp_external_retry_defer(struct apple_dcp *dcp, unsigned int min_ms);
 void dcp_external_retry_work(struct work_struct *work);
 void dcp_external_sink_irq(struct apple_dcp *dcp);
 void dcp_queue_typec_reconnect(struct apple_dcp *dcp, unsigned long delay);
