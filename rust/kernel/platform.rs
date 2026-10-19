@@ -79,6 +79,11 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
             (*pdrv.get()).remove = Some(Self::remove_callback);
             (*pdrv.get()).driver.of_match_table = of_table;
             (*pdrv.get()).driver.acpi_match_table = acpi_table;
+            (*pdrv.get()).driver.pm = if T::HAS_PM {
+                &Self::PM_OPS
+            } else {
+                core::ptr::null()
+            };
         }
 
         // SAFETY: `pdrv` is guaranteed to be a valid `DriverType`.
@@ -92,6 +97,34 @@ unsafe impl<T: Driver + 'static> driver::RegistrationOps for Adapter<T> {
 }
 
 impl<T: Driver + 'static> Adapter<T> {
+    // SAFETY: dev_pm_ops contains only optional C function pointers; all-zero
+    // initializes unimplemented callbacks to None.
+    const PM_OPS: bindings::dev_pm_ops = bindings::dev_pm_ops {
+        suspend: Some(Self::suspend_callback),
+        resume: Some(Self::resume_callback),
+        ..unsafe { core::mem::zeroed() }
+    };
+
+    extern "C" fn suspend_callback(dev: *mut bindings::device) -> kernel::ffi::c_int {
+        // SAFETY: The PM core supplies a valid, bound device for this callback.
+        let dev = unsafe { device::Device::<device::Core>::from_raw(dev) };
+        from_result(|| {
+            let data = dev.drvdata::<T>()?;
+            T::suspend(dev, data)?;
+            Ok(0)
+        })
+    }
+
+    extern "C" fn resume_callback(dev: *mut bindings::device) -> kernel::ffi::c_int {
+        // SAFETY: The PM core supplies a valid, bound device for this callback.
+        let dev = unsafe { device::Device::<device::Core>::from_raw(dev) };
+        from_result(|| {
+            let data = dev.drvdata::<T>()?;
+            T::resume(dev, data)?;
+            Ok(0)
+        })
+    }
+
     extern "C" fn probe_callback(pdev: *mut bindings::platform_device) -> kernel::ffi::c_int {
         // SAFETY: The platform bus only ever calls the probe callback with a valid pointer to a
         // `struct platform_device`.
@@ -204,6 +237,23 @@ macro_rules! module_platform_driver {
 /// }
 ///```
 pub trait Driver: Send {
+    /// Whether this driver provides ordinary system suspend/resume callbacks.
+    ///
+    /// Runtime PM, hibernation and noirq callbacks are not registered here.
+    const HAS_PM: bool = false;
+
+    /// Suspend a successfully probed device while its parent is still active.
+    fn suspend(dev: &device::Device<device::Core>, this: Pin<&Self>) -> Result {
+        let _ = (dev, this);
+        Ok(())
+    }
+
+    /// Resume a bound device after its parent has resumed.
+    fn resume(dev: &device::Device<device::Core>, this: Pin<&Self>) -> Result {
+        let _ = (dev, this);
+        Ok(())
+    }
+
     /// The type holding driver private data about each device id supported by the driver.
     // TODO: Use associated_type_defaults once stabilized:
     //
