@@ -281,7 +281,7 @@ module_platform_driver! {
     params: {
         j613_suspend_quiesce: u32 {
             default: 0,
-            description: "J613 experiment: stop ALS reports during ordinary suspend and restore on resume",
+            description: "J613 experiment: pause ALS reports during system suspend",
         },
     },
 }
