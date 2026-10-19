@@ -19,11 +19,10 @@ fn word(out: &mut [u8], off: usize, value: u32) { out[off..off+4].copy_from_slic
 fn pointer(out: &mut [u8], off: usize, value: u64) { out[off..off+8].copy_from_slice(&value.to_le_bytes()); }
 /// A four-byte-aligned byte address in the G15 lower 42-bit GPU root. This
 /// accepts subobjects (including packed register data), unlike page owners.
-/// The register lists a GPU's firmware expects in its commands: G15S's, or G15G's, which drop
-/// some G15S registers and keep the order, entry layout and placement of the rest.
+/// The register lists a GPU's firmware expects in its commands: G15G's, which drop some of the
+/// G15S registers and keep the order, entry layout and placement of the rest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RegisterSet {
-    G15S,
     G15G,
 }
 #[derive(Clone, Copy, Debug)]
@@ -88,7 +87,6 @@ impl Command {
         word(bytes, CONTEXT, self.context);
         pointer(bytes, 0x14, self.notifier.get());
         let count = match self.register_set {
-            RegisterSet::G15S => REGISTER_COUNT,
             RegisterSet::G15G => G15G_REGISTER_COUNT,
         };
         for (n, (register, value)) in values.into_iter().take(count).enumerate() {

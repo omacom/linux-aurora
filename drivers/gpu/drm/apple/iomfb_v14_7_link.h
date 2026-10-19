@@ -52,6 +52,8 @@ struct dcp_v14_link {
 
 	struct completion ready;
 	int ready_result;
+	/* The swap the firmware dropped: its D589, if any, completes nothing. */
+	u32 dropped_completion;
 
 	/* Our calls: [0] outer, [1] made from inside a callback. */
 	struct {

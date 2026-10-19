@@ -24,28 +24,7 @@ impl KnownImage {
     }
 }
 
-/// T6030 GPU firmware images known to the M3 runtime. An image is accepted when every recorded
-/// identity (UUID, hash) matches.
-pub(crate) static KNOWN_IMAGES: [KnownImage; 2] = [
-    KnownImage {
-        name: "J514S RTKit-2419.140.12",
-        uuid: None,
-        stkg_sha256: Some(crate::m3_firmware::TEXT_SHA256),
-        initdata_magic: Some(G15_V14_8_3_INITDATA),
-    },
-    KnownImage {
-        name: "g15s build b0 (firmware 14.8.3) RTKit-2419.140.12",
-        uuid: Some([
-            0xdb, 0xf3, 0x7c, 0x40, 0xea, 0xd5, 0x37, 0x60, 0x94, 0x41, 0x99, 0x50,
-            0x18, 0x78, 0x29, 0x55,
-        ]),
-        stkg_sha256: None,
-        initdata_magic: Some(G15_V14_8_3_INITDATA),
-    },
-];
-
-/// The G15 InitData version of firmware-compat 14.8.3: the version of both T6030 images and of
-/// the T8122 image.
+/// The G15 InitData version of firmware-compat 14.8.3, the version of the T8122 image.
 pub(crate) const G15_V14_8_3_INITDATA: u64 = 0x0c08_e21e_8380_0490;
 
 /// The image-info UUID of the T8122 C0 firmware-compat 14.8.3 image.
@@ -121,15 +100,6 @@ pub(crate) struct Layout {
     pub(crate) version: &'static str,
 }
 
-pub(crate) static T6030_LAYOUT: Layout = Layout {
-    text_size: 0x5c000,
-    data_size: 0x114000,
-    vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0005_c000],
-    entropy_tag_offset: 0x58e88,
-    entropy_tag: *b"GKTS\x08\x00\x00\x00",
-    version: "RTKit-2419.140.12.release",
-};
-
 /// T8122 firmware-compat 14.8.3 segment sizes, virtual addresses and entropy-tag bounds.
 pub(crate) static T8122_LAYOUT: Layout = Layout {
     text_size: 0x64000,
@@ -139,23 +109,6 @@ pub(crate) static T8122_LAYOUT: Layout = Layout {
     entropy_tag: *b"GKTS\x08\x00\x00\x00",
     version: "RTKit-2419.140.12.release",
 };
-
-/// The T6031 firmware-compat 14.8.3 segment sizes and VAs, from the J516C ADT (iop-gfx-nub0
-/// segment-ranges: TEXT 0x64000 and DATA 0x140000 at the VAs both other layouts use). Neither
-/// existing layout matches them. The boot-entropy tag offset is not known (0 stands for it);
-/// an armed start searches the loaded text for the tag. The loaded image's version string is
-/// not known ("unknown" stands for it).
-pub(crate) const T6031_LAYOUT: Layout = Layout {
-    text_size: 0x64000,
-    data_size: 0x14_0000,
-    vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0006_4000],
-    entropy_tag_offset: 0,
-    entropy_tag: *b"GKTS\x08\x00\x00\x00",
-    version: "unknown",
-};
-
-pub(crate) const TEXT_SHA256: [u8; 32] = [
-    0x11, 0xe4, 0x9f, 0x75, 0xb, 0x67, 0x1a, 0x2b, 0x13, 0xd0, 0x92, 0xdb, 0x1c, 0xbc, 0xa3, 0xa8, 0x77, 0x55, 0x86, 0xd6, 0xb1, 0xe3, 0xaa, 0xe8, 0xa6, 0xa4, 0x64, 0xa7, 0x80, 0x2, 0x93, 0xd5];
 
 fn normalize_boot_entropy(layout: &Layout, text: &mut [u8]) -> bool {
     let tag = layout.entropy_tag_offset;
@@ -198,7 +151,6 @@ pub(crate) fn identify_loaded(
     soc: &'static crate::m3_soc::Soc,
     resources: agx_resources::Resources,
     experiment: Option<&crate::t8122_start::Experiment>,
-    t6031: Option<&crate::t6031_start::Experiment>,
 ) -> kernel::error::Result<Firmware> {
     use kernel::{
         bindings, c_str,
@@ -220,21 +172,6 @@ pub(crate) fn identify_loaded(
     let bytes = unsafe { core::slice::from_raw_parts(mapping.ptr(), mapping.size()) };
     let mut canonical = KVec::new();
     canonical.extend_from_slice(bytes, GFP_KERNEL)?;
-    // An armed T6031 searches the loaded text for its boot-entropy tag. The layout's offset is
-    // a placeholder, so the T8122 image table must not see this image.
-    if let Some(experiment) = t6031 {
-        experiment.normalize_text(&mut canonical)?;
-        let mut digest = [0u8; 32];
-        // SAFETY: the initialized private copy and distinct digest live for the synchronous
-        // SHA-256 call. Normalization never writes the loaded firmware.
-        unsafe { bindings::sha256(canonical.as_ptr(), canonical.len(), digest.as_mut_ptr()) };
-        experiment.admit_image(pdev.as_ref(), bytes, &digest)?;
-        return Ok(Firmware {
-            resources,
-            initdata_magic: experiment.initdata_version(),
-            layout,
-        });
-    }
     if !normalize_boot_entropy(layout, &mut canonical) {
         return Err(ENODEV);
     }
@@ -260,8 +197,43 @@ mod tests {
     use super::*;
     use agx_resources::{Region, Resources};
 
+    /// A second layout, with other segment sizes than the T8122's (the former T6030 one).
+    static OTHER_LAYOUT: Layout = Layout {
+        text_size: 0x5c000,
+        data_size: 0x114000,
+        vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0005_c000],
+        entropy_tag_offset: 0x58e88,
+        entropy_tag: *b"GKTS\x08\x00\x00\x00",
+        version: "RTKit-2419.140.12.release",
+    };
+
+    const TEXT_SHA256: [u8; 32] = [
+        0x11, 0xe4, 0x9f, 0x75, 0xb, 0x67, 0x1a, 0x2b, 0x13, 0xd0, 0x92, 0xdb, 0x1c, 0xbc, 0xa3,
+        0xa8, 0x77, 0x55, 0x86, 0xd6, 0xb1, 0xe3, 0xaa, 0xe8, 0xa6, 0xa4, 0x64, 0xa7, 0x80, 0x2,
+        0x93, 0xd5,
+    ];
+
+    /// Images of another chip: one identified by its text digest, one by its UUID.
+    static KNOWN_IMAGES: [KnownImage; 2] = [
+        KnownImage {
+            name: "digest-identified image",
+            uuid: None,
+            stkg_sha256: Some(TEXT_SHA256),
+            initdata_magic: Some(G15_V14_8_3_INITDATA),
+        },
+        KnownImage {
+            name: "uuid-identified image",
+            uuid: Some([
+                0xdb, 0xf3, 0x7c, 0x40, 0xea, 0xd5, 0x37, 0x60, 0x94, 0x41, 0x99, 0x50,
+                0x18, 0x78, 0x29, 0x55,
+            ]),
+            stkg_sha256: None,
+            initdata_magic: Some(G15_V14_8_3_INITDATA),
+        },
+    ];
+
     fn image_header(uuid: [u8; 16]) -> Vec<u8> {
-        let mut text = vec![0; T6030_LAYOUT.text_size as usize];
+        let mut text = vec![0; OTHER_LAYOUT.text_size as usize];
         let size = text.len() as u32;
         for (offset, value) in [
             (0, IMAGE_INFO_BRANCH), (4, IMAGE_INFO_MAGIC), (8, 5),
@@ -381,7 +353,7 @@ mod tests {
 
     #[test]
     fn each_layout_rejects_the_other_chips_segments() {
-        for (layout, other) in [(&T6030_LAYOUT, &T8122_LAYOUT), (&T8122_LAYOUT, &T6030_LAYOUT)] {
+        for (layout, other) in [(&OTHER_LAYOUT, &T8122_LAYOUT), (&T8122_LAYOUT, &OTHER_LAYOUT)] {
             let mut regions = [Region { base: 0, size: 0 }; 6];
             regions[4].size = layout.text_size;
             regions[5].size = layout.data_size;
@@ -394,23 +366,8 @@ mod tests {
     }
 
     #[test]
-    fn t6031_layout_is_the_adt_segments_and_matches_neither_other_layout() {
-        let layout = &T6031_LAYOUT;
-        assert_eq!((layout.text_size, layout.data_size), (0x64000, 0x140000));
-        assert_eq!(layout.vas, [0xffff_fc00_0000_0000, 0xffff_fc00_0000_0000 + 0x64000]);
-        assert_eq!(layout.entropy_tag, T8122_LAYOUT.entropy_tag);
-        let mut regions = [Region { base: 0, size: 0 }; 6];
-        regions[4].size = layout.text_size;
-        regions[5].size = layout.data_size;
-        let resources = Resources { regions, firmware_vas: layout.vas };
-        assert!(Firmware::matching_layout(layout, &resources));
-        assert!(!Firmware::matching_layout(&T6030_LAYOUT, &resources));
-        assert!(!Firmware::matching_layout(&T8122_LAYOUT, &resources));
-    }
-
-    #[test]
     fn entropy_normalization_changes_only_the_eight_boot_bytes() {
-        for layout in [&T6030_LAYOUT, &T8122_LAYOUT] {
+        for layout in [&OTHER_LAYOUT, &T8122_LAYOUT] {
             let mut text = vec![0xa5; layout.text_size as usize];
             let tag = layout.entropy_tag_offset;
             text[tag..tag + 8].copy_from_slice(&layout.entropy_tag);

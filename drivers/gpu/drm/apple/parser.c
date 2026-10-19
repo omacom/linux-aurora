@@ -6,7 +6,9 @@
 #include <linux/limits.h>
 #include <linux/math.h>
 #include <linux/string.h>
+#include <linux/math64.h>
 #include <linux/slab.h>
+#include <kunit/visibility.h>
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)
 #include <sound/pcm.h> // for sound format masks
@@ -426,6 +428,8 @@ struct color_mode {
 	s64 id;
 	s64 pixel_encoding;
 	s64 score;
+	/* fw14 SupportsDSC: the sink takes this colour compressed (absent: no). */
+	s64 supports_dsc;
 };
 
 static int fill_color_mode(struct dcp_color_mode *color,
@@ -477,8 +481,26 @@ static unsigned int external_sdr_rank(const struct color_mode *color)
 	}
 }
 
-/* Firmware lists color element IDs which this timing cannot safely use. */
-#define DCP_TIMING_COLOR_ID_LIMIT 64
+/*
+ * T6030 external (fw14): only an 8-bit SDR RGB colour, sRGB or default RGB,
+ * is driven; among those the highest score wins, and a tie on score goes to
+ * the lower colour ID (@best is reset so that fill_color_mode() takes it).
+ */
+static bool v14_7_rgb8_color(const struct color_mode *color, struct dcp_color_mode *best)
+{
+	if (color->depth != 8 || color->colorimetry == DCP_COLORIMETRY_BT709 ||
+	    !external_sdr_rank(color))
+		return false;
+	if (best->score >= 0 && best->score == color->score && color->id < best->id)
+		best->score = -1;
+	return true;
+}
+
+/*
+ * Firmware lists color element IDs which this timing cannot safely use. An
+ * HDMI 2.1 (FRL) sink's timing lists up to 68 on the T6030 external processor.
+ */
+#define DCP_TIMING_COLOR_ID_LIMIT 128
 
 struct timing_color_ids {
 	u32 ids[DCP_TIMING_COLOR_ID_LIMIT];
@@ -572,6 +594,7 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 	out->sdr_rgb.score = -1;
 	out->sdr.score = -1;
 	out->best.score = -1;
+	out->dsc_rgb.score = -1;
 
 	dcp_parse_foreach_in_array(handle, outer_it) {
 		static const char * const dup_fields[] = {
@@ -615,6 +638,8 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 				ret = parse_int(it.handle, &cmode.pixel_encoding);
 			else if (!strcmp(key, "Score"))
 				ret = parse_int(it.handle, &cmode.score);
+			else if (handle->v14_7_dsc && !strcmp(key, "SupportsDSC"))
+				ret = parse_int(it.handle, &cmode.supports_dsc);
 			else
 				skip(it.handle);
 
@@ -639,8 +664,18 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 		if (external_sdr) {
 			unsigned int rank;
 
-			if (timing_color_contains(&limits->dsc_required, cmode.id))
+			if (timing_color_contains(&limits->dsc_required, cmode.id)) {
+				/*
+				 * fw14: the same 8-bit RGB selection among the
+				 * DSC-required colours the sink takes compressed,
+				 * never an unsafe one.
+				 */
+				if (handle->v14_7_dsc && cmode.supports_dsc > 0 &&
+				    !timing_color_contains(&limits->unsafe, cmode.id) &&
+				    v14_7_rgb8_color(&cmode, &out->dsc_rgb))
+					fill_color_mode(&out->dsc_rgb, &cmode);
 				continue;
+			}
 			rank = external_sdr_rank(&cmode);
 			if (timing_color_contains(&limits->unsafe, cmode.id)) {
 				/*
@@ -656,6 +691,24 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 					best_unsafe_rank = rank;
 				}
 				continue;
+			}
+			if (handle->v14_7_rgb8) {
+				/*
+				 * fw14: an 8-bit RGB colour by score, then the
+				 * lower ID. Any other SDR colour stays a fallback
+				 * for a timing that offers no such colour.
+				 */
+				if (!v14_7_rgb8_color(&cmode, &out->sdr_rgb)) {
+					if (cmode.eotf == DCP_EOTF_SDR_GAMMA) {
+						if (cmode.pixel_encoding == DCP_COLOR_FORMAT_YCBCR444 &&
+						    cmode.depth <= 10)
+							fill_color_mode(&out->sdr_444, &cmode);
+						fill_color_mode(&out->sdr, &cmode);
+					}
+					fill_color_mode(&out->best, &cmode);
+					continue;
+				}
+				rank = 1;
 			}
 			if (!rank || rank < best_sdr_rank)
 				continue;
@@ -724,6 +777,7 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 	bool is_virtual = false;
 	bool preferred = false, interlaced = false;
 	bool have_preferred = false, have_interlaced = false;
+	bool split = false, single_pipe = true;
 	struct drm_display_mode *mode = &out->mode;
 
 	*out = (struct dcp_display_mode) {};
@@ -731,6 +785,7 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 	out->sdr_444.score = -1;
 	out->sdr.score = -1;
 	out->best.score = -1;
+	out->dsc_rgb.score = -1;
 	*score = -1;
 	handle->ambiguous_180hz = false;
 
@@ -792,6 +847,16 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 			else
 				ret = parse_bool(it.handle, &interlaced);
 			have_interlaced = true;
+		} else if (handle->v14_7_rgb8 && !strcmp(key, "IsSplit")) {
+			ret = parse_bool(it.handle, &split);
+		} else if (handle->v14_7_rgb8 &&
+			   (!strcmp(key, "HorizontalPipeCount") ||
+			    !strcmp(key, "VerticalPipeCount"))) {
+			s64 pipes = 0;
+
+			/* fw14 omits both counts: a single pipe. */
+			ret = parse_int_bound(it.handle, &pipes, 0, U32_MAX);
+			single_pipe &= pipes == 1;
 		} else if (!strcmp(key, "Score"))
 			ret = parse_int(it.handle, score);
 		else
@@ -834,6 +899,11 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 		best_color_mode = out->sdr.id;
 	else if (out->best.score >= 0)
 		best_color_mode = out->best.id;
+	/* No uncompressed colour: the DSC-required one, compressed by the firmware. */
+	if (best_color_mode < 0 && handle->v14_7_dsc && out->dsc_rgb.score >= 0) {
+		best_color_mode = out->dsc_rgb.id;
+		out->dsc = true;
+	}
 
 	trace_iomfb_parse_mode_success(id, &horiz, &vert, best_color_mode,
 				       is_virtual, *score);
@@ -857,6 +927,12 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 	 * DCP reports these modes at all. Treat as a recoverable error.
 	 */
 	if (is_virtual)
+		return -EINVAL;
+
+	/* fw14 external: progressive, unsplit, one pipe, no pixel repetition. */
+	if (handle->v14_7_rgb8 &&
+	    (interlaced || split || !single_pipe ||
+	     horiz.pixel_repetition != 0 || vert.pixel_repetition != 0))
 		return -EINVAL;
 
 	/*
@@ -1093,10 +1169,77 @@ struct dcp_display_mode *enumerate_modes(struct dcp_parse_ctx *handle,
 	return modes;
 }
 
+/* 16.16 Hz refresh of a DRM mode, from its kHz clock and totals. */
+static u64 dcp_mode_rate16(const struct drm_display_mode *mode)
+{
+	u64 total = (u64)mode->htotal * mode->vtotal;
+
+	return total ? div64_u64((u64)mode->clock * 1000 * 65536 + total / 2, total) : 0;
+}
+
+/* Payload of one lane at a link rate code: 0.27 Gb/s per unit, 8b/10b. */
+static u64 dcp_lane_kbps(u32 rate)
+{
+	return (u64)rate * 270000 * 8 / 10;
+}
+
+/* Uncompressed wire bits per pixel a catalog is budgeted with (RGB8). */
+#define DCP_BUDGET_WIRE_BPP	24
+/*
+ * A DSC timing must fit the lanes at the fewest bits per pixel an 8-bit RGB
+ * DSC stream can take (VESA DSC 1.2: 8 for 4:4:4), less the FEC that carries
+ * DSC on DP (2.4 % of the link). The firmware picks the actual rate.
+ */
+#define DCP_BUDGET_DSC_MIN_BPP	8
+#define DCP_BUDGET_FEC_PERMILLE	24
+
+/*
+ * Keep the timings @lanes of @rate can carry uncompressed (24 bpp within the
+ * lanes' payload) or compressed by the firmware (a DSC timing at
+ * DCP_BUDGET_DSC_MIN_BPP within the payload less FEC). If the firmware's
+ * preferred timing goes, the largest, then fastest, remaining one becomes
+ * preferred. Returns the number kept; *@rejected counts the rest.
+ */
+unsigned int dcp_catalog_budget(struct dcp_display_mode *modes, unsigned int count,
+				u32 lanes, u32 rate, unsigned int *rejected)
+{
+	u64 budget = lanes * dcp_lane_kbps(rate);
+	u64 dsc_budget = budget - budget * DCP_BUDGET_FEC_PERMILLE / 1000;
+	unsigned int i, kept = 0, best = 0;
+	bool preferred = false;
+
+	*rejected = 0;
+	for (i = 0; i < count; i++) {
+		const struct drm_display_mode *m = &modes[i].mode;
+		bool fits = modes[i].dsc ?
+			(u64)m->clock * DCP_BUDGET_DSC_MIN_BPP <= dsc_budget :
+			(u64)m->clock * DCP_BUDGET_WIRE_BPP <= budget;
+
+		if (!fits) {
+			(*rejected)++;
+			continue;
+		}
+		preferred |= m->type & DRM_MODE_TYPE_PREFERRED;
+		modes[kept++] = modes[i];
+	}
+	if (preferred || !kept)
+		return kept;
+	for (i = 1; i < kept; i++) {
+		const struct drm_display_mode *a = &modes[i].mode, *b = &modes[best].mode;
+		u64 area_a = (u64)a->hdisplay * a->vdisplay, area_b = (u64)b->hdisplay * b->vdisplay;
+
+		if (area_a > area_b || (area_a == area_b && dcp_mode_rate16(a) > dcp_mode_rate16(b)))
+			best = i;
+	}
+	modes[best].mode.type |= DRM_MODE_TYPE_PREFERRED;
+	return kept;
+}
+EXPORT_SYMBOL_IF_KUNIT(dcp_catalog_budget);
+
 int replace_modes(struct dcp_parse_ctx *handle,
 		  struct dcp_display_mode **modes, unsigned int *count,
 		  int width_mm, int height_mm, unsigned int notch_height,
-		  bool internal)
+		  bool internal, bool external_sdr)
 {
 	struct dcp_display_mode *next;
 	struct dcp_parse_ctx extent = *handle;
@@ -1109,12 +1252,23 @@ int replace_modes(struct dcp_parse_ctx *handle,
 		return ret;
 
 	next = enumerate_modes(handle, &next_count, width_mm, height_mm,
-			       notch_height, internal, false);
+			       notch_height, internal, external_sdr);
 	if (IS_ERR(next))
 		return PTR_ERR(next);
 	if (it.len && !next_count) {
 		kfree(next);
 		return -EINVAL;
+	}
+	/* The routed link's budget, where the caller knows it. */
+	if (handle->link_lanes && handle->link_rate) {
+		unsigned int rejected;
+
+		next_count = dcp_catalog_budget(next, next_count, handle->link_lanes,
+						handle->link_rate, &rejected);
+		if (rejected)
+			dev_info(handle->dcp->dev,
+				 "%u of %u timings over the %u-lane link's budget\n",
+				 rejected, next_count + rejected, handle->link_lanes);
 	}
 
 	kfree(*modes);
@@ -1745,14 +1899,19 @@ static int parse_mode_in_avep_element(struct dcp_parse_ctx *handle,
 					return ret;
 			}
 		} else if (consume_string(it.handle, "ElementData")) {
+			size_t size = DCP_SOUND_COOKIE_SIZE;
 			const u8 *blob;
 
-			ret = parse_blob(it.handle, sizeof(*cookie), &blob);
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+			if (dcp_parse_v14_7_audio(handle))
+				size = DCP_SOUND_COOKIE_SIZE_V14_7;
+#endif
+			ret = parse_blob(it.handle, size, &blob);
 			if (ret)
 				return ret;
 
 			if (cookie)
-				memcpy(cookie, blob, sizeof(*cookie));
+				memcpy(cookie, blob, size);
 		} else {
 			ret = skip_pair(it.handle);
 			if (ret)

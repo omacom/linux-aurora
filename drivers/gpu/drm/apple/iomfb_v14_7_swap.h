@@ -3,6 +3,9 @@
 #ifndef __APPLE_IOMFB_V14_7_SWAP_H__
 #define __APPLE_IOMFB_V14_7_SWAP_H__
 
+#include <linux/bitops.h>
+#include <linux/build_bug.h>
+#include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
@@ -23,8 +26,46 @@
 #define DCP_V14_SWAP_SURF_NULL(p)	(0x1b4b + (p))
 #define DCP_V14_SWAP_SURF_NULL_COUNT	10
 
+/*
+ * The panel level block of the 0x508-byte swap prefix (14.7 panel): a
+ * present byte at +0x354 and the level in nits as an unaligned IEEE 754
+ * binary64 at +0x35c. Zero when the level does not change.
+ */
+#define DCP_V14_SWAP_NITS_PRESENT	0x354
+#define DCP_V14_SWAP_NITS		0x35c
+/* The nits field takes integral levels up to the panel maximum. */
+#define DCP_V14_NITS_MAX		500
+/* Level presented by the first present after takeover. */
+#define DCP_V14_NITS_DEFAULT		140
+
 #define DCP_V14_SWAP_LAYERS		0x7
 #define DCP_V14_SWAP_SET_BACKGROUND	BIT(31)
+
+static_assert(DCP_V14_SWAP_NITS_PRESENT > DCP_V14_SWAP_BACKGROUND + 4);
+static_assert(DCP_V14_SWAP_NITS + 8 <= DCP_V14_SWAP_SURFACE(0));
+
+/* Integral nits as IEEE 754 binary64, without kernel floating point. */
+static inline u64 dcp_v14_nits_binary64(u32 nits)
+{
+	unsigned int bit;
+
+	if (!nits)
+		return 0;
+	bit = fls(nits) - 1;
+	return ((u64)(1023 + bit) << 52) |
+	       ((u64)(nits - (1U << bit)) << (52 - bit));
+}
+
+/* The level block of an encoded swap: @nits when @change, else none. */
+static inline int dcp_v14_encode_nits(u8 *swap, bool change, u32 nits)
+{
+	if (change && nits > DCP_V14_NITS_MAX)
+		return -EINVAL;
+	swap[DCP_V14_SWAP_NITS_PRESENT] = change;
+	put_unaligned_le64(change ? dcp_v14_nits_binary64(nits) : 0,
+			   swap + DCP_V14_SWAP_NITS);
+	return 0;
+}
 
 /* Offsets in a surface record. */
 #define DCP_V14_SURF_OPAQUE		0x02

@@ -73,13 +73,39 @@ static void v14_board_j516c(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, b->ctm_get, 0);
 }
 
-/* A T6031 DCP on another board, or on a T6034, has no record: refused. */
+/*
+ * The J514C: the same T6031 DCP and image, the panel from the boot
+ * framebuffer, the first boots logged.
+ */
+static void v14_board_j514c(struct kunit *test)
+{
+	const struct dcp_v14_board *b;
+	bool known;
+
+	b = board_for("apple,t6031-dcp", j514c, &known);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_STREQ(test, b->name, "J514C");
+	KUNIT_EXPECT_STREQ(test, b->debugfs, "dcp-j514c");
+	KUNIT_EXPECT_STREQ(test, b->machine, "apple,j514c");
+	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t6031-handoff");
+	KUNIT_EXPECT_STREQ(test, b->firmware_uuid, J516C_DCP_IMAGE);
+	KUNIT_EXPECT_EQ(test, b->panel_width, 0);
+	KUNIT_EXPECT_EQ(test, b->panel_height, 0);
+	KUNIT_EXPECT_TRUE(test, b->promotion);
+	KUNIT_EXPECT_TRUE(test, b->log_bringup);
+	KUNIT_EXPECT_EQ(test, b->ctm_set, 0);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
+	/* Not the J516C record. */
+	KUNIT_EXPECT_PTR_NE(test, b, board_for("apple,t6031-dcp", j516c, &known));
+}
+
+/* A T6031 DCP on a T6034 has no record: refused. */
 static void v14_board_t6031_other_boards(struct kunit *test)
 {
 	bool known;
 
-	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514c, &known));
-	KUNIT_EXPECT_TRUE(test, known);
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j516m, &known));
 	KUNIT_EXPECT_TRUE(test, known);
 	/* Not a 14.x internal DCP at all. */
@@ -150,6 +176,7 @@ static void v14_board_unchanged(struct kunit *test)
 
 static struct kunit_case v14_board_cases[] = {
 	KUNIT_CASE(v14_board_j516c),
+	KUNIT_CASE(v14_board_j514c),
 	KUNIT_CASE(v14_board_t6031_other_boards),
 	KUNIT_CASE(v14_board_j516c_image),
 	KUNIT_CASE(v14_board_unchanged),

@@ -130,16 +130,10 @@ pub(crate) const IOVA_USER_TOP: u64 = 1 << 39;
 
 const AGX3_FIRMWARE_HANDOFF_VALIDATED: bool = false;
 
-/// The t6030 G15 14.8.3 firmware completes the AGX2-style Dekker handoff when the GpuManager
-/// builds the UAT before starting it: it publishes `magic_fw` and serves flush requests
-/// (observed on J516S).
-const G15_DEKKER_HANDOFF_OBSERVED: bool = true;
-
 /// How the firmware-shared UAT handoff region behaves for the target SoC.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum HandoffMode {
     FirmwareDekker,
-    StoppedFirmwareT6030,
     /// The M3 runtime's RTKit is running before the AP publishes its host mappings (observed
     /// on J514S).
     FirmwareM3,
@@ -200,12 +194,11 @@ impl UatConfig {
         })
     }
 
-    /// Whether an M3 owner holds this UAT: the M3 runtime (reserved tables) on any SoC, or the
-    /// G15 manager backend, which runs on T6030 only. These owners look their reserved regions
-    /// up through `m3_resources`, track faults and VM status, and keep the AP side of the
-    /// handoff themselves.
+    /// Whether the M3 runtime (reserved tables) holds this UAT. That owner looks its reserved
+    /// regions up through `m3_resources`, tracks faults and VM status, and keeps the AP side of
+    /// the handoff itself.
     const fn m3_owner(&self) -> bool {
-        self.reserved_tables || self.chip_id == 0x6030
+        self.reserved_tables
     }
 }
 
@@ -2366,6 +2359,9 @@ struct UatInner {
     m3_running: bool,
     fault: Option<Arc<AtomicBool>>,
     firmware_cache_flush_ready: AtomicBool,
+    /// Clean page tables to the point of coherency for a walker that does not snoop the CPU
+    /// caches. Set only by [`Uat::new_adopted`].
+    clean_poc: bool,
     #[pin]
     shared: Mutex<UatShared>,
     #[pin]
@@ -2476,7 +2472,7 @@ impl Handoff {
         self.magic_ap.store(PPL_MAGIC, Ordering::Relaxed);
         self.cur_slot.store(if m3 && mode != HandoffMode::FirmwareDekker { u32::MAX } else { 0 }, Ordering::Relaxed);
         self.unk3.store(0, Ordering::Relaxed);
-        if matches!(mode, HandoffMode::StoppedFirmwareT6030 | HandoffMode::FirmwareG16) {
+        if mode == HandoffMode::FirmwareG16 {
             // This mode is constructed only with ASC stopped. Preserve the
             // firmware magic but initialize the AP producer's lock/flush state.
             self.lock_ap.store(0, Ordering::Relaxed);
@@ -2737,6 +2733,55 @@ impl Vm {
         Ok(self)
     }
 
+    /// Attach a status and job lifetime tracking before sharing a newly created user VM with
+    /// queues, without the G17 canonical context views, shared-object footprints and idle
+    /// residency reclaim of [`Self::with_status`]. Used by G15, whose user objects stay pinned.
+    pub(crate) fn with_tracked_status(mut self) -> Result<Self> {
+        self.status = Some(Arc::pin_init(crate::g17::status::VmStatus::new(), GFP_KERNEL)?);
+        self.lifetime = Some(lifetime::VmLifetime::new()?);
+        Ok(self)
+    }
+
+    /// Copies `buf.len()` bytes of GPU-readable memory at `va` of this VM into `buf`, for admission
+    /// checks of streams the GPU will execute (G15 stream gates).
+    ///
+    /// Every page must be mapped GPU-readable and be RAM; otherwise EFAULT. The lines are cleaned
+    /// and invalidated to the point of coherency first (never only invalidated: CPU-written lines
+    /// may be dirty), so the copy sees what the GPU or a write-combined CPU view stored. The
+    /// mappings cannot change during the copy (GPUVM exec lock).
+    pub(crate) fn read_user(&self, va: u64, buf: &mut [u8]) -> Result {
+        let mut inner = self.inner.exec_lock(None, false)?;
+        let mut done = 0usize;
+        while done < buf.len() {
+            let address = va.checked_add(done as u64).ok_or(EFAULT)?;
+            let page = address & !(UAT_PGMSK as u64);
+            let within = (address - page) as usize;
+            let count = (buf.len() - done).min(UAT_PGSZ - within);
+            if page < inner.va_range.start || page >= inner.va_range.end {
+                return Err(EFAULT);
+            }
+            let leaf = inner.page_table.leaf_entry(page).map_err(|_| EFAULT)?;
+            if !Prot::from_pte(leaf).allows_gpu(true, false) {
+                return Err(EFAULT);
+            }
+            let phys = inner.page_table.translate_iova(page).map_err(|_| EFAULT)?;
+            // SAFETY: `phys` is checked to be a RAM page; it stays mapped (and its backing pinned)
+            // while the exec lock is held, and is only read here.
+            let ram = unsafe { kernel::page::Page::borrow_phys(&phys) }.ok_or(EFAULT)?;
+            let target = &mut buf[done..done + count];
+            ram.with_pointer_into_page(within, count, |p| {
+                pgtable::clean_invalidate_poc(p, count);
+                pgtable::poc_barrier();
+                // SAFETY: with_pointer_into_page() checked that `count` bytes at `p` are inside the
+                // page, and `target` holds exactly `count` bytes.
+                unsafe { core::ptr::copy_nonoverlapping(p, target.as_mut_ptr(), count) };
+                Ok(())
+            })?;
+            done += count;
+        }
+        Ok(())
+    }
+
     /// Status shared by every queue using this VM, if enabled by its GPU.
     pub(crate) fn status(&self) -> Option<&Arc<crate::g17::status::VmStatus>> {
         self.status.as_ref()
@@ -2863,6 +2908,13 @@ impl Vm {
 
         } else {
             UatPageTable::new_by_geometry(cfg.ias, cfg.oas)?
+        };
+        let page_table = {
+            let mut page_table = page_table;
+            if uat_inner.clean_poc {
+                page_table.enable_clean_poc()?;
+            }
+            page_table
         };
 
         let lower_start = IOVA_USER_BASE;
@@ -3828,7 +3880,8 @@ impl Vm {
     }
 
     fn drop_mappings_now(&self, gem: &gem::Object) -> Result {
-        if !self.published() {
+        // A tracked VM of a handoff UAT (G15) drops like a published one.
+        if !self.published() && self.lifetime.is_none() {
             return self.m3_drop_mappings(gem);
         }
         let _residency = self.enter_retirement_residency();
@@ -4011,7 +4064,163 @@ impl Drop for VmInner {
     }
 }
 
+/// Physical regions of a UAT whose handoff the generation has already established itself
+/// ([`Uat::new_adopted`]). None of them needs to be in the kernel linear map.
+pub(crate) struct AdoptedRegions {
+    /// The handoff region (PPL magic, lock and flush requests).
+    pub(crate) handoff: Range<PhysicalAddr>,
+    /// The TTBAT.
+    pub(crate) ttbs: Range<PhysicalAddr>,
+    /// The firmware kernel (upper) root, which every user context names as its upper half.
+    pub(crate) kernel_root: PhysicalAddr,
+}
+
 impl Uat {
+    /// Map a region given by its physical range, write-combined.
+    fn map_physical(range: &Range<PhysicalAddr>, min_size: usize) -> Result<UatRegion> {
+        let size: usize = (range.end.checked_sub(range.start).ok_or(EINVAL)?).try_into()?;
+        if size < min_size || range.start & (UAT_PGMSK as PhysicalAddr) != 0 {
+            return Err(EINVAL);
+        }
+        // SAFETY: All-zero is a valid `struct resource` (no name, parent or children).
+        let mut raw: kernel::bindings::resource = unsafe { core::mem::zeroed() };
+        raw.start = range.start;
+        raw.end = range.end - 1;
+        raw.flags = kernel::bindings::IORESOURCE_MEM as _;
+        // SAFETY: `Resource` is a transparent wrapper around `Opaque<bindings::resource>`, and
+        // `raw` describes a valid memory range.
+        let res: io::resource::Resource =
+            unsafe { core::mem::transmute(kernel::types::Opaque::new(raw)) };
+        // A carveout outside System RAM is mapped write-combined; a reserved-memory region
+        // inside System RAM (mapped by the kernel) through the kernel's own mapping, as
+        // `map_region` does for the other generations.
+        extern "C" {
+            fn asahi_g15_ram_within(start: u64, size: u64) -> bool;
+        }
+        // SAFETY: Only queries the resource tree (`g15/glue.c`).
+        let ram = unsafe { asahi_g15_ram_within(range.start, size as u64) };
+        let flags = if ram {
+            io::mem::MemFlag::WB
+        } else {
+            io::mem::MemFlag::WC
+        };
+        // SAFETY: The UAT regions are only accessed through this mapping by the CPU; the GPU
+        // reaches them through its own translation.
+        let map = unsafe { io::mem::Mem::try_new(res, flags.into()) }?;
+        Ok(UatRegion {
+            base: range.start,
+            map,
+        })
+    }
+
+    /// Creates a `Uat` for a handoff that the caller establishes itself (G15).
+    ///
+    /// This only maps the handoff and the TTBAT (write-combined); neither is written here. The
+    /// caller performs the PPL magic exchange and installs TTBAT context 0 before any user `Vm` is
+    /// bound, naming [`Self::kernel_lower_vm`] as its lower half and `regions.kernel_root` as its
+    /// upper half. Bound user `Vm`s also name `regions.kernel_root` as their upper half.
+    ///
+    /// The firmware kernel root is not in the kernel linear map, so the driver cannot walk it.
+    /// [`Self::kernel_vm`] instead manages the driver window (the kernel range) below a
+    /// driver-owned shadow root that no context names: the caller links the window's second-level
+    /// entries ([`Self::kernel_window_root`]) into the firmware's own table for that window after
+    /// mapping and before the firmware uses the new addresses. Page tables are never freed on
+    /// unmap, so linked entries stay valid.
+    ///
+    /// No M3 owner applies: the `UatConfig` is the published-roots one (chip 0, no reserved
+    /// tables), so the VMs take the plain handoff paths and the legacy PPL lock.
+    pub(crate) fn new_adopted(
+        dev: &driver::AsahiDevice,
+        geometry: UatGeometry,
+        regions: &AdoptedRegions,
+    ) -> Result<Self> {
+        let cfg = UatConfig::published(geometry)?;
+        let handoff_rgn = Self::map_physical(&regions.handoff, HANDOFF_SIZE)?;
+        let ttbs_rgn = Self::map_physical(&regions.ttbs, SLOTS_SIZE)?;
+
+        // SAFETY: The Handoff struct layout matches the firmware's view of memory at this
+        // address, and the region is at least large enough per the check above.
+        let handoff = unsafe { &(handoff_rgn.map.ptr() as *mut Handoff).as_ref().unwrap() };
+
+        let inner = Arc::pin_init(
+            try_pin_init!(UatInner {
+                firmware: UatFirmware::Handoff,
+                m3_running: false,
+                fault: None,
+                // No handoff cache-flush requests: the generation keeps the PPL protocol itself.
+                firmware_cache_flush_ready: AtomicBool::new(false),
+                // The G15 UAT walker does not snoop the CPU caches.
+                clean_poc: true,
+                handoff_flush <- pin_init::pin_init_array_from_fn(|i| {
+                    new_mutex!(HandoffFlush(&handoff.flush[i]), "handoff_flush")
+                }),
+                shared <- new_mutex!(
+                    UatShared {
+                        fault: None,
+                        kernel_ttb1: regions.kernel_root,
+                        execution_contexts: !EXECUTION_CONTEXT_MASK,
+                        context_generations: [0; UAT_NUM_CTX],
+                        secondary_ttb1: None,
+                        map_kernel_to_user: true,
+                        handoff_rgn,
+                        ttbs_rgn,
+                    },
+                    "uat_shared"
+                ),
+            }),
+            GFP_KERNEL,
+        )?;
+
+        // The shadow root is retained for the lifetime of the driver window it describes.
+        let shadow = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
+        let shadow_root = Page::into_phys(shadow);
+
+        let kernel_lower_vm = Vm::new(
+            dev,
+            inner.clone(),
+            IOVA_USER_BASE..uat_geometry(cfg)?.user_va_top(),
+            cfg,
+            None,
+            1,
+        )?;
+        let kernel_vm = Vm::new(
+            dev,
+            inner.clone(),
+            iova_kern_range(cfg)?,
+            cfg,
+            Some(shadow_root),
+            0,
+        )?;
+
+        Ok(Self {
+            dev: dev.into(),
+            cfg,
+            geometry,
+            kernel_vm,
+            kernel_lower_vm,
+            inner,
+            slots: slotalloc::SlotAllocator::new(
+                UAT_USER_CTX as u32,
+                (),
+                |_inner, _slot| Some(SlotInner { generation: 0 }),
+                c_str!("Uat::SlotAllocator"),
+                static_lock_class!(),
+                static_lock_class!(),
+            )?,
+        })
+    }
+
+    /// Root of the kernel lower `Vm`, for TTBAT context 0 of an adopted handoff.
+    pub(crate) fn kernel_lower_root(&self) -> PhysicalAddr {
+        self.kernel_lower_vm.ttb()
+    }
+
+    /// Root whose driver-window entry names the second-level table of [`Self::kernel_vm`]'s
+    /// driver window. With [`Self::new_adopted`] this is the shadow root that no context names.
+    pub(crate) fn kernel_window_root(&self) -> PhysicalAddr {
+        self.kernel_vm.ttb()
+    }
+
     /// Map a bootloader-preallocated memory region
     fn map_region(
         dev: &device::Device,
@@ -4421,9 +4630,7 @@ impl Uat {
         m3: bool,
         firmware: UatFirmware,
     ) -> Result<Arc<UatInner>> {
-        let cached = !matches!(
-            handoff_mode, HandoffMode::StoppedFirmwareT6030 | HandoffMode::FirmwareM3 | HandoffMode::FirmwareG16
-        );
+        let cached = !matches!(handoff_mode, HandoffMode::FirmwareM3 | HandoffMode::FirmwareG16);
         let handoff_rgn =
             Self::map_region(dev.as_ref(), c_str!("handoff"), HANDOFF_SIZE, cached, m3)?;
         let ttbs_rgn = Self::map_region(dev.as_ref(), c_str!("ttbs"), SLOTS_SIZE, cached, m3)?;
@@ -4448,6 +4655,7 @@ impl Uat {
                 firmware_cache_flush_ready: AtomicBool::new(
                     handoff_mode == HandoffMode::FirmwareDekker
                 ),
+                clean_poc: false,
                 handoff_flush <- pin_init::pin_init_array_from_fn(|i| {
                     new_mutex!(HandoffFlush(&handoff.flush[i]), "handoff_flush")
                 }),
@@ -4532,8 +4740,6 @@ impl Uat {
         map_kernel_to_user: bool,
         handoff_mode: HandoffMode,
     ) -> Result<Self> {
-        // The stopped-firmware mode requires its dedicated ownership contract.
-        if handoff_mode == HandoffMode::StoppedFirmwareT6030 { return Err(EINVAL); }
         Self::new_with_config(
             dev,
             UatConfig::from_hw(cfg),
@@ -4565,14 +4771,8 @@ impl Uat {
             HandoffMode::FirmwareG16 => {
                 if !cfg.reserved_tables || cfg.chip_id != 0x8122 { return Err(ENODEV); }
             }
-            HandoffMode::StoppedFirmwareT6030 => {
-                if !cfg.reserved_tables || cfg.chip_id != 0x6030 { return Err(ENODEV); }
-            }
             HandoffMode::FirmwareDekker => {
-                if cfg.ias != 39
-                    && !AGX3_FIRMWARE_HANDOFF_VALIDATED
-                    && !(cfg.chip_id == 0x6030 && G15_DEKKER_HANDOFF_OBSERVED)
-                {
+                if cfg.ias != 39 && !AGX3_FIRMWARE_HANDOFF_VALIDATED {
                     dev_err!(
                         dev.as_ref(),
                         "MMU: {}-bit UAT geometry is implemented, but the AGX3 firmware Handoff ABI and kernel-VA map are unvalidated\n",

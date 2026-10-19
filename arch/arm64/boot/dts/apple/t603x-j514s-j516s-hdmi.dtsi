@@ -10,7 +10,19 @@
  *
  * The processor stays a hybrid pipeline: while no HDMI display is attached
  * it can still be lent to a USB-C port.
+ *
+ * The HDMI port's audio is the processor's audio service with DPA1, the
+ * DisplayPort audio interface its port@0 links (no AP-side registers): SIO
+ * channel 0x66 carries the samples, as on the M1 Pro/Max HDMI port. The
+ * loader reserves the SIO firmware and enables the SIO with its parameters.
  */
+
+/ {
+	aliases {
+		/* The boot loader looks the SIO up by this alias. */
+		sio = &sio;
+	};
+};
 
 &atcphy3 {
 	status = "okay";
@@ -53,6 +65,13 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
+		port@0 {
+			reg = <0>;
+			dcpext_audio: endpoint {
+				remote-endpoint = <&dpaudio1_dcpext>;
+			};
+		};
+
 		port@1 {
 			reg = <1>;
 			dcpext_dpout: endpoint {
@@ -60,6 +79,33 @@
 			};
 		};
 	};
+};
+
+/* DPA1: the HDMI port's DisplayPort audio, SIO channel 0x66. */
+&soc {
+	dpaudio1: audio-controller-1 {
+		compatible = "apple,t6030-dpaudio", "apple,dpaudio";
+		dmas = <&sio 0x66>;
+		dma-names = "tx";
+		power-domains = <&ps_dpa1>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				dpaudio1_dcpext: endpoint {
+					remote-endpoint = <&dcpext_audio>;
+				};
+			};
+		};
+	};
+};
+
+/* The SIO's mailbox; the boot loader enables the SIO with its firmware. */
+&sio_mbox {
+	status = "okay";
 };
 
 /*

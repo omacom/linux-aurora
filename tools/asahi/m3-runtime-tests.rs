@@ -21,8 +21,6 @@ use agx_resources as m3_resources;
 mod m3_firmware;
 #[path = "../../drivers/gpu/drm/asahi/t8122_knobs.rs"]
 mod t8122_knobs;
-#[path = "../../drivers/gpu/drm/asahi/t6031_knobs.rs"]
-mod t6031_knobs;
 #[path = "../../drivers/gpu/drm/asahi/m3_pass_layout.rs"]
 mod m3_pass_layout;
 #[path = "../../drivers/gpu/drm/asahi/t8122_hwdata.rs"]

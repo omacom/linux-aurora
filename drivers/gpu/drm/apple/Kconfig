@@ -29,6 +29,18 @@ config DRM_APPLE_AUDIO
 	select SND_PCM
 	select SND_DMAENGINE_PCM
 
+config DRM_APPLE_DCP_T6030_AUDIO
+	bool "HDMI audio through the T6030 external display processor"
+	default y
+	depends on DRM_APPLE_AUDIO
+	help
+	  DP/HDMI audio of the external display processors of the M3 Pro
+	  (T6030, MacBook Pro J514S/J516S built-in HDMI port), whose DCP
+	  firmware 14.7 external role takes 32-byte audio link data and the
+	  native driver's link lifecycle. The audio service of every other
+	  DCP is driven unchanged. Say N to build the audio and element
+	  parser code exactly as before.
+
 config DRM_APPLE_DEBUG
 	bool "Enable additional driver debugging"
 	depends on DRM_APPLE

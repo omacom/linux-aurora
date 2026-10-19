@@ -52,6 +52,11 @@ struct apple_pmp_report_offsets {
 	/* With starts_pmp: soc-device record i holds device id i + 1. */
 	bool devices_ordered;
 	/*
+	 * With starts_pmp: request the CPU clients' DRAM and fabric floor
+	 * once the PMP runs, see apple_pmp_t6030_floor_work().
+	 */
+	bool memory_floor;
+	/*
 	 * The report is published in apple_pmp_reports, where the fast
 	 * die-temperature reader and the power callbacks of its entries look
 	 * it up by node, and its teardown withdraws the entries first (T8140).
@@ -96,6 +101,14 @@ struct apple_pmp_report {
 	bool stopping;
 	unsigned int waiters;
 	struct completion waiters_done;
+	/* Only with offsets->memory_floor: the floor request, once the PMP runs. */
+	resource_size_t size;
+	struct delayed_work floor_work;
+	unsigned int floor_try;
+	bool floor_valid;
+	u32 floor_req[2];
+	u32 floor_state[2];
+	u64 floor_prior[2];
 };
 
 /* Serializes M3 publication, startup requests and waiter references. */
@@ -426,6 +439,118 @@ static int apple_pmp_t6030_check_layout(struct apple_pmp_report *rep)
 	return 0;
 }
 
+/*
+ * T6030 DRAM and fabric floor. Once the PMP runs it owns the DRAM controller
+ * (DCS) and SoC fabric (FAB) performance states, and nothing asks it for more
+ * than their lowest states: an 8-thread CPU copy measures 28 GB/s and the GPU
+ * is starved. The PMP's CPU clients, EACC0 and PACC0, are the first two
+ * entries of the SOC-DEV-DVFS range of its device-state table (PTD indices
+ * 288 and 289 on the J514S); a request there with the valid bit set asks for
+ * a DCS and a FAB state, and the DVFS-STATE range (indices 8 and 10)
+ * publishes the firmware's response.
+ *
+ * The PMP applies a CPU-client request on its change notification, and a
+ * read of the request entry may consume that notification: a floor written
+ * and read back at once stayed latched without effect. So, from a delayed
+ * work once the PMP has reported ready: read the two entries once, clear the
+ * floor fields (the floor is always a fresh transition), write both floors
+ * back to back through the request-set aperture and confirm on the
+ * DVFS-STATE entries without reading the requests again; retry if the
+ * firmware did not respond. With the floor the DVFS-STATE entries go from
+ * 0x100 to 0x2104, the CPU copy bandwidth from 28 to 123 GB/s.
+ *
+ * The entry indices are taken from the PMP's own apple,tunable-ptd-range,
+ * not hard-coded; the floor values are the J514S measurement. Known on T6030
+ * only: the T6031 table's CPU-client entries have not been read.
+ */
+#define PMP_T6030_FLOOR_VALID		BIT_ULL(61)
+#define PMP_T6030_FLOOR_DCS		GENMASK_ULL(51, 48)
+#define PMP_T6030_FLOOR_FAB		GENMASK_ULL(35, 32)
+#define PMP_T6030_FLOOR_MASK		(PMP_T6030_FLOOR_VALID | PMP_T6030_FLOOR_DCS | \
+					 PMP_T6030_FLOOR_FAB)
+#define PMP_T6030_FLOOR			(PMP_T6030_FLOOR_VALID | \
+					 FIELD_PREP(PMP_T6030_FLOOR_DCS, 4) | \
+					 FIELD_PREP(PMP_T6030_FLOOR_FAB, 2))
+#define PMP_T6030_FLOOR_CLIENTS		2
+#define PMP_T6030_FLOOR_SETTLE_MS	100
+#define PMP_T6030_FLOOR_TRIES		10
+#define PMP_PTD_ENTRY(i)		((i) * 16)
+#define PMP_PTD_SET(i)			(0x10000 + (i) * 8)
+
+/* The entries of the floor, from the PMP's PTD ranges; not fatal to the start. */
+static void apple_pmp_t6030_floor_setup(struct apple_pmp_report *rep)
+{
+	const u8 *table;
+	u32 req, state, count;
+	unsigned int i;
+	int len = 0;
+
+	if (!rep->offsets->memory_floor)
+		return;
+	table = of_get_property(rep->pmp, "apple,tunable-ptd-range", &len);
+	if (!apple_pmp_range_find(table, len > 0 ? len : 0, PMP_PTD_RANGE_SOC_DEV_DVFS,
+				  "SOC-DEV-DVFS", &req, &count) ||
+	    count < PMP_T6030_FLOOR_CLIENTS ||
+	    !apple_pmp_range_find(table, len > 0 ? len : 0, PMP_PTD_RANGE_DVFS_STATE,
+				  "DVFS-STATE", &state, &count) ||
+	    count < 2 * PMP_T6030_FLOOR_CLIENTS) {
+		dev_warn(rep->dev, "no memory floor: the PTD ranges do not describe the CPU clients\n");
+		return;
+	}
+	for (i = 0; i < PMP_T6030_FLOOR_CLIENTS; i++) {
+		rep->floor_req[i] = req + i;
+		rep->floor_state[i] = state + 2 * i;
+		if (PMP_PTD_SET(rep->floor_req[i]) + 8 > rep->size ||
+		    PMP_PTD_ENTRY(rep->floor_state[i]) + 16 > rep->size) {
+			dev_warn(rep->dev, "no memory floor: PTD entries %u/%u outside the aperture\n",
+				 rep->floor_req[i], rep->floor_state[i]);
+			return;
+		}
+	}
+	rep->floor_valid = true;
+}
+
+static void apple_pmp_t6030_floor_work(struct work_struct *work)
+{
+	struct apple_pmp_report *rep = container_of(work, struct apple_pmp_report,
+						    floor_work.work);
+	u64 before[PMP_T6030_FLOOR_CLIENTS], after[PMP_T6030_FLOOR_CLIENTS];
+	bool confirmed = false;
+	unsigned int i;
+
+	if (readq(rep->base + rep->offsets->status) != PMP_REPORT_READY)
+		goto retry;
+	/* The first try reads the requests while no change of ours is pending. */
+	if (!rep->floor_try)
+		for (i = 0; i < PMP_T6030_FLOOR_CLIENTS; i++)
+			rep->floor_prior[i] = readq(rep->base + PMP_PTD_ENTRY(rep->floor_req[i])) &
+					      ~PMP_T6030_FLOOR_MASK;
+	for (i = 0; i < PMP_T6030_FLOOR_CLIENTS; i++)
+		writeq(rep->floor_prior[i], rep->base + PMP_PTD_SET(rep->floor_req[i]));
+	msleep(PMP_T6030_FLOOR_SETTLE_MS);
+	for (i = 0; i < PMP_T6030_FLOOR_CLIENTS; i++)
+		before[i] = readq(rep->base + PMP_PTD_ENTRY(rep->floor_state[i]));
+	for (i = 0; i < PMP_T6030_FLOOR_CLIENTS; i++)
+		writeq(rep->floor_prior[i] | PMP_T6030_FLOOR,
+		       rep->base + PMP_PTD_SET(rep->floor_req[i]));
+	msleep(PMP_T6030_FLOOR_SETTLE_MS);
+	for (i = 0; i < PMP_T6030_FLOOR_CLIENTS; i++)
+		after[i] = readq(rep->base + PMP_PTD_ENTRY(rep->floor_state[i]));
+	confirmed = before[0] != after[0] || before[1] != after[1];
+	dev_info(rep->dev, "memory floor DCS%llu/FAB%llu try %u: DVFS state %#llx/%#llx -> %#llx/%#llx%s\n",
+		 (unsigned long long)FIELD_GET(PMP_T6030_FLOOR_DCS, PMP_T6030_FLOOR),
+		 (unsigned long long)FIELD_GET(PMP_T6030_FLOOR_FAB, PMP_T6030_FLOOR),
+		 rep->floor_try + 1, before[0], before[1], after[0], after[1],
+		 confirmed ? "" : ", no response");
+retry:
+	if (!confirmed && ++rep->floor_try < PMP_T6030_FLOOR_TRIES) {
+		schedule_delayed_work(&rep->floor_work, HZ);
+		return;
+	}
+	if (!confirmed)
+		dev_warn(rep->dev, "memory floor not confirmed by the PMP\n");
+}
+
 static int apple_pmp_t6030_check(struct apple_pmp_report *rep)
 {
 	struct device_node *np = rep->dev->of_node;
@@ -495,6 +620,7 @@ static int apple_pmp_t6030_check(struct apple_pmp_report *rep)
 		return dev_err_probe(rep->dev, -EINVAL,
 				     "%s PMP not started: its tunables do not describe this PTD layout\n",
 				     rep->offsets->name);
+	apple_pmp_t6030_floor_setup(rep);
 
 	status = readq(rep->base + rep->offsets->status);
 	request = readq(rep->base + rep->offsets->tgt_read);
@@ -900,6 +1026,9 @@ static void apple_pmp_t6030_start(struct work_struct *work)
 		ret = 0;
 		if (rep->offsets->temps)
 			apple_pmp_t6030_temps_register(rep);
+		/* The PMP has settled: ask it for the CPU clients' memory floor. */
+		if (rep->floor_valid)
+			schedule_delayed_work(&rep->floor_work, HZ);
 	}
 	apple_pmp_t6030_finish(rep, ret);
 }
@@ -930,6 +1059,7 @@ static void apple_pmp_report_remove(struct platform_device *pdev)
 	}
 	/* No work or waiter may use the devres state after remove returns. */
 	cancel_work_sync(&rep->start_work);
+	cancel_delayed_work_sync(&rep->floor_work);
 	if (waiters)
 		wait_for_completion(&rep->waiters_done);
 }
@@ -1017,6 +1147,65 @@ out_put:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(apple_pmp_report_wait_ready);
+
+/*
+ * apple_pmp_report_check_ready() - whether a PMP report entry is acknowledged now
+ * @entry: report entry node whose request must be acknowledged
+ *
+ * The non-blocking form of apple_pmp_report_wait_ready(): it never starts the
+ * PMP and never waits. Returns 0 once the PMP runs and has acknowledged
+ * @entry, -EAGAIN while it has not (the PMP not started yet, starting, or
+ * the entry not acknowledged yet), -EPROBE_DEFER while the report driver
+ * has not probed, -EINVAL for an entry this report cannot acknowledge, or
+ * the reason the PMP was not started.
+ */
+int apple_pmp_report_check_ready(struct device_node *entry)
+{
+	struct device_node *parent = of_get_parent(entry);
+	struct platform_device *pdev;
+	struct apple_pmp_report *rep;
+	u64 status, ack;
+	bool record;
+	u32 id;
+	int ret;
+
+	if (!parent || of_property_read_u32(entry, "reg", &id) || id > 63) {
+		of_node_put(parent);
+		return -EINVAL;
+	}
+	if (!of_device_is_compatible(parent, "apple,t6030-pmp-v2-report") &&
+	    !of_device_is_compatible(parent, "apple,t8122-pmp-v2-report") &&
+	    !of_device_is_compatible(parent, "apple,t6031-pmp-v2-report")) {
+		of_node_put(parent);
+		return -EINVAL;
+	}
+	pdev = of_find_device_by_node(parent);
+	of_node_put(parent);
+	if (!pdev)
+		return -EPROBE_DEFER;
+
+	scoped_guard(mutex, &apple_pmp_report_mutex) {
+		rep = platform_get_drvdata(pdev);
+		if (!rep) {
+			ret = -EPROBE_DEFER;
+		} else if (rep->stopping) {
+			ret = -ENODEV;
+		} else if (!rep->offsets->starts_pmp ||
+			   apple_pmp_report_bit(rep, entry, &id, &record) ||
+			   !(rep->ack & BIT_ULL(id))) {
+			ret = -EINVAL;
+		} else if (completion_done(&rep->started) && rep->start_result) {
+			ret = rep->start_result;
+		} else {
+			status = readq(rep->base + rep->offsets->status);
+			ack = readq(rep->base + rep->offsets->actual);
+			ret = status == PMP_REPORT_READY && (ack & BIT_ULL(id)) ? 0 : -EAGAIN;
+		}
+	}
+	put_device(&pdev->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_check_ready);
 
 /* Select one available report entry by its reg (soc-device ID - 1). */
 static struct device_node *apple_pmp_report_entry(struct device_node *report, u32 id)
@@ -1233,6 +1422,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
 	struct apple_pmp_report *rep;
+	struct resource *res;
 	u64 request;
 	int ret;
 
@@ -1245,11 +1435,14 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 	rep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(rep->base))
 		return PTR_ERR(rep->base);
+	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	rep->size = res ? resource_size(res) : 0;
 	rep->offsets = of_device_get_match_data(dev);
 	if (rep->offsets->starts_pmp) {
 		init_completion(&rep->started);
 		init_completion(&rep->waiters_done);
 		INIT_WORK(&rep->start_work, apple_pmp_t6030_start);
+		INIT_DELAYED_WORK(&rep->floor_work, apple_pmp_t6030_floor_work);
 		ret = apple_pmp_t6030_check(rep);
 		if (ret == -EPROBE_DEFER) {
 			of_node_put(rep->pmp);
@@ -1345,6 +1538,7 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t6030 = {
 	.pwrstate = "apple,t6030-pmgr-pwrstate",
 	.temps = true,
 	.devices_ordered = true,
+	.memory_floor = true,
 };
 
 /*

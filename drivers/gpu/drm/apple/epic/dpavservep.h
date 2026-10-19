@@ -7,6 +7,7 @@
 #include <linux/completion.h>
 #include <linux/mutex.h>
 #include <linux/types.h>
+#include <linux/workqueue.h>
 
 struct drm_edid;
 struct apple_epic_service;
@@ -22,9 +23,19 @@ struct dcpavserv {
 	struct completion enable_completion;
 	u32 unit;
 	struct apple_epic_service *service;
-	/* The service instance last opened; compared only, never used. */
+	/*
+	 * The 14.7 external role: the instance the host opened as a client
+	 * (DCPAV Open), closed again before the sink's HPD low or at the
+	 * instance's Terminate report; compared only, never dereferenced.
+	 */
 	struct apple_epic_service *opened;
+	/* Terminate reported: no new use of the instance, its Close pending. */
+	struct apple_epic_service *terminated;
+	struct work_struct close_wq;
 };
+
+/* The 14.7 external role: close the AV client before the sink is released. */
+void dcpavserv_v14_close(struct apple_dcp *dcp);
 
 bool dcpavserv_edid_current(struct apple_dcp *dcp, u64 generation);
 bool dcpavserv_edid_service_current(struct apple_dcp *dcp, u64 epoch);

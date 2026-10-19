@@ -144,9 +144,8 @@ pub(crate) fn validate_iomaps(iomaps: &[IoMap]) -> Result<(), Error> {
 pub(crate) const IOMAP_BASE: u64 = 0xfffffc2068000000;
 
 /// The runtime IO maps of `mappings` (HwDataB slot, physical address, total size, element size,
-/// writable), laid out as [`T6030_IOMAPS`] is: each map is the 16 KiB pages that hold its
-/// mapping, with the subpage offset kept, and starts at the end of the previous map plus a
-/// 16 KiB gap, the first at `base`.
+/// writable): each map is the 16 KiB pages that hold its mapping, with the subpage offset kept,
+/// and starts at the end of the previous map plus a 16 KiB gap, the first at `base`.
 pub(crate) const fn pack_iomaps<const N: usize>(
     mappings: &[(usize, u64, u32, u32, bool); N],
     base: u64,
@@ -183,26 +182,6 @@ pub(crate) const fn same_iomaps(a: &[IoMap], b: &[IoMap]) -> bool {
     true
 }
 
-/// The T6030 runtime's IO maps (`m3_soc::T6030.iomaps`), one per entry of
-/// `m3_adt_config::T6030_IO_MAPPINGS`: the page-aligned CPU physical block and
-/// the fixed firmware VA of each slot.
-pub(crate) const T6030_IOMAPS:[IoMap;15]=[
-    IoMap { slot:0, physical:0x290d00000, size:0x144000, address:0xfffffc2068000000, offset:0x0 },
-    IoMap { slot:1, physical:0x20e100000, size:0x4000, address:0xfffffc2068148000, offset:0x1000 },
-    IoMap { slot:2, physical:0x351014000, size:0x4000, address:0xfffffc2068150000, offset:0x0 },
-    IoMap { slot:3, physical:0x290000000, size:0x20000, address:0xfffffc2068158000, offset:0x0 },
-    IoMap { slot:7, physical:0x3502bc000, size:0x4000, address:0xfffffc206817c000, offset:0x0 },
-    IoMap { slot:9, physical:0x290e08000, size:0x8000, address:0xfffffc2068184000, offset:0x0 },
-    IoMap { slot:11, physical:0x220000000, size:0x12c000, address:0xfffffc2068190000, offset:0x0 },
-    IoMap { slot:12, physical:0x35104c000, size:0x4000, address:0xfffffc20682c0000, offset:0x0 },
-    IoMap { slot:18, physical:0x3503d0000, size:0x4000, address:0xfffffc20682c8000, offset:0x0 },
-    IoMap { slot:19, physical:0x3503c0000, size:0x4000, address:0xfffffc20682d0000, offset:0x0 },
-    IoMap { slot:20, physical:0x3503d8000, size:0x4000, address:0xfffffc20682d8000, offset:0x0 },
-    IoMap { slot:23, physical:0x293000000, size:0x400000, address:0xfffffc20682e0000, offset:0x0 },
-    IoMap { slot:25, physical:0x30945c000, size:0x4000, address:0xfffffc20686e4000, offset:0x0 },
-    IoMap { slot:26, physical:0x350280000, size:0x8000, address:0xfffffc20686ec000, offset:0x0 },
-    IoMap { slot:29, physical:0x290e5c000, size:0x4000, address:0xfffffc20686f8000, offset:0x0 },
-];
 // HWDataB.gpu_region_base refers to the physical GPU reserved region (TTBs),
 // not an MMIO firmware VA. Resources validates its ownership and alignment.
 pub(crate) const GPU_REGION_PHYSICAL:usize=0xb44;
@@ -218,6 +197,26 @@ pub(crate) fn parameter_buffer(pages:u32)->Result<[u8;16],Error> {
 #[cfg(test)]
 mod iomap_tests {
     use super::*;
+
+    /// A valid IO-map table (the former T6030 runtime's): the page-aligned CPU
+    /// physical block and the fixed firmware VA of each slot.
+    const T6030_IOMAPS:[IoMap;15]=[
+        IoMap { slot:0, physical:0x290d00000, size:0x144000, address:0xfffffc2068000000, offset:0x0 },
+        IoMap { slot:1, physical:0x20e100000, size:0x4000, address:0xfffffc2068148000, offset:0x1000 },
+        IoMap { slot:2, physical:0x351014000, size:0x4000, address:0xfffffc2068150000, offset:0x0 },
+        IoMap { slot:3, physical:0x290000000, size:0x20000, address:0xfffffc2068158000, offset:0x0 },
+        IoMap { slot:7, physical:0x3502bc000, size:0x4000, address:0xfffffc206817c000, offset:0x0 },
+        IoMap { slot:9, physical:0x290e08000, size:0x8000, address:0xfffffc2068184000, offset:0x0 },
+        IoMap { slot:11, physical:0x220000000, size:0x12c000, address:0xfffffc2068190000, offset:0x0 },
+        IoMap { slot:12, physical:0x35104c000, size:0x4000, address:0xfffffc20682c0000, offset:0x0 },
+        IoMap { slot:18, physical:0x3503d0000, size:0x4000, address:0xfffffc20682c8000, offset:0x0 },
+        IoMap { slot:19, physical:0x3503c0000, size:0x4000, address:0xfffffc20682d0000, offset:0x0 },
+        IoMap { slot:20, physical:0x3503d8000, size:0x4000, address:0xfffffc20682d8000, offset:0x0 },
+        IoMap { slot:23, physical:0x293000000, size:0x400000, address:0xfffffc20682e0000, offset:0x0 },
+        IoMap { slot:25, physical:0x30945c000, size:0x4000, address:0xfffffc20686e4000, offset:0x0 },
+        IoMap { slot:26, physical:0x350280000, size:0x8000, address:0xfffffc20686ec000, offset:0x0 },
+        IoMap { slot:29, physical:0x290e5c000, size:0x4000, address:0xfffffc20686f8000, offset:0x0 },
+    ];
 
     #[test]
     fn t6030_maps_and_relocated_physical_blocks_are_valid() {

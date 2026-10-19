@@ -33,6 +33,8 @@
 
 #define DCPAUD_ELEMENTS_MAXSIZE		16384
 #define DCPAUD_PRODUCTATTRS_MAXSIZE	1024
+/* The native element catalog capacity (14.7 external role). */
+#define DCPAUD_ELEMENTS_V14_7		SZ_256K
 
 /*
  * SIO takes one of its 64 descriptor slots per period, shared by all its
@@ -69,7 +71,33 @@ struct dcp_audio {
 	void *productattrs;
 
 	struct snd_pcm_chmap *chmap_info;
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	/*
+	 * DCP firmware 14.7, external role (T6030 external processor): the
+	 * native link lifecycle, one link per stream start
+	 * (dcp_native_playback_ops).
+	 */
+	bool native_link;
+	struct mutex link_lock;
+	bool link_prepared;
+	bool link_started;
+#endif
 };
+
+/* The 14.7 external role's audio service (DRM_APPLE_DCP_T6030_AUDIO only). */
+static inline bool dcpaud_native_link(struct dcp_audio *dcpaud)
+{
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	return dcpaud->native_link;
+#else
+	return false;
+#endif
+}
+
+static inline size_t dcpaud_elements_size(struct dcp_audio *dcpaud)
+{
+	return dcpaud_native_link(dcpaud) ? DCPAUD_ELEMENTS_V14_7 : DCPAUD_ELEMENTS_MAXSIZE;
+}
 
 static const struct snd_pcm_hardware dcp_pcm_hw = {
 	.info	 = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
@@ -126,7 +154,7 @@ static int dcpaud_read_remote_info(struct dcp_audio *dcpaud)
 	int ret;
 
 	ret = dcp_audiosrv_get_elements(dcpaud->dcp_dev, dcpaud->elements,
-					DCPAUD_ELEMENTS_MAXSIZE);
+					dcpaud_elements_size(dcpaud));
 	if (ret < 0)
 		return ret;
 
@@ -183,8 +211,11 @@ static void dcpaud_consult_elements(struct dcp_audio *dcpaud,
 	struct dcp_parse_ctx elements = {
 		.dcp = dev_get_drvdata(dcpaud->dcp_dev),
 		.blob = dcpaud->elements + 4,
-		.len = DCPAUD_ELEMENTS_MAXSIZE - 4,
+		.len = dcpaud_elements_size(dcpaud) - 4,
 		.pos = 0,
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+		.v14_7_audio = dcpaud->native_link,
+#endif
 	};
 
 	dcpaud_fill_fmt_sieve(params, &sieve);
@@ -200,8 +231,11 @@ static int dcpaud_select_cookie(struct dcp_audio *dcpaud,
 	struct dcp_parse_ctx elements = {
 		.dcp = dev_get_drvdata(dcpaud->dcp_dev),
 		.blob = dcpaud->elements + 4,
-		.len = DCPAUD_ELEMENTS_MAXSIZE - 4,
+		.len = dcpaud_elements_size(dcpaud) - 4,
 		.pos = 0,
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+		.v14_7_audio = dcpaud->native_link,
+#endif
 	};
 
 	dcpaud_fill_fmt_sieve(params, &sieve);
@@ -570,6 +604,234 @@ struct snd_pcm_ops dcp_playback_ops = {
 	.pointer = dcp_pcm_pointer,
 };
 
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+/*
+ * DCP firmware 14.7, external role (the T6030 external processor, J514S
+ * built-in HDMI): the link lifecycle of the native audio driver:
+ *
+ *   prepare:   the DMA channel configured, then PrepareLink, once per link;
+ *   START:     the cyclic DMA issued, then StartLink;
+ *   STOP:      the DMA terminated;
+ *   sync_stop: the DMA drained, then StopLink and CompleteLink;
+ *   hw_free:   CompleteLink of a link prepared but never started.
+ *
+ * Every link method carries the selected element's link data. A link of an
+ * earlier connection went with its service: its state is dropped unsent.
+ * The audio service itself is open only while the PCM is.
+ */
+static int dcp_pcm_native_open(struct snd_pcm_substream *substream)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+	bool live;
+	int ret;
+
+	scoped_guard(mutex, &dcpaud->data_lock)
+		live = dcpaud->connected;
+	if (live) {
+		ret = dcp_audiosrv_open(dcpaud->dcp_dev);
+		if (ret)
+			return ret;
+	}
+
+	ret = dcp_pcm_open(substream);
+	if (ret && live)
+		dcp_audiosrv_close(dcpaud->dcp_dev);
+
+	return ret;
+}
+
+static int dcp_pcm_native_close(struct snd_pcm_substream *substream)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+	int ret = dcp_pcm_close(substream);
+
+	dcp_audiosrv_close(dcpaud->dcp_dev);
+
+	return ret;
+}
+
+/*
+ * StopLink and CompleteLink of the link held, on the open audio service
+ * (@live), or dropped unsent with a service that went away.
+ */
+static void dcpaud_link_teardown(struct dcp_audio *dcpaud, bool live)
+{
+	int ret;
+
+	lockdep_assert_held(&dcpaud->link_lock);
+	if (dcpaud->link_started && live) {
+		ret = dcp_audiosrv_link(dcpaud->dcp_dev, DCP_AUDIO_LINK_STOP,
+					&dcpaud->selected_cookie);
+		if (ret)
+			dev_err(dcpaud->dev, "StopLink failed: %d\n", ret);
+	}
+	dcpaud->link_started = false;
+	if (dcpaud->link_prepared && live) {
+		ret = dcp_audiosrv_link(dcpaud->dcp_dev, DCP_AUDIO_LINK_COMPLETE,
+					&dcpaud->selected_cookie);
+		if (ret)
+			dev_err(dcpaud->dev, "CompleteLink failed: %d\n", ret);
+	}
+	dcpaud->link_prepared = false;
+}
+
+/* New parameters select a new element: the link of the old one ends first. */
+static int dcp_pcm_native_hw_params(struct snd_pcm_substream *substream,
+				    struct snd_pcm_hw_params *params)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+
+	scoped_guard(mutex, &dcpaud->link_lock)
+		dcpaud_link_teardown(dcpaud, dcpaud_connection_up(dcpaud));
+
+	return dcp_pcm_hw_params(substream, params);
+}
+
+static int dcp_pcm_native_hw_free(struct snd_pcm_substream *substream)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+
+	guard(mutex)(&dcpaud->link_lock);
+	dcpaud_link_teardown(dcpaud, dcpaud_connection_up(dcpaud));
+
+	return 0;
+}
+
+static int dcp_pcm_native_prepare(struct snd_pcm_substream *substream)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+	struct dma_slave_config slave_config = {
+		.direction = DMA_MEM_TO_DEV,
+		/* One 32-bit DPA entry per sample word, as in hw_params. */
+		.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES,
+	};
+	int ret;
+
+	if (dcpaud->open_unplugged)
+		return 0;
+
+	if (!dcpaud_connection_up(dcpaud))
+		return -ENXIO;
+
+	guard(mutex)(&dcpaud->link_lock);
+	if (dcpaud->link_prepared)
+		return 0;
+
+	/* The SIO channel is configured again before every PrepareLink. */
+	ret = dmaengine_slave_config(snd_dmaengine_pcm_get_chan(substream),
+				     &slave_config);
+	if (ret)
+		return ret;
+
+	ret = dcp_audiosrv_link(dcpaud->dcp_dev, DCP_AUDIO_LINK_PREPARE,
+				&dcpaud->selected_cookie);
+	if (ret)
+		return ret;
+
+	dcpaud->link_prepared = true;
+	return 0;
+}
+
+static int dcp_pcm_native_start(struct snd_pcm_substream *substream, int cmd)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+	int ret;
+
+	if (!dcpaud_connection_up(dcpaud))
+		return -ENXIO;
+
+	/* The first period descriptor is issued before StartLink. */
+	ret = snd_dmaengine_pcm_trigger(substream, cmd);
+	if (ret)
+		return ret;
+
+	guard(mutex)(&dcpaud->link_lock);
+	if (!dcpaud->link_prepared)
+		return -EBADFD;
+	if (dcpaud->link_started)
+		return 0;
+	ret = dcp_audiosrv_link(dcpaud->dcp_dev, DCP_AUDIO_LINK_START,
+				&dcpaud->selected_cookie);
+	dcpaud->link_started = !ret;
+	return ret;
+}
+
+static int dcp_pcm_native_trigger(struct snd_pcm_substream *substream, int cmd)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+	int ret;
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+		/*
+		 * Balanced by STOP, which the PCM core also sends after a
+		 * failed start; sync_stop then drains the DMA and completes
+		 * the link.
+		 */
+		WARN_ON(pm_runtime_get_sync(dcpaud->dev) < 0);
+		return dcp_pcm_native_start(substream, cmd);
+
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+		ret = snd_dmaengine_pcm_trigger(substream, cmd);
+		pm_runtime_mark_last_busy(dcpaud->dev);
+		__pm_runtime_put_autosuspend(dcpaud->dev);
+		return ret;
+
+	default:
+		return -EINVAL;
+	}
+}
+
+static int dcp_pcm_native_sync_stop(struct snd_pcm_substream *substream)
+{
+	struct dcp_audio *dcpaud = substream->pcm->private_data;
+	int ret;
+
+	/* SIO TERMINATE acknowledged and the issued periods reported back. */
+	ret = snd_dmaengine_pcm_sync_stop(substream);
+
+	guard(mutex)(&dcpaud->link_lock);
+	dcpaud_link_teardown(dcpaud, dcpaud_connection_up(dcpaud));
+
+	return ret;
+}
+
+/*
+ * The card was disconnected (its stream stopped) while the audio service
+ * stays: the display was powered off or the sink released, and the service
+ * is about to be closed. Its link is completed first, the DMA drained
+ * before: the firmware keeps a link prepared by a client that closes without
+ * CompleteLink, and refuses every later PrepareLink of that service
+ * (0xe00002ea), so every later open failed.
+ */
+void dcpaud_release_link(struct platform_device *pdev)
+{
+	struct dcp_audio *dcpaud = platform_get_drvdata(pdev);
+
+	if (!dcpaud->native_link)
+		return;
+	guard(mutex)(&dcpaud->link_lock);
+	if (!dcpaud->link_prepared && !dcpaud->link_started)
+		return;
+	if (dcpaud->chan)
+		dmaengine_synchronize(dcpaud->chan);
+	dcpaud_link_teardown(dcpaud, true);
+}
+
+static const struct snd_pcm_ops dcp_native_playback_ops = {
+	.open = dcp_pcm_native_open,
+	.close = dcp_pcm_native_close,
+	.hw_params = dcp_pcm_native_hw_params,
+	.hw_free = dcp_pcm_native_hw_free,
+	.prepare = dcp_pcm_native_prepare,
+	.trigger = dcp_pcm_native_trigger,
+	.sync_stop = dcp_pcm_native_sync_stop,
+	.pointer = snd_dmaengine_pcm_pointer,
+};
+#endif
+
 // Transitional workaround: for the chmap control TLV, advertise options
 // copied from hdmi-codec.c
 #include "hdmi-codec-chmap.h"
@@ -621,6 +883,11 @@ static int dcpaud_create_pcm(struct dcp_audio *dcpaud)
 	if (ret)
 		return ret;
 
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	if (dcpaud_native_link(dcpaud))
+		snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &dcp_native_playback_ops);
+	else
+#endif
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &dcp_playback_ops);
 	dcpaud->substream = pcm->streams[SNDRV_PCM_STREAM_PLAYBACK].substream;
 	pcm->nonatomic = true;
@@ -794,6 +1061,19 @@ static int dcpaud_comp_bind(struct device *dev, struct device *main, void *data)
 	}
 	dcpaud->dcp_dev = &dcp_pdev->dev;
 
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	/* The 14.7 external role: its native links and element catalog. */
+	if (dcp_audiosrv_native_link(dcpaud->dcp_dev)) {
+		void *elements = devm_kzalloc(dev, DCPAUD_ELEMENTS_V14_7, GFP_KERNEL);
+
+		if (!elements)
+			goto rpm_put;
+		devm_kfree(dev, dcpaud->elements);
+		dcpaud->elements = elements;
+		dcpaud->native_link = true;
+	}
+#endif
+
 	dma_pdev = of_find_device_by_node(dma_spec.np);
 	of_node_put(dma_spec.np);
 	if (!dma_pdev) {
@@ -814,7 +1094,7 @@ static int dcpaud_comp_bind(struct device *dev, struct device *main, void *data)
 		dcpaud_expose_debugfs_blob(dcpaud, "selected_cookie", &dcpaud->selected_cookie,
 					sizeof(dcpaud->selected_cookie));
 		dcpaud_expose_debugfs_blob(dcpaud, "elements", dcpaud->elements,
-					DCPAUD_ELEMENTS_MAXSIZE);
+					dcpaud_elements_size(dcpaud));
 		dcpaud_expose_debugfs_blob(dcpaud, "product_attrs", dcpaud->productattrs,
 					DCPAUD_PRODUCTATTRS_MAXSIZE);
 	}
@@ -862,6 +1142,9 @@ static int dcpaud_probe(struct platform_device *pdev)
 
 	dcpaud->dev = &pdev->dev;
 	mutex_init(&dcpaud->data_lock);
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	mutex_init(&dcpaud->link_lock);
+#endif
 	INIT_DELAYED_WORK(&dcpaud->void_work, dcpaud_void_work);
 	platform_set_drvdata(pdev, dcpaud);
 

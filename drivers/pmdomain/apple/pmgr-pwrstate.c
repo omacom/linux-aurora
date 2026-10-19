@@ -50,6 +50,8 @@ struct apple_pmgr_ps {
 	bool externally_clocked;
 	bool retained_25g83;
 	bool firmware_owned;
+	/* Never enable automatic power management (apple,no-auto-pm). */
+	bool no_auto_pm;
 	/* T8140: follow a transition that times out with the opposite one. */
 	bool undo_timeout;
 	bool system_sleep;
@@ -172,7 +174,7 @@ static int apple_pmgr_ps_power_on(struct generic_pm_domain *genpd)
 	if (ps->firmware_owned)
 		return 0;
 
-	ret = apple_pmgr_ps_set(genpd, APPLE_PMGR_PS_ACTIVE, true);
+	ret = apple_pmgr_ps_set(genpd, APPLE_PMGR_PS_ACTIVE, !ps->no_auto_pm);
 	if (ret && ps->undo_timeout && !ps->system_sleep)
 		apple_pmgr_ps_set(genpd, APPLE_PMGR_PS_PWRGATE, false);
 
@@ -189,7 +191,7 @@ static int apple_pmgr_ps_power_off(struct generic_pm_domain *genpd)
 
 	ret = apple_pmgr_ps_set(genpd, APPLE_PMGR_PS_PWRGATE, false);
 	if (ret && ps->undo_timeout)
-		apple_pmgr_ps_set(genpd, APPLE_PMGR_PS_ACTIVE, true);
+		apple_pmgr_ps_set(genpd, APPLE_PMGR_PS_ACTIVE, !ps->no_auto_pm);
 
 	return ret;
 }
@@ -409,6 +411,12 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	if (of_property_read_bool(node, "apple,externally-clocked"))
 		ps->externally_clocked = true;
 
+	/*
+	 * A coprocessor CPU domain whose firmware Linux starts cold must not be
+	 * gated automatically behind its back: keep it at the requested state.
+	 */
+	ps->no_auto_pm = of_property_read_bool(node, "apple,no-auto-pm");
+
 	active = apple_pmgr_ps_is_active(ps);
 	if (ps->retained_25g83) {
 		if (!active)
@@ -431,16 +439,16 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 			 * even if it does not get there in time.
 			 */
 			active = apple_pmgr_ps_set(&ps->genpd, APPLE_PMGR_PS_ACTIVE,
-						   true) == 0;
+						   !ps->no_auto_pm) == 0;
 		}
 	} else if (active) {
 		ps->genpd.flags |= GENPD_FLAG_DEFER_OFF | GENPD_FLAG_ACTIVE_WAKEUP;
 	}
 
-	/* Turn on auto-PM if the domain is already on */
+	/* Turn on auto-PM if the domain is already on, unless it must stay off */
 	if (active && !ps->retained_25g83 && !ps->firmware_owned)
 		regmap_update_bits(regmap, ps->offset, APPLE_PMGR_FLAGS | APPLE_PMGR_AUTO_ENABLE,
-				   APPLE_PMGR_AUTO_ENABLE);
+				   ps->no_auto_pm ? 0 : APPLE_PMGR_AUTO_ENABLE);
 
 	ret = pm_genpd_init(&ps->genpd, NULL, !active);
 	if (ret < 0) {

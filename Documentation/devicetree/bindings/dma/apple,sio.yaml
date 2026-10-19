@@ -22,6 +22,7 @@ properties:
     items:
       - enum:
           - apple,t6000-sio
+          - apple,t6030-sio
           - apple,t8103-sio
       - const: apple,sio
 

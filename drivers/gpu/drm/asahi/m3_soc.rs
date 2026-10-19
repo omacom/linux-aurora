@@ -43,8 +43,6 @@ pub(crate) struct Windows {
 /// any GPU register is touched, and again on the uploaded HwDataB.
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum PstateTable {
-    /// A fixed table: `states` states above the off state, the highest at `top_mhz` MHz.
-    Fixed { states: u32, top_mhz: u32 },
     /// The table of the device tree's operating points: one state per distinct voltage above
     /// the off state, the highest at the highest frequency
     /// (`t8122_admission::opp_table_shape`).
@@ -113,8 +111,8 @@ pub(crate) struct Soc {
     pub(crate) board: &'static str,
     /// GPU node compatible.
     pub(crate) gpu: &'static str,
-    /// Boards the runtime starts on by default and registers a render node on. On a T8122 it
-    /// starts on no other board, whatever `asahi.m3_backend` says (`m3_params::t8122_backend`).
+    /// Boards the runtime starts on and registers a render node on. On a T8122 it starts on no
+    /// other board (`m3_params::t8122_backend`).
     pub(crate) validated_boards: &'static [&'static [u8]],
     /// GPU clusters, and core slots per cluster.
     pub(crate) clusters: u32,
@@ -178,8 +176,8 @@ pub(crate) struct Soc {
     pub(crate) globals_words: &'static [(usize, u32)],
     /// The boot loader's decoded GPU leakage fuse, when it exports one for this SoC.
     pub(crate) leak_fuse: Option<LeakFuse>,
-    /// Whether each operating point may give each cluster its own voltage (the per-cluster,
-    /// binned voltage tables of T6031). Otherwise every cluster of a point must have the same.
+    /// Whether each operating point may give each cluster its own voltage (per-cluster, binned
+    /// voltage tables). Otherwise every cluster of a point must have the same.
     pub(crate) per_cluster_voltages: bool,
 }
 
@@ -228,109 +226,35 @@ impl Soc {
     }
 }
 
-/// The HwDataB configuration words and unit masks of the T6030 runtime InitData, as checked on
-/// J514S and J516S (the runtime's earlier fixed values).
-pub(crate) static T6030_HWDATA_B: G15RuntimeHwDataB = G15RuntimeHwDataB {
-    unk_454: 1,
+/// The HwDataB configuration words and unit masks of the T8122 runtime InitData: the values the
+/// runtime was checked with on the T6030 (J514S, J516S), except for four words the G15G firmware
+/// takes with other values (+0xa2c, the chip revision's major number, 2; +0xb20, the core slots,
+/// 0x0a; +0x17b8, 4; +0x1818, all ones). The unit masks are the T6030's.
+pub(crate) static T8122_HWDATA_B: G15RuntimeHwDataB = G15RuntimeHwDataB {
+    unk_454: 2,
     unk_464: 1,
     unk_a7c: 0x1_0000_0001,
     unk_a98: 0,
     unk_abc: 4,
     unk_ae4: 0x31,
-    unk_b20: 0x14,
+    unk_b20: 0x0a,
     unk_b24: 3,
     unk_554: 0,
-    unk_17b8: 5,
+    unk_17b8: 4,
     unit_mask_a: 0x7_0000_0003,
     unit_mask_b: 7,
     unk_1808: 1,
-    unk_1818: 1,
-};
-
-/// The HwDataB configuration words and unit masks of the T8122 runtime InitData: T6030's, except
-/// for four words the G15G firmware takes with other values (+0xa2c, the chip revision's major
-/// number; +0xb20, the core slots; +0x17b8; +0x1818). The unit masks are T6030's.
-pub(crate) static T8122_HWDATA_B: G15RuntimeHwDataB = G15RuntimeHwDataB {
-    unk_454: 2,
-    unk_b20: 0x0a,
-    unk_17b8: 4,
     unk_1818: 0xffff_ffff,
-    ..T6030_HWDATA_B
 };
 
-/// Every SoC the M3 runtime has a table for.
-pub(crate) static SOCS: [&Soc; 2] = [&T6030, &T8122];
+/// Every SoC the M3 runtime has a table for. The T6030 and T6031 are the G15 generation's
+/// (`g15`), not the runtime's.
+pub(crate) static SOCS: [&Soc; 1] = [&T8122];
 
 /// The table of the SoC with chip id `chip_id`, if the M3 runtime has one.
 pub(crate) fn by_chip(chip_id: u32) -> Option<&'static Soc> {
     SOCS.iter().copied().find(|soc| soc.chip_id == chip_id)
 }
-
-/// T6030 (M3 Pro, G15S): one die, two clusters of ten core slots.
-pub(crate) static T6030: Soc = Soc {
-    name: "T6030",
-    gpu_name: "G15S",
-    chip_id: 0x6030,
-    gpu_variant: hw::GpuVariant::S,
-    gpu_revision: hw::GpuRevision::B1,
-    gpu_revision_id: hw::GpuRevisionID::B1,
-    board: "apple,t6030",
-    gpu: "apple,agx-t6030",
-    // The M3 Pro MacBook Pros (14" J514S, 16" J516S).
-    validated_boards: &[b"apple,j514s", b"apple,j516s"],
-    clusters: 2,
-    cores_per_cluster: 10,
-    mailbox_compatibles: &[
-        b"apple,t6030-asc-mailbox\0apple,asc-mailbox-v4\0",
-        b"apple,t6030-agx-asc-mailbox\0",
-    ],
-    mailbox_interrupts: &[0, 832, 4, 0, 833, 4, 0, 834, 4, 0, 835, 4],
-    // The T6030 device tree (t6030-gpu.dtsi): asc, sgx and the mailbox at asc + 0x8000.
-    windows: Windows {
-        asc: 0x2_9240_0000,
-        sgx: 0x2_9000_0000,
-        mailbox: 0x2_9240_8000,
-    },
-    id: IdWords {
-        version: 0x0703_1100,
-        version_mask: !0,
-        counts: 0x0011_0209,
-        counts_mask: !0,
-    },
-    images: &crate::m3_board::KNOWN_IMAGES,
-    firmware: Some(&crate::m3_firmware::T6030_LAYOUT),
-    hwcfg: Some(&hw::t6030::HWCONFIG_T6030),
-    io_mappings: Some(&crate::m3_adt_config::T6030_IO_MAPPINGS),
-    iomaps: Some(&crate::m3_init_storage::T6030_IOMAPS),
-    // The J514S/J516S runtime table: eight voltage-sorted states up to 1380 MHz.
-    pstates: PstateTable::Fixed {
-        states: 8,
-        top_mhz: 1380,
-    },
-    sgx_setup: Some((0xd14000, 0x70001)),
-    hwdata_b: Some(&T6030_HWDATA_B),
-    // Validated on J514S and J516S.
-    features: Features {
-        compute_wide_visibility: true,
-        fragment_dependency: true,
-    },
-    power_from_boot_loader: false,
-    unported: &[],
-    // Engine-busy, fault banks and performance state.
-    retire_mmio: 7,
-    // The hardware configuration's fast-die mask; no alarm mask.
-    mtr_masks: None,
-    // The fixed allocation, uncached.
-    hwdata_object: None,
-    registers: RegisterSet::G15S,
-    ut_engagement: 1,
-    power_target_cap_mw: None,
-    hwdata_words: &[],
-    globals_words: &[],
-    // The boot loader reads the T6030 leakage fuse itself and writes apple,core-leak-coef.
-    leak_fuse: None,
-    per_cluster_voltages: false,
-};
 
 /// T8122 (M3, G15G): one die, one cluster of ten core slots (eight or ten of them active).
 ///
@@ -436,82 +360,12 @@ pub(crate) static T8122: Soc = Soc {
     per_cluster_voltages: false,
 };
 
-/// T6031 (M3 Max, G15C): one die, four clusters of ten core slots. Not in [`SOCS`]. The probe
-/// still refuses it unless `asahi.t6031_start=1` (`t6031_start`). An unarmed probe never reads
-/// this table. An armed probe does. `require_complete` still refuses it: `unported` is nonempty
-/// and the IO maps, HwDataB words and SGX setup stay `None` here. The armed start supplies those
-/// from `t6031_knobs`.
-///
-/// The compatibles, the register windows, the mailbox and its interrupts are the J516C ADT's
-/// (`t6031-gpu.dtsi`). The power configuration and the operating points, with one voltage per
-/// cluster, come from the boot loader.
-#[allow(dead_code)]
-pub(crate) static T6031: Soc = Soc {
-    name: "T6031",
-    gpu_name: "G15C",
-    chip_id: 0x6031,
-    gpu_variant: hw::GpuVariant::C,
-    // /arm-io chip-revision 0x12; to be confirmed by the GPU's own identification register.
-    gpu_revision: hw::GpuRevision::B2,
-    gpu_revision_id: hw::GpuRevisionID::B1,
-    board: "apple,t6031",
-    gpu: "apple,agx-t6031",
-    // No board is validated.
-    validated_boards: &[],
-    clusters: 4,
-    cores_per_cluster: 10,
-    mailbox_compatibles: &[b"apple,t6031-agx-asc-mailbox\0"],
-    // The ADT's gfx-asc interrupts 1244, 1243, 1246, 1245, in mailbox order, on die 0 of the
-    // four-cell AIC.
-    mailbox_interrupts: &[0, 0, 1243, 4, 0, 0, 1244, 4, 0, 0, 1245, 4, 0, 0, 1246, 4],
-    // ADT sgx reg[0] and gfx-asc reg[0] through /arm-io ranges (child + 0x2_0000_0000); the
-    // mailbox at asc + 0x8000, as on T6030 and T8122.
-    windows: Windows {
-        asc: 0x4_0a40_0000,
-        sgx: 0x4_0800_0000,
-        mailbox: 0x4_0a40_8000,
-    },
-    // Family 7, variant 4; one die with four clusters. The revision is left to the read.
-    id: IdWords {
-        version: 0x0704_0000,
-        version_mask: 0xffff_0000,
-        counts: 0x0001_0400,
-        counts_mask: 0x000f_ff00,
-    },
-    images: &[],
-    firmware: Some(&crate::m3_firmware::T6031_LAYOUT),
-    hwcfg: Some(&hw::t6031::CONFIG),
-    io_mappings: None,
-    iomaps: None,
-    // The boot loader's ladder from this machine's ADT (J516C: eight voltages, up to 1380 MHz).
-    pstates: PstateTable::DeviceTree,
-    sgx_setup: None,
-    hwdata_b: None,
-    features: Features {
-        compute_wide_visibility: false,
-        fragment_dependency: false,
-    },
-    power_from_boot_loader: true,
-    unported: &["the G15C InitData version, IO mappings, HwDataB words and MTR masks are not in this table: only asahi.t6031_start=1 supplies them"],
-    // The performance state only, as on T8122.
-    retire_mmio: 4,
-    mtr_masks: None,
-    hwdata_object: None,
-    registers: RegisterSet::G15S,
-    ut_engagement: 1,
-    power_target_cap_mw: None,
-    hwdata_words: &[],
-    globals_words: &[],
-    leak_fuse: None,
-    per_cluster_voltages: true,
-};
-
 /// The T8122 HwData words that differ from the shared builder's (offsets into the object;
 /// HwDataA starts at +0x4580):
-/// - HwDataB +0xa30 and +0xa34: 0 and 4 (T6030: 1 and 0);
-/// - HwDataB +0x17e0..+0x1860: the G15G firmware's flag words (T6030 has 1 at +0x17e8,
-///   +0x1804, +0x1814 and +0x1860 and all-ones at +0x1848);
-/// - HwDataA +0x11e0: 30 (T6030: 40), a word of the shader-engine controller block;
+/// - HwDataB +0xa30 and +0xa34: 0 and 4 (the builder writes 1 and 0);
+/// - HwDataB +0x17e0..+0x1860: the G15G firmware's flag words (the builder writes 1 at
+///   +0x17e8, +0x1804, +0x1814 and +0x1860 and all-ones at +0x1848);
+/// - HwDataA +0x11e0: 30 (the builder writes 40), a word of the shader-engine controller block;
 /// - HwDataA +0x1290: 125, and HwDataA +0x424c: 24000000, the 24 MHz reference clock.
 pub(crate) static T8122_HWDATA_WORDS: [(usize, u32); 17] = [
     (0xa30, 0),
@@ -534,7 +388,7 @@ pub(crate) static T8122_HWDATA_WORDS: [(usize, u32); 17] = [
 ];
 
 /// The T8122 Globals words that differ from the shared builder's: +0x9bc, the CDM backoff
-/// timeout (4) with the three bytes after it 0 (T6030: 1, 0, 0).
+/// timeout (4) with the three bytes after it 0 (the builder writes 1, 0, 0).
 pub(crate) static T8122_GLOBALS_WORDS: [(usize, u32); 1] = [(0x9bc, 4)];
 
 /// The T8122 HwData object's firmware VA: 0x8a80 bytes before the end of the fixed allocation's

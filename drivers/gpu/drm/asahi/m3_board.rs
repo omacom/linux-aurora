@@ -24,21 +24,21 @@ fn board_is(compatible: &[u8]) -> bool {
 }
 
 /// Whether this is a board the M3 runtime is validated on (`soc.validated_boards`).
-/// `asahi.m3_expose=auto` registers the render node and `asahi.m3_backend=auto` starts the
-/// runtime only on these.
+/// `asahi.m3_expose=auto` registers the render node and the probe starts the runtime only on
+/// these.
 pub(crate) fn runtime_validated_board(soc: &Soc) -> bool {
     soc.validated_boards.iter().any(|board| board_is(board))
 }
 
-/// The number of core slots of `soc` (2 x 10 on T6030, 4 x 10 on T6031).
+/// The number of core slots of `soc` (1 x 10 on T8122).
 pub(crate) fn core_slots(soc: &Soc) -> u32 {
     soc.cores_per_cluster * soc.clusters
 }
 
 /// Whether the core-enable mask describes a usable GPU of `soc`: at least one core, and no core
 /// outside its core slots. The mask is the fused core-enable words from SGX+0xe01500, the second
-/// word as bits 32..63 when the SoC has more than 32 core slots. It varies with the SKU (0x6f5fc
-/// on a 14-core T6030, 0x7fdff on an 18-core one); absent cores must never be enabled.
+/// word as bits 32..63 when the SoC has more than 32 core slots. It varies with the SKU; absent
+/// cores must never be enabled.
 pub(crate) fn core_mask_valid(soc: &Soc, mask: u64) -> bool {
     let slots = core_slots(soc);
     mask != 0 && slots <= 64 && (slots == 64 || mask >> slots == 0)
@@ -466,7 +466,7 @@ pub(crate) fn has_pmp_link(pdev: &platform::Device<Core>) -> bool {
         .is_some_and(|node| node.get_property::<u32>(c_str!("apple,pmp")).is_ok())
 }
 
-pub(crate) use crate::m3_firmware::{KnownImage, KNOWN_IMAGES, KNOWN_IMAGES_T8122};
+pub(crate) use crate::m3_firmware::{KnownImage, KNOWN_IMAGES_T8122};
 use crate::m3_firmware::image_info;
 
 fn sha256(data: &[u8]) -> [u8; 32] {

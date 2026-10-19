@@ -67,6 +67,16 @@ int apple_pmp_set_device_power(u8 command, u16 device_id, u32 enabled)
 		return -ENODEV;
 	/* The 25G83 PTD readiness is required, with no elapsed-time fallback. */
 	ret = apple_pmp_report_wait_supplier_ready(pmp_device, 5000);
+	/*
+	 * The T6030 PMP declares no readiness report (its report entries are
+	 * named by the display processors, not by the PMP node), so the wait
+	 * finds none. A registered PMP has started its firmware and endpoint,
+	 * and the command below is acknowledged by the firmware itself; that
+	 * is the gate the J514S GPU bridge used for the AGX vote.
+	 */
+	if (ret == -ENODEV && pmp_device->of_node &&
+	    of_device_is_compatible(pmp_device->of_node, "apple,t6030-pmp-v2"))
+		ret = 0;
 	if (ret)
 		return ret;
 	return apple_pmp_send_power_command(pmp_data, command, device_id, enabled);

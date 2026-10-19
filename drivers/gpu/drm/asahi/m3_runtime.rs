@@ -104,9 +104,6 @@ impl Inner {
             let start_stamp=self.jobs[index].batch_gpu_span().ok().map(|span| span[0]);
             crate::t8122_start::job_failed_verdict(self.drm.as_ref(),primary,start_stamp,pstate,self.state.health.crashed());
             self.t8122_verdict=true;
-        } else if crate::t6031_start::is_t6031(self.device.soc()) {
-            crate::t6031_start::job_failed_verdict(self.drm.as_ref(), primary, self.state.health.crashed());
-            self.t8122_verdict=true;
         }
         let events=self.state.event_messages.load(Ordering::Acquire);
         if let Err(e) = self.jobs[index].log(&self.drm) {
@@ -327,9 +324,6 @@ impl Inner {
                     if published {
                         if crate::t8122_start::is_t8122(self.device.soc()) && !self.t8122_verdict {
                             crate::t8122_start::job_setup_failed_verdict(self.drm.as_ref(),error);
-                            self.t8122_verdict=true;
-                        } else if crate::t6031_start::is_t6031(self.device.soc()) && !self.t8122_verdict {
-                            crate::t6031_start::job_setup_failed_verdict(self.drm.as_ref(), error);
                             self.t8122_verdict=true;
                         }
                         // A live ring WRITE or doorbell may have been published: keep packets
@@ -775,9 +769,6 @@ impl Inner {
                                 if crate::t8122_start::is_t8122(self.device.soc()) {
                                     crate::t8122_start::cap_violated_verdict(self.drm.as_ref(),e);
                                     self.t8122_verdict=true;
-                                } else if crate::t6031_start::is_t6031(self.device.soc()) {
-                                    crate::t6031_start::cap_violated_verdict(self.drm.as_ref(), e);
-                                    self.t8122_verdict=true;
                                 }
                                 self.fail_active(e);return Err(e);
                             }
@@ -933,8 +924,6 @@ impl Inner {
                 NativeJob::Render(j)=>j.gpu_ticks(batch.base,batch_count).ok().map(|(a,b)|[a,b]),
             };
             crate::t8122_start::job_completed_verdict(self.drm.as_ref(),kind,gpu_ns,span);
-        } else if t[0]==1 && crate::t6031_start::is_t6031(self.device.soc()) {
-            crate::t6031_start::job_completed_verdict(self.drm.as_ref(), kind, gpu_ns);
         }
         if t[0]%128==0 && crate::debug::debug_enabled(crate::debug::DebugFlags::SubmitTiming) {
             dev_info!(self.drm.as_ref(),"M3_TIMING kind={} count={} prepare_ns={} active_ns={} gpu_ns={} ta_ns={} fragment_ns={} gap_ns={} ordinal={}\n",kind,t[0],t[1],t[2],t[3],t[4],t[5],t[6],
@@ -976,10 +965,8 @@ impl Runtime {
         // state, mailbox transport, the DRM device). Captured as a Copy bool so the closure does
         // not borrow `device`, which is moved into Inner below.
         let t8122 = crate::t8122_start::is_t8122(device.soc());
-        let t6031 = crate::t6031_start::is_t6031(device.soc());
         let coproc_refused = |e: &Error| {
             if t8122 { crate::t8122_start::coproc_setup_refused(pdev.as_ref(), *e); }
-            if t6031 { crate::t6031_start::coproc_setup_refused(pdev.as_ref(), *e); }
         };
         device.require_stopped(pdev).inspect_err(coproc_refused)?;
         // Reserve before starting ASC. ENOMEM must not drop firmware owners
@@ -990,7 +977,6 @@ impl Runtime {
         let state = m3_rtkit::State::new(pdev, drm.clone(), device.firmware().resources.regions[5]).inspect_err(coproc_refused)?;
         let mut transport = rtkit::RtKit::new(pdev.as_ref(), None, 0, state.clone()).inspect_err(coproc_refused)?;
         if crate::m3_adt_config::stop_before_asc(pdev.as_ref()) {
-            if t6031 { crate::t6031_start::coproc_setup_refused(pdev.as_ref(), ENODEV); }
             return Err(ENODEV);
         }
         // Whether the coprocessor runs and offers its endpoints, for the T8122 verdict.
@@ -1015,7 +1001,6 @@ impl Runtime {
             Ok(v)=>v,
             Err(e)=>{
                 crate::t8122_start::prepare_verdict(pdev.as_ref(),device.soc(),started,e);
-                if t6031 { crate::t6031_start::prepare_verdict(pdev.as_ref(), started, e); }
                 state.health.mark_failed();
                 if device.stop_asc().is_err() {
                     unsafe {kernel::bindings::__module_get(crate::THIS_MODULE.as_ptr())};
@@ -1122,7 +1107,6 @@ impl Runtime {
     }
     pub(crate) fn boot(&mut self, pdev: &platform::Device<Core>) -> Result {
         let is_t8122 = crate::t8122_start::is_t8122(self.inner.device.soc());
-        let is_t6031 = crate::t6031_start::is_t6031(self.inner.device.soc());
         self.inner.boot_step = crate::t8122_start::BootStep::Publish;
         let result = self.boot_inner(pdev);
         if let Err(error) = result {
@@ -1131,7 +1115,7 @@ impl Runtime {
             // boot_inner already logs them (on every SoC, as in 12.0), so skip that case here.
             let logged = self.inner.boot_step == crate::t8122_start::BootStep::AwaitReady
                 && error == ETIMEDOUT;
-            if (is_t8122 || is_t6031) && !logged {
+            if is_t8122 && !logged {
                 let inner: &mut Inner = &mut *self.inner;
                 let _ = inner.config.log_ready(&inner.drm);
             }
@@ -1140,11 +1124,6 @@ impl Runtime {
         if is_t8122 {
             let accepted = result.is_ok() || self.inner.config.ready().unwrap_or(false);
             crate::t8122_start::boot_verdict(pdev.as_ref(), self.inner.device.firmware().initdata_magic,
-                self.inner.boot_step, accepted, self.inner.state.health.crashed(), result);
-        }
-        if is_t6031 {
-            let accepted = result.is_ok() || self.inner.config.ready().unwrap_or(false);
-            crate::t6031_start::boot_verdict(pdev.as_ref(), self.inner.device.firmware().initdata_magic,
                 self.inner.boot_step, accepted, self.inner.state.health.crashed(), result);
         }
         result

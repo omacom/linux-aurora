@@ -58,6 +58,74 @@ const UAT_LEVELS: usize = crate::uat::UAT_LEVELS;
 /// Number of address bits below the index of a top-level page table entry.
 pub(crate) const UAT_TOP_LEVEL_SHIFT: usize = UAT_PGBIT + (UAT_LEVELS - 1) * UAT_LVBIT;
 
+/// Size of the smallest CPU data cache line (`CTR_EL0.DminLine`).
+#[inline(always)]
+fn dcache_line_size() -> usize {
+    let ctr: u64;
+    // SAFETY: CTR_EL0 is readable at EL1 and reading it has no side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {ctr}, ctr_el0",
+            ctr = out(reg) ctr,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    4 << ((ctr >> 16) & 0xf)
+}
+
+/// Cleans the CPU data cache lines covering `len` bytes at `ptr` to the point of coherency, for an
+/// agent that does not snoop the CPU caches. [`poc_barrier`] completes the maintenance.
+pub(crate) fn clean_poc(ptr: *const u8, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let line = dcache_line_size();
+    let end = ptr as usize + len;
+    let mut addr = ptr as usize & !(line - 1);
+    while addr < end {
+        // SAFETY: Cleaning a cache line of a mapped kernel address writes dirty data back without
+        // changing memory contents. The asm is a compiler barrier, so earlier stores are emitted
+        // first, and the architecture orders them with the clean of the same line.
+        unsafe {
+            core::arch::asm!(
+                "dc cvac, {addr}",
+                addr = in(reg) addr,
+                options(nostack, preserves_flags)
+            )
+        };
+        addr += line;
+    }
+}
+
+/// Cleans and invalidates the CPU data cache lines covering `len` bytes at `ptr` to the point of
+/// coherency, so that later CPU reads observe what a non-snooping agent wrote. Lines the CPU wrote
+/// are written back first. [`poc_barrier`] completes the maintenance.
+pub(crate) fn clean_invalidate_poc(ptr: *const u8, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let line = dcache_line_size();
+    let end = ptr as usize + len;
+    let mut addr = ptr as usize & !(line - 1);
+    while addr < end {
+        // SAFETY: Clean+invalidate of a mapped kernel address never discards dirty data.
+        unsafe {
+            core::arch::asm!(
+                "dc civac, {addr}",
+                addr = in(reg) addr,
+                options(nostack, preserves_flags)
+            )
+        };
+        addr += line;
+    }
+}
+
+/// Completes earlier point-of-coherency maintenance for the outer shareable domain (`dsb osh`).
+pub(crate) fn poc_barrier() {
+    // SAFETY: Barriers are always safe.
+    unsafe { core::arch::asm!("dsb osh", options(nostack, preserves_flags)) };
+}
+
 /// Runs `f` on the first `count` top-level entries of the root page table at `ttb`.
 ///
 /// # Safety
@@ -249,6 +317,12 @@ impl Prot {
 
     const fn memattr(&self, memattr: u8) -> Self {
         Self { memattr, ..*self }
+    }
+
+    /// The protection bits of a leaf with this protection (no address, table type or non-global
+    /// bits), for checking that a firmware leaf word round-trips through [`Self::from_pte`].
+    pub(crate) const fn leaf_bits(&self) -> u64 {
+        self.as_pte()
     }
 
     const fn as_pte(&self) -> u64 {
@@ -744,6 +818,19 @@ impl UatPageTable {
 
     pub(crate) fn ttb(&self) -> PhysicalAddr {
         self.ttb
+    }
+
+    /// Makes every later change of this page table visible to a UAT walker that does not snoop the
+    /// CPU caches (G15), and cleans the root, which was zeroed through the cacheable linear map.
+    ///
+    /// From now on the `noncoherent` publication of this file applies: a new table page is cleaned
+    /// before its parent descriptor names it, and every written table span is cleaned after the
+    /// store with a `dsb osh` ([`Self::publish_table`]). Call it before anything is mapped and
+    /// before any context names the root.
+    pub(crate) fn enable_clean_poc(&mut self) -> Result {
+        self.noncoherent = true;
+        // The zeroed root: published whole through the write path of `with_table`.
+        self.with_table(self.ttb, 0, UAT_NPTE, true, |_| Ok(()))
     }
 
     /// INT's 42-bit (AGX3) walk with prepared, non-allocating leaf writes. 39-bit roots and G17

@@ -51,9 +51,5 @@ const fn agx3(
 }
 
 pub(crate) const T8122: SocConfig = agx3(0x8122, GpuGen::G15, GpuVariant::G, 0x7, 2, 1);
-/// Apple M3 Pro (G15S).
-pub(crate) const T6030: SocConfig = agx3(0x6030, GpuGen::G15, GpuVariant::S, 0x7, 3, 1);
-/// Apple M3 Max (G15C).
-pub(crate) const T6031: SocConfig = agx3(0x6031, GpuGen::G15, GpuVariant::C, 0x7, 4, 1);
 /// Apple M3 Ultra (G15D, two dies).
 pub(crate) const T6032: SocConfig = agx3(0x6032, GpuGen::G15, GpuVariant::D, 0x7, 4, 2);

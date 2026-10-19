@@ -21,7 +21,45 @@ struct dcp_parse_ctx {
 	/* External H17P candidates require separate publication/lookup proof. */
 	bool automatic_1080p180_rgb8;
 	bool ambiguous_180hz;
+	/*
+	 * The T6030 external processor (DCP firmware 14.7, external role): of
+	 * an external SDR catalog, an 8-bit RGB colour (sRGB or default RGB)
+	 * is preferred, ties on score going to the lower colour ID, and
+	 * interlaced, split, multi-pipe and pixel-repeated timings are refused.
+	 * A timing without such a colour keeps the common selection.
+	 */
+	bool v14_7_rgb8;
+	/*
+	 * A timing's DSC-required 8-bit RGB colour the sink takes compressed
+	 * (SupportsDSC) is admissible, the firmware compressing it on the
+	 * wire; an uncompressed colour of the timing is still preferred.
+	 */
+	bool v14_7_dsc;
+	/*
+	 * The routed link's width and highest rate code (RBR 0x06 .. HBR3
+	 * 0x1e): a catalog is budgeted by what the link can carry. 0: no
+	 * budget.
+	 */
+	u32 link_lanes, link_rate;
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	/*
+	 * T6030 external processor audio elements (DCP firmware 14.7, external
+	 * role): an element's ElementData, the link data the audio service
+	 * takes, is 32 bytes.
+	 */
+	bool v14_7_audio;
+#endif
 };
+
+/* The T6030 external processor's audio elements (DRM_APPLE_DCP_T6030_AUDIO only). */
+static inline bool dcp_parse_v14_7_audio(const struct dcp_parse_ctx *ctx)
+{
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+	return ctx->v14_7_audio;
+#else
+	return false;
+#endif
+}
 
 enum dcp_color_eotf {
 	DCP_EOTF_SDR_GAMMA = 0, // "SDR gamma"
@@ -110,6 +148,9 @@ struct dcp_display_mode {
 	/* Immutable receipt provenance; never retag a cached exception. */
 	struct dcp_metadata_ticket unsafe_rgb8_ticket;
 	u64 unsafe_rgb8_service_epoch;
+	/* The timing's best DSC-required colour, and whether it was taken. */
+	struct dcp_color_mode dsc_rgb;
+	bool dsc;
 };
 
 struct dimension {
@@ -126,6 +167,8 @@ struct dcp_display_mode *enumerate_modes(struct dcp_parse_ctx *handle,
 					 int height_mm, unsigned notch_height,
 					 bool internal, bool external_sdr);
 int parse_display_metadata(struct dcp_parse_ctx *handle, struct dcp_display_metadata *out);
+unsigned int dcp_catalog_budget(struct dcp_display_mode *modes, unsigned int count,
+				u32 lanes, u32 rate, unsigned int *rejected);
 /* Caller holds modes_lock while checking connector ownership. */
 bool dcp_modes_for_connector(struct apple_dcp *dcp,
 			     struct apple_connector *connector);
@@ -149,7 +192,7 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *handle,
 int replace_modes(struct dcp_parse_ctx *handle,
 		  struct dcp_display_mode **modes, unsigned int *count,
 		  int width_mm, int height_mm, unsigned int notch_height,
-		  bool internal);
+		  bool internal, bool external_sdr);
 int parse_display_attributes(struct dcp_parse_ctx *handle, int *width_mm,
 			     int *height_mm, bool *backlight_control);
 int parse_display_attributes_h17p(struct dcp_parse_ctx *handle, int *width_mm,
@@ -163,8 +206,20 @@ struct dcp_sound_format_mask {
 	unsigned int nchans;
 };
 
+/*
+ * An audio element's ElementData, the link data of the audio service's link
+ * methods: 24 bytes up to DCP firmware 13.5, 32 on the 14.7 external role.
+ */
+#define DCP_SOUND_COOKIE_SIZE		24
+#if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
+#define DCP_SOUND_COOKIE_SIZE_V14_7	32
+#define DCP_SOUND_COOKIE_MAX		DCP_SOUND_COOKIE_SIZE_V14_7
+#else
+#define DCP_SOUND_COOKIE_MAX		DCP_SOUND_COOKIE_SIZE
+#endif
+
 struct dcp_sound_cookie {
-	u8 data[24];
+	u8 data[DCP_SOUND_COOKIE_MAX];
 };
 
 struct snd_pcm_chmap_elem;

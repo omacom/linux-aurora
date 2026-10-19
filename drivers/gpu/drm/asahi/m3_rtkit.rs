@@ -247,12 +247,9 @@ impl rtkit::Operations for Operations {
         crate::m3_completion::queue(&state.drm);
         dev_err!(
             state.dev.as_ref(),
-            "M3 G15S: firmware crashed, retained crashlog bytes={}\n",
+            "M3: firmware crashed, retained crashlog bytes={}\n",
             crashlog.map_or(0, |b| b.len())
         );
-        if let Some(bytes) = crashlog {
-            crate::t6031_start::capture_crashlog(state.dev.as_ref(), bytes);
-        }
     }
 
     fn shmem_map(

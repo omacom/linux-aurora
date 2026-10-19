@@ -19,13 +19,11 @@ use kernel::{
     error::{from_err_ptr, to_result},
     io::{
         mem::IoMem, //
-        poll::read_poll_timeout,
         Io,
     },
     platform,
     prelude::*,
     sync::{aref::ARef, Arc}, //
-    time::Delta,
 };
 
 /// Size of the ASC control MMIO region.
@@ -69,49 +67,6 @@ const G17_GATING_DISABLE: u32 = 0x6; // BIT(1) | BIT(2)
 const G17_PERF_CONTROL: usize = 0xe0141c;
 const G17_PERF_MAP: usize = 0xe01480;
 const G17_CORE_POWER: usize = 0xe01000;
-
-// G15 (t6030) Fender registers. Fender = SGX + 0xd00000 on every AGX checked, so the ID block
-// above is Fender+0x4000 and the G14X core masks are Fender+0x101500. Everything
-// here is inside the 16 MiB `sgx` mapping.
-/// Fender block offset inside the SGX window.
-const FENDER: usize = 0xd00000;
-/// Fender "kick": a command (0x11 at probe, 0x10 at start and teardown) followed by a wait for
-/// bit 4 to clear. The G15 firmware boots and runs jobs without it.
-const FENDER_KICK: usize = FENDER + 0x1000;
-const FENDER_KICK_BUSY: u32 = 1 << 4;
-/// Fender kick command issued at probe. Only used for A/B via asahi.g15_debug bit 41.
-pub(crate) const FENDER_KICK_PROBE: u32 = 0x11;
-/// Fender kick command issued at start and on teardown. Only used for A/B via
-/// asahi.g15_debug bit 41.
-pub(crate) const FENDER_KICK_START: u32 = 0x10;
-/// Dynamic Fender clock gating control: enable = RMW &= !0x6, disable = RMW |= 0x4.
-/// Fender MMU/TTBAT block. Same layout as G14X.
-const FENDER_MMU_ENABLE: usize = FENDER + 0x8000;
-const FENDER_MMU_8004: usize = FENDER + 0x8004;
-const FENDER_MMU_8008: usize = FENDER + 0x8008;
-const FENDER_MMU_800C: usize = FENDER + 0x800c;
-const FENDER_MMU_8010: usize = FENDER + 0x8010;
-const FENDER_MMU_8014: usize = FENDER + 0x8014;
-const FENDER_MMU_8018: usize = FENDER + 0x8018;
-const FENDER_MMU_801C: usize = FENDER + 0x801c;
-const FENDER_MMU_8020: usize = FENDER + 0x8020;
-const FENDER_MMU_8024: usize = FENDER + 0x8024;
-const FENDER_MMU_8028: usize = FENDER + 0x8028;
-/// TTBAT base, PA >> 14 in a 28-bit field (G13X had it at +0x8024).
-const FENDER_MMU_TTBAT_BASE: usize = FENDER + 0x802c;
-const FENDER_MMU_TTBAT_BASE_MASK: u32 = (1 << 28) - 1;
-/// GPC performance state ([3:0]); host-owned on G15, firmware-owned on G14S.
-const GPC_PERF_STATE: usize = FENDER + 0x101000;
-/// GPC -> host interrupt enable: bit 0/1/2 for type 0/1/2.
-/// GPC -> host interrupt status, write-1-to-clear.
-
-/// G15 read-only self-test snapshot: GPC perf state, per-event status c020, busy mask c120,
-/// kick control c050, fault address/info d8c8/d8c0 and the done mask c128. The kick registers
-/// c040/c048/c058/c238 are write-only and are not read.
-const SGX_EVENT_STATUS: usize = 0xc020;
-const SGX_KICK_CTL: usize = 0xc050;
-const SGX_BUSY_MASK: usize = 0xc120;
-const SGX_DONE_MASK: usize = 0xc128;
 
 const FAULT_ADDR_MASK_G15: u64 = (1 << 42) - 1;
 /// Enum representing the unit that caused an MMU fault.
@@ -316,117 +271,6 @@ pub(crate) struct Resources {
 }
 
 impl Resources {
-    fn sgx_write32<const OFF: usize>(&self, val: u32) {
-        if let Some(sgx) = self.sgx.try_access() {
-            sgx.relaxed().write32(val, OFF);
-        }
-    }
-
-    pub(crate) fn init_mmio_g15(&self, ttbat_base: u64) -> Result {
-        self.g15_setup_mmu_config(ttbat_base)
-    }
-
-    fn g15_setup_mmu_config(&self, ttbat_base: u64) -> Result {
-        if ttbat_base & ((1 << 14) - 1) != 0
-            || (ttbat_base >> 14) > FENDER_MMU_TTBAT_BASE_MASK as u64
-        {
-            dev_err!(
-                self.dev.as_ref(),
-                "Fender MMU: TTBAT base {:#x} not representable\n",
-                ttbat_base
-            );
-            return Err(EINVAL);
-        }
-
-        if self.sgx_read32::<FENDER_MMU_ENABLE>() != 0 {
-            let cur = ((self.sgx_read32::<FENDER_MMU_TTBAT_BASE>() & FENDER_MMU_TTBAT_BASE_MASK)
-                as u64)
-                << 14;
-            if cur != ttbat_base {
-                dev_err!(
-                    self.dev.as_ref(),
-                    "Fender MMU: preconfigured TTBAT {:#x} != ttbs region {:#x}\n",
-                    cur,
-                    ttbat_base
-                );
-                return Err(EINVAL);
-            }
-            dev_info!(
-                self.dev.as_ref(),
-                "Fender MMU: preconfigured by the bootloader (TTBAT {:#x})\n",
-                cur
-            );
-            return Ok(());
-        }
-
-        dev_info!(
-            self.dev.as_ref(),
-            "Fender MMU: programming TTBAT {:#x}\n",
-            ttbat_base
-        );
-        // G15 MMU configuration sequence. The meaning of the 0x80d8 / 1 / 0x3ff
-        // words is unknown.
-        // TODO: confirm this register sequence on hardware.
-        self.sgx_write32::<FENDER_MMU_TTBAT_BASE>(
-            (ttbat_base >> 14) as u32 & FENDER_MMU_TTBAT_BASE_MASK,
-        );
-        self.sgx_write32::<FENDER_MMU_8014>(0x80d8);
-        self.sgx_write32::<FENDER_MMU_8018>(0x80d8);
-        self.sgx_write32::<FENDER_MMU_800C>(0);
-        self.sgx_write32::<FENDER_MMU_8010>(0);
-        self.sgx_write32::<FENDER_MMU_801C>(0);
-        self.sgx_write32::<FENDER_MMU_8020>(0);
-        self.sgx_write32::<FENDER_MMU_8024>(0);
-        self.sgx_write32::<FENDER_MMU_8028>(0);
-        self.sgx_write32::<FENDER_MMU_8008>(1);
-        self.sgx_write32::<FENDER_MMU_8004>(0x3ff);
-        // Enable, written last.
-        self.sgx_write32::<FENDER_MMU_ENABLE>(1);
-
-        Ok(())
-    }
-
-    pub(crate) fn g15_fender_kick(&self, cmd: u32) -> Result {
-        self.sgx_write32::<FENDER_KICK>(cmd);
-        read_poll_timeout(
-            || Ok(self.sgx_read32::<FENDER_KICK>()),
-            |val| val & FENDER_KICK_BUSY == 0,
-            Delta::from_micros(10),
-            Delta::from_millis(100),
-        )
-        .inspect_err(|_| {
-            dev_err!(self.dev.as_ref(), "Fender kick {:#x} timed out\n", cmd);
-        })?;
-        Ok(())
-    }
-
-    pub(crate) fn g15_selftest_snapshot(&self, tag: &str, with_done: bool) {
-        let gpc = self.sgx_read32::<GPC_PERF_STATE>();
-        let status = self.sgx_read64::<SGX_EVENT_STATUS>();
-        let kick_ctl = self.sgx_read64::<SGX_KICK_CTL>();
-        let busy = self.sgx_read64::<SGX_BUSY_MASK>();
-        let fault_addr = self.sgx_read64::<FAULT_ADDR_G14X>();
-        let fault_info = self.sgx_read64::<FAULT_INFO_G14X>();
-        let done = if with_done {
-            Some(self.sgx_read64::<SGX_DONE_MASK>())
-        } else {
-            None
-        };
-        dev_info!(
-            self.dev.as_ref(),
-            "G15 self-test mmio [{}]: GPC perf {:#x} (pstate {}), c020 {:#x}, c050 {:#x}, c120 busy {:#x}, d8c8 {:#x}, d8c0 {:#x}, c128 done {:?}\n",
-            tag,
-            gpc,
-            gpc & 0xf,
-            status,
-            kick_ctl,
-            busy,
-            fault_addr,
-            fault_info,
-            done
-        );
-    }
-
     fn fault_unit_g15(unit_code: u8) -> FaultUnit {
         let hi = unit_code >> 4;
         // x4 -> GL2CC_META_G15GX_{0,2,4,6}, xF -> GL2CC_META_G15GX_{1,3,5,7}
@@ -531,14 +375,6 @@ impl Resources {
         Ok(true)
     }
 
-    fn sgx_read32<const OFF: usize>(&self) -> u32 {
-        if let Some(sgx) = self.sgx.try_access() {
-            sgx.relaxed().read32(OFF)
-        } else {
-            0
-        }
-    }
-
     /* Not yet used
     fn sgx_write32<OFF: usize>(&self, val: u32) {
         if let Some(sgx) = self.sgx.try_access() {
@@ -546,6 +382,14 @@ impl Resources {
         }
     }
     */
+
+    fn sgx_read32<const OFF: usize>(&self) -> u32 {
+        if let Some(sgx) = self.sgx.try_access() {
+            sgx.relaxed().read32(OFF)
+        } else {
+            0
+        }
+    }
 
     fn sgx_read64<const OFF: usize>(&self) -> u64 {
         if let Some(sgx) = self.sgx.try_access() {
@@ -562,6 +406,19 @@ impl Resources {
         }
     }
     */
+
+    /// Reads a 32-bit SGX register at a runtime offset (G15 identification, power and fault
+    /// windows).
+    pub(crate) fn sgx_read32_at(&self, offset: usize) -> Result<u32> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        sgx.try_read32(offset)
+    }
+
+    /// Writes a 32-bit SGX register at a runtime offset (G15).
+    pub(crate) fn sgx_write32_at(&self, offset: usize, value: u32) -> Result {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        sgx.try_write32(value, offset)
+    }
 
     /// Initialize the MMIO registers for the GPU.
     pub(crate) fn init_mmio(&self) -> Result {

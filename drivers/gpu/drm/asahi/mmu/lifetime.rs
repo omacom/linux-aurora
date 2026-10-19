@@ -134,7 +134,8 @@ impl Vm {
         mappings: KVec<KernelMapping>,
         reserved: KVec<Range<u64>>,
     ) -> Result {
-        if !self.published() {
+        // A tracked VM of a handoff UAT (G15) keeps its aliases in the lifetime.
+        if !self.published() && self.lifetime.is_none() {
             return self.m3_install_driver_mappings(mappings, reserved);
         }
         let lifetime = self.lifetime.as_ref().ok_or(EINVAL)?;
@@ -336,9 +337,18 @@ impl Vm {
         drop(previous);
     }
 
+    /// Whether the client's handle of this VM is gone ([`Self::unmap_user_ranges`] closed
+    /// admission for good). G15 releases its per-VM state after that.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.lifetime
+            .as_ref()
+            .is_some_and(|lifetime| lifetime.state.lock().closed)
+    }
+
     /// Tests mappings and reservations which userspace must never replace.
     pub(crate) fn driver_range_overlaps(&self, range: Range<u64>) -> bool {
-        if !self.published() {
+        // A tracked VM of a handoff UAT (G15) keeps its reservations in the lifetime.
+        if !self.published() && self.lifetime.is_none() {
             return self.m3_driver_range_overlaps(range);
         }
         let Some(lifetime) = self.lifetime.as_ref() else {
@@ -567,7 +577,8 @@ impl Vm {
 
     /// Closes admission permanently and preserves mappings referenced by accepted jobs.
     pub(crate) fn unmap_user_ranges(&self, user: Range<u64>, kernel: Range<u64>) -> Result {
-        if !self.published() {
+        // A tracked VM of a handoff UAT (G15) closes through its lifetime.
+        if !self.published() && self.lifetime.is_none() {
             return self.m3_unmap_user_ranges(user, kernel);
         }
         if let Some(lifetime) = self.lifetime.as_ref() {

@@ -44,11 +44,11 @@ use ::pin_init::Init;
 #[allow(dead_code)]
 pub(crate) const G15_KEEP_POWERED_MS: u32 = i32::MAX as u32;
 
-/// Which T6030 backend a G15 InitData is built for. The two differ where the manager backend
-/// keeps the values it was validated with on J516S.
+/// Which backend a G15 InitData is built for. The two differ where the GpuManager layout keeps
+/// the values the former bring-up backend was validated with on J516S.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum G15Layout {
-    /// The G15 GpuManager backend: rings in Fender SRAM, the GPU never idles off.
+    /// The GpuManager's layout: rings in Fender SRAM, the GPU never idles off.
     Manager,
     /// The serialized M3 runtime backend: rings in DRAM with finite idle-off, its own GPU and
     /// firmware VA layout, and the values its InitData carries for the power, idle and
@@ -69,7 +69,7 @@ pub(crate) struct G15Options {
     /// Firmware VA of the timestamp arena (HwDataB+0x28); None uses the manager's kernel range.
     pub(crate) timestamp_base: Option<u64>,
     /// Manager layout: write the PPM words and the Globals power targets as the runtime layout
-    /// does (`asahi.g15_debug` bit 55). The runtime layout always does.
+    /// does. The runtime layout always does.
     pub(crate) reference_ppm: bool,
     /// Runtime layout: the SoC's HwDataB configuration words and unit masks
     /// (`m3_soc::Soc::hwdata_b`). None for the manager layout, which does not write them.
@@ -104,20 +104,18 @@ pub(crate) struct G15RuntimeHwDataB {
 }
 
 impl G15Options {
-    /// The options of the G15 manager backend: its validated defaults, the performance-state
-    /// cap (`asahi.m3_max_pstate`) and the `asahi.g15_debug` A/B switches.
+    /// The GpuManager's options: the validated defaults and the performance-state cap
+    /// (`asahi.m3_max_pstate`).
     fn manager(cfg: &'static hw::HwConfig) -> G15Options {
         let g15 = cfg.gpu_gen == hw::GpuGen::G15;
         G15Options {
             layout: G15Layout::Manager,
-            split_pstates: g15
-                && crate::m3_params::g15_debug(crate::m3_params::G15Debug::ManagerSplitPstates),
+            split_pstates: false,
             cap: g15.then(|| {
                 crate::m3_params::max_pstate_param().unwrap_or(crate::m3_params::MAX_PSTATE_DEFAULT)
             }),
             timestamp_base: None,
-            reference_ppm: g15
-                && crate::m3_params::g15_debug(crate::m3_params::G15Debug::ManagerReferencePpm),
+            reference_ppm: false,
             runtime_hwdata_b: None,
             per_cluster_voltages: false,
         }
@@ -311,24 +309,6 @@ impl PStateTables {
     pub(crate) fn primary_state<'s>(&self, pwr: &'s hw::PwrConfig, i: usize) -> &'s hw::PState {
         &pwr.perf_states[self.primary[i] as usize]
     }
-
-    /// The frequency of the highest entry the firmware may select, in kHz.
-    pub(crate) fn max_frequency_khz(&self, pwr: &hw::PwrConfig) -> u32 {
-        self.primary_state(pwr, self.max as usize).freq_hz / 1000
-    }
-}
-
-/// The highest GPU frequency the G15 manager backend lets the firmware use, in kHz (its
-/// performance cap), or None when the GPU is not G15 or the cap cannot be applied.
-pub(crate) fn g15_manager_max_frequency_khz(
-    cfg: &'static hw::HwConfig,
-    pwr: &hw::PwrConfig,
-) -> Option<u32> {
-    if cfg.gpu_gen != hw::GpuGen::G15 {
-        return None;
-    }
-    let tables = G15Options::manager(cfg).tables(pwr).ok()?;
-    Some(tables.max_frequency_khz(pwr))
 }
 
 #[versions(AGX)]
@@ -1897,8 +1877,7 @@ impl<'a> InitDataBuilder::ver<'a> {
                     fwlog_buf: None,
                     __pad_200: Default::default(),
                     // FWLog enable: the firmware writes no log records while this is 0.
-                    // Opt-in via asahi.g15_debug bit 43.
-                    unk_230: crate::m3_params::g15_debug(crate::m3_params::G15Debug::FwLog) as u32,
+                    unk_230: 0,
 
                     stats_vtx: inner.stats.vtx.gpu_pointer(),
                     stats_frag: inner.stats.frag.gpu_pointer(),
@@ -2077,7 +2056,7 @@ impl<'a> InitDataBuilder::ver<'a> {
                 if tables.secondary.is_some() { "voltage-sorted" } else { "device-tree" },
                 tables.max,
                 tables.len - 1,
-                tables.max_frequency_khz(pwr) / 1000
+                tables.primary_state(pwr, tables.max as usize).freq_hz / 1_000_000
             );
         }
         let runtime_pointers = self.runtime_pointers()?;

@@ -57,14 +57,7 @@ use kernel::{
         Instant,
         Monotonic, //
     },
-    types::ForeignOwnable,
-    workqueue::{
-        self as kworkqueue,
-        impl_has_delayed_work,
-        new_delayed_work,
-        DelayedWork,
-        WorkItem, //
-    }, //
+    types::ForeignOwnable, //
 };
 #[cfg(CONFIG_DEV_COREDUMP)]
 use kernel::{
@@ -74,10 +67,6 @@ use kernel::{
 
 use crate::alloc::Allocator;
 use crate::debug::*;
-use crate::m3_params::{
-    g15_debug,
-    G15Debug, //
-};
 use crate::driver::{
     AsahiDevRef,
     AsahiDevice, //
@@ -89,10 +78,6 @@ use crate::fw::channels::{
 use crate::fw::types::{
     U32,
     U64, //
-};
-use crate::object::{
-    GpuStruct,
-    GpuWeakPointer, //
 };
 use crate::{
     alloc,
@@ -175,237 +160,10 @@ const G15_PROBE_CHECKPOINTS_MS: [i64; 5] = [10, 50, 100, 250, 500];
 /// G15: ring the devctl doorbell once more if the read index has not moved by this point.
 const G15_PROBE_RERING_MS: i64 = 100;
 
-/// t6030 ADT `gfx-data-base` / `gfx-data-size` on J516S: the GPU firmware's data segment, which
-/// the firmware maps at VA 0xfffffc000005c000. Diagnostics only (asahi.g15_debug bit 46), and
-/// only used when the device tree has no `fw-data` region (older bootloaders).
-const G15_T6030_GFXDATA_PA: u64 = 0x100_0195_0000;
-const G15_T6030_GFXDATA_SIZE: usize = 0x11_4000;
-const G15_GFXDATA_VA_BASE: u64 = 0xffff_fc00_0005_c000;
-
 /// Returns the kernel monotonic time in ns (the same clock as the rtkit.c trace lines).
 fn ktime_ns() -> i64 {
     // SAFETY: ktime_get() is always safe to call outside NMI context.
     unsafe { bindings::ktime_get() }
-}
-
-pub(crate) struct G15GfxData {
-    cpu: NonNull<u8>,
-    size: usize,
-    /// Firmware VA of the start of the carveout.
-    va_base: u64,
-    /// true: `ioremap_np()` (device memory); false: `memremap(MEMREMAP_WB)`.
-    ioremapped: bool,
-}
-
-// SAFETY: The mapping is immutable and only read with volatile loads.
-unsafe impl Send for G15GfxData {}
-// SAFETY: See above.
-unsafe impl Sync for G15GfxData {}
-
-impl Drop for G15GfxData {
-    fn drop(&mut self) {
-        let p = self.cpu.as_ptr() as *mut core::ffi::c_void;
-        if self.ioremapped {
-            // SAFETY: `p` came from a successful ioremap_np() and is unmapped only here.
-            unsafe { bindings::iounmap(p) };
-        } else {
-            // SAFETY: `p` came from a successful memremap() and is unmapped only here.
-            unsafe { bindings::memunmap(p) };
-        }
-    }
-}
-
-impl G15GfxData {
-    /// Map gfx-data if debug flag bit 46 is set on a t6030. Failures only log.
-    fn map(dev: &AsahiDevice, cfg: &'static hw::HwConfig) -> Option<G15GfxData> {
-        if cfg.gpu_gen != hw::GpuGen::G15 || !g15_debug(G15Debug::GfxDataPeek) {
-            return None;
-        }
-        if cfg.chip_id != 0x6030 {
-            dev_warn!(
-                dev.as_ref(),
-                "G15 gfx-data peek: only the t6030 carveout address is known, skipped\n"
-            );
-            return None;
-        }
-        // The firmware data segment as the bootloader describes it (the `fw-data` region and
-        // the second firmware segment VA), else the J516S address.
-        let node = dev.as_ref().of_node();
-        let described = node.as_ref().and_then(|n| {
-            let res = n.reserved_mem_region_to_resource_byname(c_str!("fw-data")).ok()?;
-            let vas: KVec<u64> = n.get_property(c_str!("apple,firmware-segment-vas")).ok()?;
-            Some((res.start(), usize::try_from(res.size()).ok()?, *vas.get(1)?))
-        });
-        let (pa, size, va_base) = match described {
-            Some(region) => {
-                dev_info!(dev.as_ref(), "G15 gfx-data peek: using the device tree fw-data region\n");
-                region
-            }
-            None => (G15_T6030_GFXDATA_PA, G15_T6030_GFXDATA_SIZE, G15_GFXDATA_VA_BASE),
-        };
-        let p = unsafe { bindings::memremap(pa as _, size, bindings::MEMREMAP_WB as _) };
-        if let Some(cpu) = NonNull::new(p as *mut u8) {
-            dev_info!(
-                dev.as_ref(),
-                "G15 gfx-data peek: PA {:#x} size {:#x} mapped memremap(WB); the firmware may hold newer data in its caches, reads can be stale\n",
-                pa,
-                size
-            );
-            return Some(G15GfxData {
-                cpu,
-                size,
-                va_base,
-                ioremapped: false,
-            });
-        }
-        // SAFETY: Fallback for a no-map carveout; device mapping, only read.
-        let p = unsafe { bindings::ioremap_np(pa as bindings::phys_addr_t, size) };
-        match NonNull::new(p as *mut u8) {
-            Some(cpu) => {
-                dev_info!(
-                    dev.as_ref(),
-                    "G15 gfx-data peek: PA {:#x} size {:#x} mapped ioremap_np (memremap failed)\n",
-                    pa,
-                    size
-                );
-                Some(G15GfxData {
-                    cpu,
-                    size,
-                    va_base,
-                    ioremapped: true,
-                })
-            }
-            None => {
-                dev_warn!(
-                    dev.as_ref(),
-                    "G15 gfx-data peek: could not map PA {:#x} size {:#x}\n",
-                    pa,
-                    size
-                );
-                None
-            }
-        }
-    }
-
-    fn off(&self, va: u64, len: usize) -> Option<usize> {
-        let off = va.checked_sub(self.va_base)? as usize;
-        if off % len != 0 || off.checked_add(len)? > self.size {
-            return None;
-        }
-        Some(off)
-    }
-
-    fn r32(&self, va: u64) -> Option<u32> {
-        let off = self.off(va, 4)?;
-        // SAFETY: In bounds and aligned (checked above); the mapping is live.
-        Some(unsafe { core::ptr::read_volatile(self.cpu.as_ptr().add(off) as *const u32) })
-    }
-
-    fn r64(&self, va: u64) -> Option<u64> {
-        let off = self.off(va, 8)?;
-        // SAFETY: In bounds and aligned (checked above); the mapping is live.
-        Some(unsafe { core::ptr::read_volatile(self.cpu.as_ptr().add(off) as *const u64) })
-    }
-
-    /// Whether `va` lies inside the carveout.
-    fn contains(&self, va: u64) -> bool {
-        va >= self.va_base
-            && self
-                .va_base
-                .checked_add(self.size as u64)
-                .is_some_and(|end| va < end)
-    }
-
-    /// Log the firmware's init-progress words, thread handles and crashlog fill.
-    fn log(&self, dev: &kernel::device::Device, tag: &str, our_p2: u64, verbose: bool) {
-        const V: u64 = 0xffff_fc00_0000_0000;
-        let x32 = |va: u64| self.r32(V | va).unwrap_or(u32::MAX);
-        let x64 = |va: u64| self.r64(V | va).unwrap_or(u64::MAX);
-        let p2 = x64(0x16ac38);
-        let p2_match = if p2 == our_p2 {
-            "matches this boot"
-        } else {
-            "DOES NOT match this boot"
-        };
-        dev_info!(
-            dev,
-            "G15 gfx-data [{}]: init flag 0x16b278={} main event 0x16adf8={:#x} agx_power event 0x16af18={:#x} P2 ptr 0x16ac38={:#x} ({}) InitData copy ver_info={:#x} RP={:#x}\n",
-            tag,
-            x32(0x16b278),
-            x64(0x16adf8),
-            x64(0x16af18),
-            p2,
-            p2_match,
-            x64(0x16ace8),
-            x64(0x16ace8 + 0x18)
-        );
-        let crash_off = 0x10_8000usize;
-        let mut cl = [0u8; 16];
-        // A device-tree fw-data region can be smaller than the J516S carveout.
-        if crash_off.checked_add(cl.len()).is_some_and(|end| end <= self.size) {
-            let mut ef = true;
-            for (i, b) in cl.iter_mut().enumerate() {
-                // SAFETY: crash_off + 16 <= size (checked above); the mapping is live.
-                *b = unsafe { core::ptr::read_volatile(self.cpu.as_ptr().add(crash_off + i)) };
-                ef &= *b == 0xef;
-            }
-            let fill = if ef {
-                "untouched 0xef fill"
-            } else {
-                "HAS DATA"
-            };
-            dev_info!(
-                dev,
-                "G15 gfx-data [{}]: crashlog +0x108000: {:02x?} ({})\n",
-                tag,
-                cl,
-                fill
-            );
-        } else {
-            dev_info!(
-                dev,
-                "G15 gfx-data [{}]: crashlog +0x108000 is outside the {:#x}-byte region\n",
-                tag,
-                self.size
-            );
-        }
-        const THREADS: [(u64, &str); 5] = [
-            (0x0, "agx_background"),
-            (0x140, "agx_recovery"),
-            (0xa8, "agx_interrupt"),
-            (0x1a0, "agx_sampler"),
-            (0x120, "agx_power"),
-        ];
-        for (off, name) in THREADS.iter() {
-            let h = x64(0x16ae00 + off);
-            dev_info!(
-                dev,
-                "G15 gfx-data [{}]: thread {} handle {:#x}\n",
-                tag,
-                name,
-                h
-            );
-            // The saved-context layout is untraced: dump the start of the thread object so the
-            // saved PC/SP can be decoded offline.
-            if verbose && self.contains(h) && h % 8 == 0 {
-                for row in 0..4u64 {
-                    // A wrapped address fails r64()'s range check like any other.
-                    let va = h.wrapping_add(row * 0x20);
-                    dev_info!(
-                        dev,
-                        "G15 gfx-data [{}]:   {}+{:#04x}: {:016x} {:016x} {:016x} {:016x}\n",
-                        tag,
-                        name,
-                        row * 0x20,
-                        self.r64(va).unwrap_or(u64::MAX),
-                        self.r64(va.wrapping_add(8)).unwrap_or(u64::MAX),
-                        self.r64(va.wrapping_add(0x10)).unwrap_or(u64::MAX),
-                        self.r64(va.wrapping_add(0x18)).unwrap_or(u64::MAX)
-                    );
-                }
-            }
-        }
-    }
 }
 
 /// Timeout for entering the halt state after a fault or request.
@@ -534,9 +292,6 @@ pub(crate) struct GpuManager {
     #[ver(V >= V14_8_3)]
     /// G15 diagnostics: last P2+0x14 value seen by the init poll.
     g15_init_state: AtomicU32,
-    #[ver(V >= V14_8_3)]
-    /// G15 diagnostics (asahi.g15_debug bit 46): read-only mapping of the firmware data carveout.
-    g15_gfxdata: Option<G15GfxData>,
     #[pin]
     rx_channels: Mutex<RxChannels::ver>,
     #[pin]
@@ -586,6 +341,40 @@ pub(crate) trait Gpu: Send + Sync {
     }
     /// Temporary capacity hint and validity in milliseconds for subsequent syncobj waits.
     fn syncobj_wait_hint(&self) -> Option<(u32, u32)> {
+        None
+    }
+    // The five hooks below are read through the G15 `drm_gpu::DrmGpu` adapter when that
+    // generation is configured; without it nothing calls them.
+    /// The VA range that user VMs may use (`vm_start..vm_end` of GET_PARAMS).
+    #[allow(dead_code)]
+    fn user_range(&self) -> Range<u64> {
+        self.uat_geometry().user_usable_range()
+    }
+    /// Whether this GPU uses the tracked submission model of `file.rs` (besides G17, which
+    /// `file.rs` recognizes by its backend): VM_BIND batches are validated as a whole against
+    /// driver-reserved ranges before any change, and SUBMIT copies the command buffer before
+    /// resolving syncs because the queue installs a fence in every output sync even on failure.
+    #[allow(dead_code)]
+    fn tracked_submission(&self) -> bool {
+        false
+    }
+    /// Whether SOFT_FAULTS may be advertised when `fault_control` selects soft faults.
+    #[allow(dead_code)]
+    fn soft_faults(&self) -> bool {
+        true
+    }
+    /// Whether new user objects must be populated, cleaned to the point of coherency and pinned
+    /// at creation, before any CPU view exists (GPUs whose device is not DMA-coherent and whose
+    /// default CPU mappings are write-combined).
+    #[allow(dead_code)]
+    fn prepare_new_objects(&self) -> bool {
+        false
+    }
+    /// The largest VM_BIND batch, if the GPU's UAPI contract bounds it; with a bound, a batch also
+    /// needs at least one operation, a non-null pointer and a stride that is a multiple of 8 and at
+    /// most a page (EINVAL otherwise). `None` keeps the shared rules.
+    #[allow(dead_code)]
+    fn bind_batch_limit(&self) -> Option<u32> {
         None
     }
     /// Frequency of the CPU timer that GPU timestamps are derived from.
@@ -1018,79 +807,6 @@ fn g15_rtkit_map(
         size,
         kind: RtkitMapKind::VmMapRam(v, count),
     })
-}
-
-/// Delayed firmware health samples (G15 bring-up). The work item re-arms itself once per
-/// entry of [`G15_HEALTH_SAMPLES_MS`].
-#[pin_data]
-struct G15HealthReport {
-    gpu: Arc<dyn GpuManager>,
-    /// Set when the driver instance is unbound; the report then does nothing.
-    cancelled: Arc<AtomicBool>,
-    /// Index of the next sample in [`G15_HEALTH_SAMPLES_MS`].
-    next: AtomicU32,
-    #[pin]
-    work: DelayedWork<G15HealthReport>,
-}
-
-impl_has_delayed_work! {
-    impl HasDelayedWork<Self> for G15HealthReport { self.work }
-}
-
-/// Delayed health samples, as (label, ms after init() returned). The init-done and
-/// post-probe samples are taken synchronously inside init().
-const G15_HEALTH_SAMPLES_MS: [(&str, u32); 2] = [("3s", 3000), ("10s", 10000)];
-
-impl WorkItem for G15HealthReport {
-    type Pointer = Arc<G15HealthReport>;
-
-    fn run(this: Arc<G15HealthReport>) {
-        if this.cancelled.load(Ordering::Acquire) {
-            pr_info!("asahi: G15: device unbound, skipping the firmware health report\n");
-            return;
-        }
-        let i = this.next.fetch_add(1, Ordering::Relaxed) as usize;
-        let Some(&(tag, at)) = G15_HEALTH_SAMPLES_MS.get(i) else {
-            return;
-        };
-        this.gpu.health_report(tag);
-        if let Some(&(_, next_at)) = G15_HEALTH_SAMPLES_MS.get(i + 1) {
-            let _ = kworkqueue::system().enqueue_delayed(
-                this,
-                kernel::time::msecs_to_jiffies(next_at.saturating_sub(at)),
-            );
-        }
-    }
-}
-
-/// Schedule the read-only firmware health samples after init() (G15 only). Does not block
-/// probe. The work item holds a reference to the GpuManager, so the objects stay valid even if
-/// the device is unbound first; the workqueue API has no cancel for it, so the returned flag
-/// must be set on unbind to turn the remaining samples into no-ops.
-pub(crate) fn schedule_g15_health_report(gpu: Arc<dyn GpuManager>) -> Option<Arc<AtomicBool>> {
-    let cancelled = Arc::new(AtomicBool::new(false), GFP_KERNEL).ok()?;
-    let flag = cancelled.clone();
-    match Arc::pin_init(
-        pin_init!(G15HealthReport {
-            gpu,
-            cancelled: flag,
-            next: AtomicU32::new(0),
-            work <- new_delayed_work!("asahi::G15HealthReport"),
-        }),
-        GFP_KERNEL,
-    ) {
-        Ok(r) => {
-            let _ = kworkqueue::system().enqueue_delayed(
-                r,
-                kernel::time::msecs_to_jiffies(G15_HEALTH_SAMPLES_MS[0].1),
-            );
-            Some(cancelled)
-        }
-        Err(_) => {
-            pr_warn!("asahi: G15: could not schedule the firmware health report\n");
-            None
-        }
-    }
 }
 
 #[versions(AGX)]
@@ -1626,8 +1342,6 @@ impl GpuManager::ver {
                 g15_init_ns: AtomicI64::new(0),
                 #[ver(V >= V14_8_3)]
                 g15_init_state: AtomicU32::new(0),
-                #[ver(V >= V14_8_3)]
-                g15_gfxdata: G15GfxData::map(dev, cfg),
                 crashed: AtomicBool::new(false),
                 event_manager,
                 alloc <- new_mutex!(alloc, "alloc"),
@@ -2434,14 +2148,6 @@ impl GpuManager::ver {
             tag,
             e5
         );
-        if let Some(g) = &self.g15_gfxdata {
-            g.log(
-                dev,
-                tag,
-                self.initdata.debug_block.gpu_va().get(),
-                tag == "init-done",
-            );
-        }
     }
 
     #[cfg(CONFIG_DEV_COREDUMP)]
@@ -2468,346 +2174,6 @@ impl GpuManager::ver {
         );
 
         Ok(())
-    }
-
-    /// G15 boot self-test. Opt-in via [`G15Debug::SelfTest`]. Logs the result and always
-    /// returns, so a missing stamp or a build failure cannot fail probe.
-    ///
-    /// With [`G15Debug::SelfTestSkipFirst`], a firmware-only copy of the job runs first. It
-    /// tests the StartCL skip path, FinalizeCL and the stamp write without any hardware kick. The real
-    /// job then runs on its own queue unless the firmware crashed.
-    ///
-    /// Other GPU versions never call this. The body is compiled only for G15 / 14.8.3.
-    #[allow(dead_code)]
-    fn g15_selftest(&self) {
-        #[ver(V >= V14_8_3)]
-        {
-        dev_info!(
-            self.dev.as_ref(),
-            "G15 self-test (g15_debug {:#x}): firmware-only job first = {} (bit 51). Boot continues either way; poll is {} ms per job\n",
-            crate::m3_params::g15_debug_mask(),
-            g15_debug(G15Debug::SelfTestSkipFirst),
-            crate::g15_selftest::POLL_MS
-        );
-        if let Some(res) = (*self.dev).resources.as_ref() {
-            res.g15_selftest_snapshot("pre", false);
-        }
-        self.initdata.globals.with(|raw, _inner| {
-            raw.pending_submissions.fetch_add(1, Ordering::Acquire);
-        });
-        let mut jobs: KVec<(bool, &str)> = KVec::new();
-        if g15_debug(G15Debug::SelfTestSkipFirst) {
-            let _ = jobs.push((true, "firmware-only (skip) job"), GFP_KERNEL);
-        }
-        let _ = jobs.push((false, "empty compute job"), GFP_KERNEL);
-        for (skip, name) in jobs.iter().copied() {
-            if self.is_crashed() {
-                dev_warn!(self.dev.as_ref(), "G15 self-test: {} not run: firmware crashed\n", name);
-                break;
-            }
-            match self.g15_selftest_submit(skip) {
-                Ok(true) => dev_info!(
-                    self.dev.as_ref(),
-                    "G15 self-test: {} completed (host stamp matched)\n",
-                    name
-                ),
-                Ok(false) => dev_warn!(
-                    self.dev.as_ref(),
-                    "G15 self-test: {} did not complete within {} ms; boot continues\n",
-                    name,
-                    crate::g15_selftest::POLL_MS
-                ),
-                Err(err) => dev_warn!(
-                    self.dev.as_ref(),
-                    "G15 self-test: {} was not submitted ({:?}); boot continues\n",
-                    name,
-                    err
-                ),
-            }
-        }
-        self.initdata.globals.with(|raw, _inner| {
-            raw.pending_submissions.fetch_sub(1, Ordering::Release);
-        });
-        }
-    }
-
-    /// Build and submit one empty CL job on a new compute queue. `skip` pre-sets cmd+0x878 so
-    /// the firmware completes it without kicking the hardware.
-    #[allow(dead_code)]
-    fn g15_selftest_submit(&self, skip: bool) -> Result<bool> {
-        #[ver(V >= V14_8_3)]
-        {
-        use core::sync::atomic::AtomicU32;
-
-        if self.is_crashed() {
-            return Err(ENODEV);
-        }
-        let tag = if skip { "skip" } else { "real" };
-
-        let mut alloc = self.alloc();
-        let kalloc = &mut *alloc;
-
-        let queue_id = self.ids.queue.next();
-
-        let mut notifier_list = kalloc.shared.new_default::<fw::event::NotifierList>()?;
-        let list_ptr = notifier_list.weak_pointer();
-        notifier_list.with_mut(|raw, _inner| {
-            raw.list_head.next = Some(crate::inner_weak_ptr!(list_ptr, list_head));
-        });
-        let notifier_list = Arc::new(notifier_list, GFP_KERNEL)?;
-
-        let threshold = kalloc.shared.new_default::<fw::event::Threshold>()?;
-        let notifier = Arc::new(
-            kalloc.private.new_init(
-                init!(fw::event::Notifier::ver { threshold }),
-                |inner, _p| {
-                    try_init!(fw::event::raw::Notifier::ver {
-                        threshold: inner.threshold.gpu_pointer(),
-                        // StartCL+0x34 carries the same value (the queue id, as on G13/G14).
-                        generation: AtomicU32::new(queue_id as u32),
-                        cur_count: AtomicU32::new(0),
-                        unk_10: AtomicU32::new(0x50),
-                        state: Default::default(),
-                    })
-                },
-            )?,
-            GFP_KERNEL,
-        )?;
-
-        let gpu_context = Arc::new(
-            workqueue::GpuContext::new(&self.dev, kalloc, Arc::new(queue_id, GFP_KERNEL)?)?,
-            GFP_KERNEL,
-        )?;
-        let wq = workqueue::WorkQueue::ver::new(
-            &self.dev,
-            self.cfg,
-            kalloc,
-            self.event_manager.clone(),
-            gpu_context,
-            notifier_list,
-            PipeType::Compute,
-            queue_id,
-            2,
-            16,
-        )?;
-
-        const ALIGN: u64 = 0x4000;
-        let align_up = |va: u64| (va + ALIGN - 1) & !(ALIGN - 1);
-
-        // StartCL context areas: GPU+FW read/write.
-        // t6030: 20 core slots, 2 MGPUs -> A 0x1e400, B 0x1000, 0x3dc00 bytes.
-        let (ctx_a, ctx_b, ctx_size) = crate::g15_selftest::ctx_sizes(
-            u64::from(self.cfg.max_num_cores * self.cfg.max_num_clusters),
-            u64::from(self.cfg.max_num_clusters),
-        );
-        let ctxbuf = kalloc
-            .gpu
-            .array_empty::<u8>((ctx_size + ALIGN) as usize)?;
-        let ctx = align_up(ctxbuf.gpu_va().get());
-
-        // Scratch for 0x1a510 and 0x1a4d0..0x1a4e8.
-        let p1 = self.get_cfg().compute_preempt1_size as u64;
-        let scratchbuf = kalloc
-            .gpu
-            .array_empty::<u8>((p1 + 0x40 + ALIGN) as usize)?;
-        let scratch = align_up(scratchbuf.gpu_va().get());
-
-        let mut uma = kalloc.private.array_empty::<u8>(crate::g15_selftest::UMA_OBJ_SIZE)?;
-        // UMA id at +8. 0xffffffff is greater than 0xff, so the firmware skips the pool.
-        uma.as_mut_slice()[8..12].copy_from_slice(&0xffff_ffffu32.to_le_bytes());
-        // FinalizeCL writes u32 +0x30 and increments u64 +0x50. Read them after the poll.
-        let uma_ptr = uma.as_slice().as_ptr();
-
-        // GPU-readable. The CDM fetches this stream itself.
-        let mut cdm = kalloc.gpu_ro.array_empty::<u8>(128)?;
-        // Mesa CDM Stream Terminate: 8 bytes, block type 2 in bits 29:31.
-        cdm.as_mut_slice()[..4].copy_from_slice(&0x4000_0000u32.to_le_bytes());
-
-        let mut cmd = fw::types::GpuObject::new_inplace(
-            kalloc.gpu_ro.alloc_object::<crate::g15_selftest::CmdBytes>()?,
-            crate::g15_selftest::CmdBytes,
-            |_inner, raw| {
-                // SAFETY: `raw` is the command allocation, which is at least CMD_SIZE bytes
-                // and valid for the duration of this callback.
-                unsafe {
-                    let p = raw.as_mut_ptr() as *mut [u8; crate::g15_selftest::CMD_SIZE];
-                    core::ptr::write_bytes(p, 0, 1);
-                    Ok(&mut *p)
-                }
-            },
-        )?;
-
-        let fence_ctx = kernel::dma_fence::FenceContexts::new(
-            1,
-            c_str!("asahi_g15_selftest"),
-            crate::g15_selftest::FENCE_KEY,
-        )?;
-        let fence = kernel::dma_fence::Fence::from_fence(
-            &*fence_ctx.new_fence::<crate::g15_selftest::SelfTestFence>(0, crate::g15_selftest::SelfTestFence)?,
-        );
-        let mut job = wq.new_job(fence)?;
-        let ev = job.event_info();
-        let stamp_value = ev.value.next().raw();
-
-        let notifier_buf = u64::from(crate::inner_weak_ptr!(notifier.weak_pointer(), state.unk_buf));
-        let mut sku = kalloc.private.array_empty::<u8>(0x240)?;
-        let addrs = crate::g15_selftest::Addrs {
-            cmd: cmd.gpu_va().get(),
-            sku: sku.gpu_va().get(),
-            ctx,
-            ctx_a,
-            ctx_b,
-            scratch,
-            scratch_p1: p1,
-            cdm: cdm.gpu_va().get(),
-            uma: uma.gpu_va().get(),
-            notifier: notifier.gpu_va().get(),
-            notifier_buf,
-            stats: u64::from(self.initdata.runtime_pointers.stats.comp.weak_pointer()),
-            work_queue: u64::from(ev.info_ptr),
-            host_stamp: u64::from(ev.stamp_pointer),
-            fw_stamp: u64::from(ev.fw_stamp_pointer),
-            stamp_value,
-            stamp_slot: ev.slot,
-            queue_id: queue_id as u32,
-            skip,
-        };
-        let sku_bytes = crate::g15_selftest::build_sku(&addrs)?;
-        sku.as_mut_slice().copy_from_slice(sku_bytes.as_slice());
-        cmd.with_mut(|raw, _inner| crate::g15_selftest::fill_cmd(raw, &addrs, sku_bytes.len() as u32))?;
-
-        job.add(cmd, 0)?;
-        job.next_seq();
-        job.commit()?;
-        mem::sync();
-        let submission = job.submit()?;
-        core::mem::drop(alloc);
-
-        dev_info!(
-            self.dev.as_ref(),
-            "G15 self-test [{}]: queue {} cmd {:#x} sku {:#x} ({} bytes) cdm {:#x} ctx {:#x} (A {:#x} B {:#x}) scratch {:#x} uma {:#x} stamp slot {} value {:#x}; {} host regs (+8 appended by StartCL = kick register count {:#x})\n",
-            tag,
-            queue_id,
-            addrs.cmd,
-            addrs.sku,
-            sku_bytes.len(),
-            addrs.cdm,
-            addrs.ctx,
-            addrs.ctx_a,
-            addrs.ctx_b,
-            addrs.scratch,
-            addrs.uma,
-            addrs.stamp_slot,
-            addrs.stamp_value,
-            crate::g15_selftest::HOST_REGS,
-            crate::g15_selftest::HOST_REGS + 8
-        );
-
-        self.run_job(submission)?;
-
-        let (queue_va, ring0, done, gpu_rptr, cpu_wptr, rb_size) = wq.ring_snapshot();
-        dev_info!(
-            self.dev.as_ref(),
-            "G15 self-test [{}]: queue {:#x} ring0 {:#x} state done={} gpu_rptr={} cpu_wptr={} size={}\n",
-            tag,
-            queue_va,
-            ring0,
-            done,
-            gpu_rptr,
-            cpu_wptr,
-            rb_size
-        );
-        for (name, va) in [
-            ("cmd", addrs.cmd),
-            ("sku", addrs.sku),
-            ("queue", queue_va),
-            ("ctx", addrs.ctx),
-            ("scratch", addrs.scratch),
-            ("cdm", addrs.cdm),
-        ] {
-            match self.uat.translate_kernel_va(va) {
-                Ok((pa, pte)) => dev_info!(
-                    self.dev.as_ref(),
-                    "G15 self-test [{}]: {} {:#x} -> PA {:#x} PTE {:#x}\n",
-                    tag,
-                    name,
-                    va,
-                    pa,
-                    pte
-                ),
-                Err(err) => dev_info!(
-                    self.dev.as_ref(),
-                    "G15 self-test [{}]: {} {:#x} not mapped ({:?})\n",
-                    tag,
-                    name,
-                    va,
-                    err
-                ),
-            }
-        }
-
-        // The work queue stays reachable through its event-slot owner. The command only stores
-        // GPU VAs of these buffers, so freeing them while the firmware may still read the command
-        // would be a use-after-free. One boot, a few pages; `uma_ptr` stays valid.
-        core::mem::forget((ctxbuf, scratchbuf, cdm, notifier, sku, uma));
-
-        // SAFETY: `uma_ptr` points into the leaked, CPU-mapped UMA object of UMA_OBJ_SIZE bytes.
-        let read_uma = || unsafe {
-            (
-                core::ptr::read_volatile(uma_ptr.add(0x30) as *const u32),
-                core::ptr::read_volatile(uma_ptr.add(0x50) as *const u64),
-            )
-        };
-
-        let start = Instant::<Monotonic>::now();
-        let timeout = Delta::from_millis(crate::g15_selftest::POLL_MS);
-        loop {
-            if self.is_crashed() {
-                dev_err!(self.dev.as_ref(), "G15 self-test [{}]: firmware crashed while waiting\n", tag);
-                return Ok(false);
-            }
-            let host_done = wq.stamp_raw() == Some(stamp_value);
-            let timed_out = start.elapsed() >= timeout;
-            if host_done || timed_out {
-                let (_q, ring0, done, gpu_rptr, cpu_wptr, rb_size) = wq.ring_snapshot();
-                let pipe = self.pipes.comp.get(2).map(|p| p.lock().indices());
-                let (uma30, uma50) = read_uma();
-                dev_info!(
-                    self.dev.as_ref(),
-                    "G15 self-test [{}]: after {} ms: stamp host {:?} fw {:?} (wanted {:#x}); uma+0x30 {:#x} uma+0x50 {:#x} (FinalizeCL ran if non-zero); ring0 {:#x} done={} gpu_rptr={} cpu_wptr={} size={}; pipe[2] {:?}\n",
-                    tag,
-                    start.elapsed().as_millis(),
-                    wq.stamp_raw(),
-                    wq.fw_stamp_raw(),
-                    stamp_value,
-                    uma30,
-                    uma50,
-                    ring0,
-                    done,
-                    gpu_rptr,
-                    cpu_wptr,
-                    rb_size,
-                    pipe
-                );
-                if host_done {
-                    if let Some(res) = (*self.dev).resources.as_ref() {
-                        res.g15_selftest_snapshot(if skip { "skip-done" } else { "real-done" }, false);
-                    }
-                    return Ok(true);
-                }
-                if let Some(res) = (*self.dev).resources.as_ref() {
-                    res.g15_selftest_snapshot(if skip { "skip-timeout" } else { "real-timeout" }, true);
-                }
-                return Ok(false);
-            }
-            fsleep(Delta::from_millis(10));
-        }
-        }
-        #[ver(V < V14_8_3)]
-        {
-            let _ = skip;
-            Err(ENODEV)
-        }
     }
 }
 
@@ -2909,53 +2275,23 @@ impl GpuManager for GpuManager::ver {
         // of its post-INIT initialisation; a doorbell that arrives earlier is queued where
         // nothing drains it (observed on J516S: the firmware went quiet after MSG_INIT with the
         // old doorbell sequence). So wait for the firmware's own "init done" word, then ring the
-        // devctl doorbell once as a liveness probe. Debug bit 44 restores the older sequence for
-        // A/B tests.
+        // devctl doorbell once as a liveness probe.
         #[ver(V >= V14_8_3)]
         {
-            let legacy = g15_debug(G15Debug::LegacyDoorbells);
-            if legacy {
-                let r1 = rtk
-                    .as_mut()
-                    .send_message(EP_DOORBELL, MSG_TX_DOORBELL | DOORBELL_DEVCTRL);
-                let r2 = rtk
-                    .as_mut()
-                    .send_message(EP_DOORBELL, MSG_TX_DOORBELL | DOORBELL_KICKFW);
-                dev_info!(
-                    self.dev.as_ref(),
-                    "G15: legacy doorbells (g15_debug bit 44) right after INIT: DEVCTRL {:?} KICKFW {:?}\n",
-                    r1,
-                    r2
-                );
-            }
             core::mem::drop(guard);
 
             let done = self.g15_wait_init_done();
             self.health_report("init-done");
 
-            if legacy {
-                dev_info!(
-                    self.dev.as_ref(),
-                    "G15: legacy doorbells were sent, skipping the devctl liveness probe\n"
-                );
-            } else if !done {
+            if !done {
                 dev_warn!(
                     self.dev.as_ref(),
                     "G15: firmware init not confirmed (P2+0x14 = {:#x}); sending no doorbell\n",
                     self.g15_init_state.load(Ordering::Relaxed)
                 );
-            } else if g15_debug(G15Debug::NoDevctlProbe) {
-                dev_info!(
-                    self.dev.as_ref(),
-                    "G15: devctl liveness probe disabled (g15_debug bit 45); no doorbell sent\n"
-                );
             } else {
                 self.g15_devctl_probe();
                 self.health_report("probe+500ms");
-            }
-
-            if done && g15_debug(G15Debug::SelfTest) {
-                self.g15_selftest();
             }
         }
         Ok(())

@@ -4,14 +4,19 @@
 
 #include <linux/bitops.h>
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
 
 #define PMP_SOC_DEVICE_SIZE	0x7c
 #define PMP_SOC_DEVICE_ACK	BIT(1)
 #define PMP_PTD_RANGE_SIZE	32
+#define PMP_PTD_RANGE_NAME	16
+#define PMP_PTD_RANGE_NAME_LEN	16
+#define PMP_PTD_RANGE_DVFS_STATE	3
 #define PMP_PTD_RANGE_REQUEST	10
 #define PMP_PTD_RANGE_ACK	11
+#define PMP_PTD_RANGE_SOC_DEV_DVFS	12
 
 /* The PTD request read, request update and acknowledgment apertures. */
 static inline bool apple_pmp_ranges_valid(const u8 *table, size_t len,
@@ -40,6 +45,35 @@ static inline bool apple_pmp_ranges_valid(const u8 *table, size_t len,
 		}
 	}
 	return found == (BIT(0) | BIT(1));
+}
+
+/*
+ * The base entry and entry count of the single PTD range with @id, whose
+ * name (16 bytes at +16, NUL padded) must be @name. The lookup is by id;
+ * the name guards against a table whose ids mean something else.
+ */
+static inline bool apple_pmp_range_find(const u8 *table, size_t len, u32 id,
+					const char *name, u32 *base, u32 *count)
+{
+	bool found = false;
+	size_t pos;
+
+	if (!table || !len || len % PMP_PTD_RANGE_SIZE)
+		return false;
+	for (pos = 0; pos < len; pos += PMP_PTD_RANGE_SIZE) {
+		const u8 *rec = table + pos;
+
+		if (get_unaligned_le32(rec) != id)
+			continue;
+		if (found ||
+		    strncmp((const char *)rec + PMP_PTD_RANGE_NAME, name, PMP_PTD_RANGE_NAME_LEN) ||
+		    !get_unaligned_le32(rec + 8))
+			return false;
+		*base = get_unaligned_le32(rec + 4);
+		*count = get_unaligned_le32(rec + 8);
+		found = true;
+	}
+	return found;
 }
 
 /* Request bit N names device ID N + 1, independent of table order. */

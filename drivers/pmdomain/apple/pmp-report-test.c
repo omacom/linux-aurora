@@ -112,6 +112,48 @@ static void pmp_ranges_reject_bad_records(struct kunit *test)
 							0x1180, 0x108c0, 0x11c0));
 }
 
+/* J516S ADT: DVFS-STATE (id 3) at 8, 4 entries; SOC-DEV-DVFS (id 12) at 288, 16. */
+static void pmp_range_named(u8 *table, u32 id, u32 base, u32 count, const char *name)
+{
+	pmp_range(table, id, base, count);
+	strscpy((char *)table + PMP_PTD_RANGE_NAME, name, PMP_PTD_RANGE_NAME_LEN);
+}
+
+static void pmp_ranges_find_floor_entries(struct kunit *test)
+{
+	u8 table[3 * PMP_PTD_RANGE_SIZE];
+	u32 base = 0, count = 0;
+
+	pmp_range_named(table, PMP_PTD_RANGE_DVFS_STATE, 8, 4, "DVFS-STATE");
+	pmp_range_named(table + PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_REQUEST, 0x118, 4,
+			"SOC-DEV-PS-REQ");
+	pmp_range_named(table + 2 * PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_SOC_DEV_DVFS, 288, 16,
+			"SOC-DEV-DVFS");
+	KUNIT_EXPECT_TRUE(test, apple_pmp_range_find(table, sizeof(table),
+						     PMP_PTD_RANGE_SOC_DEV_DVFS, "SOC-DEV-DVFS",
+						     &base, &count));
+	KUNIT_EXPECT_EQ(test, base, 288);
+	KUNIT_EXPECT_EQ(test, count, 16);
+	KUNIT_EXPECT_TRUE(test, apple_pmp_range_find(table, sizeof(table),
+						     PMP_PTD_RANGE_DVFS_STATE, "DVFS-STATE",
+						     &base, &count));
+	KUNIT_EXPECT_EQ(test, base, 8);
+	KUNIT_EXPECT_EQ(test, count, 4);
+	/* The name must match the id, the range must exist and be unique. */
+	KUNIT_EXPECT_FALSE(test, apple_pmp_range_find(table, sizeof(table),
+						      PMP_PTD_RANGE_SOC_DEV_DVFS, "DVFS-STATE",
+						      &base, &count));
+	KUNIT_EXPECT_FALSE(test, apple_pmp_range_find(table, sizeof(table), 13, "SOC-DEV-BWR",
+						      &base, &count));
+	pmp_range_named(table + PMP_PTD_RANGE_SIZE, PMP_PTD_RANGE_SOC_DEV_DVFS, 288, 16,
+			"SOC-DEV-DVFS");
+	KUNIT_EXPECT_FALSE(test, apple_pmp_range_find(table, sizeof(table),
+						      PMP_PTD_RANGE_SOC_DEV_DVFS, "SOC-DEV-DVFS",
+						      &base, &count));
+	KUNIT_EXPECT_FALSE(test, apple_pmp_range_find(table, 33, PMP_PTD_RANGE_DVFS_STATE,
+						      "DVFS-STATE", &base, &count));
+}
+
 static void pmp_ranges_reject_wrapped_base(struct kunit *test)
 {
 	u8 table[2 * PMP_PTD_RANGE_SIZE];
@@ -260,6 +302,7 @@ static struct kunit_case apple_pmp_report_cases[] = {
 	KUNIT_CASE(pmp_ranges_t6031),
 	KUNIT_CASE(pmp_ranges_reject_bad_records),
 	KUNIT_CASE(pmp_ranges_reject_wrapped_base),
+	KUNIT_CASE(pmp_ranges_find_floor_entries),
 	KUNIT_CASE(pmp_devices_seed_and_ack),
 	KUNIT_CASE(pmp_devices_reordered),
 	KUNIT_CASE(pmp_devices_t6031),

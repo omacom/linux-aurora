@@ -596,7 +596,9 @@ static int apple_probe_per_dcp(struct device *dev,
 		return ret;
 
 	drm_crtc_helper_add(&crtc->base, &apple_crtc_helper_funcs);
-	drm_crtc_enable_color_mgmt(&crtc->base, 0, true, 0);
+	/* No matrix property on a pipe whose firmware is never sent one. */
+	if (dcp_ctm_supported(dcp))
+		drm_crtc_enable_color_mgmt(&crtc->base, 0, true, 0);
 
 	crtc->dcp = dcp;
 	*crtc_mask = drm_crtc_mask(&crtc->base);

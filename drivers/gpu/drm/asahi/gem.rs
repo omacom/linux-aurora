@@ -410,6 +410,52 @@ impl AsahiObject {
     }
 }
 
+/// Populates and pins a new user object through its DMA mapping, before any CPU view exists.
+///
+/// On a device that is not DMA-coherent, the DMA mapping cleans the cacheable kernel alias of the
+/// freshly zeroed pages to the point of coherency, so that no dirty line can later overwrite data
+/// written through a write-combined view. The pin keeps reclaim from creating a new cacheable
+/// alias, and the object is marked held for the device (see [`set_mapping_held`]). Only used when
+/// the GPU asks for it ([`crate::gpu::Gpu::prepare_new_objects`]).
+///
+/// The DMA mapping only cleans if the device is not marked DMA-coherent (the G15 GPU node has no
+/// `dma-coherent`). Should it ever be marked so, the pages are cleaned here instead.
+pub(crate) fn prepare_new_object(gem: &Object) -> Result {
+    let sgt = gem.sg_table()?;
+    set_mapping_held(gem, true);
+    let dev: &kernel::device::Device = gem.dev().as_ref();
+    // SAFETY: The device outlives its GEM objects; the flag is fixed when the device is probed.
+    if !unsafe { (*dev.as_raw()).dma_coherent() } {
+        return Ok(());
+    }
+    static WARNED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        dev_warn!(
+            dev,
+            "GPU marked DMA-coherent: cleaning new objects to the point of coherency explicitly\n"
+        );
+    }
+    let page_size = kernel::page::PAGE_SIZE;
+    for segment in sgt.iter() {
+        // Without an IOMMU in front of the GPU, its DMA addresses are physical addresses.
+        let start = segment.dma_address() as kernel::addr::PhysicalAddr;
+        let len = segment.dma_len() as usize;
+        let mut offset = 0;
+        while offset < len {
+            let phys = start + offset as kernel::addr::PhysicalAddr;
+            // SAFETY: The pinned SG table keeps these shmem pages allocated.
+            let page = unsafe { kernel::page::Page::borrow_phys(&phys) }.ok_or(EIO)?;
+            page.with_pointer_into_page(0, page_size, |p| {
+                crate::pgtable::clean_poc(p, page_size);
+                Ok(())
+            })?;
+            offset += page_size;
+        }
+    }
+    crate::pgtable::poc_barrier();
+    Ok(())
+}
+
 /// Purge advice for a VM-private, non-exportable object. Returns whether the
 /// contents are retained (0 once purged).
 pub(crate) fn madvise(gem: &Object, dontneed: bool) -> Result<u32> {

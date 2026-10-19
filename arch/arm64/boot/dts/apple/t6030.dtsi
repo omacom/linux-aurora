@@ -580,6 +580,33 @@
 			//apple,dma-range = <0x100 0x0001c000 0x2ff 0xfffe4000>;
 		};
 
+		sio_mbox: mbox@289c08000 {
+			compatible = "apple,t6030-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x2 0x89c08000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 907 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 908 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 909 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 910 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+				"recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+			power-domains = <&ps_sio_cpu>;
+			status = "disabled";
+		};
+
+		/* Enabled by the boot loader with its firmware and parameters. */
+		sio: sio@289c00000 {
+			compatible = "apple,t6030-sio", "apple,sio";
+			reg = <0x2 0x89c00000 0x0 0x8000>;
+			dma-channels = <128>;
+			#dma-cells = <1>;
+			mboxes = <&sio_mbox>;
+			iommus = <&sio_dart 0>;
+			power-domains = <&ps_sio_cpu>;
+			status = "disabled";
+		};
+
 		admac: dma-controller@28b200000 {
 			compatible = "apple,t6030-admac", "apple,t8122-admac";
 			reg = <0x2 0x8b200000 0x0 0x34000>;

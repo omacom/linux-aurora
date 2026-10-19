@@ -341,7 +341,9 @@ impl File {
             crate::agx_status::PARAM_GROUP_VM_STATUS => {
                 return Self::get_vm_status(device, data, file);
             }
-            uapi::DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR if device.g17().is_some() => {
+            uapi::DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR
+                if device.g17().is_some() || gpu.tracked_submission() =>
+            {
                 return Self::register_vm_status_mirror(data, file);
             }
             uapi::DRM_ASAHI_PARAM_GROUP_QUEUE_LIMITS => {
@@ -411,8 +413,10 @@ impl File {
         if gpu.supports_scheduled_queues() {
             params.features |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SCHEDULED_QUEUES as u64;
         }
-        // The M3 runtime's optional features are per SoC (`m3_soc::Soc::features`).
-        let m3 = (facts.gpu_hal_generation == hw::GpuHalGeneration::Legacy as u32)
+        // The M3 runtime's optional features are per SoC (`m3_soc::Soc::features`); the G15
+        // generation reports its own feature word on the same chips.
+        let m3 = (facts.gpu_hal_generation == hw::GpuHalGeneration::Legacy as u32
+            && device.g15().is_none())
             .then(|| crate::m3_soc::by_chip(facts.chip_id)).flatten();
         if m3.is_some_and(|soc| soc.features.fragment_dependency)
             && *module_parameters::m3_early_tiling.value()!=0
@@ -428,6 +432,7 @@ impl File {
         // not on any SoC with an M3 runtime table, nor on the M3 Max or M4.
         if facts.gpu_hal_generation == hw::GpuHalGeneration::Legacy as u32 && m3.is_none()
             && !matches!(facts.chip_id, 0x6031 | 0x6034 | 0x8132)
+            && gpu.soft_faults()
             && *module_parameters::fault_control.value() == 0xb
         {
             params.features |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SOFT_FAULTS as u64;
@@ -644,16 +649,18 @@ impl File {
 
     /// IOCTL: vm_destroy: Destroy a `Vm`.
     pub(crate) fn vm_destroy(
-        _device: &AsahiDevice,
+        device: &AsahiDevice,
         data: &mut uapi::drm_asahi_vm_destroy,
         file: &DrmFile,
     ) -> Result<u32> {
         let vm = file.inner().vms().remove(data.vm_id as usize);
         if vm.is_none() {
-            Err(ENOENT)
-        } else {
-            Ok(0)
+            return Err(ENOENT);
         }
+        drop(vm);
+        // The generation may release per-VM state now that the client's handle is gone.
+        device.gpu()?.vm_closed();
+        Ok(0)
     }
 
     /// IOCTL: gem_create: Create a new GEM object.
@@ -695,6 +702,9 @@ impl File {
         };
 
         let gem = gem::new_object(device, data.size.try_into()?, data.flags, resv_obj, reclaim_cpu)?;
+        if device.gpu()?.prepare_new_objects() {
+            gem::prepare_new_object(&gem)?;
+        }
 
         let handle = gem.create_handle(file)?;
         data.handle = handle;
@@ -772,7 +782,20 @@ impl File {
             return Err(EINVAL);
         }
 
-        if device.g17().is_some() {
+        let gpu = device.gpu()?;
+        if let Some(limit) = gpu.bind_batch_limit() {
+            if data.num_binds == 0
+                || data.num_binds > limit
+                || data.userptr == 0
+                || data.stride % 8 != 0
+                || data.stride as usize > kernel::page::PAGE_SIZE
+            {
+                cls_pr_debug!(Errors, "vm_bind: Batch outside the GPU's limits\n");
+                return Err(EINVAL);
+            }
+        }
+
+        if device.g17().is_some() || gpu.tracked_submission() {
             return Self::vm_bind_g17(data, file);
         }
 
@@ -1386,7 +1409,7 @@ impl File {
             .reader()
             .read_all(bytes, GFP_KERNEL)
         };
-        let guarded = device.g17().is_some();
+        let guarded = device.g17().is_some() || gpu.tracked_submission();
         // Once G17 output syncobjs are resolved, its queue must install a fence
         // on every failure. Take the fallible userspace snapshot before that point.
         if guarded {

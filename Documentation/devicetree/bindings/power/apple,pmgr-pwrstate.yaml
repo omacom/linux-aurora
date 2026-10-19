@@ -79,11 +79,32 @@ properties:
       Forces this power domain to always be powered up.
     type: boolean
 
+  apple,no-auto-pm:
+    description: |
+      Never enables automatic power management (auto-enable) for this
+      domain: once powered up it stays at its requested state until
+      Linux changes it. Required for a coprocessor CPU domain whose
+      firmware is started cold by Linux and must not be clock or power
+      gated behind its back, such as the T6030 external display
+      coprocessors' CPU domains.
+    type: boolean
+
   apple,firmware-owned:
     description:
       The boot loader hands over the coprocessor in this domain running, and its
       firmware owns the domain's power state; writing it faults. The OS keeps the
       domain on and never changes its power target, automatic gating or reset.
+    type: boolean
+
+  apple,inherited-on:
+    description: |
+      The boot loader leaves this domain powered, with the coprocessor it
+      feeds running (the internal display chain of the T6030, T6031 and
+      T8122 MacBook Pros: DISP_SYS, DISP_FE and DISP_CPU). The power state
+      driver treats it as any domain found on; the display handoff requires
+      the marker before it adds the PMP and sets apple,min-state on the
+      chain, so the PMP cannot power the running display coprocessor down.
+      Unlike apple,firmware-owned, the domain's register is still written.
     type: boolean
 
   apple,min-state:

@@ -59,11 +59,6 @@ impl EventValue {
         EventValue(self.0.wrapping_add(0x100))
     }
 
-    /// The raw 32-bit stamp word (slot in the high byte, increments of 0x100).
-    pub(crate) fn raw(&self) -> u32 {
-        self.0
-    }
-
     /// Increments this `EventValue` in place.
     pub(crate) fn increment(&mut self) {
         self.0 = self.0.wrapping_add(0x100);
@@ -151,10 +146,6 @@ pub(crate) struct EventManager {
 }
 
 impl EventManager {
-    pub(crate) fn fw_current(&self, slot: u32) -> u32 {
-        self.alloc.with_inner(|inner| inner.fw_stamps[slot as usize].0.load(Ordering::Acquire))
-    }
-
     /// Create a new EventManager.
     #[inline(never)]
     pub(crate) fn new(alloc: &mut gpu::KernelAllocators) -> Result<EventManager> {

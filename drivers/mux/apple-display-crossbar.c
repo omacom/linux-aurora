@@ -18,6 +18,7 @@
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/soc/apple/dp-tunnel.h>
 
 /*
@@ -105,6 +106,8 @@ struct apple_dpxbar {
 	/* T6030 programs all its outputs itself, see apple_dpxbar_t6030_link() */
 	bool t6030_dpin;
 	bool tunnel_link_up[MUX_MAX];
+	/* T6030: the crossbar's power is held from the first select until idle. */
+	bool pm_held;
 	spinlock_t lock;
 };
 
@@ -238,9 +241,66 @@ static unsigned int apple_dpxbar_t6030_shift(unsigned int index)
 	}
 }
 
-/* Called with the crossbar lock held and a selected output. */
-static void apple_dpxbar_t6030_link(struct apple_dpxbar *xbar,
-				  unsigned int index, bool up)
+/*
+ * The register image of a T6030 crossbar with no connection up: the gates
+ * at +0x004/+0x014/+0x024 closed and their status bits set, everything else
+ * clear. The selectors at +0x030 are not part of it (a route stays selected
+ * while its connection is down), and +0x034 may keep an output's bit from an
+ * earlier connection, as the hardware leaves it.
+ */
+static const struct {
+	u16 offset;
+	u16 value;
+} apple_dpxbar_t6030_idle[] = {
+	{ 0x000, 0x000 }, { 0x004, 0x1ff }, { 0x008, 0x000 }, { 0x00c, 0x000 },
+	{ 0x010, 0x000 }, { 0x014, 0x1ff }, { 0x018, 0x000 }, { 0x01c, 0x000 },
+	{ 0x020, 0x000 }, { 0x024, 0x111 }, { 0x028, 0x000 }, { 0x02c, 0x000 },
+	{ 0x030, 0x000 }, { 0x034, 0x000 }, { 0x800, 0x000 }, { 0x804, 0x1ff },
+	{ 0x808, 0x000 }, { 0x80c, 0x000 }, { 0x810, 0x1ff }, { 0x814, 0x000 },
+	{ 0x818, 0x000 }, { 0x81c, 0x111 },
+};
+
+static void apple_dpxbar_t6030_dump(struct apple_dpxbar *xbar, unsigned int index,
+				    const char *what)
+{
+	char buf[256];
+	unsigned int i;
+	int n = 0;
+
+	for (i = 0; i < ARRAY_SIZE(apple_dpxbar_t6030_idle); i++)
+		n += scnprintf(buf + n, sizeof(buf) - n, " %03x=%x",
+			       apple_dpxbar_t6030_idle[i].offset,
+			       readl(xbar->regs + apple_dpxbar_t6030_idle[i].offset));
+	dev_warn(xbar->dev, "%s: %s:%s\n", apple_dpxbar_names[index], what, buf);
+}
+
+/* No output's connection is up, so the whole crossbar must show the idle image. */
+static bool apple_dpxbar_t6030_is_idle(struct apple_dpxbar *xbar)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(apple_dpxbar_t6030_idle); i++) {
+		u16 offset = apple_dpxbar_t6030_idle[i].offset;
+		u32 v = readl(xbar->regs + offset);
+
+		if (offset == T602X_MUX_SELECT)
+			continue;
+		if (offset == T602X_ATC_ENABLE)
+			v &= ~0x111;
+		if (v != apple_dpxbar_t6030_idle[i].value)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * Checks the image of one output after its connection went up or down:
+ * its source bit @u in the write-side registers, its bit @d in the output
+ * registers and its two-bit fields in the select registers. The other
+ * outputs' bits are left alone, they may be connected.
+ */
+static bool apple_dpxbar_t6030_output_is(struct apple_dpxbar *xbar, unsigned int index,
+					 bool up)
 {
 	u32 state = xbar->selected_dispext[index];
 	u32 u = BIT(state), shift = apple_dpxbar_t6030_shift(index);
@@ -249,11 +309,88 @@ static void apple_dpxbar_t6030_link(struct apple_dpxbar *xbar,
 	u32 ps = pclk2 ? 3 : 1;
 	u32 rd = pclk2 ? T602X_RD_PCLK2 : T602X_RD_PCLK1;
 	u32 out = pclk2 ? T602X_OUT_PCLK2 : T602X_OUT_PCLK1;
+	u32 sel = (state << shift) | (state << (shift + 12));
+	u32 sel_mask = (0xfU << shift) | (0xfU << (shift + 12));
+	bool ok;
+
+#define OUT_BIT(reg, bit, set) ((readl(xbar->regs + (reg)) & (bit)) == ((set) ? (bit) : 0))
+	/* The clocks and enables of this output, and the gates' status. */
+	ok = OUT_BIT(T602X_FIFO_WR_DPTX_CLK_EN, u, up) && OUT_BIT(T602X_FIFO_WR_N_CLK_EN, u, !up) &&
+	     OUT_BIT(T602X_FIFO_WR_UNK_EN, u, up) && OUT_BIT(rd, u, up) &&
+	     OUT_BIT(T602X_RD_GATE, u, !up) && OUT_BIT(out, d, up) &&
+	     OUT_BIT(T602X_OUT_GATE, d, !up) && OUT_BIT(T602X_DISPEXT_ENABLE, u, up) &&
+	     OUT_BIT(0x804, u, !up) && OUT_BIT(0x810, u, !up) && OUT_BIT(0x81c, d, !up) &&
+	     ((readl(xbar->regs + T602X_RD_SELECT) >> (2 * state)) & 3) == (up ? ps : 0) &&
+	     ((readl(xbar->regs + T602X_OUT_SELECT) >> shift) & 3) == (up ? ps : 0) &&
+	     (readl(xbar->regs + T602X_MUX_SELECT) & sel_mask) == sel;
+	/*
+	 * The clock status bits at +0x800/+0x808/+0x80c/+0x814/+0x818 are
+	 * part of the idle image only: the connection-up image leaves them
+	 * out. The ATC enable is set with the connection and left set after it.
+	 */
+	if (up)
+		ok = ok && OUT_BIT(T602X_ATC_ENABLE, d, true);
+	else
+		ok = ok && OUT_BIT(0x800, u, false) && OUT_BIT(pclk2 ? 0x80c : 0x808, u, false) &&
+		     OUT_BIT(pclk2 ? 0x818 : 0x814, d, false);
+#undef OUT_BIT
+	return ok;
+}
+
+/*
+ * Verifies the register image after a connection transition, with the lock
+ * held: this output's own image, and, when no connection is left up, the
+ * crossbar's idle image. A mismatch is reported with the complete image;
+ * the transition is not undone, as the hardware may have taken part of it.
+ */
+static bool apple_dpxbar_t6030_verify(struct apple_dpxbar *xbar, unsigned int index, bool up)
+{
+	unsigned int i;
+	bool ok;
+
+	lockdep_assert_held(&xbar->lock);
+	ok = apple_dpxbar_t6030_output_is(xbar, index, up);
+	if (!ok)
+		apple_dpxbar_t6030_dump(xbar, index, up ? "connection not up" :
+						       "connection not down");
+	if (up)
+		return ok;
+	for (i = 0; i < MUX_MAX; i++)
+		if (xbar->tunnel_link_up[i])
+			return ok;
+	if (!apple_dpxbar_t6030_is_idle(xbar)) {
+		apple_dpxbar_t6030_dump(xbar, index, "crossbar not idle after connection down");
+		return false;
+	}
+	return ok;
+}
+
+/*
+ * Called with the crossbar lock held and a selected output. Returns whether
+ * the register image is the expected one afterwards.
+ */
+static bool apple_dpxbar_t6030_link(struct apple_dpxbar *xbar,
+				    unsigned int index, bool up)
+{
+	u32 state = xbar->selected_dispext[index];
+	u32 u = BIT(state), shift = apple_dpxbar_t6030_shift(index);
+	u32 d = BIT(shift);
+	bool pclk2 = (index == MUX_DPIN1) ^ (state & 1);
+	u32 ps = pclk2 ? 3 : 1;
+	u32 rd = pclk2 ? T602X_RD_PCLK2 : T602X_RD_PCLK1;
+	u32 out = pclk2 ? T602X_OUT_PCLK2 : T602X_OUT_PCLK1;
+	unsigned int i;
 
 	lockdep_assert_held(&xbar->lock);
 	if (xbar->tunnel_link_up[index] == up)
-		return;
+		return true;
 	if (up) {
+		/* A connection starts from the idle image when it is the first. */
+		for (i = 0; i < MUX_MAX; i++)
+			if (xbar->tunnel_link_up[i])
+				break;
+		if (i == MUX_MAX && !apple_dpxbar_t6030_is_idle(xbar))
+			apple_dpxbar_t6030_dump(xbar, index, "crossbar not idle before connection up");
 		dpxbar_clear32(xbar, T602X_FIFO_WR_N_CLK_EN, u);
 		dpxbar_clear32(xbar, T602X_RD_GATE, u);
 		dpxbar_clear32(xbar, T602X_OUT_GATE, d);
@@ -291,6 +428,37 @@ static void apple_dpxbar_t6030_link(struct apple_dpxbar *xbar,
 	}
 	/* No T8103 cycle-slip workaround: T602X does not require one. */
 	xbar->tunnel_link_up[index] = up;
+	return apple_dpxbar_t6030_verify(xbar, index, up);
+}
+
+/*
+ * The crossbar's power (its ATC's USB domain, power-domains) is held from
+ * the first select until the last output has been deselected and the
+ * crossbar verified idle. Called without the lock: resuming may sleep.
+ */
+static int apple_dpxbar_t6030_pm_get(struct apple_dpxbar *xbar)
+{
+	int ret;
+
+	if (xbar->pm_held)
+		return 0;
+	ret = pm_runtime_resume_and_get(xbar->dev);
+	if (ret) {
+		dev_err(xbar->dev, "cannot power the crossbar: %d\n", ret);
+		return ret;
+	}
+	xbar->pm_held = true;
+	return 0;
+}
+
+/* @release: every output deselected and the idle image verified. */
+static void apple_dpxbar_t6030_pm_put(struct apple_dpxbar *xbar, bool release)
+{
+	/* A crossbar that did not reach the idle image keeps its power. */
+	if (!xbar->pm_held || !release)
+		return;
+	xbar->pm_held = false;
+	pm_runtime_put(xbar->dev);
 }
 
 /* Standard mux ownership, but Activate only routes; DidChange enables clocks. */
@@ -302,9 +470,18 @@ static int apple_dpxbar_t6030_dpin_set(struct mux_control *mux, int state)
 	u32 shift = apple_dpxbar_t6030_shift(index);
 	u32 mask = (0xfU << shift) | (0xfU << (shift + 12));
 	unsigned int i;
+	bool idle = true;
+	int ret;
 
 	if (state != MUX_IDLE_DISCONNECT && (state < 0 || state >= 9))
 		return -EINVAL;
+	if (state >= 0) {
+		ret = apple_dpxbar_t6030_pm_get(xbar);
+		if (ret)
+			return ret;
+	} else if (!xbar->pm_held) {
+		return 0;	/* never selected: nothing was written */
+	}
 	spin_lock_irqsave(&xbar->lock, flags);
 	if (state >= 0) {
 		for (i = 0; i < MUX_MAX; i++) {
@@ -314,14 +491,24 @@ static int apple_dpxbar_t6030_dpin_set(struct mux_control *mux, int state)
 			}
 		}
 	}
+	/* A disconnect must leave the idle image behind to release the power. */
 	if (xbar->selected_dispext[index] >= 0)
-		apple_dpxbar_t6030_link(xbar, index, false);
+		idle = apple_dpxbar_t6030_link(xbar, index, false);
 	if (state >= 0)
 		dpxbar_mask32(xbar, T602X_MUX_SELECT, mask,
 			      (state << shift) | (state << (shift + 12)));
 	/* Leave MUX and ATC enable intact on disconnect, as the hardware does. */
 	xbar->selected_dispext[index] = state;
+	for (i = 0; i < MUX_MAX && idle; i++)
+		if (xbar->selected_dispext[i] >= 0 || xbar->tunnel_link_up[i])
+			idle = false;
+	if (idle && !apple_dpxbar_t6030_is_idle(xbar)) {
+		apple_dpxbar_t6030_dump(xbar, index, "crossbar not idle after disconnect");
+		idle = false;
+	}
 	spin_unlock_irqrestore(&xbar->lock, flags);
+	if (state < 0)
+		apple_dpxbar_t6030_pm_put(xbar, idle);
 	dev_info(xbar->dev, "%s: T602X route %d, clocks disabled\n",
 		 apple_dpxbar_names[index], state);
 	return 0;
@@ -1015,7 +1202,15 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 	if (IS_ERR(dpxbar->regs))
 		return PTR_ERR(dpxbar->regs);
 
-	if (!of_device_is_compatible(dev->of_node, "apple,t6020-display-crossbar")) {
+	if (dpxbar->t6030_dpin) {
+		/*
+		 * T6030: probe writes nothing. The crossbar is powered (its
+		 * ATC's USB domain) from the first select until it is idle.
+		 */
+		ret = devm_pm_runtime_enable(dev);
+		if (ret)
+			return ret;
+	} else if (!of_device_is_compatible(dev->of_node, "apple,t6020-display-crossbar")) {
 		readl(dpxbar->regs + UNK_TUNABLE);
 		writel(hw->tunable, dpxbar->regs + UNK_TUNABLE);
 		readl(dpxbar->regs + UNK_TUNABLE);

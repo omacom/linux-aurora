@@ -128,6 +128,9 @@ struct sio_data {
 	} tags;
 
 	int nchannels;
+#if IS_ENABLED(CONFIG_APPLE_SIO_T6030)
+	bool t6030;
+#endif
 	struct sio_chan channels[];
 };
 
@@ -149,6 +152,15 @@ static int sio_send_siomsg_atomic(struct sio_data *sio, u64 msg,
 				  sio_ack_callback ack_callback,
 				  void *cookie);
 static int sio_call(struct sio_data *sio, u64 msg);
+
+static inline bool sio_is_t6030(struct sio_data *sio)
+{
+#if IS_ENABLED(CONFIG_APPLE_SIO_T6030)
+	return sio->t6030;
+#else
+	return false;
+#endif
+}
 
 static struct sio_chan *to_sio_chan(struct dma_chan *chan)
 {
@@ -283,6 +295,12 @@ static struct dma_async_tx_descriptor *sio_prep_dma_cyclic(
 			return NULL;
 		}
 
+		/*
+		 * T6030: publish the whole descriptor, its other fields zero;
+		 * a slot may come back from an earlier transfer.
+		 */
+		if (sio_is_t6030(siochan->host))
+			memset(d, 0, sizeof(*d));
 		d->flag = 1; /* not sure what's up with this */
 		d->iova = buf_addr + period_len * i;
 		d->size = period_len;
@@ -656,7 +674,12 @@ static int sio_device_config(struct dma_chan *chan,
 	cfg.timeout = 0;
 	cfg.fifo = 0x800;
 	cfg.limit = 0x800;
-	cfg.threshold = 0x800;
+	/*
+	 * The ADT records each client's channel configuration with it (the
+	 * dp-audioN dma-channels: channel, data shape, timeout, FIFO size,
+	 * threshold). T6030's DisplayPort audio channels refill at 0x600.
+	 */
+	cfg.threshold = sio_is_t6030(sio) ? 0x600 : 0x800;
 
 	/*
 	 * Dmaengine prescribes we ought to apply the new configuration only
@@ -805,6 +828,9 @@ static int sio_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, sio);
 	sio->dev = &pdev->dev;
 	sio->nchannels = nchannels;
+#if IS_ENABLED(CONFIG_APPLE_SIO_T6030)
+	sio->t6030 = of_device_is_compatible(np, "apple,t6030-sio");
+#endif
 
 	sio->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(sio->base))

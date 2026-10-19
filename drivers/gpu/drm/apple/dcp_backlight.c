@@ -93,10 +93,17 @@ static u32 brightness_part2[] = {
 #define DCP_BL_FADE_MS		250U
 #define DCP_BL_FADE_STEP_MS	16U
 
+/* Panels whose presents carry the level in nits: H17P, and the 14.7 panel. */
+static bool dcp_backlight_presents_nits(struct apple_dcp *dcp)
+{
+	return (dcp->fw_compat == DCP_FIRMWARE_H17P &&
+		dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G) ||
+	       dcp_is_v14_7_panel(dcp);
+}
+
 bool dcp_backlight_active(struct apple_dcp *dcp)
 {
-	return dcp->fw_compat == DCP_FIRMWARE_H17P &&
-		dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G &&
+	return dcp_backlight_presents_nits(dcp) &&
 		READ_ONCE(dcp->backlight.state.ready);
 }
 
@@ -144,8 +151,8 @@ int dcp_backlight_configure(struct apple_dcp *dcp, u32 maximum,
 	unsigned long flags;
 	int ret;
 
-	if (dcp->fw_compat != DCP_FIRMWARE_H17P || !dcp_has_panel(dcp) ||
-	    !dcp->crtc || !kick)
+	if ((dcp->fw_compat != DCP_FIRMWARE_H17P && !dcp_is_v14_7_panel(dcp)) ||
+	    !dcp_has_panel(dcp) || !dcp->crtc || !kick)
 		return -EINVAL;
 
 	mutex_lock(&dcp->bl_register_mutex);
@@ -156,7 +163,14 @@ int dcp_backlight_configure(struct apple_dcp *dcp, u32 maximum,
 		ret = dcp_bl_init(&dcp->backlight.state, maximum,
 				  inherited_valid, inherited,
 				  default_valid, default_nits);
-		if (!ret) {
+		if (!ret && dcp_is_v14_7_panel(dcp)) {
+			/*
+			 * The J514S panel jumps to new levels, and its first
+			 * present carries the requested level.
+			 */
+			dcp_bl_jump(&dcp->backlight.state);
+			dcp->backlight.kick = kick;
+		} else if (!ret) {
 			dcp->backlight.state.fade = true;
 			dcp->backlight.kick = kick;
 		}
@@ -494,8 +508,7 @@ int dcp_backlight_update(struct apple_dcp *dcp)
 		dcp_backlight_kick(dcp);
 		return 0;
 	}
-	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
-	    dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G)
+	if (dcp_backlight_presents_nits(dcp))
 		return -ENODATA;
 
 	/*
@@ -569,7 +582,8 @@ static int dcp_set_brightness(struct backlight_device *bd)
 	struct drm_modeset_acquire_ctx ctx;
 	int brightness = backlight_get_brightness(bd);
 
-	if (dcp->fw_compat == DCP_FIRMWARE_H17P)
+	/* The 14.7 panel takes the H17P policy: a level request, no DAC. */
+	if (dcp->fw_compat == DCP_FIRMWARE_H17P || dcp_is_v14_7_panel(dcp))
 		return dcp_set_brightness_h17p(bd);
 
 	drm_modeset_acquire_init(&ctx, DRM_MODESET_ACQUIRE_INTERRUPTIBLE);
@@ -626,9 +640,7 @@ int dcp_backlight_register(struct apple_dcp *dcp)
 		.scale = BACKLIGHT_SCALE_LINEAR,
 	};
 	props.max_brightness = min(dcp->brightness.maximum, MAX_BRIGHTNESS_PART2 - 1);
-	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
-	    dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G &&
-	    !dcp_backlight_active(dcp))
+	if (dcp_backlight_presents_nits(dcp) && !dcp_backlight_active(dcp))
 		return -ENODATA;
 	if (dcp_backlight_active(dcp)) {
 		spin_lock_irqsave(&dcp->backlight.lock, flags);

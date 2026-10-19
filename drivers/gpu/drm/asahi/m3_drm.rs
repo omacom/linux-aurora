@@ -89,31 +89,27 @@ impl Registered {
     pub(crate) fn start(pdev: &platform::Device<Core>, soc: &'static crate::m3_soc::Soc) -> Result<Self> {
         let resources = crate::m3_resources::from_device(pdev, soc).inspect_err(|_| {
             crate::t8122_start::not_admitted(pdev.as_ref(), soc);
-            crate::t6031_start::not_admitted(pdev.as_ref(), soc);
         })?;
         dev_info!(pdev.as_ref(), "M3: resource admission complete\n");
-        // An armed T8122 or T6031 start supplies the values its table leaves out. Any other SoC,
-        // or an unarmed T8122 or T6031, needs a complete table.
+        // An armed T8122 start supplies the values its table leaves out. Any other SoC, or an
+        // unarmed T8122, needs a complete table.
         let experiment = crate::t8122_start::arm(pdev.as_ref(), soc)?;
-        let t6031 = crate::t6031_start::arm(pdev.as_ref(), soc)?;
-        if experiment.is_none() && t6031.is_none() {
+        if experiment.is_none() {
             soc.require_complete(pdev.as_ref())?;
         }
         let experiment = experiment.as_ref();
-        let t6031 = t6031.as_ref();
         let refused = |stage: &'static str| {
             move |e: &Error| {
                 crate::t8122_start::refused(pdev.as_ref(), experiment, stage, *e);
-                crate::t6031_start::refused(pdev.as_ref(), t6031, stage, *e);
             }
         };
-        let firmware = crate::m3_firmware::identify_loaded(pdev, soc, resources, experiment, t6031)
+        let firmware = crate::m3_firmware::identify_loaded(pdev, soc, resources, experiment)
             .inspect_err(refused("the firmware identity"))?;
         dev_info!(pdev.as_ref(), "M3: firmware identity accepted\n");
         // InitData source and contents, before any GPU register access.
-        let contents = crate::m3_adt_config::Contents::select(pdev, &firmware, soc, experiment, t6031)
+        let contents = crate::m3_adt_config::Contents::select(pdev, &firmware, soc, experiment)
             .inspect_err(refused("the InitData contents"))?;
-        let device = crate::m3_device::Device::new(pdev, firmware, soc, experiment, t6031)
+        let device = crate::m3_device::Device::new(pdev, firmware, soc, experiment)
             .inspect_err(refused("the GPU registers and identity"))?;
         device.check_drm(pdev).inspect_err(refused("the DRM setup"))?;
         let core_mask = device.core_mask();

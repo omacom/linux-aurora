@@ -1357,9 +1357,15 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *handle,
 
 		if (generation != dcp->modes_generation)
 			return -ESTALE;
+		/*
+		 * The T6030 external processor's catalog takes the external SDR
+		 * path: timing colour restrictions, sync polarity, IsPreferred,
+		 * and the fw14 profile the parse context carries.
+		 */
 		ret = replace_modes(handle, &dcp->modes, &dcp->nr_modes,
 				    dcp->width_mm, dcp->height_mm, dcp->notch_height,
-				    dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP);
+				    dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP,
+				    dcp_is_v14_7_external(dcp));
 		if (!ret) {
 			dcp->modes_admitted = true;
 			dcp->modes_provisional = false;
@@ -1804,9 +1810,10 @@ int dcp_get_modes(struct drm_connector *connector)
 			edid = dcpavserv_copy_edid(dcp, 0, &epoch);
 			if (IS_ERR_OR_NULL(edid))
 				dev_info(dcp->dev, "copy_edid failed: %pe\n", edid);
-			else
-				apple_connector_edid_install(apple_connector, pdev,
-							     generation, edid);
+			else if (apple_connector_edid_install(apple_connector, pdev,
+							      generation, edid))
+				/* A native T6030 pipe: its audio, after the first EDID. */
+				dcp_external_audio_start(dcp);
 		}
 
 		edid = apple_connector_edid_dup(apple_connector, pdev);

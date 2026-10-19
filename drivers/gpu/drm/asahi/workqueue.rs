@@ -798,21 +798,6 @@ impl WorkQueue::ver {
         )
     }
 
-    /// Host-memory stamp word for the queue's current event, if it holds one.
-    /// Only the G15 self-test calls this, so other versions see it as unused.
-    #[allow(dead_code)]
-    pub(crate) fn stamp_raw(&self) -> Option<u32> {
-        let inner = self.inner.lock();
-        inner.event.as_ref().map(|ev| ev.0.current().raw())
-    }
-
-    /// Firmware-private stamp word for the queue's current event.
-    #[allow(dead_code)]
-    pub(crate) fn fw_stamp_raw(&self) -> Option<u32> {
-        let inner = self.inner.lock();
-        inner.event.as_ref().map(|ev| inner.event_manager.fw_current(ev.0.slot()))
-    }
-
     /// Work-ring pointers the firmware walks after consuming a pipe kick.
     /// `(queue VA, ring[0], done, gpu_rptr, cpu_wptr, size)`.
     #[allow(dead_code)]

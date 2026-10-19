@@ -292,6 +292,12 @@ struct apple_dcp {
 	 */
 	bool external_detached;
 	atomic_t external_requested;
+	/*
+	 * Native: the DP/HDMI audio endpoint (EP 0x29) starts once per
+	 * session, after the first display's EDID; see dcp_external_audio_start().
+	 */
+	struct work_struct external_audio_work;
+	bool external_audio_started;
 
 	/* DCP_FIRMWARE_V_14_7 state; outlives this device once RTKit runs. */
 	struct apple_dcp_v14 *v14;
@@ -661,6 +667,27 @@ static inline bool dcp_fw_is_14_7(const struct apple_dcp *dcp)
 	return dcp->fw_compat == DCP_FIRMWARE_V_14_7 ||
 	       dcp->fw_compat == DCP_FIRMWARE_V_14_7_TEMPLATE;
 }
+
+/*
+ * The T6030 external processor (the J514S/J516S built-in HDMI port and
+ * USB-C displays) driven natively through Aurora's DCPLink session: DCP
+ * firmware 14.7's external role, whose DP/HDMI audio service differs from
+ * the M1/M2 one (see av.c). The manual diagnostic pipe (dcpext_scanout) and
+ * the T8122 template path are not this.
+ */
+static inline bool dcp_is_v14_7_external(const struct apple_dcp *dcp)
+{
+	return dcp->fw_compat == DCP_FIRMWARE_V_14_7 && dcp->external_native;
+}
+
+/* The 14.7 internal panel (J514S/J516S), presented through DCPLink. */
+static inline bool dcp_is_v14_7_panel(const struct apple_dcp *dcp)
+{
+	return dcp->fw_compat == DCP_FIRMWARE_V_14_7 && !dcp->external;
+}
+
+/* Native external pipe: start its audio endpoint, once, after the first EDID. */
+void dcp_external_audio_start(struct apple_dcp *dcp);
 
 /*
  * The T8122 dcpext connects its DPTX port as AsahiLinux/linux#607 does,

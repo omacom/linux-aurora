@@ -467,6 +467,8 @@ static void afk_service_worker(struct work_struct *work)
 		afk_retry_service_init(ep);
 }
 
+static void afk_recv_handle_teardown(struct apple_dcp_afkep *ep, u32 channel);
+
 static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
 				 u8 *payload, size_t payload_size)
 {
@@ -484,6 +486,15 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
 	size_t props_size = payload_size - sizeof(name);
 
 	previous = afk_epic_find_service(ep, channel);
+	/*
+	 * The 14.7 external role announces its AV service again on the same
+	 * channel after a replug: that is a new instance, and the old one is
+	 * gone with the sink it served.
+	 */
+	if (previous && dcp_is_v14_7_external(ep->dcp) && ep == ep->dcp->dcpavservep) {
+		afk_recv_handle_teardown(ep, channel);
+		previous = afk_epic_find_service(ep, channel);
+	}
 	if (previous) {
 		spin_lock_irqsave(&previous->lock, flags);
 		retired = previous->torndown;
@@ -1662,6 +1673,9 @@ static int afk_send_epic_token(struct apple_dcp_afkep *ep, u32 channel, u16 tag,
 		eshdr->type = cpu_to_le16(stype);
 		eshdr->timestamp = cpu_to_le64(0);
 		eshdr->tag = cpu_to_le16(tag);
+		/* The 14.7 external role's callback replies carry 8 in byte 35. */
+		if (ecat == EPIC_CAT_REPLY && dcp_is_v14_7_external(ep->dcp))
+			eshdr->unk = cpu_to_le16(8 << 8);
 		if (ecat == EPIC_CAT_REPLY)
 			eshdr->inline_len = cpu_to_le32(payload_len - 4);
 		else

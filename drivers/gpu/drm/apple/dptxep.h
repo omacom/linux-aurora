@@ -63,6 +63,8 @@ struct dptx_port {
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
 	u32 trained_voltage[4], trained_pre[4];
+	/* The 14.7 external role: the sink is inactive (callback 20) until a link-up. */
+	bool sink_inactive;
 	/*
 	 * Per-boot invocation counters for the validate/connect/request/
 	 * release AFK calls, used together with the caller return address

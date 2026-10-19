@@ -15,5 +15,6 @@ void dcp_hdmi_enable(struct apple_dcp *dcp);
 void dcp_hdmi_disable(struct apple_dcp *dcp);
 void dcp_hdmi_hpd_edge(struct apple_dcp *dcp);
 void dcp_hdmi_link_configured(struct apple_dcp *dcp, u32 link_rate);
+void dcp_hdmi_sink_held(struct apple_dcp *dcp, bool held);
 
 #endif /* __APPLE_DCP_HDMI_H__ */

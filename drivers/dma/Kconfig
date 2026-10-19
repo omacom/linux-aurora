@@ -103,6 +103,17 @@ config APPLE_SIO
 	  Enable support for the SIO coprocessor found on Apple Silicon SoCs
 	  where it provides DMA services.
 
+config APPLE_SIO_T6030
+	bool "Apple SIO on the M3 Pro (T6030)"
+	depends on APPLE_SIO
+	help
+	  Configure the SIO channels of the T6030 (apple,t6030-sio) the way
+	  its firmware expects them: the DisplayPort audio channels refill
+	  their FIFO at the threshold the system's device tree records for
+	  them (0x600 bytes, not 0x800), and every period descriptor is
+	  published whole. The firmware's boot tables come from the boot
+	  loader, as on the other SoCs.
+
 config ARM_DMA350
 	tristate "Arm DMA-350 support"
 	depends on ARM || ARM64 || COMPILE_TEST

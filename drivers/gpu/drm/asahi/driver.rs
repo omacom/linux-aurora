@@ -25,7 +25,7 @@ use crate::{
     debug,
     drm_gpu,
     file,
-    g15_boot,
+    g15,
     g17,
     gem::AsahiObject,
     gpu,
@@ -89,6 +89,14 @@ impl AsahiData {
         }
     }
 
+    /// The G15 generation, if this device runs it.
+    pub(crate) fn g15(&self) -> Option<&Arc<g15::Gpu>> {
+        match self.gpu.as_ref() {
+            Some(drm_gpu::Backend::G15(gpu)) => Some(gpu),
+            _ => None,
+        }
+    }
+
     /// Runtime construction can use GEM before the GPU backend exists. All
     /// DRM operations fail with ENODEV until probe publishes the backend once.
     pub(crate) fn gpu(&self) -> Result<&dyn drm_gpu::DrmGpu> {
@@ -115,8 +123,13 @@ enum AsahiRuntime {
     Legacy(ARef<drm::Device<AsahiDriver>>),
     M3(crate::m3_drm::Registered),
     G16(crate::g16_drm::Registered),
-    G15(crate::g15_probe::G15Manager),
     G17(ARef<drm::Device<AsahiDriver>>, Arc<g17::Gpu>),
+    /// The G15 generation (`g15`): its DRM device and GPU, retained until reboot.
+    G15(ARef<drm::Device<AsahiDriver>>, Arc<g15::Gpu>),
+    /// A G15 probe that failed once the firmware had been touched: the device stays bound
+    /// (unbinding would detach and power off the GFX domain under the running firmware), the
+    /// firmware session is retained until reboot and no DRM device exists.
+    G15Retained,
 }
 
 pub(crate) struct AsahiDriver {
@@ -131,6 +144,9 @@ pub(crate) enum ProbeConfig {
     /// topology decode run at probe time, then the probe fails closed before
     /// DMA setup, ASC start, or any MMIO write.
     Agx3Diagnostic(&'static hw::agx3::SocConfig),
+    /// G15 (T6030, T6031): the G15 generation, driving the firmware the boot loader left
+    /// loaded.
+    G15(&'static g15::Config),
     /// G17 (T8140): the G17P firmware runtime.
     G17(&'static g17::Config),
 }
@@ -238,24 +254,23 @@ kernel::of_device_table!(
         ),
         // AGX3 (G15) identification targets. These intentionally select no
         // HwConfig: unproved power/MMIO/firmware-tuning fields must never be
-        // represented by copied or zero-filled legacy values. T6030 starts
-        // the M3 runtime; a handed-over T8122 is admitted by it and refused
-        // while its table is incomplete; T6031 starts that runtime only with
-        // asahi.t6031_start=1 and otherwise fails closed the same way; the
-        // others fail closed before any firmware handoff.
+        // represented by copied or zero-filled legacy values. A handed-over
+        // T8122 is admitted by the M3 runtime and refused while its table is
+        // incomplete; the others fail closed before any firmware handoff.
         // The M4 (G16) and M5 bring-up runtimes are not bound in this kernel.
-        // The A18 Pro (T8140, G17P) runtime is bound below.
+        // The M3 Pro/Max (T6030/T6031, G15) generation and the A18 Pro
+        // (T8140, G17P) runtime are bound below.
         (
             of::DeviceId::new(c_str!("apple,agx-t8122")),
             ProbeConfig::Agx3Diagnostic(&hw::agx3::T8122)
         ),
         (
             of::DeviceId::new(c_str!("apple,agx-t6030")),
-            ProbeConfig::Agx3Diagnostic(&hw::agx3::T6030)
+            ProbeConfig::G15(&g15::hw::t6030::CONFIG)
         ),
         (
             of::DeviceId::new(c_str!("apple,agx-t6031")),
-            ProbeConfig::Agx3Diagnostic(&hw::agx3::T6031)
+            ProbeConfig::G15(&g15::hw::t6031::CONFIG)
         ),
         (
             of::DeviceId::new(c_str!("apple,agx-t6032")),
@@ -292,12 +307,6 @@ fn start_t8122(pdev: &platform::Device<Core>) -> Result<crate::m3_drm::Registere
         return Err(ENODEV);
     }
     crate::m3_drm::Registered::start(pdev, &crate::m3_soc::T8122)
-}
-
-/// Start the M3 runtime on a T6031 (M3 Max, G15C) when `asahi.t6031_start=1`. The caller has
-/// already accepted that parameter. Resource admission still requires the boot loader's handoff.
-fn start_t6031(pdev: &platform::Device<Core>) -> Result<crate::m3_drm::Registered> {
-    crate::m3_drm::Registered::start(pdev, &crate::m3_soc::T6031)
 }
 
 fn refuse_agx3_probe(pdev: &platform::Device<Core>, soc: &'static hw::agx3::SocConfig) -> Error {
@@ -383,65 +392,13 @@ fn refuse_agx3_probe(pdev: &platform::Device<Core>, soc: &'static hw::agx3::SocC
     }
 }
 
-/// Report the grounded-vs-UNKNOWN state of the single-role G15 (M3) boot, then
-/// stop the probe. G15 is the easiest AGX3 target — one `GFX` role, classic
-/// device-control-ring submission — but the firmware image is not on disk and
-/// the init-data/RTKit graph is not boot-complete offline.
+/// Refuse a G15 SoC that no generation binds (the two-die T6032): nothing is known about its
+/// firmware handoff, so the probe stops before any DMA, MMIO, UAT or processor state changes.
 fn refuse_g15_probe(pdev: &platform::Device<Core>) -> Error {
-    let Err(missing) = g15_boot::pre_handoff_gate(hw::GpuGen::G15 as u32) else {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 diagnostic target remained selected after its preflight opened\n"
-        );
-        return EINVAL;
-    };
-
-    dev_info!(
-        pdev.as_ref(),
-        "G15 identity decoded (single-role GFX, classic submission); grounded init-data root and shared RTKit codec are diagnostic-only\n"
-    );
     dev_err!(
         pdev.as_ref(),
-        "G15 setup incomplete: evidence mask {:#x}; no DMA, MMIO, UAT, or processor state changed\n",
-        missing.bits()
+        "G15 setup unavailable for this SoC: firmware tuning, initdata and handoff are not known; no DMA, MMIO, UAT or processor state changed\n"
     );
-    if missing.contains(g15_boot::missing::FIRMWARE_IMAGE) {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 preflight: the G15 GFX RTKit firmware image and its nested identity are not available offline\n"
-        );
-    }
-    if missing.contains(g15_boot::missing::UAT_HANDOFF) {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 preflight: the dual-TTBR 42-bit UAT/Handoff firmware-shared state is not validated\n"
-        );
-    }
-    if missing.contains(g15_boot::missing::INITDATA_GRAPH) {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 preflight: init-data root and runtime-pointer graph are grounded, but hw_globals and struct sizes are not boot-complete\n"
-        );
-    }
-    if missing.contains(g15_boot::missing::RTKIT_TRANSPORT) {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 preflight: the GPU RTKit codec is grounded but HELLO/EPMAP transmit is unproved\n"
-        );
-    }
-    if missing.contains(g15_boot::missing::INTERFACE_VERSION) {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 preflight: the EP0 RTKit interface version for this firmware/OS build is unknown\n"
-        );
-    }
-    if missing.contains(g15_boot::missing::SUBMISSION_TRANSPORT) {
-        dev_err!(
-            pdev.as_ref(),
-            "G15 preflight: classic register-list submission is not implemented\n"
-        );
-    }
-
     ENODEV
 }
 
@@ -472,18 +429,6 @@ impl platform::Driver for AsahiDriver {
 
         let cfg = match info.ok_or(ENODEV)? {
             ProbeConfig::Supported(cfg) => *cfg,
-            ProbeConfig::Agx3Diagnostic(soc) if soc.chip_id == 0x6030 => {
-                match crate::m3_params::t6030_backend(pdev) {
-                    crate::m3_params::T6030Backend::Manager => {
-                        let manager = crate::g15_probe::probe(pdev)?;
-                        return Ok(Self { runtime: AsahiRuntime::G15(manager) });
-                    }
-                    crate::m3_params::T6030Backend::Off => return Err(ENODEV),
-                    crate::m3_params::T6030Backend::Runtime => {}
-                }
-                let runtime = crate::m3_drm::Registered::start(pdev, &crate::m3_soc::T6030)?;
-                return Ok(Self { runtime: AsahiRuntime::M3(runtime) });
-            }
             ProbeConfig::Agx3Diagnostic(soc) if soc.chip_id == 0x8122 => {
                 if crate::g16_profile::selected(pdev).inspect_err(|error| {
                     dev_err!(pdev.as_ref(), "G16G: firmware/profile admission failed: {:?}\n", error);
@@ -498,31 +443,8 @@ impl platform::Driver for AsahiDriver {
                 let runtime = start_t8122(pdev)?;
                 return Ok(Self { runtime: AsahiRuntime::M3(runtime) });
             }
-            ProbeConfig::Agx3Diagnostic(soc) if soc.chip_id == 0x6031 => {
-                match crate::t6031_knobs::start(&crate::m3_params::t6031_params()) {
-                    crate::t6031_knobs::Start::Off => {
-                        if crate::m3_params::t6031_params().values_given() {
-                            dev_info!(
-                                pdev.as_ref(),
-                                "M3 G15C start: asahi.t6031_* values given without asahi.t6031_start=1; ignored\n"
-                            );
-                        }
-                        return Err(refuse_agx3_probe(pdev, soc));
-                    }
-                    crate::t6031_knobs::Start::Invalid => {
-                        dev_err!(
-                            pdev.as_ref(),
-                            "M3 G15C start: refused: asahi.t6031_start has a value it does not accept (0 or 1); GPU startup disabled\n"
-                        );
-                        return Err(ENODEV);
-                    }
-                    crate::t6031_knobs::Start::On => {
-                        let runtime = start_t6031(pdev)?;
-                        return Ok(Self { runtime: AsahiRuntime::M3(runtime) });
-                    }
-                }
-            }
             ProbeConfig::Agx3Diagnostic(soc) => return Err(refuse_agx3_probe(pdev, soc)),
+            ProbeConfig::G15(cfg) => return Self::probe_g15(pdev, cfg),
             ProbeConfig::G17(cfg) => return Self::probe_g17(pdev, cfg),
         };
 
@@ -605,6 +527,49 @@ impl AsahiDriver {
         }
         Ok(Self {
             runtime: AsahiRuntime::G17(drm, gpu),
+        })
+    }
+}
+
+impl AsahiDriver {
+    /// Boots a G15 GPU and registers its DRM device.
+    ///
+    /// A G15 firmware session cannot be stopped once started. If the boot or the registration
+    /// fails after the firmware has been touched ([`g15::retained`]), the device stays bound with
+    /// no DRM device and [`g15::Gpu`] retains everything the firmware can reach until reboot.
+    fn probe_g15(pdev: &platform::Device<Core>, cfg: &'static g15::Config) -> Result<Self> {
+        dev_info!(pdev.as_ref(), "G15: probing\n");
+        // SAFETY: The GPU performs DMA through a UAT whose output width is part of the SoC config.
+        unsafe { pdev.dma_set_mask_and_coherent(DmaMask::try_new(cfg.uat_oas)?)? };
+        let res = regs::Resources::new(pdev)?;
+        // No userspace or GPU backend is published before the generation is constructed.
+        let drm: ARef<AsahiDevice> = drm::device::Device::new(
+            pdev.as_ref(),
+            AsahiData::new(pdev, Some(res.clone()), false),
+        )?;
+        let retained = |error: Error| -> Result<Self> {
+            dev_err!(
+                pdev.as_ref(),
+                "G15: probe failed after the firmware start ({:?}); device kept bound, firmware retained until reboot\n",
+                error
+            );
+            Ok(Self {
+                runtime: AsahiRuntime::G15Retained,
+            })
+        };
+        let gpu = match g15::Gpu::new(pdev, &drm, cfg, res) {
+            Ok(gpu) => gpu,
+            Err(error) if g15::retained() => return retained(error),
+            Err(error) => return Err(error),
+        };
+        if !drm.gpu.populate(drm_gpu::Backend::G15(gpu.clone())) {
+            return retained(EBUSY);
+        }
+        if let Err(error) = drm::driver::Registration::new_foreign_owned(&drm, pdev.as_ref(), 0) {
+            return retained(error);
+        }
+        Ok(Self {
+            runtime: AsahiRuntime::G15(drm, gpu),
         })
     }
 }

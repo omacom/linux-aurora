@@ -14,8 +14,6 @@ const MAX_POWERZONES: usize = 5;
 pub(crate) mod agx3;
 pub(crate) mod t600x;
 pub(crate) mod t602x;
-pub(crate) mod t6030;
-pub(crate) mod t6031;
 pub(crate) mod t8103;
 pub(crate) mod t8112;
 pub(crate) mod t8122;
@@ -65,8 +63,8 @@ pub(crate) enum GpuCore {
     // G15P_AGX2 = 20,
     // G15P = 21,
     G15G = 22,
-    G15S = 23,
-    /// Not confirmed on hardware yet; only the T6031 table uses it.
+    // G15S = 23,
+    /// Not confirmed on hardware yet.
     #[allow(dead_code)]
     G15C = 24,
 }
@@ -470,6 +468,11 @@ pub(crate) struct PwrConfig {
     pub(crate) se_target: u32,
 }
 
+/// SRAM rail floor of a G15 device tree without `apple,min-sram-microvolt`, in microvolts.
+/// The commonly used G15 default is 789 mV, but the J516S runtime ADT perf-states-sram table
+/// floors SRAM at 810 mV; use the higher, safe value.
+const G15_MIN_SRAM_MICROVOLT: u32 = 810_000;
+
 impl PwrConfig {
     fn load_opp(
         dev: &kernel::device::Device,
@@ -608,9 +611,8 @@ impl PwrConfig {
             perf_base_pstate: prop!("apple,perf-base-pstate", 1),
             perf_max_pstate: perf_states.len() as u32 - 1,
             min_sram_microvolt: if cfg.gpu_gen == GpuGen::G15 {
-                // SRAM rail floor: 810 mV from the J516S runtime ADT perf-states-sram table.
                 // Tolerate a DT without the property on G15 only.
-                prop!("apple,min-sram-microvolt", t6030::MIN_SRAM_MICROVOLT)
+                prop!("apple,min-sram-microvolt", G15_MIN_SRAM_MICROVOLT)
             } else {
                 prop!("apple,min-sram-microvolt")
             },
