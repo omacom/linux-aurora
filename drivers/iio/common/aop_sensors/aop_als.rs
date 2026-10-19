@@ -12,6 +12,7 @@ use kernel::{
     module_platform_driver, of, platform,
     prelude::*,
     soc::apple::aop::{EPICService, FakehidRegistration, AOP},
+    sync::Arc,
 };
 
 const EPIC_SUBTYPE_GET_AOP_PROPERTY: u16 = 0xa;
@@ -166,6 +167,24 @@ struct IIOAopAlsDriver {
     /// Declared first: the subscription ends before the IIO device goes.
     listener: FakehidRegistration,
     _iio: IIORegistration<MsgProc>,
+    aop: Arc<dyn AOP>,
+    service: EPICService,
+    j613_quiesce: bool,
+}
+
+impl IIOAopAlsDriver {
+    fn set_report_interval(&self, interval: u32) -> Result {
+        let status = set_als_property(
+            self.aop.as_ref(),
+            &self.service,
+            ALS_PROP_INTERVAL,
+            &interval.to_le_bytes(),
+        )?;
+        if status != 0 {
+            return Err(EIO);
+        }
+        Ok(())
+    }
 }
 
 kernel::of_device_table!(
@@ -179,9 +198,46 @@ impl platform::Driver for IIOAopAlsDriver {
     type IdInfo = ();
 
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
+    const HAS_PM: bool = true;
+
+    fn suspend(dev: &kernel::device::Device<Core>, this: Pin<&Self>) -> Result {
+        if this.j613_quiesce {
+            if let Err(error) = this.set_report_interval(0) {
+                // A failed suspend callback is not guaranteed a resume call.
+                // Try to restore reporting before returning the failure.
+                if let Err(restore_error) = this.set_report_interval(ALS_INTERVAL_US) {
+                    dev_err!(dev, "ALS reporting rollback failed: {:?}\n", restore_error);
+                }
+                return Err(error);
+            }
+            dev_info!(dev, "J613 ALS reports paused for suspend\n");
+        }
+        Ok(())
+    }
+
+    fn resume(dev: &kernel::device::Device<Core>, this: Pin<&Self>) -> Result {
+        if this.j613_quiesce {
+            this.set_report_interval(ALS_INTERVAL_US)?;
+            dev_info!(dev, "J613 ALS reports restored after resume\n");
+        }
+        Ok(())
+    }
 
     fn probe(pdev: &platform::Device<Core>, _info: Option<&()>) -> impl PinInit<Self, Error> {
         let dev = pdev.as_ref();
+        // SAFETY: The boot device-tree root is either NULL or a live node;
+        // of_device_is_compatible only reads its compatibility property.
+        let j613_quiesce = *module_parameters::j613_suspend_quiesce.value() == 1
+            && unsafe {
+                !bindings::of_root.is_null()
+                    && bindings::of_device_is_compatible(
+                        bindings::of_root,
+                        c_str!("apple,j613").as_char_ptr(),
+                    ) != 0
+            };
+        if j613_quiesce {
+            dev_info!(dev, "J613 ALS suspend quiescing enabled\n");
+        }
         // SAFETY: This driver binds only to the service devices the AOP core
         // registers, and `pdev` is being probed.
         let adata = unsafe { <dyn AOP>::from_child(dev) }?;
@@ -204,6 +260,9 @@ impl platform::Driver for IIOAopAlsDriver {
         Ok(IIOAopAlsDriver {
             listener,
             _iio: iio,
+            aop: adata,
+            service,
+            j613_quiesce,
         })
     }
 
@@ -219,4 +278,10 @@ module_platform_driver! {
     license: "Dual MIT/GPL",
     alias: ["platform:iio_aop_als"],
     firmware: ["apple/aop-als-cal.bin"],
+    params: {
+        j613_suspend_quiesce: u32 {
+            default: 0,
+            description: "J613 experiment: pause ALS reports during system suspend",
+        },
+    },
 }
