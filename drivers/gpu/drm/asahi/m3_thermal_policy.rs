@@ -6,6 +6,16 @@
 //! Times are monotonic nanoseconds from any fixed origin, temperatures millidegrees Celsius, and
 //! states indices of the published performance-state table.
 
+/// Thermal fallback is independent of the experimental T8122 ceiling.
+/// Keep other SoCs' existing fallback and never exceed a lower requested cap.
+pub(crate) fn safe_cap(max: u32, t8122: bool, legacy_limit: u32) -> u32 {
+    max.min(if t8122 {
+        crate::t8122_knobs::PSTATE_CAP
+    } else {
+        legacy_limit
+    })
+}
+
 /// Required thermal-zone bits: SMC die (bit 0), PMP hotspot (bit 1).
 /// A missing or malformed compatible list requires both zones. The M3 Max MacBook Pros (J514C,
 /// J516C) require the SMC die zone: their PMP does not run, so it has no hotspot zone.
@@ -293,5 +303,61 @@ mod zone_tests {
         assert_eq!(required_zones(b"apple,t8122"), 3);
         assert_eq!(required_zones(b"apple,j274\0apple,t8103\0"), 0);
         assert_eq!(required_zones(b"apple,t81220\0"), 0);
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+
+    fn temp(mc: i32, at: i64) -> Reading {
+        Reading::Temp { mc, at, zones: 1 }
+    }
+
+    #[test]
+    fn t8122_higher_ceilings_keep_state_two_fallback() {
+        for ceiling in 1..=5 {
+            assert_eq!(safe_cap(ceiling, true, 5), ceiling.min(2));
+            assert_eq!(safe_cap(ceiling, false, 5), ceiling);
+        }
+        assert_eq!(safe_cap(8, false, 5), 5);
+    }
+
+    #[test]
+    fn next_state_returns_to_two_when_hot_or_reading_fails() {
+        for reading in [
+            temp(80_000, 3 * S),
+            temp(88_000, 3 * S),
+            Reading::None,
+            Reading::Failed { errno: -19, at: 3 * S },
+        ] {
+            let mut p = Policy::new(true, safe_cap(3, true, 5), 3, 80_000);
+            assert_eq!(p.cap(), 2);
+            let _ = p.update(0, temp(50_000, 0));
+            assert_eq!(p.cap(), 3);
+            let _ = p.update(3 * S, reading);
+            assert_eq!(p.cap(), 2);
+        }
+    }
+
+    #[test]
+    fn stale_or_stuck_sensor_returns_to_two() {
+        let mut p = Policy::new(true, safe_cap(3, true, 5), 3, 80_000);
+        let _ = p.update(0, temp(50_000, 0));
+        assert_eq!(p.cap(), 3);
+        let _ = p.update(4 * S, temp(50_000, 0));
+        assert_eq!(p.cap(), 2);
+        let _ = p.update(6 * S, temp(51_000, 6 * S));
+        assert_eq!(p.cap(), 3);
+        let _ = p.update(67 * S, temp(51_000, 67 * S));
+        assert_eq!(p.cap(), 2);
+    }
+
+    #[test]
+    fn hold_never_raises_t8122_above_two() {
+        let mut p = Policy::new(false, safe_cap(3, true, 5), 3, 80_000);
+        let _ = p.update(0, temp(50_000, 0));
+        let _ = p.update(3 * S, temp(50_000, 3 * S));
+        assert_eq!(p.cap(), 2);
     }
 }

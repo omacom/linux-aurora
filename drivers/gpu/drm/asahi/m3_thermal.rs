@@ -12,12 +12,13 @@
 //! "ceiling"), and what bounds the firmware is the runtime cap: the Globals performance-state
 //! cap and power-interface state targets, which the firmware keeps reading while it runs (a
 //! host moves the cap with a single store, with no message). The runtime cap starts at the
-//! fixed cap of `off` (the "safe cap") and never goes below it, so at worst the GPU runs as it
-//! does without the limit.
+//! board-specific fallback (the "safe cap") and never goes below it. The T8122 experiment
+//! retains state 2 as that fallback even when its ceiling is raised; other SoCs retain
+//! the cap used without the limit.
 //!
-//! - `hold`: the runtime cap stays at the safe cap for the whole boot. The GPU then runs exactly
-//!   as with `off`, provided the firmware follows the runtime cap; the per-job check below
-//!   proves or disproves that before `on` is used.
+//! - `hold`: the runtime cap stays at the safe cap for the whole boot, provided the firmware
+//!   follows the runtime cap; the per-job check below proves or disproves that before `on`
+//!   is used.
 //! - `on`: the runtime cap follows the hottest SoC die temperature, read by a work item every
 //!   500 ms while the GPU is busy (every 2 s when idle) from the thermal zones in [`ZONES`]
 //!   that exist: the SMC's die sensors and the PMP's CPU cluster sensors (see [`ZONES`]):
