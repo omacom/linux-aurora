@@ -21,10 +21,6 @@ properties:
               - apple,t6031-avd
           - const: apple,t8122-avd
       - items:
-          - const: apple,t6041-max-avd
-          - const: apple,t6041-avd
-          - const: apple,t8132-avd
-      - items:
           - const: apple,t6041-avd
           - const: apple,t8132-avd
       - enum:
@@ -55,16 +51,7 @@ properties:
     maxItems: 3
 
   power-domains:
-    minItems: 1
-    items:
-      - description: decoder power state
-      - description: performance floor (PMC rail or PMP device level) held while decoding
-
-  power-domain-names:
-    minItems: 1
-    items:
-      - const: core
-      - const: perf
+    maxItems: 1
 
   resets:
     maxItems: 1
