@@ -4917,7 +4917,7 @@ m3_report_boot_dt() {
     echo "boot.bin: not found or not readable"
     return 0
   fi
-  while IFS=: read -r off _; do
+  while read -r off; do
     # A device tree's header: the magic, its total size, ..., and version 17 at byte 20.
     size=$(od -An -tu4 --endian=big -j "$((off + 4))" -N4 "$bin" 2>/dev/null | tr -d ' ')
     ver=$(od -An -tu4 --endian=big -j "$((off + 20))" -N4 "$bin" 2>/dev/null | tr -d ' ')
@@ -4934,7 +4934,9 @@ m3_report_boot_dt() {
       match+="dtb $n (sha256 $sha) is ${dtbs:-none of the device trees of the installed kernels}"$'\n'
     fi
     n=$((n + 1))
-  done < <(LC_ALL=C grep -obUaP '\xd0\x0d\xfe\xed' "$bin" 2>/dev/null)
+  # Only the offsets: grep -o also prints the matched bytes, which are not
+  # valid UTF-8, and bash 5.2's read returns nothing for them in a UTF-8 locale.
+  done < <(LC_ALL=C grep -obUaP '\xd0\x0d\xfe\xed' "$bin" 2>/dev/null | cut -d: -f1)
   echo "device trees in boot.bin: $n"
   if [[ -n $match ]]; then printf '%s' "$match"; else echo "no device tree in boot.bin names this board (${board:-?})"; fi
 }
