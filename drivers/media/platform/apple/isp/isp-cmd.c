@@ -151,16 +151,24 @@ int isp_cmd_set_dsid_clr_req_base(struct apple_isp *isp, u64 dsid_clr_base,
 	return CISP_SEND_IN(isp, args);
 }
 
-int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, u64 dsid_clr_base,
-				  u32 dsid_clr_range)
+int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, const u64 *bases,
+				  unsigned int count, u32 dsid_clr_range)
 {
 	struct cmd_set_dsid_clr_multi_bc_reg_base args = {
 		.opcode = CISP_OPCODE(CISP_CMD_SET_DSID_CLR_MULTI_BC_REG_BASE),
-		.count = 1,
+		.count = count,
 		.dsid_clr_range = dsid_clr_range,
-		.dsid_clr_base = dsid_clr_base,
 	};
-	return CISP_SEND_IN(isp, args);
+
+	/* The caller, isp_set_dsid_clr(), bounds count by the array. */
+	if (!count)
+		return -EINVAL;
+	memcpy(args.dsid_clr_base, bases, count * sizeof(*bases));
+
+	return cisp_send(isp, &args,
+			 offsetof(typeof(args), dsid_clr_base) +
+				 count * sizeof(*bases), 0,
+			 CISP_TIMEOUT);
 }
 
 int isp_cmd_pmp_ctrl_set(struct apple_isp *isp, u64 clock_scratch,
@@ -481,7 +489,8 @@ int isp_cmd_ch_buffer_pool_config_set_rendered(struct apple_isp *isp, u32 chan,
 	struct cmd_ch_buffer_pool_config_set_rendered args = {
 		.opcode = CISP_OPCODE(CISP_CMD_CH_BUFFER_POOL_CONFIG_SET),
 		.chan = chan,
-		.type = CISP_POOL_TYPE_RENDERED,
+		.type = isp->hw->scl1 ? CISP_POOL_TYPE_RENDERED_SCL1 :
+					CISP_POOL_TYPE_RENDERED,
 		.count = count,
 		.plane0_size = plane0_size,
 		.plane0_stride = plane0_stride,

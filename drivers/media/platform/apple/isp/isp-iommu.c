@@ -218,6 +218,35 @@ struct isp_surf *isp_alloc_surface_vmap(struct apple_isp *isp, u64 size)
 	return surf;
 }
 
+/* A surface at a fixed IOVA, outside the range the others come from. */
+struct isp_surf *isp_alloc_surface_at(struct apple_isp *isp, dma_addr_t iova,
+				      u64 size)
+{
+	struct isp_surf *surf;
+
+	surf = kzalloc_obj(*surf);
+	if (!surf)
+		return NULL;
+
+	__isp_surf_init(isp, surf, size, false);
+	surf->iova = iova;
+
+	if (isp_surf_alloc_pages(surf) < 0)
+		goto free_surf;
+
+	if (isp_surf_iommu_map(isp, surf) < 0)
+		goto free_pages;
+
+	refcount_set(&surf->refcount, 1);
+	return surf;
+
+free_pages:
+	isp_surf_free_pages(surf);
+free_surf:
+	kfree(surf);
+	return NULL;
+}
+
 void isp_free_surface(struct apple_isp *isp, struct isp_surf *surf)
 {
 	if (refcount_dec_and_test(&surf->refcount)) {

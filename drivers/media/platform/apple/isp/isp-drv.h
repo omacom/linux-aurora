@@ -51,6 +51,7 @@ enum isp_generation {
 	ISP_GEN_T8112,
 	ISP_GEN_T6031,
 	ISP_GEN_T8140,
+	ISP_GEN_T6040,
 };
 
 /*
@@ -146,6 +147,8 @@ struct apple_isp_hw {
 	u64 pmu_base;
 
 	int dsid_count;
+	/* windows of the H17 multi broadcast-clear command, the unused all ones */
+	u8 dsid_slots;
 	u64 dsid_clr_base0;
 	u64 dsid_clr_base1;
 	u64 dsid_clr_base2;
@@ -185,6 +188,9 @@ struct apple_isp_hw {
 
 	/* ISP_GPIO_6 boot mode */
 	u32 boot_mode;
+
+	/* shared memory size in the H16 boot descriptor, 0 for the T8140 one */
+	u64 shared_size;
 
 	/* size of a capture metadata buffer, 0 for no such pool */
 	u32 capture_meta_size;
@@ -244,6 +250,7 @@ enum isp_sensor_id {
 	ISP_IMX814_2123_01,
 	ISP_IMX853_7622_01,
 	ISP_IMX913_7523_01,
+	ISP_IMX958_2224_01,
 	ISP_VD56G0_6221_01,
 	ISP_VD56G0_6222_01,
 };
@@ -264,6 +271,7 @@ struct apple_isp {
 	enum isp_firmware_version fw_compat;
 	u32 platform_id;
 	u32 temporal_filter;
+	u32 cam_connections_scheme;
 	struct isp_preset *presets;
 	int num_presets;
 
@@ -306,7 +314,9 @@ struct apple_isp {
 	struct mutex iovad_lock;
 
 	struct isp_firmware {
+		u64 heap_base;
 		u64 heap_top;
+		u64 data_top; /* 0 unless the bootloader loads the data */
 	} fw;
 	/* changes under video_lock once the video device is registered */
 	enum isp_fw_state fw_state;
@@ -314,6 +324,7 @@ struct apple_isp {
 	struct isp_surf *ipc_surf;
 	struct isp_surf *extra_surf;
 	struct isp_surf *data_surf;
+	struct isp_surf *main_tail_surf;
 	struct isp_surf *log_surf;
 	struct isp_surf *bt_surf;
 	struct isp_surf *meta_surfs[ISP_MAX_BUFFERS];

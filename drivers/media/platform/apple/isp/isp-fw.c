@@ -10,6 +10,7 @@
 #include <linux/overflow.h>
 #include <linux/pm_runtime.h>
 #include <linux/types.h>
+#include <linux/unaligned.h>
 
 #include "isp-cam.h"
 #include "isp-cmd.h"
@@ -163,6 +164,7 @@ static_assert(sizeof(struct isp_firmware_bootargs) == 0x180);
  */
 #define ISP_H16_DESCRIPTOR_SIZE		0x200
 #define ISP_H16_SHARED_SIZE		0xee000000ULL
+#define ISP_H16_DESC_CAM_SCHEME		0x60
 #define ISP_H16_DESC_NO_OPTICAL_CARD_ID 0xb0
 
 struct isp_firmware_bootargs_h16 {
@@ -315,6 +317,31 @@ static int isp_reset_coproc_t8140(struct apple_isp *isp)
 	return 0;
 }
 
+/*
+ * The T6040 firmware is started as the bootloader left it, without a reset:
+ * the coprocessor must never have run, and its reset vector must be the
+ * entry of the firmware text at the base of the heap region.
+ */
+static int isp_check_coproc_t6040(struct apple_isp *isp)
+{
+	u32 control = isp_coproc_read32(isp, isp_coproc_control(isp));
+	u64 rvbar = readq(isp->coproc + ISP_COPROC_RVBAR);
+
+	if (control) {
+		isp_err(isp, "coprocessor already started (control 0x%x)\n",
+			control);
+		return -EBUSY;
+	}
+
+	if (rvbar != (isp->fw.heap_base | 1)) {
+		isp_err(isp, "reset vector 0x%llx is not the firmware at 0x%llx\n",
+			rvbar, isp->fw.heap_base);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
 static int isp_reset_coproc(struct apple_isp *isp)
 {
 	int retries;
@@ -323,6 +350,8 @@ static int isp_reset_coproc(struct apple_isp *isp)
 
 	if (isp->hw->gen == ISP_GEN_T8140)
 		return isp_reset_coproc_t8140(isp);
+	if (isp->hw->gen == ISP_GEN_T6040)
+		return isp_check_coproc_t6040(isp);
 
 	isp_coproc_write32(isp, ISP_COPROC_EDPRCR, 0x2);
 
@@ -377,8 +406,8 @@ static int isp_firmware_boot_stage1(struct apple_isp *isp)
 	if (err < 0)
 		return err;
 
-	/* ISP17a has no clock enable word */
-	if (isp->hw->gen != ISP_GEN_T8140)
+	/* ISP17a and T6040 have no clock enable word */
+	if (isp->hw->gen != ISP_GEN_T8140 && isp->hw->gen != ISP_GEN_T6040)
 		isp_gpio_write32(isp, ISP_GPIO_CLOCK_EN, 0x1);
 
 #if 0
@@ -445,11 +474,27 @@ int apple_isp_alloc_firmware_surface(struct apple_isp *isp)
 	dev_dbg(isp->dev, "Data surface iova: 0x%llx\n",
 		(long long)isp->data_surf->iova);
 
+	/* Without it, the firmware faults on its first writes there. */
+	if (isp->fw.data_top && isp->fw.data_top < isp->fw.heap_top) {
+		isp->main_tail_surf =
+			isp_alloc_surface_at(isp, isp->fw.data_top,
+					     isp->fw.heap_top - isp->fw.data_top);
+		if (!isp->main_tail_surf) {
+			isp_err(isp, "failed to back main memory 0x%llx-0x%llx\n",
+				isp->fw.data_top, isp->fw.heap_top);
+			isp_free_surface(isp, isp->data_surf);
+			isp_free_surface(isp, isp->ipc_surf);
+			return -ENOMEM;
+		}
+	}
+
 	return 0;
 }
 
 void apple_isp_free_firmware_surface(struct apple_isp *isp)
 {
+	if (isp->main_tail_surf)
+		isp_free_surface(isp, isp->main_tail_surf);
 	isp_free_surface(isp, isp->data_surf);
 	isp_free_surface(isp, isp->ipc_surf);
 }
@@ -491,12 +536,14 @@ static void isp_write_bootargs_h16(struct apple_isp *isp, void *virt,
 	memset(&args, 0, sizeof(args));
 	args.ipc_iova = isp->ipc_surf->iova;
 	args.shared_base = isp->fw.heap_top & 0xffffffff;
-	args.shared_size = ISP_H16_SHARED_SIZE;
+	args.shared_size = isp->hw->shared_size ?: ISP_H16_SHARED_SIZE;
 	args.extra_iova = isp->extra_surf->iova;
 	args.extra_size = isp->extra_surf->size;
 	args.platform_id = isp->platform_id;
 	args.ipc_queue_size = (u64)args_offset + 1;
 	args.unk_68 = 0x40;
+	put_unaligned_le64(isp->cam_connections_scheme,
+			   &args.descriptor[ISP_H16_DESC_CAM_SCHEME]);
 	args.descriptor[ISP_H16_DESC_NO_OPTICAL_CARD_ID] = 1;
 	memcpy(virt, &args, sizeof(args));
 }
@@ -825,12 +872,26 @@ static int isp_set_dsid_clr(struct apple_isp *isp)
 	int err;
 
 	/*
-	 * The H17 firmware takes no PMU base, and its single broadcast-clear
-	 * window in the multi-window form.
+	 * The H17 firmware takes no PMU base, and its broadcast-clear windows
+	 * in the multi-window form.
 	 */
-	if (hw->fw_abi == ISP_FW_ABI_H17)
-		return isp_cmd_set_dsid_clr_multi_bc(isp, hw->dsid_clr_base0,
+	if (hw->fw_abi == ISP_FW_ABI_H17) {
+		const u64 used[] = { hw->dsid_clr_base0, hw->dsid_clr_base1,
+				     hw->dsid_clr_base2, hw->dsid_clr_base3 };
+		u64 bases[ISP_DSID_MULTI_BC_MAX];
+		unsigned int slots = max_t(unsigned int, hw->dsid_count,
+					   hw->dsid_slots);
+
+		if (WARN_ON(hw->dsid_count > ARRAY_SIZE(used) ||
+			    slots > ARRAY_SIZE(bases)))
+			return -EINVAL;
+
+		for (unsigned int i = 0; i < slots; i++)
+			bases[i] = i < hw->dsid_count ? used[i] : U64_MAX;
+
+		return isp_cmd_set_dsid_clr_multi_bc(isp, bases, slots,
 						     hw->dsid_clr_range0);
+	}
 
 	err = isp_cmd_set_isp_pmu_base(isp, hw->pmu_base);
 	if (err)

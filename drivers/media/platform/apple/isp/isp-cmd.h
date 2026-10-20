@@ -197,15 +197,20 @@ struct cmd_set_dsid_clr_req_base {
 } __packed;
 static_assert(sizeof(struct cmd_set_dsid_clr_req_base) == 0x14);
 
-/* H17: a count of broadcast-clear windows and the first window */
+/*
+ * H17: a count of broadcast-clear windows, their common range and the
+ * windows; the command carries only the @count windows.
+ */
+#define ISP_DSID_MULTI_BC_MAX 8
+
 struct cmd_set_dsid_clr_multi_bc_reg_base {
 	u64 opcode;
 	u8 count;
 	u8 pad_9[3];
 	u32 dsid_clr_range;
-	u64 dsid_clr_base;
+	u64 dsid_clr_base[ISP_DSID_MULTI_BC_MAX];
 } __packed;
-static_assert(sizeof(struct cmd_set_dsid_clr_multi_bc_reg_base) == 0x18);
+static_assert(sizeof(struct cmd_set_dsid_clr_multi_bc_reg_base) == 0x50);
 
 struct cmd_pmp_ctrl_set {
 	u64 opcode;
@@ -260,8 +265,8 @@ int isp_cmd_config_get(struct apple_isp *isp, struct cmd_config_get *args);
 int isp_cmd_set_isp_pmu_base(struct apple_isp *isp, u64 pmu_base);
 int isp_cmd_set_dsid_clr_req_base(struct apple_isp *isp, u64 dsid_clr_base,
 				  u32 dsid_clr_range);
-int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, u64 dsid_clr_base,
-				  u32 dsid_clr_range);
+int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, const u64 *bases,
+				  unsigned int count, u32 dsid_clr_range);
 int isp_cmd_set_dsid_clr_req_base2(struct apple_isp *isp, u64 dsid_clr_base0,
 				   u64 dsid_clr_base1, u64 dsid_clr_base2,
 				   u64 dsid_clr_base3, u32 dsid_clr_range0,

@@ -70,6 +70,7 @@ static const struct isp_setfile isp_setfiles[] = {
 	[ISP_IMX814_2123_01] = {0x814, 0x21230101, "apple/isp_2123_01XX.dat", 0xed54},
 	[ISP_IMX853_7622_01] = {0x853, 0x76220112, "apple/isp_7622_01XX.dat", 0x247f8},
 	[ISP_IMX913_7523_01] = {0x913, 0x75230107, "apple/isp_7523_01XX.dat", 0x247f8},
+	[ISP_IMX958_2224_01] = {0x958, 0x22240106, "apple/isp_2224_01XX.dat", 0x6ff4},
 	[ISP_VD56G0_6221_01] = {0xd56, 0x62210102, "apple/isp_6221_01XX.dat", 0x1b80},
 	[ISP_VD56G0_6222_01] = {0xd56, 0x62220102, "apple/isp_6222_01XX.dat", 0x1b80},
 };
@@ -158,6 +159,10 @@ static int isp_ch_get_sensor_id(struct apple_isp *isp, u32 ch)
 	case 0x913:
 		id = ISP_IMX913_7523_01;
 		break;
+	case 0x958:
+		/* Section 0x50f of 2224 names sensor 0x958; 2924's names 0x614. */
+		id = ISP_IMX958_2224_01;
+		break;
 	case 0xd56:
 		id = ISP_VD56G0_6221_01;
 		break;
@@ -228,10 +233,14 @@ static int isp_ch_cache_sensor_info(struct apple_isp *isp, u32 ch)
 
 	dev_dbg(isp->dev, "found sensor %x on ch %d\n", args->version, ch);
 
-	/* The metadata buffers are allocated for the sizes the driver knows. */
+	/*
+	 * The metadata buffers are allocated for the sizes the driver knows;
+	 * without a capture metadata pool its size is not used.
+	 */
 	if (isp->hw->fw_abi == ISP_FW_ABI_H17 &&
 	    (args->unk_68 != isp->hw->meta_size ||
-	     args->unk_78 != isp->hw->capture_meta_size)) {
+	     (isp->hw->capture_meta_size &&
+	      args->unk_78 != isp->hw->capture_meta_size))) {
 		dev_err(isp->dev,
 			"metadata sizes 0x%x/0x%x, expected 0x%x/0x%x\n",
 			args->unk_68, args->unk_78, isp->hw->meta_size,
@@ -245,7 +254,8 @@ static int isp_ch_cache_sensor_info(struct apple_isp *isp, u32 ch)
 	err = isp_ch_get_sensor_id(isp, ch);
 	if (err ||
 	    (fmt->id != ISP_IMX248_1820_01 && fmt->id != ISP_IMX558_1921_01 &&
-	     fmt->id != ISP_IMX558_1925_03 && fmt->id != ISP_IMX364_8720_01)) {
+	     fmt->id != ISP_IMX558_1925_03 && fmt->id != ISP_IMX364_8720_01 &&
+	     fmt->id != ISP_IMX958_2224_01)) {
 		dev_err(isp->dev,
 			"ch %d: unsupported sensor. Please file a bug report with hardware info & dmesg trace.\n",
 			ch);
@@ -451,10 +461,13 @@ static int isp_ch_configure_pools(struct apple_isp *isp, u32 ch)
 	if (err)
 		return err;
 
-	err = isp_cmd_ch_buffer_pool_config_set(isp, ch,
-						CISP_POOL_TYPE_META_CAPTURE);
-	if (err)
-		return err;
+	/* H17 firmware without capture metadata has no such pool. */
+	if (isp->hw->fw_abi != ISP_FW_ABI_H17 || isp->hw->capture_meta_size) {
+		err = isp_cmd_ch_buffer_pool_config_set(isp, ch,
+							CISP_POOL_TYPE_META_CAPTURE);
+		if (err)
+			return err;
+	}
 
 	/* The H17 firmware also takes the geometry of the output buffers. */
 	if (isp->hw->fw_abi != ISP_FW_ABI_H17)

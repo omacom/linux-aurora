@@ -144,17 +144,44 @@ static int apple_isp_map_fw_mmio(struct apple_isp *isp)
 	return 0;
 }
 
+/* The IOVA range of a memory-region, from its last iommu-addresses entry. */
+static int isp_of_region_iova(struct device *dev, const char *name,
+			      phys_addr_t *base, size_t *size)
+{
+	const __be32 *maps, *end;
+	int idx, len;
+
+	idx = of_property_match_string(dev->of_node, "memory-region-names",
+				       name);
+	if (idx < 0)
+		return -ENOENT;
+
+	struct device_node *np __free(device_node) =
+		of_parse_phandle(dev->of_node, "memory-region", idx);
+	if (!np)
+		return -ENODEV;
+
+	maps = of_get_property(np, "iommu-addresses", &len);
+	if (!maps || !len)
+		return -ENODEV;
+
+	end = maps + len / sizeof(__be32);
+
+	while (maps < end) {
+		maps++;
+		maps = of_translate_dma_region(dev->of_node, maps, base, size);
+	}
+
+	return 0;
+}
+
 static int apple_isp_init_iommu(struct apple_isp *isp)
 {
 	struct device *dev = isp->dev;
-	phys_addr_t heap_base;
-	size_t heap_size;
+	phys_addr_t heap_base, data_base;
+	size_t heap_size, data_size;
 	u64 vm_size;
 	int err;
-	int idx;
-	int size;
-	struct device_node *mem_node;
-	const __be32 *maps, *end;
 
 	isp->domain = iommu_get_domain_for_dev(isp->dev);
 	if (!isp->domain)
@@ -162,29 +189,35 @@ static int apple_isp_init_iommu(struct apple_isp *isp)
 	isp->shift = __ffs(isp->domain->pgsize_bitmap);
 	isp->fw_iova_mask = isp->hw->fw_iova_mask ?: U64_MAX;
 
-	idx = of_property_match_string(dev->of_node, "memory-region-names",
-				       "heap");
-	mem_node = of_parse_phandle(dev->of_node, "memory-region", idx);
-	if (!mem_node) {
-		dev_err(dev, "No memory-region found for heap\n");
-		return -ENODEV;
-	}
-
-	maps = of_get_property(mem_node, "iommu-addresses", &size);
-	if (!maps || !size) {
+	err = isp_of_region_iova(dev, "heap", &heap_base, &heap_size);
+	if (err) {
 		dev_err(dev, "No valid iommu-addresses found for heap\n");
 		return -ENODEV;
 	}
 
-	end = maps + size / sizeof(__be32);
-
-	while (maps < end) {
-		maps++;
-		maps = of_translate_dma_region(dev->of_node, maps, &heap_base,
-					       &heap_size);
-	}
-
+	isp->fw.heap_base = heap_base;
 	isp->fw.heap_top = heap_base + heap_size;
+
+	/*
+	 * Where the bootloader loads the firmware's data, it backs the
+	 * firmware's main memory only up to the end of it. The rest, up to
+	 * the heap top, is the host's to back.
+	 */
+	err = isp_of_region_iova(dev, "data", &data_base, &data_size);
+	if (!err) {
+		isp->fw.data_top = data_base + data_size;
+		if (isp->fw.data_top <= isp->fw.heap_base ||
+		    isp->fw.data_top > isp->fw.heap_top ||
+		    !IS_ALIGNED(isp->fw.data_top, 1UL << isp->shift)) {
+			dev_err(dev, "data 0x%llx outside the heap 0x%llx-0x%llx\n",
+				isp->fw.data_top, isp->fw.heap_base,
+				isp->fw.heap_top);
+			return -EINVAL;
+		}
+	} else if (err != -ENOENT) {
+		dev_err(dev, "No valid iommu-addresses found for data\n");
+		return -ENODEV;
+	}
 
 	err = of_property_read_u64(dev->of_node, "apple,dart-vm-size",
 				   &vm_size);
@@ -433,6 +466,10 @@ static int apple_isp_probe(struct platform_device *pdev)
 		dev_info(dev, "using temporal filter 0 on M3 Air firmware 14.7\n");
 		isp->temporal_filter = 0;
 	}
+
+	/* the sensor connection layout, for firmware that takes it at boot */
+	of_property_read_u32(dev->of_node, "apple,cam-connections-scheme",
+			     &isp->cam_connections_scheme);
 
 	err = apple_isp_init_presets(isp);
 	if (err) {
@@ -801,6 +838,64 @@ static const struct apple_isp_hw apple_isp_hw_t8140 = {
 	.resident_fw = true,
 };
 
+/* The same for T6040, from the J616s ADT's DART address filter. */
+static const struct isp_mmio_window apple_isp_fw_mmio_t6040[] = {
+	{ 0x220004000, 0x1d4000 },	/* DSID broadcast-clear windows */
+	{ 0x222004000, 0x1d4000 },
+	{ 0x224004000, 0x1d4000 },
+	{ 0x226004000, 0x1d4000 },
+	{ 0x485660000, 0x4000 },
+	{ 0x5003c0000, 0x28000 },	/* PMGR, with the PMP clock scratch */
+	{ 0x500e3c000, 0x4000 },
+	{ 0x502284000, 0x4000 },	/* PMGR, ISP power states */
+	{ 0x502880000, 0x8000 },
+	{ 0x504824000, 0x4000 },	/* PMP bandwidth scratch */
+	{ 0x51062c000, 0x20000 },
+};
+
+/*
+ * T6040 runs the same coprocessor and firmware interface as T8140, booted
+ * as macOS boots it on the J616s (macOS 26.6.2 camera log, kext register
+ * map) and as aurora's m1n1 proxy captures with it: no coprocessor reset,
+ * four broadcast-clear windows in eight slots, the scaler 1 output path and
+ * no capture metadata pool or watchdog.
+ */
+static const struct apple_isp_hw apple_isp_hw_t6040 = {
+	.gen = ISP_GEN_T6040,
+	.fw_abi = ISP_FW_ABI_H17,
+	.pmu_base = 0x0,
+
+	.dsid_count = 4,
+	.dsid_slots = 8,
+	.dsid_clr_base0 = 0x2201d4000,
+	.dsid_clr_base1 = 0x2221d4000,
+	.dsid_clr_base2 = 0x2241d4000,
+	.dsid_clr_base3 = 0x2261d4000,
+	.dsid_clr_range0 = 0x2fc,
+
+	/* the PMGR and PMP scratch words of the ISP's DAPF windows */
+	.clock_scratch = 0x5003d0fa8,
+	.clock_base = 0x0,
+	.clock_bit = 0x0,
+	.clock_size = 0x8,
+	.bandwidth_scratch = 0x504824000,
+	.bandwidth_base = 0x0,
+	.bandwidth_bit = 0x0,
+	.bandwidth_size = 0x8,
+	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
+
+	.scl1 = true,
+	.lpdp = false,
+	.meta_size = ISP_META_SIZE_T8140,
+	.fw_mmio = apple_isp_fw_mmio_t6040,
+	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t6040),
+
+	.coproc_control = ISP_COPROC_CONTROL_T8140,
+	.boot_mode = 1,
+	.shared_size = 0xde600000,
+	.resident_fw = true,
+};
+
 static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t8103-isp", .data = &apple_isp_hw_t8103 },
 	{ .compatible = "apple,t8112-isp", .data = &apple_isp_hw_t8112 },
@@ -810,6 +905,7 @@ static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t6030-isp", .data = &apple_isp_hw_t6030 },
 	{ .compatible = "apple,t6031-isp", .data = &apple_isp_hw_t6031 },
 	{ .compatible = "apple,t8140-isp", .data = &apple_isp_hw_t8140 },
+	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6040 },
 	{},
 };
 MODULE_DEVICE_TABLE(of, apple_isp_of_match);
