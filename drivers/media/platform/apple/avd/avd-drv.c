@@ -320,7 +320,14 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 		goto done;
 	} else {
 		dev_err(avd->dev, "H%d error", status);
-		/* let watchdog handle */
+		/*
+		 * avd-fw err(n): VP n raised its error interrupt and stopped,
+		 * and the PP only starts on a VP done, so the job cannot
+		 * complete any more. Run the watchdog now instead of after its
+		 * timeout: it resets the AVD and fails only this frame, and it
+		 * ignores a job the hardware does not own yet.
+		 */
+		mod_delayed_work(system_wq, &ctx->watchdog_work, 0);
 		goto done;
 	}
 
