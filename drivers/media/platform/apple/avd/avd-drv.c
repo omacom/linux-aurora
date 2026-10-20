@@ -797,10 +797,9 @@ static const struct avd_variant avd_t8132_variant = {
 };
 
 /*
- * T6040 (M4 Pro): the T8132 decoder, but only H.264 and VP9 decode
- * correctly there so far. An HEVC stream with wavefront parallel processing
- * stalled the VP on its first job, and AV1 has not been tried. The decoder
- * binds at boot, so do not offer either to V4L2 clients.
+ * T6040 (M4 Pro): the T8132 decoder. An HEVC stream with wavefront parallel
+ * processing stalled the VP on its first job, so HEVC is not offered to V4L2
+ * clients.
  */
 static const struct avd_variant avd_t6040_variant = {
 	.vp_slots = {
@@ -812,7 +811,8 @@ static const struct avd_variant avd_t6040_variant = {
 	.fifo_slots = 15,
 	.configure_stream = t8122_configure_stream,
 	.capabilities = AVD_CAPABILITY_H264 |
-			AVD_CAPABILITY_VP9,
+			AVD_CAPABILITY_VP9 |
+			AVD_CAPABILITY_AV1,
 	.fw_name = "apple/avd-fw-v5-t1.bin",
 	.revision = 4,
 	.vp_slot_offset = 0xc,
