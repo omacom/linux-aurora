@@ -97,6 +97,7 @@ struct avd_av1_decoded_buffer_info {
 	u8 ref_frame_idx[V4L2_AV1_REFS_PER_FRAME];
 	bool intrabc;
 	size_t color_size;
+	size_t seg_size;
 };
 
 struct avd_hevc_decoded_buffer_info {

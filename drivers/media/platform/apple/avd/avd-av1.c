@@ -202,6 +202,11 @@
 	(ALIGN_DOWN((dst), AVD_ALIGN) - ALIGN(cl, AVD_ALIGN))
 #define AVD_AV1_CDFS_OFFSET(dst, cl) \
 	(AVD_AV1_COLOR_OFFSET(dst, cl) - ALIGN(AVD_CDFS_SIZE, AVD_ALIGN))
+/* The frame's segmentation map, saved with it like the CDFs (AV1 7.20) */
+#define AVD_AV1_SEG_OFFSET(dst, cl, sl) \
+	(AVD_AV1_CDFS_OFFSET(dst, cl) - (sl))
+
+#define AV1_PRIMARY_REF_NONE	7
 
 struct avd_av1_run {
 	struct avd_run base;
@@ -209,6 +214,8 @@ struct avd_av1_run {
 	struct {
 		dma_addr_t probs_out;
 		dma_addr_t color;
+		dma_addr_t seg;
+		dma_addr_t prev_seg;
 	} addresses;
 
 	const struct v4l2_ctrl_av1_sequence *seq;
@@ -223,7 +230,7 @@ struct avd_av1_ctx {
 		struct avd_buf inst;
 		struct avd_buf pipe_state;
 		struct avd_buf probs;
-		struct avd_buf seg;
+		struct avd_buf no_prev_seg;
 		struct avd_buf above_info;
 		struct avd_buf rf_above_info;
 		struct avd_buf az_above;
@@ -812,9 +819,8 @@ static void set_header(struct avd_ctx *ctx, struct avd_av1_run *run)
 	pusha(run->addresses.probs_out, "probs_out", 0);
 	pusha(av1_ctx->bufs.probs.addr, "probs", 1);
 	pusha(av1_ctx->bufs.above_info.addr, "col", 0);
-	pusha(av1_ctx->bufs.seg.addr, "seg", 0);
-	/* make it obvious if its used */
-	pusha((dma_addr_t)0xb0b0b0b0b0b0, "", 1);
+	pusha(run->addresses.seg, "seg", 0);
+	pusha(run->addresses.prev_seg, "prev_seg", 1);
 	pusha(run->addresses.color, "w_color", 0);
 
 	for (i = 0; i < 3; i++) {
@@ -1062,7 +1068,7 @@ static void avd_av1_set_prob(struct avd_ctx *ctx, struct avd_av1_run *run)
 	dst = vb2_to_avd_decoded_buf(&run->base.bufs.dst->vb2_buf);
 
 	if (error_resilient_mode || frame_is_intra ||
-	    run->frame->primary_ref_frame == 7) {
+	    run->frame->primary_ref_frame == AV1_PRIMARY_REF_NONE) {
 		avd_av1_default_coeff_probs(run->frame->quantization.base_q_idx,
 					    av1_ctx->bufs.probs.cpu);
 		avd_av1_set_default_cdfs(av1_ctx->bufs.probs.cpu);
@@ -1090,6 +1096,66 @@ static void avd_av1_set_prob(struct avd_ctx *ctx, struct avd_av1_run *run)
 	       av1_ctx->bufs.probs.cpu, sizeof(struct avd_av1_cdfs));
 }
 
+/*
+ * The segment ids the frame reads as the previous ones (load_previous_segment_ids()):
+ * the primary reference frame's map if that frame has the same size, else zeroes.
+ * The AVD reads them whenever segmentation is on, and writes the frame's map only
+ * when update_map is set; otherwise fill in the map the spec saves with the frame.
+ */
+static void avd_av1_set_seg(struct avd_ctx *ctx, struct avd_av1_run *run)
+{
+	struct avd_av1_ctx *av1_ctx = ctx->priv;
+	const struct v4l2_ctrl_av1_frame *frame = run->frame;
+	u8 flags = frame->segmentation.flags;
+	struct avd_decoded_buffer *dst, *ref = NULL;
+	void *seg, *prev_seg = NULL;
+
+	dst = vb2_to_avd_decoded_buf(&run->base.bufs.dst->vb2_buf);
+	seg = vb2_plane_vaddr(&dst->base.vb.vb2_buf, 0) +
+	      AVD_AV1_SEG_OFFSET(dst->base.vb.vb2_buf.planes[0].length,
+				 dst->av1.color_size, dst->av1.seg_size);
+
+	if (frame->primary_ref_frame != AV1_PRIMARY_REF_NONE) {
+		ref = avd_get_ref_buf(
+			ctx, &dst->base.vb,
+			frame->reference_frame_ts
+				[frame->ref_frame_idx[frame->primary_ref_frame]]);
+		/* avd_get_ref_buf() returns dst for a missing reference */
+		/* same MiCols and MiRows, as libdav1d compares them */
+		if (ref == dst ||
+		    DIV_ROUND_UP(ref->av1.width + 1, 8) !=
+			    DIV_ROUND_UP(frame->frame_width_minus_1 + 1, 8) ||
+		    DIV_ROUND_UP(ref->av1.height + 1, 8) !=
+			    DIV_ROUND_UP(frame->frame_height_minus_1 + 1, 8))
+			ref = NULL;
+	}
+
+	if (ref) {
+		size_t off = AVD_AV1_SEG_OFFSET(
+			ref->base.vb.vb2_buf.planes[0].length,
+			ref->av1.color_size, ref->av1.seg_size);
+
+		run->addresses.prev_seg =
+			vb2_dma_contig_plane_dma_addr(&ref->base.vb.vb2_buf, 0) +
+			off;
+		prev_seg = vb2_plane_vaddr(&ref->base.vb.vb2_buf, 0) + off;
+	} else {
+		run->addresses.prev_seg = av1_ctx->bufs.no_prev_seg.addr;
+	}
+
+	if (!(flags & V4L2_AV1_SEGMENTATION_FLAG_ENABLED) ||
+	    (!(flags & V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP) && !prev_seg))
+		memset(seg, 0, dst->av1.seg_size);
+	else if (!(flags & V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP))
+		memcpy(seg, prev_seg, dst->av1.seg_size);
+}
+
+static int avd_av1_seg_size(int w, int h)
+{
+	/* 3 bits per 4x4 block, in rows of 128x128 superblocks (64x64 fit too) */
+	return ALIGN(ALIGN(w, 128) * ALIGN(h, 128) / 128 * 3, AVD_ALIGN);
+}
+
 static int avd_color_size(int h, int w)
 {
 	/*
@@ -1112,6 +1178,8 @@ static void update_dec_buf_info(struct avd_decoded_buffer *buf,
 	buf->av1.intrabc = frame->flags & V4L2_AV1_FRAME_FLAG_ALLOW_INTRABC;
 
 	buf->av1.color_size = avd_color_size(frame->frame_width_minus_1 + 1,
+					     frame->frame_height_minus_1 + 1);
+	buf->av1.seg_size = avd_av1_seg_size(frame->frame_width_minus_1 + 1,
 					     frame->frame_height_minus_1 + 1);
 
 	for (i = 0; i < V4L2_AV1_TOTAL_REFS_PER_FRAME; i++)
@@ -1138,6 +1206,11 @@ static int avd_av1_run_preamble(struct avd_ctx *ctx, struct avd_av1_run *run)
 		return -EINVAL;
 	run->frame = ctrl->p_cur.p;
 
+	/* The map, CDFs and color data sit at the buffer's end, sized by the frame. */
+	if (run->frame->frame_width_minus_1 + 1 > ctx->decoded_fmt.fmt.pix_mp.width ||
+	    run->frame->frame_height_minus_1 + 1 > ctx->decoded_fmt.fmt.pix_mp.height)
+		return -EINVAL;
+
 	ctrl = v4l2_ctrl_find(&ctx->ctrl_hdl,
 			      V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY);
 	if (WARN_ON(!ctrl))
@@ -1159,6 +1232,12 @@ static int avd_av1_run_preamble(struct avd_ctx *ctx, struct avd_av1_run *run)
 
 	run->addresses.probs_out =
 		run->base.y_out + AVD_AV1_CDFS_OFFSET(dst_len, tlb_len);
+
+	run->addresses.seg =
+		run->base.y_out +
+		AVD_AV1_SEG_OFFSET(dst_len, tlb_len,
+				   avd_av1_seg_size(run->frame->frame_width_minus_1 + 1,
+						    run->frame->frame_height_minus_1 + 1));
 	return 0;
 }
 
@@ -1217,11 +1296,10 @@ static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 	if (ret)
 		return ret;
 
-	if (frame->segmentation.flags & V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP) {
-		ret = avd_buf_alloc(
-			avd, &av1_ctx->bufs.seg,
-			(ALIGN(h, 64 << sb_shift) * ALIGN(w, 64 << sb_shift)) /
-				128 * 3);
+	/* zeroes, read as the previous segment ids when no reference has them */
+	if (av1_ctx->bufs.no_prev_seg.size != avd_av1_seg_size(w, h)) {
+		ret = avd_buf_alloc(avd, &av1_ctx->bufs.no_prev_seg,
+				    avd_av1_seg_size(w, h));
 		if (ret)
 			return ret;
 	}
@@ -1279,13 +1357,27 @@ static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 static int avd_av1_run(struct avd_ctx *ctx)
 {
 	struct avd_av1_run run;
-	struct avd_decoded_buffer *dst;
+	struct avd_decoded_buffer *dst, *ref;
 	int ret;
 
 	ret = avd_av1_run_preamble(ctx, &run);
 	if (ret) {
 		avd_run_postamble(ctx, &run.base);
 		return ret;
+	}
+
+	/* The CDF and segmentation map copies need the CPU mappings. */
+	dst = vb2_to_avd_decoded_buf(&run.base.bufs.dst->vb2_buf);
+	ref = dst;
+	if (run.frame->primary_ref_frame != AV1_PRIMARY_REF_NONE)
+		ref = avd_get_ref_buf(ctx, &dst->base.vb,
+				      run.frame->reference_frame_ts
+					      [run.frame->ref_frame_idx
+						       [run.frame->primary_ref_frame]]);
+	if (!vb2_plane_vaddr(&dst->base.vb.vb2_buf, 0) ||
+	    !vb2_plane_vaddr(&ref->base.vb.vb2_buf, 0)) {
+		avd_run_postamble(ctx, &run.base);
+		return -ENOMEM;
 	}
 
 	ret = avd_init_job(ctx, AVD_CODEC_AV1,
@@ -1303,10 +1395,10 @@ static int avd_av1_run(struct avd_ctx *ctx)
 		return ret;
 	}
 
-	dst = vb2_to_avd_decoded_buf(&run.base.bufs.dst->vb2_buf);
 	update_dec_buf_info(dst, run.seq, run.frame);
 
 	avd_av1_set_prob(ctx, &run);
+	avd_av1_set_seg(ctx, &run);
 
 	set_header(ctx, &run);
 	set_tiles(ctx, &run);
@@ -1355,7 +1447,7 @@ static void avd_av1_stop(struct avd_ctx *ctx)
 	avd_buf_free(avd, &av1_ctx->bufs.sr_left);
 	avd_buf_free(avd, &av1_ctx->bufs.rf_left);
 	avd_buf_free(avd, &av1_ctx->bufs.rf_left_info);
-	avd_buf_free(avd, &av1_ctx->bufs.seg);
+	avd_buf_free(avd, &av1_ctx->bufs.no_prev_seg);
 	avd_buf_free(avd, &av1_ctx->bufs.mv_above_info);
 
 	avd_buf_free(avd, &av1_ctx->bufs.pipe_state);
@@ -1437,6 +1529,8 @@ static void avd_av1_adjust_decoded_fmt(struct avd_ctx *ctx,
 	pix_mp->plane_fmt[0].sizeimage += ALIGN(AVD_CDFS_SIZE, AVD_ALIGN);
 	pix_mp->plane_fmt[0].sizeimage +=
 		ALIGN(avd_color_size(pix_mp->width, pix_mp->height), AVD_ALIGN);
+	pix_mp->plane_fmt[0].sizeimage +=
+		avd_av1_seg_size(pix_mp->width, pix_mp->height);
 }
 
 static int avd_av1_validate_sequence(struct avd_ctx *ctx,
