@@ -334,6 +334,49 @@ int apple_isp_detect_camera(struct apple_isp *isp)
 	return err;
 }
 
+/*
+ * A setfile is a chain of { le32 size, le32 0, le32 tag, payload } sections
+ * from 0x14 on, size counting what follows it. The lens shading sections
+ * hold 18-byte table records after a 10-byte header: { ?, 0x20, 0x20,
+ * offset lo, offset hi, 0, 0, width, height }. The xx24 setfiles keep the
+ * row stride (2 * width) in "offset hi"; the H17 firmware reads it as the
+ * offset's high half ("baseHi") and faults far past the file. Their xx25
+ * twins are the same tables with it zeroed, as macOS hands them over.
+ */
+static void isp_setfile_fixup_h17(void *data, size_t len)
+{
+	size_t off = 0x14;
+
+	while (off + 12 <= len) {
+		u32 size = get_unaligned_le32(data + off);
+		size_t end = off + 4 + size;
+		size_t rec;
+		int i;
+
+		if (size < 8 || end > len)
+			break;
+
+		switch (get_unaligned_le32(data + off + 8)) {
+		case 0xc003:
+		case 0xc01b:
+		case 0xc01c:
+		case 0xc01f:
+		case 0xc021:
+			rec = off + 12 + 10;
+			for (i = 0; i < 16 && rec + 18 <= end; i++, rec += 18) {
+				if (get_unaligned_le16(data + rec + 2) != 0x20 ||
+				    get_unaligned_le16(data + rec + 4) != 0x20)
+					break;
+				if (get_unaligned_le16(data + rec + 8) ==
+				    2 * get_unaligned_le16(data + rec + 14))
+					put_unaligned_le16(0, data + rec + 8);
+			}
+			break;
+		}
+		off = end;
+	}
+}
+
 static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 {
 	struct isp_format *fmt = isp_get_format(isp, ch);
@@ -372,6 +415,8 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 	memcpy(isp->data_surf->virt, fw->data, len);
 	memset(isp->data_surf->virt + len, 0, setfile->size - len);
 	release_firmware(fw);
+	if (isp->hw->fw_abi == ISP_FW_ABI_H17)
+		isp_setfile_fixup_h17(isp->data_surf->virt, len);
 
 	return isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
 					setfile->size);
