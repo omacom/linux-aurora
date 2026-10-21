@@ -20,48 +20,6 @@
   }
  },
  "warnings": {
-  "apple-dcp-external-announce.announce_unbind_running_hotplug_test": [
-   {
-    "site": "kernel/workqueue.c:__flush_work",
-    "count": 1,
-    "reason": "WARN_ON(!work->func): dcp_comp_unbind() calls disable_work_sync(&dcp->dimensions_wq), which only dcp_modes_init() initialises; the announce test fixture never calls dcp_modes_init(). The test still passes."
-   }
-  ],
-  "apple-dcp-external-announce.announce_shutdown_running_hotplug_test": [
-   {
-    "site": "kernel/workqueue.c:__flush_work",
-    "count": 1,
-    "reason": "Same uninitialised dimensions_wq flush in dcp_comp_unbind()."
-   }
-  ],
-  "apple-dcp-external-announce.announce_probe_after_unbind_test": [
-   {
-    "site": "kernel/workqueue.c:__flush_work",
-    "count": 1,
-    "reason": "Same uninitialised dimensions_wq flush in dcp_comp_unbind()."
-   }
-  ],
-  "apple-dcp-external-announce.announce_release_while_stopped_test": [
-   {
-    "site": "kernel/workqueue.c:__flush_work",
-    "count": 3,
-    "reason": "Same uninitialised dimensions_wq flush in dcp_comp_unbind(), once per unbind in the case."
-   }
-  ],
-  "apple-dcp-external-announce.announce_resume_hold_sleep_again_test": [
-   {
-    "site": "kernel/workqueue.c:__flush_work",
-    "count": 3,
-    "reason": "Same uninitialised dimensions_wq flush in dcp_comp_unbind(), once per unbind in the case."
-   }
-  ],
-  "apple-dcp-external-announce.announce_new_connection_sleep_again_test": [
-   {
-    "site": "kernel/workqueue.c:__flush_work",
-    "count": 3,
-    "reason": "Same uninitialised dimensions_wq flush in dcp_comp_unbind(), once per unbind in the case."
-   }
-  ],
   "apple-display-parser.parser_attribute_deferred": [
    {
     "site": "kernel/workqueue.c:__queue_work",
