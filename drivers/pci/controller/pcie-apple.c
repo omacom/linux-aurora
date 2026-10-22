@@ -3959,7 +3959,7 @@ static int apple_pcie_config_write(struct pci_bus *bus, unsigned int devfn,
 	if (pcie->hw->mps_timers && where == PCIEC_RP_DEVCTL)
 		apple_pcie_update_mps_timers(pcie,
 					     FIELD_GET(PCI_EXP_DEVCTL_PAYLOAD, val));
-	if (!pcie->kernel_init)
+	if (!(pcie->kernel_init || pcie->tunnel_cold_init))
 		return ret;
 	/* Root-port prefetchable window. The port block has to be told too. */
 	if (where < 0x24 || where >= 0x30)
