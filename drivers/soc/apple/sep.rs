@@ -877,12 +877,17 @@ impl SepData {
                 Some(store)
             }
             Err(e) => {
-                dev_err!(
+                // The enclave must still be booted: on the M1 and M2 laptops
+                // the Secure Enclave sits in the path of the microphone data
+                // lines, and the microphones only work once it runs. Without
+                // the store the enclave's xART requests are refused (see
+                // `on_xarm`), so Touch ID and trusted keys stay unavailable.
+                dev_warn!(
                     dev,
-                    "xART gigalocker in the iBoot container is unavailable or invalid: {:?}\n",
+                    "xART gigalocker in the iBoot container is unavailable or invalid ({:?}); booting the SEP without it: Touch ID and trusted keys stay unavailable until the next boot\n",
                     e
                 );
-                return Err(e);
+                None
             }
         };
 
