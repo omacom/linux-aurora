@@ -30,6 +30,7 @@
 #include "dcp-announce.h"
 #include "dcp-display-metadata.h"
 #include "dcp-metadata-epoch.h"
+#include "dcp-panel-edid.h"
 #include "dcp-180hz.h"
 #include "iomfb.h"
 #include "iomfb_h17p.h"
@@ -232,6 +233,8 @@ struct dcp_panel {
 	u32 edr_ceiling;
 	/// calibrated colour target from the raw ADT; NULL if not given
 	const struct dcp_color_space *color_target;
+	/// make and product for the base EDID, from the panel's compatible
+	struct dcp_panel_id id;
 };
 
 /*
