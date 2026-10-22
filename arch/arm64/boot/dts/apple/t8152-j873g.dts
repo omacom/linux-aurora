@@ -247,3 +247,5 @@
 		};
 	};
 };
+
+#include "t8152-j873g-peripherals.dtsi"
