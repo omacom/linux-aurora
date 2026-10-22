@@ -39,7 +39,7 @@ impl QosIds {
         let mut used = self.used.lock();
         let id = used.trailing_ones();
         if id == 128 {
-            return Err(ENOSPC);
+            return Err(resource_exhausted!("QoS IDs"));
         }
         *used |= 1u128 << id;
         Ok(QosLease {
@@ -121,6 +121,8 @@ pub(crate) struct Context {
     work_base: u64,
     render: Arc<Mutex<Option<Arc<RenderPool>>>>,
     render_blocks: AtomicUsize,
+    /// Timestamp pages of retired compute commands, mapped in this context's VM.
+    compute_timestamps: Arc<super::completion::ComputeTimestampCache>,
     /// Fixed for the context's life. Physical queues bound to it carry this
     /// profile in every record, ring, doorbell and registration.
     policy: Policy,
@@ -142,6 +144,7 @@ impl Context {
             mmu::PROT_GPU_FW_SHARED_RW,
             CpuMap::WriteCombined,
         )?;
+        scheduler.classify_memory(crate::agx_memory_stats::KernelCategory::Scheduler);
         scheduler.initialize::<fw::Scheduler>(0, |value| {
             value.init();
             Ok(())
@@ -194,11 +197,15 @@ impl Context {
             work_base,
             render,
             render_blocks: AtomicUsize::new(super::fw::freelist::RENDER_BLOCKS),
+            compute_timestamps: super::completion::ComputeTimestampCache::new()?,
             policy,
         })
     }
     pub(crate) fn vm(&self) -> &Vm {
         self.execution.vm()
+    }
+    pub(crate) fn compute_timestamps(&self) -> &Arc<super::completion::ComputeTimestampCache> {
+        &self.compute_timestamps
     }
     pub(crate) fn status(&self) -> &Arc<VmStatus> {
         &self.status
@@ -387,7 +394,12 @@ impl WorkStateLease {
     }
 
     pub(crate) fn render_slot(&self, pair: u8) -> Result<u32> {
-        self.context.work.lock().render.get(pair).ok_or(ENOSPC)
+        self.context
+            .work
+            .lock()
+            .render
+            .get(pair)
+            .ok_or_else(|| resource_exhausted!("context render channels"))
     }
     pub(crate) fn channel_payload(&self, pair: u8, ordinal: u64) -> Result<u8> {
         self.context

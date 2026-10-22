@@ -29,6 +29,11 @@ impl RenderIds {
             used: [AtomicU64::new(0), AtomicU64::new(1 << 63)],
         }
     }
+    /// Allocated render pool IDs, for diagnostics.
+    pub(crate) fn in_use(&self) -> usize {
+        (self.used[0].load(Ordering::Relaxed).count_ones()
+            + (self.used[1].load(Ordering::Relaxed) & !(1u64 << 63)).count_ones()) as usize
+    }
 }
 struct RenderId {
     slot: u16,
@@ -59,7 +64,7 @@ impl RenderId {
                 }
             }
         }
-        Err(ENOSPC)
+        Err(resource_exhausted!("render free-list IDs"))
     }
 }
 impl Drop for RenderId {
@@ -69,19 +74,89 @@ impl Drop for RenderId {
     }
 }
 
+/// Free-list backing is by far the largest user of the shared lower GPU VA
+/// window, and placing it populates every page before the window is searched.
+/// After a refused placement, builders waiting for capacity would allocate and
+/// free tens of MiB per attempt while nothing in the window changed. A refused
+/// size is therefore refused again without allocating until free-list backing
+/// is freed, except for one probe per interval across all callers.
+static LOWER_FREED: AtomicU64 = AtomicU64::new(0);
+/// `LOWER_FREED + 1` at the latest refusal, or zero after a placement fits.
+static LOWER_REFUSED: AtomicU64 = AtomicU64::new(0);
+static LOWER_REFUSED_SIZE: AtomicU64 = AtomicU64::new(0);
+static LOWER_PROBE_AT: AtomicU64 = AtomicU64::new(0);
+const LOWER_PROBE_NS: u64 = 100_000_000;
+
+/// The window refused free-list backing and nothing was freed since.
+pub(crate) fn lower_pressure() -> bool {
+    let refused = LOWER_REFUSED.load(Ordering::Acquire);
+    refused != 0 && refused == LOWER_FREED.load(Ordering::Acquire).wrapping_add(1)
+}
+
+/// Place free-list backing of `size` bytes unless the same or a smaller size
+/// was refused with nothing freed since; `place` allocates and maps it.
+fn place_lower<T>(size: usize, place: impl FnOnce() -> Result<T>) -> Result<T> {
+    let size = size as u64;
+    if lower_pressure() && size >= LOWER_REFUSED_SIZE.load(Ordering::Relaxed) {
+        let now = super::now_ns();
+        let at = LOWER_PROBE_AT.load(Ordering::Relaxed);
+        if now < at
+            || LOWER_PROBE_AT
+                .compare_exchange(at, now + LOWER_PROBE_NS, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+        {
+            return Err(ENOSPC);
+        }
+    }
+    match place() {
+        Err(error) if error == ENOSPC => {
+            LOWER_REFUSED_SIZE.store(size, Ordering::Relaxed);
+            LOWER_PROBE_AT.store(super::now_ns() + LOWER_PROBE_NS, Ordering::Relaxed);
+            LOWER_REFUSED.store(
+                LOWER_FREED.load(Ordering::Acquire).wrapping_add(1),
+                Ordering::Release,
+            );
+            Err(error)
+        }
+        Ok(placed) => {
+            if size >= LOWER_REFUSED_SIZE.load(Ordering::Relaxed) {
+                LOWER_REFUSED.store(0, Ordering::Release);
+            }
+            Ok(placed)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) struct Pages {
     backing: KernelObject,
     blocks: usize,
     layout: RunLayout,
 }
+impl Drop for Pages {
+    fn drop(&mut self) {
+        LOWER_FREED.fetch_add(1, Ordering::AcqRel);
+    }
+}
 impl Pages {
     fn new(alloc: &Allocator<'_>, blocks: usize, layout: RunLayout) -> Result<Self> {
-        let mut backing = alloc.lower(
-            TABLE_SIZE + blocks * FREE_LIST_BLOCK_SIZE,
-            mmu::UAT_PGSZ as u64,
-            mmu::PROT_GPU_SHARED_RW,
-            CpuMap::WriteCombined,
-        )?;
+        let size = TABLE_SIZE + blocks * FREE_LIST_BLOCK_SIZE;
+        let backing = place_lower(size, || {
+            alloc.lower(
+                size,
+                mmu::UAT_PGSZ as u64,
+                mmu::PROT_GPU_SHARED_RW,
+                CpuMap::WriteCombined,
+            )
+        })?;
+        Self::from_backing(backing, blocks, layout)
+    }
+    /// Size of the backing, for diagnostics.
+    pub(crate) fn bytes(&self) -> usize {
+        TABLE_SIZE + self.blocks * FREE_LIST_BLOCK_SIZE
+    }
+    fn from_backing(mut backing: KernelObject, blocks: usize, layout: RunLayout) -> Result<Self> {
+        backing.classify_memory(crate::agx_memory_stats::KernelCategory::FreeList);
         let base = backing.gpu_va();
         backing.initialize::<PoolTables>(0, |tables| tables.init(base, blocks, layout))?;
         Ok(Self {
@@ -144,14 +219,24 @@ impl RenderBacking {
         if blocks < RENDER_BLOCKS || blocks > PAGE_LIST_SIZE / (FREE_LIST_BLOCK_PAGES as usize * 8) {
             return Err(EINVAL);
         }
-        let pages = Pages::new(alloc, blocks, RunLayout::Render)?;
-        let address = pages.page_list_va();
-        let global = pages
-            .backing
-            .map_alias(render_global, address, mmu::PROT_GPU_SHARED_RW)?;
-        let client = pages
-            .backing
-            .map_alias(client, address, mmu::PROT_GPU_SHARED_RW)?;
+        let size = TABLE_SIZE + blocks * FREE_LIST_BLOCK_SIZE;
+        let (backing, [global, client]) = place_lower(size, || {
+            alloc.lower_with_aliases(
+                size,
+                mmu::UAT_PGSZ as u64,
+                mmu::PROT_GPU_SHARED_RW,
+                CpuMap::WriteCombined,
+                [render_global, client],
+            )
+        })
+        .map_err(|error| {
+            if error == ENOSPC {
+                resource_exhausted!("shared lower GPU VA (render free list)")
+            } else {
+                error
+            }
+        })?;
+        let pages = Pages::from_backing(backing, blocks, RunLayout::Render)?;
         Ok(Self {
             _client: client,
             _global: global,
@@ -244,6 +329,10 @@ impl RenderPool {
     /// No backing is installed: the pool must be re-armed before staging.
     pub(crate) fn vacant(&self) -> bool {
         self.page_list.load(Ordering::Acquire) == 0
+    }
+    /// Bytes of installed backing in the shared lower window, for diagnostics.
+    pub(crate) fn backing_bytes(&self) -> usize {
+        self.backing.lock().as_ref().map_or(0, |backing| backing.pages.bytes())
     }
     /// Pressure reclaim evicted the client VM, which is idle.
     pub(crate) fn client_evicted(&self) -> bool {
@@ -503,6 +592,10 @@ impl ComputePool {
     }
     pub(crate) fn populated(&self) -> bool {
         self.pages.is_some()
+    }
+    /// Bytes of installed backing in the shared lower window, for diagnostics.
+    pub(crate) fn backing_bytes(&self) -> usize {
+        self.pages.as_ref().map_or(0, Pages::bytes)
     }
     /// The release record for this pool's buffer slot under the free-list
     /// generation the queue last published.

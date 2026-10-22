@@ -222,6 +222,8 @@ typedef void (*dr_node_free_t)(struct devres_node *node);
 
 struct devres_node {
 	struct list_head		entry;
+	/* Device-list membership, cleared under devres_lock before detachment. */
+	struct device			*owner;
 	dr_node_release_t		release;
 	dr_node_free_t			free_node;
 	const char			*name;

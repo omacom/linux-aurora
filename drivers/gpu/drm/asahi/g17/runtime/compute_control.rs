@@ -50,7 +50,14 @@ impl Backend {
     /// The caller owns cancellation of a packet that never claimed publication.
     /// A missing retained packet may already have a healthy callback waiting off-lock.
     pub(super) fn timeout_compute(&self, packet: &Arc<Packet>) -> Result {
-        let mut deferred = DeferredBatch::worker()?;
+        // Unpublished packets wait in publication, which bounds them. Without a
+        // collector the watchdog expires again and retries.
+        if !packet.is_published() {
+            return Ok(());
+        }
+        let Ok(mut deferred) = DeferredBatch::worker() else {
+            return Ok(());
+        };
         let result = (|| {
             let mut state = self.shared.state.lock();
             let Some(firmware) = (*state).as_deref_mut() else {

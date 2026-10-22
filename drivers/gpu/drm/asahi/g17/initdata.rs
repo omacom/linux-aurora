@@ -64,12 +64,14 @@ impl ComputeShared {
             KernelObject::backing(alloc.dev, low::RENDER_PAGE_LIST_SIZE, CpuMap::WriteCombined)?;
         let runs =
             KernelObject::backing(alloc.dev, low::RENDER_RUN_LIST_SIZE, CpuMap::WriteCombined)?;
+        pages.classify_memory(crate::agx_memory_stats::KernelCategory::FreeList);
+        runs.classify_memory(crate::agx_memory_stats::KernelCategory::FreeList);
         let mut blocks = KVec::with_capacity(COMPUTE_BLOCKS_MAPPED, GFP_KERNEL)?;
         for _ in 0..COMPUTE_BLOCKS_MAPPED {
-            blocks.push(
-                KernelObject::backing(alloc.dev, abi::FREE_LIST_BLOCK_SIZE, CpuMap::WriteCombined)?,
-                GFP_KERNEL,
-            )?;
+            let block = KernelObject::backing(alloc.dev, abi::FREE_LIST_BLOCK_SIZE,
+                                            CpuMap::WriteCombined)?;
+            block.classify_memory(crate::agx_memory_stats::KernelCategory::FreeList);
+            blocks.push(block, GFP_KERNEL)?;
         }
         let id = u64::from(super::ids::OBJECTS.object()?);
         Ok(Self {
@@ -95,6 +97,7 @@ impl ComputeScheduler {
             mmu::PROT_GPU_FW_SHARED_RW,
             CpuMap::WriteCombined,
         )?;
+        object.classify_memory(crate::agx_memory_stats::KernelCategory::Scheduler);
         object.initialize::<super::fw::context::Scheduler>(0, |state| {
             state.init();
             Ok(())
@@ -675,6 +678,7 @@ impl InitData {
     }
 
     fn add(&mut self, object: KernelObject) -> Result<usize> {
+        object.classify_memory(crate::agx_memory_stats::KernelCategory::Firmware);
         let index = self.objects.len();
         self.objects.push(object, GFP_KERNEL)?;
         Ok(index)

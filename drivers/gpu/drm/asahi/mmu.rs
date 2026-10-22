@@ -1860,6 +1860,37 @@ impl Vm {
         prot: Prot,
         guard_size: usize,
     ) -> Result<KernelMapping> {
+        self.map_in_range_with_mode(
+            gem, object_range, alignment, range, prot, guard_size, mm::InsertMode::Best,
+        )
+    }
+
+    /// Lowest-address placement for a monotonic search across several VMs.
+    pub(crate) fn map_in_range_lowest(
+        &self,
+        gem: &gem::Object,
+        object_range: Range<usize>,
+        alignment: u64,
+        range: Range<u64>,
+        prot: Prot,
+        guard_size: usize,
+    ) -> Result<KernelMapping> {
+        self.map_in_range_with_mode(
+            gem, object_range, alignment, range, prot, guard_size, mm::InsertMode::Low,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn map_in_range_with_mode(
+        &self,
+        gem: &gem::Object,
+        object_range: Range<usize>,
+        alignment: u64,
+        range: Range<u64>,
+        prot: Prot,
+        guard_size: usize,
+        mode: mm::InsertMode,
+    ) -> Result<KernelMapping> {
         use kernel::drm::gem::BaseObject;
         if guard_size % UAT_PGSZ != 0 {
             return Err(EINVAL);
@@ -1916,7 +1947,7 @@ impl Vm {
             0,
             range.start,
             range.end,
-            mm::InsertMode::Best,
+            mode,
         );
         let mut node = match result {
             Ok(node) => node,
@@ -2496,6 +2527,12 @@ impl Uat {
         let slot = binding.binding.as_ref().unwrap().slot() + UAT_USER_CTX_START as u32;
         mod_pr_debug!("MMU: slot {} active users {}\n", slot, binding.active_users);
         Ok(VmBind(vm.clone(), slot))
+    }
+
+    /// Application contexts currently leased, including those of closed queues
+    /// whose scheduler release has not completed.
+    pub(crate) fn execution_contexts_in_use(&self) -> usize {
+        (self.inner.lock().execution_contexts & EXECUTION_CONTEXT_MASK).count_ones() as usize
     }
 
     /// Allocates a stable application context without changing the VM bind slot.

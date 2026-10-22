@@ -46,13 +46,98 @@ struct Entry {
     pending_owner_closed: bool,
     borrowed_active: bool,
     borrowed_dependencies: Option<crate::g17::queue::render::Dependencies>,
+    /// `Pair::switch_in_flight` of a borrowed pair. A borrowed pair publishes
+    /// nothing, so the snapshot can only be stale towards an older switch.
+    borrowed_switch: Option<u64>,
     event_masks: [u64; 2],
+    /// A completion event for this pair arrived while it was borrowed. Event
+    /// passes skip borrowed pairs, so the returning borrower requests another.
+    missed_event: bool,
     closed: bool,
     pending_error: Option<(Arc<crate::g17::status::VmStatus>, Error)>,
     pending_timeout: bool,
     constructing: bool,
     growing: bool,
     published: bool,
+}
+
+/// Counts of every finite queue resource at one instant. Displayed on one line.
+pub(in crate::g17) struct Capacity {
+    queues: usize,
+    contexts: usize,
+    slots: [usize; 4],
+    entries: [usize; 6],
+    retired: [usize; 2],
+    teardown: [usize; 3],
+    qids: (usize, usize, usize),
+    compute: [usize; 3],
+    buffers: usize,
+    metrics: (usize, usize),
+    render_pools: usize,
+    pools: [usize; 3],
+}
+
+// Printed by `pr_warn!` (kernel formatting) and written to debugfs (core formatting).
+impl kernel::fmt::Display for Capacity {
+    fn fmt(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        core::fmt::Display::fmt(self, f)
+    }
+}
+
+impl core::fmt::Display for Capacity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [owned, released, held, quarantined] = self.slots;
+        let [entries, pairs, parked, building, preparing, closed] = self.entries;
+        let [open, draining, releasing] = self.teardown;
+        let (leased, pair_ids, compute_ids) = self.qids;
+        write!(
+            f,
+            "queues={} contexts={}/{} (closing {}); slots owned={} released={} held={} \
+             quarantined={}; entries={} pairs={} parked={} building={} preparing={} \
+             closed={}; retired={}/{}; teardown open={} draining={} releasing={}; qids \
+             leased={} pair={} compute={}; compute queues={} bound={} pools={} MiB; \
+             pb ids={}; metrics={}/{}; render pools={} (with entries {} totalling {} MiB, \
+             largest {} MiB)",
+            self.queues,
+            self.contexts,
+            crate::mmu::MAX_EXECUTION_CONTEXTS,
+            self.contexts.saturating_sub(self.queues),
+            owned,
+            released,
+            held,
+            quarantined,
+            entries,
+            pairs,
+            parked,
+            building,
+            preparing,
+            closed,
+            self.retired[0],
+            self.retired[1],
+            open,
+            draining,
+            releasing,
+            leased,
+            pair_ids,
+            compute_ids,
+            self.compute[0],
+            self.compute[1],
+            self.compute[2] >> 20,
+            self.buffers,
+            self.metrics.0,
+            self.metrics.1,
+            self.render_pools,
+            self.pools[0],
+            self.pools[1] >> 20,
+            self.pools[2] >> 20,
+        )
+    }
+}
+
+/// Unpublished objects removed together, then destroyed outside the device lock.
+pub(super) struct UnusedRenderSpare {
+    _entry: Option<Entry>,
+    _binding: Option<crate::g17::queue::render::RetiredBinding>,
 }
 
 pub(super) struct RenderState {
@@ -124,6 +209,22 @@ impl RenderState {
             .ok_or(EIO)
     }
 
+    /// Whether the pair in `slot` is out of its entry, borrowed by an event
+    /// pass, a preparation or a growth that returns it under the device mutex.
+    fn borrowed(&self, slot: u8) -> bool {
+        self.entry(slot).is_ok_and(|entry| {
+            entry.pair.is_none() && (entry.preparing.is_some() || entry.growing)
+        })
+    }
+
+    /// Whether a completion event arrived while the pair in `slot` was
+    /// borrowed; clears the record. The returned pair is installed again, so
+    /// the next event pass observes it.
+    fn take_missed_event(&mut self, slot: u8) -> bool {
+        self.entry_mut(slot)
+            .is_ok_and(|entry| core::mem::take(&mut entry.missed_event))
+    }
+
     fn reserved(&mut self, reservation: Reservation) -> Result<&mut Entry> {
         let entry = self.entry_mut(reservation.slot)?;
         if entry.reservation.ids != reservation.ids
@@ -157,6 +258,7 @@ impl RenderState {
         }
         entry.borrowed_active = pair.published_in_flight();
         entry.borrowed_dependencies = Some(pair.dependency_snapshot());
+        entry.borrowed_switch = pair.switch_in_flight();
         entry.preparing = Some(packet.clone());
         entry.pair.take().ok_or(EIO)
     }
@@ -176,6 +278,7 @@ impl RenderState {
         }
         entry.pair = pair.take();
         entry.borrowed_dependencies = None;
+        entry.borrowed_switch = None;
         entry.preparing = None;
         Ok(())
     }
@@ -198,6 +301,224 @@ impl RenderState {
 }
 
 impl Registry {
+    /// Yield unused warming only when admission has run out of physical slots.
+    /// Previously published graphs keep their existing ownership and retirement
+    /// rules. The caller destroys returned backing after dropping the device lock.
+    pub(super) fn reclaim_unused_render_spare(
+        &mut self,
+        owner: Option<u64>,
+        require_ids: bool,
+    ) -> Result<Option<UnusedRenderSpare>> {
+        // Prefer an empty reservation or an already parked channel.
+        for with_backing in [false, true] {
+            for slot in 1..RENDER_SLOTS {
+                let mut warm = false;
+                let expected = if let Some(entry) = self.render.entries[slot].as_ref() {
+                    if entry.constructing
+                        || entry.preparing.is_some()
+                        || entry.growing
+                        || entry.pending_error.is_some()
+                        || entry.pending_timeout
+                    {
+                        continue;
+                    }
+                    // Compute can gain identities only from physical channels
+                    // that never entered command publication. Render can reuse
+                    // a retained render identity without changing its lifetime.
+                    if owner.is_none()
+                        && !entry
+                            .reservation
+                            .ids
+                            .iter()
+                            .all(|id| self.qids.can_cancel_unpublished(*id))
+                    {
+                        continue;
+                    }
+                    if let Some(pair) = entry.pair.as_ref() {
+                        if !with_backing {
+                            continue;
+                        }
+                        if owner.is_some() && pair.reusable()? {
+                            None
+                        } else if pair.can_yield_unused()? {
+                            warm = true;
+                            Some(entry.reservation.owner)
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        if with_backing || entry.context.is_some() {
+                            continue;
+                        }
+                        None
+                    }
+                } else {
+                    if with_backing || require_ids || owner.is_none() {
+                        continue;
+                    }
+                    None
+                };
+                if !self
+                    .admission
+                    .reassign_unused_spare(slot as u8, expected, owner)
+                {
+                    continue;
+                }
+                if owner.is_none() {
+                    let entry = self.render.entries[slot].take();
+                    if let Some(entry) = entry.as_ref() {
+                        for id in entry.reservation.ids {
+                            self.qids.cancel_unpublished(id)?;
+                        }
+                        if let Some(pair) = entry.pair.as_ref() {
+                            self.buffers.unreserve_owner(pair.buffer_id())?;
+                        }
+                    }
+                    return Ok(Some(UnusedRenderSpare {
+                        _entry: entry,
+                        _binding: None,
+                    }));
+                }
+                let mut binding = None;
+                if warm {
+                    let entry = self.render.entries[slot].as_mut().ok_or(EIO)?;
+                    let mut pair = entry.pair.take().ok_or(EIO)?;
+                    self.buffers.unreserve_owner(pair.buffer_id())?;
+                    pair.release_owner();
+                    let (parked, retired) = KBox::into_inner(pair).park();
+                    entry.parked = Some(parked);
+                    entry.context = None;
+                    entry.pool = None;
+                    binding = Some(retired);
+                }
+                return Ok(Some(UnusedRenderSpare {
+                    _entry: None,
+                    _binding: binding,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Every admission slot is held by a live owner and no unused graph can
+    /// yield: move an idle installed pair from a live owner which keeps another
+    /// installed pair to `owner`. Only the owner's logical binding is released;
+    /// QIDs, backing and the old context's retained graph follow the existing
+    /// rebinding rules, and its scheduler is displaced as still live.
+    pub(super) fn forfeit_idle_render_sibling(&mut self, owner: u64) -> Result<bool> {
+        let mut candidates: KVec<(u8, u64)> = KVec::with_capacity(RENDER_SLOTS, GFP_KERNEL)?;
+        let mut empty = 0u64;
+        for slot in 1..RENDER_SLOTS {
+            let Some(entry) = self.render.entries[slot].as_ref() else {
+                empty |= 1u64 << slot;
+                continue;
+            };
+            if entry.constructing
+                || entry.preparing.is_some()
+                || entry.growing
+                || entry.pending_error.is_some()
+                || entry.pending_timeout
+                || entry.closed
+                || entry.parked.is_some()
+            {
+                continue;
+            }
+            let Some(pair) = entry.pair.as_ref() else {
+                continue;
+            };
+            let Some(donor) = pair.owner() else {
+                continue;
+            };
+            if donor == owner || donor != entry.reservation.owner || !pair.forfeitable()? {
+                continue;
+            }
+            let installed = self
+                .render
+                .entries
+                .iter()
+                .flatten()
+                .filter(|other| {
+                    other.pair.as_ref().is_some_and(|pair| pair.owner() == Some(donor))
+                })
+                .count();
+            if installed < 2 {
+                continue;
+            }
+            candidates
+                .push_within_capacity((slot as u8, donor))
+                .map_err(|_| EIO)?;
+        }
+        let Some((slot, _)) = self.admission.forfeit_sibling(&candidates, empty, owner) else {
+            return Ok(false);
+        };
+        self.render
+            .entry_mut(slot)?
+            .pair
+            .as_mut()
+            .ok_or(EIO)?
+            .release_owner();
+        Ok(true)
+    }
+
+    /// A snapshot of every finite queue resource, for attributing refusals.
+    pub(in crate::g17) fn capacity(&self, render_pools: usize, contexts: usize) -> Capacity {
+        let mut entries = [0usize; 6];
+        for entry in self.render.entries.iter().flatten() {
+            entries[0] += 1;
+            entries[1] += usize::from(entry.pair.is_some());
+            entries[2] += usize::from(entry.parked.is_some());
+            entries[3] += usize::from(entry.constructing || entry.growing);
+            entries[4] += usize::from(entry.preparing.is_some());
+            entries[5] += usize::from(entry.closed);
+        }
+        let compute = self
+            .compute
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.queue.as_deref())
+            .fold([0usize; 3], |[all, bound, bytes], queue| {
+                [all + 1, bound + usize::from(queue.owner().is_some()), bytes + queue.pool_bytes()]
+            });
+        // Render pools reachable from installed or prepared entries, each once.
+        let mut pools = [0usize; 3];
+        for (index, entry) in self.render.entries.iter().enumerate() {
+            let Some(pool) = entry.as_ref().and_then(|entry| entry.pool.as_ref()) else {
+                continue;
+            };
+            let first = !self.render.entries[..index].iter().flatten().any(|other| {
+                other.pool.as_ref().is_some_and(|other| Arc::ptr_eq(other, pool))
+            });
+            if first {
+                let bytes = pool.backing_bytes();
+                pools[0] += 1;
+                pools[1] += bytes;
+                pools[2] = pools[2].max(bytes);
+            }
+        }
+        Capacity {
+            queues: self.admission.queues(),
+            contexts,
+            slots: self.admission.census(),
+            entries,
+            retired: [self.render.retired.len(), self.render.retired.capacity()],
+            teardown: self.teardown.phases(),
+            qids: self.qids.census(),
+            compute,
+            buffers: self.buffers.in_use(),
+            metrics: self.metrics.census(),
+            render_pools,
+            pools,
+        }
+    }
+
+    fn has_render_ids(&self, owner: u64) -> bool {
+        self.render
+            .entries
+            .iter()
+            .enumerate()
+            .any(|(slot, entry)| entry.is_some() && self.admission.owns_slot(owner, slot))
+    }
+
     fn ensure_render_ids(&mut self, slot: u8, owner: u64) -> Result {
         if owner == 0 || slot == 0 || usize::from(slot) >= RENDER_SLOTS {
             return Err(EINVAL);
@@ -228,7 +549,9 @@ impl Registry {
                 pending_owner_closed: false,
                 borrowed_active: false,
                 borrowed_dependencies: None,
+                borrowed_switch: None,
                 event_masks: [0; 2],
+                missed_event: false,
                 closed: false,
                 pending_error: None,
                 pending_timeout: false,
@@ -262,12 +585,8 @@ impl Registry {
         {
             return Err(EBUSY);
         }
-        let ids = self.render.entry(slot)?.reservation.ids;
-        // Physical queue identities survive failed graph construction. Only
-        // failure to acquire the second identity can return the first one.
-        for id in ids {
-            self.qids.publish(id)?;
-        }
+        // Construction keeps identities reserved. Publication pins them at the
+        // first firmware-visible command, so unused warming can still yield.
         let buffer = self.buffers.allocate_render()?;
         let entry = self.render.entry_mut(slot)?;
         entry.reservation.owner = owner;
@@ -763,9 +1082,19 @@ impl Registry {
     }
     pub(in crate::g17) fn retain_render_completions(&mut self, masks: [u64; 2]) {
         for entry in self.render.entries.iter_mut().flatten() {
+            let mut hit = false;
             for id in entry.reservation.ids {
                 let qid = usize::from(id.qid());
-                entry.event_masks[qid / 64] |= masks[qid / 64] & (1u64 << (qid % 64));
+                let bit = masks[qid / 64] & (1u64 << (qid % 64));
+                entry.event_masks[qid / 64] |= bit;
+                hit |= bit != 0;
+            }
+            // Event passes skip a pair while preparation, growth or an
+            // observation has borrowed it. Without a record, a completion
+            // that arrived meanwhile waits for an unrelated later event or the
+            // one-millisecond rescan.
+            if hit && (entry.preparing.is_some() || entry.growing) {
+                entry.missed_event = true;
             }
         }
     }

@@ -100,6 +100,9 @@ impl drm::driver::Driver for AsahiDrmDriver {
     const FEAT_RENDER: bool = true;
     const FEAT_SYNCOBJ: bool = true;
     const FEAT_SYNCOBJ_TIMELINE: bool = true;
+    const SHOW_FDINFO: Option<
+        unsafe extern "C" fn(*mut bindings::drm_printer, *mut bindings::drm_file),
+    > = Some(bindings::drm_show_memory_stats);
 
     kernel::declare_drm_ioctls! {
         (ASAHI_GET_PARAMS,      drm_asahi_get_params,
@@ -329,14 +332,19 @@ impl AsahiPlatformDriver {
                 return Err(error);
             }
         };
-        // G17's firmware channel format has no supported stats decoder yet.
+        // Enabled G17 telemetry owns agx_stats through Gpu's registration.
+        // Only the disabled-export placeholder belongs to the platform wrapper.
         let raw_dev = pdev.as_ref().as_raw();
-        let raw_stats = match crate::sysfs_exports::register(raw_dev, core::ptr::null(), false) {
-            Ok(handle) => handle,
-            Err(error) => {
-                gpu.shutdown();
-                return Err(error);
+        let raw_stats = if *module_parameters::stats_export.value() == 0 {
+            match crate::sysfs_exports::register(raw_dev, core::ptr::null(), false) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    gpu.shutdown();
+                    return Err(error);
+                }
             }
+        } else {
+            core::ptr::null_mut()
         };
         Ok(AsahiPlatformDriverData {
             _device: reg.device().into(),

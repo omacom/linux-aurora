@@ -1,0 +1,54 @@
+What:           /sys/devices/platform/.../*.gpu/agx_stats
+Date:           October 2026
+Contact:        Aurora Silicon developers
+Description:
+                Read-only, per-device firmware GPU utilization on T8140 G17P.
+                With asahi.stats_export=0, the file reports unsupported.
+                The default value 1 enables the version 2 export described here.
+                Earlier GPU generations use the separate legacy agx_stats format.
+                Version 2 is a whitespace-delimited key/value format. Readers
+                must check the version and load_valid before using percentages.
+
+                version: 2
+                source: firmware
+                load_valid: 1 if the current utilization is available, else 0
+                busy_percent: firmware aggregate utilization, percent (0..100)
+                util1..util3: firmware engine percentages (0..100); engine labels
+                             are not assigned without independent validation
+                util4: same aggregate as busy_percent; do not sum engine values
+                gpu_power_known: whether a timestamped power state was received
+                gpu_powered: 0 when firmware reports the GPU powered off, else 1
+                samples: accepted primary utilization reports since probe
+                sample_received_ns: host CLOCK_MONOTONIC receive timestamp
+                sample_age_ns: time since the retained utilization report
+                sample_timestamp_ticks: 64-bit firmware utilization timestamp
+                power_timestamp_ticks: newest secondary power-state timestamp
+                clock_hz: 24000000 (timestamp and residency ticks)
+                powered_ticks: completed powered intervals, accumulated from
+                               firmware power-off records since probe
+                unpowered_ticks: completed unpowered intervals, accumulated from
+                                 firmware power-on records since probe
+                invalid_samples: malformed utilization/power records rejected
+
+                A timestamped power-off witness overrides retained utilization
+                with zero. After wake, an old utilization report is unavailable
+                until a report for the new interval arrives. Device loss or
+                shutdown invalidates load until a new device is probed. Receive timestamps
+                do not order events across firmware rings: firmware timestamps
+                determine which state is newer. Suspend can separate the host
+                and firmware clocks; do not subtract values from those domains.
+
+                Power residency is not GPU busy time. Residency counters omit
+                the currently open power interval and saturate at U64_MAX.
+                Neither these counters nor the percentages are per-client DRM
+                engine execution time. No per-client execution counter is
+                synthesized from queue admission, wall time or job spans.
+
+                Reading debugfs asahi-g17/statistics requests two seconds of full
+                raw-payload capture, including undecoded record kinds. Repeat
+                reads to keep diagnostic capture active. It is disabled by
+                default and is not needed for normal utilization reporting.
+                Trace records and uncaptured statistics only read required words.
+                Captured counts exclude records outside the capture window. That diagnostic format is not a
+                stable userspace ABI. Optional telemetry registration failure
+                does not prevent GPU initialization and is logged by the driver.

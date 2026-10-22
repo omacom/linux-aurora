@@ -56,20 +56,26 @@ impl Rings {
     }
 
     pub(crate) fn drain_trace(&mut self, dev: &Device, init: &InitData, role: Role) {
-        self.drain_report(dev, init, role, ReportRing::Trace);
+        self.drain_report(dev, init, role, ReportRing::Trace, None);
     }
 
-    pub(crate) fn drain_statistics(&mut self, dev: &Device, init: &InitData, role: Role) {
-        self.drain_report(dev, init, role, ReportRing::Statistics);
+    pub(crate) fn drain_statistics(&mut self, dev: &Device, init: &InitData, role: Role,
+                                  statistics: &super::statistics::Statistics) {
+        self.drain_report(dev, init, role, ReportRing::Statistics, Some(statistics));
     }
 
-    fn drain_report(&mut self, dev: &Device, init: &InitData, role: Role, ring: ReportRing) {
+    fn drain_report(&mut self, dev: &Device, init: &InitData, role: Role, ring: ReportRing,
+                    statistics: Option<&super::statistics::Statistics>) {
         let quarantined = &mut self.quarantined[role as usize][ring as usize];
         if *quarantined {
             return;
         }
-        if let Err(error) = Self::consume_report(init, role, ring) {
+        if let Err(error) = Self::consume_report(init, role, ring, statistics) {
             *quarantined = true;
+            if let Some(statistics) = statistics {
+                // Without both report streams, retained load is no longer current.
+                statistics.load.invalidate();
+            }
             dev_err!(
                 dev.as_ref(),
                 "G17 {:?} {:?} ring stopped: {:?}\n",
@@ -80,7 +86,8 @@ impl Rings {
         }
     }
 
-    fn consume_report(init: &InitData, role: Role, ring: ReportRing) -> Result {
+    fn consume_report(init: &InitData, role: Role, ring: ReportRing,
+                      statistics: Option<&super::statistics::Statistics>) -> Result {
         let (state, entries, capacity, allowed_types) = ring.geometry();
         let consumer_word = init.status_word(role, state)?;
         let producer_word = init.status_word(role, state + RX_PRODUCER_OFFSET)?;
@@ -94,13 +101,41 @@ impl Rings {
         }
         while consumer != producer {
             let offset = entries + consumer as usize * EVENT_RECORD_SIZE;
-            let tag = match ring {
-                // Copy the entire trace entry before returning its slot.
-                ReportRing::Trace => init.status_read_words::<EVENT_WORDS>(role, offset)?[0],
-                ReportRing::Statistics => init.status_read_words::<1>(role, offset)?[0],
-            };
+            let tag = init.status_word(role, offset)?.load(Ordering::Relaxed);
             if tag >= u32::BITS || allowed_types & (1 << tag) == 0 {
                 return Err(EIO);
+            }
+            if let Some(statistics) = statistics {
+                const { assert!(super::statistics::WORDS == EVENT_WORDS) };
+                let pending = statistics.capture_pending();
+                let now_ns = if pending || (role == Role::Primary && tag == 0x13) {
+                    super::now_ns()
+                } else { 0 };
+                if pending && statistics.capture_enabled(now_ns) {
+                    // Diagnostic capture retains every word before returning the ring slot.
+                    let words = init.status_read_words::<EVENT_WORDS>(role, offset)?;
+                    if words[0] != tag { return Err(EIO); }
+                    statistics.record(role as usize, now_ns, &words);
+                } else {
+                    // The production decoder reads only fields it consumes. Trace records
+                    // and unsupported statistics need no payload copy or receive timestamp.
+                    let mut words = [0; EVENT_WORDS];
+                    words[0] = tag;
+                    match (role, tag) {
+                        (Role::Primary, 0x13) => {
+                            words[1..7].copy_from_slice(&init.status_read_words::<6>(role, offset + 4)?);
+                        }
+                        (Role::Secondary, 0x19) => {
+                            words[1..3].copy_from_slice(&init.status_read_words::<2>(role, offset + 4)?);
+                            words[6] = init.status_word(role, offset + 24)?.load(Ordering::Relaxed);
+                        }
+                        (Role::Secondary, 0x11 | 0x12) => {
+                            words[1..3].copy_from_slice(&init.status_read_words::<2>(role, offset + 4)?);
+                        }
+                        _ => {}
+                    }
+                    statistics.load.record(role as usize, now_ns, &words);
+                }
             }
             consumer = (consumer + 1) & (capacity - 1);
             fence(Ordering::SeqCst);

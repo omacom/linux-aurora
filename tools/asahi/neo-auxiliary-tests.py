@@ -27,10 +27,13 @@ mod mmu {
  impl KernelMapping{pub fn iova(&self)->u64{self.va}}
 }
 mod storage{CONSTANTS}
+mod agx_memory_stats{pub enum KernelCategory{RenderGeneration}}
+use agx_memory_stats::KernelCategory;
 mod cfg{pub const AUXILIARY:std::ops::Range<u64>=0x100000..0x500000;}
 enum CpuMap{WriteCombined}
 struct KernelObject{va:u64,size:usize}
 impl KernelObject{
+ fn classify_memory(&self,_c:KernelCategory){}
  fn gpu_va(&self)->u64{self.va}
  fn map_range(&self,_v:&mmu::Vm,_r:Range<usize>,_a:Range<u64>,_align:u64,_p:u32,_g:u32)->Result<mmu::KernelMapping>{Err(-28)}
 }

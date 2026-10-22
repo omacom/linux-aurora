@@ -526,6 +526,10 @@ pub(super) const fn create_fops(
     fops.read = Some(bindings::drm_read);
     fops.llseek = Some(bindings::noop_llseek);
     fops.mmap = Some(bindings::drm_gem_mmap);
+    #[cfg(CONFIG_PROC_FS)]
+    {
+        fops.show_fdinfo = Some(bindings::drm_show_fdinfo);
+    }
     fops.fop_flags = bindings::FOP_UNSIGNED_OFFSET;
 
     fops

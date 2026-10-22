@@ -9,11 +9,18 @@ use kernel::prelude::*;
 pub(crate) const SUPPORT_SIZE: usize = 0x40000;
 pub(crate) const EVENT_SLOTS: usize = 0x4000;
 pub(crate) const EVENT_COUNT: usize = 35;
-pub(crate) const STATE_SIZE: usize = 0x18000;
-pub(crate) const DEFLAKE: usize = 0x4000;
-pub(crate) const TA_STATUS: usize = 0x8000;
-pub(crate) const AUXILIARY: usize = 0x10000;
+// Host-private packing: consumers receive separate GPU pointers to these ranges.
+// Keep every accessed range and all generation slots, without unused backing pages.
+pub(crate) const STATE_SIZE: usize = 0x10000;
+pub(crate) const DEFLAKE: usize = 0;
+pub(crate) const TA_STATUS: usize = 0x4000;
+pub(crate) const AUXILIARY: usize = 0x8000;
 pub(crate) const AUXILIARY_SIZE: usize = 0x8000;
+const _: () = {
+    assert!(DEFLAKE + 0x4000 <= TA_STATUS);
+    assert!(TA_STATUS + 0x4000 <= AUXILIARY);
+    assert!(AUXILIARY + AUXILIARY_SIZE == STATE_SIZE);
+};
 
 #[repr(C)]
 pub(crate) struct Event {

@@ -42,6 +42,7 @@ impl crate::g17::Firmware {
             };
             entry.borrowed_active = pair.published_in_flight();
             entry.borrowed_dependencies = Some(pair.dependency_snapshot());
+            entry.borrowed_switch = pair.switch_in_flight();
             entry.preparing = Some(packet);
             return Ok(Some((slot, entry.pair.take().ok_or(EIO)?)));
         }
@@ -60,6 +61,7 @@ impl crate::g17::Firmware {
         }
         entry.pair = pair.take();
         entry.borrowed_dependencies = None;
+        entry.borrowed_switch = None;
         entry.preparing = None;
         Ok(())
     }
@@ -163,7 +165,7 @@ impl crate::g17::Shared {
             }
             let firmware = (*state).as_deref_mut().ok_or(EIO)?;
             self.changed.notify_all();
-            if firmware.render_grow_pending() {
+            if firmware.render_grow_pending() || firmware.queues.render.take_missed_event(slot as u8) {
                 self.queue_events();
             }
             if !epoch.is_current()

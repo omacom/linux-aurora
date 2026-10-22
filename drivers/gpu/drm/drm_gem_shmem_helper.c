@@ -7,6 +7,7 @@
 #include <linux/export.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/pagemap.h>
 #include <linux/folio_batch.h>
 #include <linux/shmem_fs.h>
 #include <linux/swap.h>
@@ -28,6 +29,41 @@
 #include <drm/drm_print.h>
 
 MODULE_IMPORT_NS("DMA_BUF");
+
+/**
+ * drm_gem_shmem_object_rss - Observe resident shmem backing without populating it
+ * @obj: shmem GEM object whose handle keeps it alive
+ *
+ * Count page-cache pages even after the device has released its page array.
+ * The object's backing file remains alive throughout the fdinfo walk. An
+ * imported object retains its DMA mapping instead of a private shmem file.
+ */
+size_t drm_gem_shmem_object_rss(struct drm_gem_object *obj)
+{
+	if (obj->import_attach)
+		return obj->size;
+	if (!obj->filp)
+		return 0;
+
+	return min_t(size_t, obj->size,
+		     READ_ONCE(obj->filp->f_mapping->nrpages) << PAGE_SHIFT);
+}
+EXPORT_SYMBOL_GPL(drm_gem_shmem_object_rss);
+
+/**
+ * drm_gem_shmem_object_status - Report resident backing for fdinfo
+ * @obj: shmem GEM object whose handle keeps it alive
+ *
+ * The fdinfo walk holds the client's handle-table spinlock. Observe residency
+ * without taking the reservation lock or populating pages. Cached pages are
+ * still resident after unpinning. Reclaim may race this observational snapshot,
+ * as permitted by drm_gem_object_funcs.status.
+ */
+enum drm_gem_object_status drm_gem_shmem_object_status(struct drm_gem_object *obj)
+{
+	return drm_gem_shmem_object_rss(obj) ? DRM_GEM_OBJECT_RESIDENT : 0;
+}
+EXPORT_SYMBOL_GPL(drm_gem_shmem_object_status);
 
 /**
  * DOC: overview

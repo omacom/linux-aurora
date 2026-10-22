@@ -2,6 +2,9 @@ What:		/sys/class/drm/card*/device/agx_stats
 Date:		October 2026
 Contact:	Asahi Linux GPU driver maintainers
 Description:
+		Legacy GPU format. For T8140 G17P, see sysfs-driver-asahi
+		for the version 2 format and power-state validity rules.
+
 		Read-only dump of the AGX firmware statistics decoded by the
 		drm/asahi driver. The driver already polls the firmware statistics
 		ring (see `drivers/gpu/drm/asahi/channel.rs::StatsChannel::poll`,

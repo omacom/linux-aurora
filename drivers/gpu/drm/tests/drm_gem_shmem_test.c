@@ -9,6 +9,7 @@
 
 #include <linux/dma-buf.h>
 #include <linux/iosys-map.h>
+#include <linux/pagemap.h>
 #include <linux/sizes.h>
 
 #include <kunit/test.h>
@@ -53,6 +54,8 @@ static void drm_gem_shmem_test_obj_create(struct kunit *test)
 	shmem = drm_gem_shmem_create(drm_dev, TEST_SIZE);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, shmem);
 	KUNIT_EXPECT_EQ(test, shmem->base.size, TEST_SIZE);
+	KUNIT_EXPECT_EQ(test, drm_gem_shmem_object_status(&shmem->base), 0);
+	KUNIT_EXPECT_EQ(test, drm_gem_shmem_object_rss(&shmem->base), 0);
 	KUNIT_EXPECT_NOT_NULL(test, shmem->base.filp);
 	KUNIT_EXPECT_NOT_NULL(test, shmem->base.funcs);
 
@@ -140,9 +143,14 @@ static void drm_gem_shmem_test_pin_pages(struct kunit *test)
 	ret = kunit_add_action_or_reset(test, drm_gem_shmem_free_wrapper, shmem);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 
+	/* Keep the cached backing resident while checking the unpinned state. */
+	mapping_set_unevictable(shmem->base.filp->f_mapping);
 	ret = drm_gem_shmem_pin(shmem);
 	KUNIT_ASSERT_EQ(test, ret, 0);
 	KUNIT_ASSERT_NOT_NULL(test, shmem->pages);
+	KUNIT_EXPECT_TRUE(test, drm_gem_shmem_object_status(&shmem->base) &
+			  DRM_GEM_OBJECT_RESIDENT);
+	KUNIT_EXPECT_EQ(test, drm_gem_shmem_object_rss(&shmem->base), TEST_SIZE);
 	KUNIT_EXPECT_EQ(test, refcount_read(&shmem->pages_use_count), 1);
 
 	for (i = 0; i < (shmem->base.size >> PAGE_SHIFT); i++)
@@ -150,7 +158,12 @@ static void drm_gem_shmem_test_pin_pages(struct kunit *test)
 
 	drm_gem_shmem_unpin(shmem);
 	KUNIT_EXPECT_NULL(test, shmem->pages);
+	/* Releasing a device pin leaves the backing file's cached pages resident. */
+	KUNIT_EXPECT_TRUE(test, drm_gem_shmem_object_status(&shmem->base) &
+			  DRM_GEM_OBJECT_RESIDENT);
+	KUNIT_EXPECT_EQ(test, drm_gem_shmem_object_rss(&shmem->base), TEST_SIZE);
 	KUNIT_EXPECT_EQ(test, refcount_read(&shmem->pages_use_count), 0);
+	mapping_clear_unevictable(shmem->base.filp->f_mapping);
 }
 
 /*
@@ -342,6 +355,8 @@ static void drm_gem_shmem_test_purge(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, shmem->pages);
 	KUNIT_EXPECT_NULL(test, shmem->sgt);
 	KUNIT_EXPECT_EQ(test, shmem->madv, -1);
+	KUNIT_EXPECT_EQ(test, drm_gem_shmem_object_rss(&shmem->base), 0);
+	KUNIT_EXPECT_EQ(test, drm_gem_shmem_object_status(&shmem->base), 0);
 }
 
 static int drm_gem_shmem_test_init(struct kunit *test)

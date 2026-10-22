@@ -152,6 +152,7 @@ pub(crate) struct Pair {
     owner: Option<u64>,
     ordinal: u64,
     initial_packet: u64,
+    graph_started: bool,
     clusters: u32,
     descriptor_flags: [u32; 2],
     installed: [bool; 2],
@@ -170,12 +171,19 @@ pub(crate) struct Pair {
     context_update: bool,
     /// A retired, never-executed group awaiting republication on this pair.
     replay: Option<Arc<Packet>>,
+    /// Scheduler page of the context of the last published command: the
+    /// scheduler the firmware last ran these queues for. Zero for a fresh graph.
+    executed: u64,
+    /// An owner change in flight: the previous scheduler page and the ordinal of
+    /// the new owner's first command, until that command leaves the pair.
+    switch: Option<(u64, u64)>,
 }
 impl Pair {
     #[inline(never)]
     pub(crate) fn new(
         alloc: &Allocator<'_>,
         pool: &Arc<Pool>,
+        rings: &Arc<kick::RenderRings>,
         ids: [kick::Id; 2],
         slot: u8,
         owner: u64,
@@ -213,8 +221,9 @@ impl Pair {
         }
         let layout = target::Layout::new(pass, clusters)?;
         let storage = KBox::<Self>::new_uninit(GFP_KERNEL)?;
-        let (tiling, ta_alias) = kick::Queue::render(alloc, ids[0], context.vm())?;
-        let (fragment, fragment_alias) = kick::Queue::render(alloc, ids[1], context.vm())?;
+        let (tiling, ta_alias) = kick::Queue::render(alloc, ids[0], context.vm(), rings)?;
+        let (fragment, fragment_alias) =
+            kick::Queue::render(alloc, ids[1], context.vm(), rings)?;
         let (memory, aliases) = memory::Memory::new(
             alloc,
             pool,
@@ -228,7 +237,7 @@ impl Pair {
             word,
         )?;
         storage.write_init(kernel::try_init!(Self {
-            kick_aliases: Some([Some(ta_alias), Some(fragment_alias)]),
+            kick_aliases: Some([ta_alias, fragment_alias]),
             memory,
             kicks: [tiling, fragment],
             free_list,
@@ -239,6 +248,7 @@ impl Pair {
             owner: Some(owner),
             ordinal: 0,
             initial_packet: first.id,
+            graph_started: false,
             clusters,
             descriptor_flags,
             installed: [false; 2],
@@ -253,6 +263,8 @@ impl Pair {
             displaced: None,
             replay: None,
             context_update: true,
+            executed: 0,
+            switch: None,
         }))
     }
     pub(crate) fn qids(&self) -> [u8; 2] {
@@ -503,9 +515,17 @@ impl Pair {
         };
         use core::sync::atomic::{fence, Ordering};
         let (epoch, mcache, policy) = self.publication_preflight(&packet, host)?;
+        self.graph_started = true;
         let ordinal = self.ordinal;
         let next_ordinal = ordinal.checked_add(1).ok_or(EOVERFLOW)?;
         let qids = self.qids();
+        let kick_ids = self.kicks.each_ref().map(kick::Queue::id);
+        // Command preparation assigns context channel state before publishing
+        // producers. Pin identities before that assignment; warming never
+        // enters this path and can still give its unused identities back.
+        for id in kick_ids {
+            host.publish_qid(id)?;
+        }
         let kicks = self.kicks.each_ref().map(kick::Queue::timestamp);
         let parents = self.kicks.each_ref().map(kick::Queue::parent);
         let work = packet.completion.work_state()?;
@@ -730,9 +750,6 @@ impl Pair {
                 host.install_pair(&registration)?;
                 self.registered = Some(policy.priority());
             }
-            for kick in &self.kicks {
-                host.publish_qid(kick.id())?;
-            }
             host.publish_outer_pair(
                 policy.priority(),
                 &fragment_slot,
@@ -781,6 +798,11 @@ impl Pair {
         if let Some(previous) = self.previous.as_mut().filter(|p| p.publication.is_none()) {
             previous.publication = Some(ordinal);
         }
+        let scheduler = packet.context.scheduler_va();
+        if self.executed != 0 && self.executed != scheduler {
+            self.switch = Some((self.executed, ordinal));
+        }
+        self.executed = scheduler;
         packet.context.mark_published();
         self.announce_publication(
             host,
@@ -1578,6 +1600,18 @@ impl Pair {
             }
         }
     }
+    /// The scheduler page these queues last ran a command for, when the next
+    /// publication for `context` changes the queues' owner.
+    pub(crate) fn owner_switch_from(&self, context: &Context) -> Option<u64> {
+        (self.executed != 0 && self.executed != context.scheduler_va()).then_some(self.executed)
+    }
+    /// The previous scheduler page of an owner change whose first command has
+    /// not left the pair yet.
+    pub(crate) fn switch_in_flight(&self) -> Option<u64> {
+        let (from, first) = self.switch?;
+        (self.replay.is_some() || self.active.iter().any(|active| active.ticket.ordinal == first))
+            .then_some(from)
+    }
     pub(crate) fn take_retired_binding(&mut self) -> Option<RetiredBinding> {
         if self.displaced.is_some() {
             return self.displaced.take();
@@ -1612,6 +1646,19 @@ impl Pair {
             .as_ref()
             .is_none_or(|p| p.memory.is_none() && self.context_update && !p.ready);
         Ok(self.owner.is_none()
+            && self.displaced.is_none()
+            && previous_ready
+            && self.idle_for_context(self.context())?)
+    }
+    /// Idle under a live owner and reusable as soon as that owner is released:
+    /// no prepared, active, replayed, quarantined, displaced or unsettled
+    /// superseded state, so a successor needs no firmware witness first.
+    pub(crate) fn forfeitable(&self) -> Result<bool> {
+        let previous_ready = self
+            .previous
+            .as_ref()
+            .is_none_or(|p| p.memory.is_none() && self.context_update && !p.ready);
+        Ok(self.owner.is_some()
             && self.displaced.is_none()
             && previous_ready
             && self.idle_for_context(self.context())?)
@@ -1736,6 +1783,7 @@ impl Pair {
         self.memory.context = binding.context.clone();
         self.owner = Some(binding.owner);
         self.initial_packet = binding.initial_packet;
+        if foreign { self.graph_started = false; }
         self.context_update = true;
         if foreign {
             self.cursors = [0; 2];

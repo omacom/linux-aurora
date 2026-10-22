@@ -11,7 +11,17 @@ use kernel::{dma_fence::RawDmaFence, prelude::*, sync::Arc};
 
 impl Backend {
     pub(in crate::g17) fn timeout_render(&self, packet: &Arc<Packet>) -> Result {
-        let mut deferred = DeferredBatch::worker()?;
+        // A packet still in publication, for example waiting for capacity or
+        // for its pair's graph, has nothing visible to firmware. Its publisher
+        // owns its bounded wait and result; the pair may not even be installed.
+        if !packet.is_published() {
+            return Ok(());
+        }
+        // Without a collector the watchdog expires again and retries: memory
+        // pressure must not stop the runtime for every client.
+        let Ok(mut deferred) = DeferredBatch::worker() else {
+            return Ok(());
+        };
         let result = {
             let mut state = self.shared.state.lock();
             let Some(firmware) = (*state).as_deref_mut() else {

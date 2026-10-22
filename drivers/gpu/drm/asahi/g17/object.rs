@@ -66,6 +66,9 @@ unsafe impl Send for KernelObject {}
 unsafe impl Sync for KernelObject {}
 
 impl KernelObject {
+    pub(crate) fn classify_memory(&self, category: crate::agx_memory_stats::KernelCategory) {
+        self.obj.gem.classify_memory(category);
+    }
     /// Allocates a zeroed object of `size` bytes and maps it into `vm`.
     pub(crate) fn new(
         dev: &AsahiDrmDevice,
@@ -159,6 +162,17 @@ impl KernelObject {
         prot: mmu::Prot,
     ) -> Result<mmu::KernelMapping> {
         gem::ObjectRef::new(self.obj.gem.clone()).map_into_range(vm, range, align, prot, false)
+    }
+
+    fn alias_in_lowest(
+        &self,
+        vm: &mmu::Vm,
+        range: Range<u64>,
+        align: u64,
+        prot: mmu::Prot,
+        guard_size: usize,
+    ) -> Result<mmu::KernelMapping> {
+        vm.map_in_range_lowest(&self.obj.gem, 0..self.size, align, range, prot, guard_size)
     }
 
     /// Maps an exact backing subrange, retaining an explicit unmapped guard.
@@ -321,6 +335,13 @@ impl Allocator<'_> {
             prot,
             cpu,
         )
+        .map_err(|error| {
+            if error == ENOSPC {
+                resource_exhausted!("firmware GPU VA")
+            } else {
+                error
+            }
+        })
     }
 
     /// Allocates a canonical low mapping, which can be aliased at the same
@@ -340,6 +361,79 @@ impl Allocator<'_> {
             prot,
             cpu,
         )
+        .map_err(|error| {
+            if error == ENOSPC {
+                resource_exhausted!("shared lower GPU VA")
+            } else {
+                error
+            }
+        })
+    }
+
+    /// Place fresh backing at one address in the canonical and both alias VMs.
+    /// A client may retain mappings after their canonical reservation is freed.
+    /// Retry only address collisions, keeping the same backing throughout.
+    pub(crate) fn lower_with_aliases(
+        &self,
+        size: usize,
+        align: u64,
+        prot: mmu::Prot,
+        cpu: CpuMap,
+        aliases: [&mmu::Vm; 2],
+    ) -> Result<(KernelObject, [mmu::KernelMapping; 2])> {
+        if size == 0 || size % mmu::UAT_PGSZ != 0 {
+            return Err(EINVAL);
+        }
+        let mut object = KernelObject::backing(self.dev, size, cpu)?;
+        let mut range = crate::hw::t8140::dynamic::LOWER;
+        let mut searching = false;
+        loop {
+            // Keep ordinary best-fit placement on the uncontended path. A
+            // collision starts a lowest-address search over the whole arena.
+            let mapping = if searching {
+                object.alias_in_lowest(
+                    self.uat.kernel_lower_vm(), range.clone(), align, prot, mmu::UAT_PGSZ,
+                )?
+            } else {
+                object.obj.map_into_range(
+                    self.uat.kernel_lower_vm(), range.clone(), align, prot, true,
+                )?
+            };
+            let address = mapping.iova();
+            let end = address.checked_add(size as u64).ok_or(EOVERFLOW)?;
+            // Partial aliases are destroyed before releasing the canonical
+            // reservation, so a retry cannot expose its address prematurely.
+            let mapped: core::result::Result<_, (Error, usize)> = (|| {
+                let first = object.map_alias(aliases[0], address, prot)
+                    .map_err(|error| (error, 0))?;
+                let second = object.map_alias(aliases[1], address, prot)
+                    .map_err(|error| (error, 1))?;
+                Ok([first, second])
+            })();
+            match mapped {
+                Ok(mapped) => {
+                    object.mapping = Some(mapping);
+                    return Ok((object, mapped));
+                }
+                Err((error, index)) if error == ENOSPC && end < range.end => {
+                    drop(mapping);
+                    let start = if searching {
+                        address + mmu::UAT_PGSZ as u64
+                    } else {
+                        range.start
+                    };
+                    // Jump to an actual hole in the VM that refused the alias,
+                    // rather than remapping backing at every intervening page.
+                    let candidate = object.alias_in_lowest(
+                        aliases[index], start..range.end, align, prot, 0,
+                    )?;
+                    range.start = candidate.iova();
+                    drop(candidate);
+                    searching = true;
+                }
+                Err((error, _)) => return Err(error),
+            }
+        }
     }
 }
 
@@ -478,6 +572,13 @@ impl Pool {
             });
         }
         let object = alloc.kernel(size, mmu::UAT_PGSZ as u64, prot, cpu)?;
+        use crate::agx_memory_stats::KernelCategory;
+        object.classify_memory(match family {
+            Family::Descriptor => KernelCategory::Descriptor,
+            Family::WorkState => KernelCategory::WorkState,
+            Family::QueueState => KernelCategory::QueueState,
+            Family::QueueConfig => KernelCategory::QueueConfig,
+        });
         let reserved = {
             let mut inner = self.inner.lock();
             if inner.stopped {

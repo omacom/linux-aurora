@@ -179,6 +179,13 @@ impl Packet {
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
+    /// Gives up a claim taken from the submitting ioctl before the job was
+    /// pushed: nothing became visible, and the scheduler claims it again.
+    pub(crate) fn abandon_publication(&self) {
+        let _ = self
+            .publication
+            .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire);
+    }
     pub(crate) fn mark_published(&self) {
         self.publication.store(2, Ordering::Release);
     }
@@ -396,7 +403,7 @@ impl<B: Backend> Scheduler<B> {
         };
         // All fallible scheduler setup precedes early hardware publication. The
         // scheduler still owns watchdog, credits and cancellation after push.
-        if packet.engine() == Engine::Render && !(early && self.backend.try_early(&packet)) {
+        if !(early && self.backend.try_early(&packet)) {
             self.backend.count_backlog(&packet);
         }
         job.push();

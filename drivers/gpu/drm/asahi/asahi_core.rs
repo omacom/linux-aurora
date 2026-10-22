@@ -3,6 +3,7 @@
 
 //! Driver for the Apple AGX GPUs found in Apple Silicon SoCs.
 
+mod agx_memory_stats;
 mod alloc;
 mod buffer;
 mod channel;

@@ -273,7 +273,7 @@ pub(crate) mod resources {
     pub(crate) const FRAGMENT_STATUS: u64 = USER_BASE + 0x1a_8000;
     pub(crate) const RENDER_ALIASES: Range<u64> = 0x10_0200_0000..0x10_0220_0000;
     pub(crate) const TARGETS: Range<u64> = 0x10_5000_0000..0x10_6400_0000;
-    pub(crate) const TARGET_RECORD_MIN: usize = 0x4_0000;
+    pub(crate) const TARGET_RECORD_MIN: usize = TVB_PAGE as usize;
     pub(crate) const TARGET_RECORD_MAX: usize = 0x80_0000;
     pub(crate) const TPC_MIN: usize = 0x3_0000;
     pub(crate) const TPC_MAX: usize = 0x200_0000;

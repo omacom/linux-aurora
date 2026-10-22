@@ -138,6 +138,16 @@ pub trait Driver {
     /// their `THIS_MODULE` so open files and exported DMA buffers retain the code.
     const MODULE: Option<&'static crate::ThisModule> = None;
 
+    /// Optional statistics for the standard DRM fdinfo interface.
+    ///
+    /// GEM drivers can opt into `drm_show_memory_stats`. Drivers may instead
+    /// provide engine counters or memory not represented by GEM handles.
+    /// The default reports only the generic DRM client identity.
+    const SHOW_FDINFO: Option<
+        unsafe extern "C" fn(*mut bindings::drm_printer, *mut bindings::drm_file),
+    > = None;
+
+
     /// IOCTL list. See `kernel::drm::ioctl::declare_drm_ioctls!{}`.
     const IOCTLS: &'static [drm::ioctl::DrmIoctlDescriptor];
 

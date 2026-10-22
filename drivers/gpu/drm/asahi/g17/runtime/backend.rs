@@ -13,7 +13,10 @@ use kernel::{dma_fence::Fence, drm::sched, prelude::*, sync::Arc};
 impl Backend {
     pub(super) fn release_backlog(&self, packet: &Packet) {
         if packet.take_backlog() {
-            self.backlog.fetch_sub(1, Ordering::AcqRel);
+            match packet.engine() {
+                Engine::Render => self.backlog.fetch_sub(1, Ordering::AcqRel),
+                Engine::Compute => self.compute_backlog.fetch_sub(1, Ordering::AcqRel),
+            };
         }
     }
 
@@ -138,7 +141,9 @@ impl job::Backend for Backend {
             Err(EIO)
         } else {
             match packet.engine() {
-                Engine::Compute => self.compute_packet(&packet, &mut deferred),
+                Engine::Compute => {
+                    self.compute_packet(&packet, &mut deferred, super::Wait::scheduled())
+                }
                 Engine::Render => self.render_packet(&packet, &mut deferred),
             }
         };
@@ -147,7 +152,13 @@ impl job::Backend for Backend {
     }
 
     fn timed_out(&self, packet: Arc<Packet>) -> sched::Status {
-        self.release_backlog(&packet);
+        // A packet still in publication keeps its place in the backlog: its
+        // publisher waits on, and a later dependency-free command must not be
+        // published from its ioctl ahead of it. Publication, cancellation and
+        // job drop release it.
+        if packet.is_published() {
+            self.release_backlog(&packet);
+        }
         let result = match packet.engine() {
             Engine::Compute => self.timeout_compute(&packet),
             Engine::Render => self.timeout_render(&packet),
@@ -184,11 +195,17 @@ impl job::Backend for Backend {
     }
 
     fn try_early(&self, packet: &Arc<Packet>) -> bool {
-        self.try_render_early(packet)
+        match packet.engine() {
+            Engine::Render => self.try_render_early(packet),
+            Engine::Compute => self.try_compute_early(packet),
+        }
     }
 
     fn count_backlog(&self, packet: &Packet) {
         packet.count_backlog();
-        self.backlog.fetch_add(1, Ordering::AcqRel);
+        match packet.engine() {
+            Engine::Render => self.backlog.fetch_add(1, Ordering::AcqRel),
+            Engine::Compute => self.compute_backlog.fetch_add(1, Ordering::AcqRel),
+        };
     }
 }

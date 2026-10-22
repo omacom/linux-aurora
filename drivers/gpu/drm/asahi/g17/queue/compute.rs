@@ -566,6 +566,21 @@ impl Queue {
     pub(crate) fn context(&self) -> Option<&Arc<Context>> {
         self.binding.as_ref().map(|binding| &binding.context)
     }
+    /// The first command after an owner change away from `context` has been
+    /// published and not retired: the queue still runs that scheduler's state.
+    pub(crate) fn switching_from(&self, context: &Arc<Context>) -> bool {
+        self.previous.as_ref().is_some_and(|previous| {
+            previous.publication.is_some() && Arc::ptr_eq(&previous.context, context)
+        })
+    }
+    /// The context these queue records were bound to before an owner change
+    /// whose first command is not published yet.
+    pub(crate) fn pending_switch_from(&self) -> Option<&Arc<Context>> {
+        self.previous
+            .as_ref()
+            .filter(|previous| previous.publication.is_none())
+            .map(|previous| &previous.context)
+    }
     /// Quarantined commands still retain the scheduler until their retirement witness.
     pub(crate) fn idle_for_context(&self, context: &Arc<Context>) -> bool {
         !self.context().is_some_and(|bound| Arc::ptr_eq(bound, context))
@@ -624,6 +639,12 @@ impl Queue {
     /// when firmware has no more events to send. Do not poll idle or failed queues.
     pub(crate) fn retirement_polling(&self) -> bool {
         !self.quarantined && self.retire_pending
+    }
+
+    /// A release has no completion event: keep observing the control consumer
+    /// until its witness lets the idle physical queue be re-armed.
+    pub(crate) fn pool_release_pending(&self) -> bool {
+        matches!(self.pool_phase, PoolPhase::ReleaseSent(_))
     }
 
     fn selected(&self, masks: Option<[u64; 2]>) -> bool {
@@ -1134,12 +1155,67 @@ impl Queue {
                 }
                 self.retirement_ready = true;
             }
+            // An owner that rebound a detached queue and closed without
+            // publishing left no command for a witness to retire. Without
+            // this the queue keeps that owner, its QID and its VM aliases
+            // until processor stop.
+            if self.previous.is_none()
+                && self.replays.len == 0
+                && self.exit.is_none()
+                && !self.growing
+            {
+                self.retirement_ready = true;
+            }
             if self.retirement_ready {
                 self.owner = None;
                 self.released_at = now_ns();
             }
         }
         Ok(false)
+    }
+    /// Installed, populated and idle under a live owner: no retained, replayed,
+    /// quarantined, exiting, growing or superseded state. Publication on this
+    /// queue holds the device mutex, which the caller also holds, so no command
+    /// can become visible between this check and a takeover.
+    pub(crate) fn idle_owned(&self) -> bool {
+        self.owner.is_some()
+            && !self.released
+            && self.installed
+            && !self.growing
+            && self.pool_phase == PoolPhase::Populated
+            && !self.needs_fresh_backing
+            && self.exit.is_none()
+            && !self.quarantined
+            && !self.awaiting_witness
+            && self.active.len == 0
+            && self.replays.len == 0
+            && self.previous.is_none()
+            && self.binding.is_some()
+    }
+    /// Releases an idle live owner exactly as its logical close would, so that
+    /// `bind_owner` can move the queue. The owner keeps its context and takes a
+    /// queue again before its next publication.
+    pub(crate) fn yield_idle_owner(&mut self) -> Result {
+        if !self.idle_owned() {
+            return Err(EBUSY);
+        }
+        self.released = true;
+        self.retirement_ready = true;
+        self.owner = None;
+        self.released_at = now_ns();
+        Ok(())
+    }
+    /// The bound owner's VM status, for preferring a same-VM takeover.
+    pub(crate) fn bound_status(&self) -> Option<&Arc<VmStatus>> {
+        self.binding.as_ref().map(|binding| binding.context.status())
+    }
+    /// GPU end time of the last retired command, for least-recent selection.
+    pub(crate) fn last_end(&self) -> u64 {
+        self.last_end
+    }
+    /// Bytes of USC pool backing in the shared lower window, for diagnostics.
+    pub(crate) fn pool_bytes(&self) -> usize {
+        self.pool.backing_bytes()
     }
     /// The last owner's file and VM are gone: its execution root was released
     /// after the scheduler-state release and command retirement were witnessed
@@ -1734,7 +1810,7 @@ impl Queue {
             }
             let free = (cursors.consumer + cursors.count - cursors.producer - 1) % cursors.count;
             if free < if entry_signal { 4 } else { 3 } {
-                return Err(ENOSPC);
+                return Err(resource_exhausted!("compute item ring"));
             }
             let prepared_kick = self.kick.prepare_entry(&kick_args)?;
             let mut producer;

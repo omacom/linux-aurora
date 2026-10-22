@@ -41,6 +41,7 @@ void devres_node_init(struct devres_node *node,
 		      dr_node_free_t free_node)
 {
 	INIT_LIST_HEAD(&node->entry);
+	WRITE_ONCE(node->owner, NULL);
 	node->release = release;
 	node->free_node = free_node;
 }
@@ -156,6 +157,7 @@ static void add_dr(struct device *dev, struct devres_node *node)
 	devres_log(dev, node, "ADD");
 	BUG_ON(!list_empty(&node->entry));
 	list_add_tail(&node->entry, &dev->devres_head);
+	WRITE_ONCE(node->owner, dev);
 }
 
 static void replace_dr(struct device *dev,
@@ -164,6 +166,8 @@ static void replace_dr(struct device *dev,
 	devres_log(dev, old, "REPLACE");
 	BUG_ON(!list_empty(&new->entry));
 	list_replace(&old->entry, &new->entry);
+	WRITE_ONCE(old->owner, NULL);
+	WRITE_ONCE(new->owner, dev);
 }
 
 /**
@@ -367,18 +371,14 @@ EXPORT_SYMBOL_GPL(devres_get);
 
 bool devres_node_remove(struct device *dev, struct devres_node *node)
 {
-	struct devres_node *__node;
-
 	guard(spinlock_irqsave)(&dev->devres_lock);
-	list_for_each_entry_reverse(__node, &dev->devres_head, entry) {
-		if (__node == node) {
-			list_del_init(&node->entry);
-			devres_log(dev, node, "REM");
-			return true;
-		}
-	}
-
-	return false;
+	/* A release-all/group pass may own a detached node on its private list. */
+	if (READ_ONCE(node->owner) != dev)
+		return false;
+	list_del_init(&node->entry);
+	WRITE_ONCE(node->owner, NULL);
+	devres_log(dev, node, "REM");
+	return true;
 }
 
 /**
@@ -405,6 +405,7 @@ void *devres_remove(struct device *dev, dr_release_t release,
 	dr = find_dr(dev, release, match, match_data);
 	if (dr) {
 		list_del_init(&dr->node.entry);
+		WRITE_ONCE(dr->node.owner, NULL);
 		devres_log(dev, &dr->node, "REM");
 		return dr->data;
 	}
@@ -500,6 +501,7 @@ static int remove_nodes(struct device *dev,
 			if (&node->entry == first)
 				first = first->next;
 			list_move_tail(&node->entry, todo);
+			WRITE_ONCE(node->owner, NULL);
 			cnt++;
 		}
 	}
@@ -530,7 +532,9 @@ static int remove_nodes(struct device *dev,
 			 * nodes are always before both.
 			 */
 			list_move_tail(&grp->node[0].entry, todo);
+			WRITE_ONCE(grp->node[0].owner, NULL);
 			list_del_init(&grp->node[1].entry);
+			WRITE_ONCE(grp->node[1].owner, NULL);
 		}
 	}
 
@@ -685,7 +689,9 @@ void devres_remove_group(struct device *dev, void *id)
 	grp = find_group(dev, id);
 	if (grp) {
 		list_del_init(&grp->node[0].entry);
+		WRITE_ONCE(grp->node[0].owner, NULL);
 		list_del_init(&grp->node[1].entry);
+		WRITE_ONCE(grp->node[1].owner, NULL);
 		devres_log(dev, &grp->node[0], "REM");
 	} else
 		WARN_ON(1);
@@ -849,6 +855,7 @@ static struct devres_action *remove_action(struct device *dev,
 		return ERR_PTR(-ENOENT);
 
 	list_del_init(&dr->node.entry);
+	WRITE_ONCE(dr->node.owner, NULL);
 	devres_log(dev, &dr->node, "REM");
 
 	return dr;

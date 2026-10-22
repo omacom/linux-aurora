@@ -58,12 +58,21 @@ pub(crate) struct AsahiObject {
     exportable: bool,
     /// Whether this is a kernel-created object.
     kernel: bool,
+    _allocation: Option<crate::agx_memory_stats::Allocation>,
     /// Driver aliases outside the user GPUVA tree; they pin the backing.
     kernel_mappings: AtomicU64,
 }
 
 /// Type alias for the shmem GEM object type for this driver.
 pub(crate) type Object = shmem::Object<AsahiObject>;
+
+impl AsahiObject {
+    pub(crate) fn classify_memory(&self, category: crate::agx_memory_stats::KernelCategory) {
+        if let Some(allocation) = &self._allocation {
+            allocation.classify_kernel(category);
+        }
+    }
+}
 
 /// Marks whether the pages of `gem` are held for the device.
 ///
@@ -211,6 +220,8 @@ pub(crate) struct AsahiObjConfig {
     flags: u32,
     exportable: bool,
     kernel: bool,
+    /// Distinguishes direct driver allocation from DRM-core imported or dumb objects.
+    driver_created: bool,
 }
 
 /// Create a new kernel-owned GEM object.
@@ -250,6 +261,7 @@ fn new_kernel_object_mapped(dev: &AsahiDrmDevice, size: usize, map_wc: bool) -> 
             flags: 0,
             exportable: false,
             kernel: true,
+            driver_created: true,
         },
     )?;
 
@@ -283,6 +295,7 @@ pub(crate) fn new_object(
             flags,
             exportable: parent_object.is_none(),
             kernel: false,
+            driver_created: true,
         },
     )?;
 
@@ -303,6 +316,11 @@ impl DriverObject for AsahiObject {
         mod_pr_debug!("AsahiObject::new id={}\n", id);
         try_pin_init!(AsahiObject {
             id,
+            _allocation: if args.driver_created {
+                Some(crate::agx_memory_stats::Allocation::gem(size, args.kernel)?)
+            } else if size != 0 {
+                Some(crate::agx_memory_stats::Allocation::core(size)?)
+            } else { None },
             size,
             flags: args.flags,
             exportable: args.exportable,
@@ -318,6 +336,7 @@ impl DriverObject for AsahiObject {
             flags: 0,
             exportable: true,
             kernel: false,
+            driver_created: false,
         })
     }
 

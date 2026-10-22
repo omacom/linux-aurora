@@ -32,6 +32,55 @@ const QIDS: usize = 128;
 const FIRST_COMPUTE_QID: u8 = 4;
 const RECOVERY_SETTLE_POLLS: usize = 200;
 const WORK_RING_WAIT_NS: u64 = super::job::TIMEOUT_MS as u64 * 1_000_000;
+/// Bound on all contention waits of one publication together: capacity and
+/// identities held by other live owners, borrowed pairs, work states, queue
+/// binding and ring backpressure. Each frees when published work retires or
+/// times out, when warming finishes or is reclaimed, or when an owner closes.
+const PUBLICATION_WAIT_NS: u64 = 4 * WORK_RING_WAIT_NS;
+
+/// Internal result of a publication attempted from the submitting ioctl that
+/// met contention before anything became visible: the scheduler publishes the
+/// command instead. Never returned to userspace.
+pub(super) const FALLBACK: Error = EINPROGRESS;
+
+/// How a publication may wait for contention.
+#[derive(Clone, Copy)]
+pub(super) enum Wait {
+    /// From the scheduler's worker, until one deadline for the whole publication.
+    Until(u64),
+    /// From the submitting ioctl, which holds the logical queue's mutex: never
+    /// sleep for contention, return `FALLBACK`.
+    Never,
+}
+
+impl Wait {
+    pub(super) fn scheduled() -> Self {
+        Self::Until(now_ns().saturating_add(PUBLICATION_WAIT_NS))
+    }
+    /// Before a contention wait: `FALLBACK` when it may not sleep at all,
+    /// otherwise whether the publication's deadline has passed.
+    pub(super) fn expired(self) -> Result<bool> {
+        match self {
+            Self::Never => Err(FALLBACK),
+            Self::Until(deadline) => Ok(now_ns() >= deadline),
+        }
+    }
+    pub(super) fn deadline(self) -> Option<u64> {
+        match self {
+            Self::Never => None,
+            Self::Until(deadline) => Some(deadline),
+        }
+    }
+}
+
+/// Whether a publication with no queue may take another live owner's idle one:
+/// when neither a fresh QID nor surplus render capacity remains, or once its
+/// own off-lock attempt (`contended`) found no released queue, fresh QID or
+/// reclaimable render spare. Surplus held by installed render pairs never
+/// becomes compute capacity, so it alone must not keep a publication waiting.
+fn takeover_allowed(compute_available: bool, render_surplus: usize, contended: bool) -> bool {
+    contended || (!compute_available && render_surplus < 2)
+}
 
 /// A reservation remains identifiable while its backing is built without the
 /// device mutex. Failed construction returns the slot, never its host identity.
@@ -74,9 +123,7 @@ impl Registry {
     ) -> impl Init<Self, Error> {
         kernel::try_init!(Self {
             qids <- kick::QueueIds::new().chain(|qids| {
-                qids.reserve(1, DataMaster::Tiling, Some(0))?;
-                qids.reserve(2, DataMaster::Fragment, Some(1))?;
-                Ok(())
+                qids.reserve_initial_render()
             }),
             buffers <- BufferIds::new(),
             accounting: qos::Accounting::new(),
@@ -95,7 +142,7 @@ impl Registry {
             compute_building: false,
             compute_scheduler_building: false,
             replay_outer_wait: None,
-            observations: compute::retirement::Batch::new()?,
+            observations <- compute::retirement::Batch::new(),
             worker_deferred: Some(DeferredBatch::worker()?),
             teardown: super::teardown::Pending::new()?,
         })
@@ -130,6 +177,7 @@ impl Registry {
             });
         }
         let mut vacant = None;
+        let teardown = &self.teardown;
         for queue in self
             .compute
             .iter_mut()
@@ -137,6 +185,12 @@ impl Registry {
             .filter_map(|entry| entry.queue.as_deref_mut())
             .filter(|queue| queue.reusable())
         {
+            // The release of the scheduler these records were bound to is armed
+            // or not yet consumed: the firmware may process it against this
+            // queue, which therefore must not change owner until it has.
+            if queue.context().is_some_and(|bound| teardown.releasing(bound)) {
+                continue;
+            }
             if queue.pool_vacant() {
                 vacant.get_or_insert(queue.qid());
                 continue;
@@ -146,6 +200,81 @@ impl Registry {
             return Ok(Rebind::Done);
         }
         Ok(vacant.map_or(Rebind::Fresh, Rebind::Rearm))
+    }
+
+    /// No fresh QID and no released queue remain: move the least recently used
+    /// idle queue of another live owner to `owner`, preferring one bound to the
+    /// same VM. Only a pool that already fits is taken; growth would have to
+    /// wait for a publication of the new owner. The previous owner keeps its
+    /// context and takes a queue again at its next publication.
+    pub(super) fn take_over_idle_compute(
+        &mut self,
+        owner: u64,
+        context: &Arc<Context>,
+        required: usize,
+    ) -> Result<bool> {
+        if !context.is_current() {
+            return Err(EFAULT);
+        }
+        let mut selected = None::<(bool, u64, usize)>;
+        for (index, entry) in self.compute.iter().enumerate() {
+            let Some(queue) = entry.as_ref().and_then(|entry| entry.queue.as_deref()) else {
+                continue;
+            };
+            if queue.owner() == Some(owner)
+                || !queue.idle_owned()
+                || !queue.pool_fits(required)
+                || queue.context().is_some_and(|bound| self.teardown.releasing(bound))
+            {
+                continue;
+            }
+            let foreign = !queue
+                .bound_status()
+                .is_some_and(|status| Arc::ptr_eq(status, context.status()));
+            let key = (foreign, queue.last_end(), index);
+            if selected.is_none_or(|best| key < best) {
+                selected = Some(key);
+            }
+        }
+        let Some((_, _, index)) = selected else {
+            return Ok(false);
+        };
+        let queue = self.compute[index]
+            .as_mut()
+            .and_then(|entry| entry.queue.as_deref_mut())
+            .ok_or(EIO)?;
+        queue.yield_idle_owner()?;
+        queue.bind_owner(owner, context.clone())?;
+        Ok(true)
+    }
+
+    /// Publication's device-locked binding: a released queue that fits, or a
+    /// takeover when neither a fresh QID nor surplus render capacity remains,
+    /// or once an off-lock attempt of this publication (`contended`) found no
+    /// released queue, fresh QID or reclaimable render spare. Render surplus
+    /// held by installed pairs cannot become compute capacity, so it must not
+    /// keep a publication from taking an idle queue. False leaves
+    /// construction, re-arming or growth to the off-lock path.
+    pub(super) fn rebind_or_take_over_compute(
+        &mut self,
+        owner: u64,
+        context: &Arc<Context>,
+        required: usize,
+        contended: bool,
+    ) -> Result<bool> {
+        match self.rebind_compute(owner, context, required)? {
+            Rebind::Done => Ok(true),
+            Rebind::Fresh
+                if takeover_allowed(
+                    self.qids.compute_available(self.admission.queues()),
+                    self.qids.render_surplus(self.admission.queues()),
+                    contended,
+                ) =>
+            {
+                self.take_over_idle_compute(owner, context, required)
+            }
+            _ => Ok(false),
+        }
     }
 
     /// Installs fresh USC backing into the vacant queue `qid`; the caller writes
@@ -167,6 +296,7 @@ impl Registry {
     }
 
     pub(super) fn bind_rearmed(&mut self, qid: u8, owner: u64, context: &Arc<Context>) -> Result {
+        let teardown = &self.teardown;
         let queue = self
             .compute
             .iter_mut()
@@ -174,6 +304,10 @@ impl Registry {
             .filter_map(|entry| entry.queue.as_deref_mut())
             .find(|queue| queue.qid() == qid && queue.reusable())
             .ok_or(EAGAIN)?;
+        // Its last owner may have closed while the backing was rebuilt.
+        if queue.context().is_some_and(|bound| teardown.releasing(bound)) {
+            return Err(EAGAIN);
+        }
         queue.bind_owner(owner, context.clone())
     }
 
@@ -275,6 +409,20 @@ impl Registry {
         Ok(freed)
     }
 
+    /// A retained queue in a pool-release transaction temporarily cannot bind.
+    /// Distinguish that state from permanent physical-identity exhaustion.
+    fn compute_admission_error(&self, error: Error) -> Error {
+        if error == ENOSPC
+            && self.compute.iter().flatten()
+                .filter_map(|entry| entry.queue.as_deref())
+                .any(|queue| queue.pool_release_pending())
+        {
+            EAGAIN
+        } else {
+            error
+        }
+    }
+
     pub(super) fn reserve_compute(&mut self, owner: u64) -> Result<ComputeReservation> {
         if owner == 0
             || self.compute.iter().flatten().any(|entry| {
@@ -296,7 +444,8 @@ impl Registry {
         let identity = self.identities.reserve(1)?.start;
         let id = self
             .qids
-            .reserve(identity, DataMaster::Compute, Some(FIRST_COMPUTE_QID))?;
+            .reserve_compute(identity, Some(FIRST_COMPUTE_QID), self.admission.queues())
+            .map_err(|error| self.compute_admission_error(error))?;
         let reservation = ComputeReservation { slot, id, owner };
         self.compute[slot] = Some(ComputeEntry {
             reservation,
@@ -379,7 +528,21 @@ pub(super) struct Backend {
     shared: Arc<super::Shared>,
     pub(super) context: Arc<Context>,
     owner: u64,
+    /// Render packets queued to the scheduler and not yet published.
     backlog: core::sync::atomic::AtomicU32,
+    /// Compute packets queued to the scheduler and not yet published.
+    compute_backlog: core::sync::atomic::AtomicU32,
+    /// One compute binder per owner: submission and publication can both bind,
+    /// and two concurrent binders could leave the owner with two queues.
+    binding: core::sync::atomic::AtomicBool,
+}
+
+/// Clears the owner's compute-binder flag on every exit.
+struct Binder<'a>(&'a core::sync::atomic::AtomicBool);
+impl Drop for Binder<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 impl Backend {
@@ -389,24 +552,59 @@ impl Backend {
         owner: u64,
         policy: super::fw::queue::Policy,
     ) -> Result<(Arc<Self>, admission::QueueSlot)> {
-        let lease = shared.preparations.enter(true)?;
-        let dev = shared.drm()?;
-        let (uat, pool, qos, execution, slot) = {
+        // A closed queue keeps its application context until its scheduler
+        // release is consumed. When only such contexts block this one, wait
+        // for the teardown (bounded) instead of failing a live client; the
+        // preparation lease is not held while sleeping.
+        const RETAINED_CONTEXT_WAIT_NS: u64 = 4 * WORK_RING_WAIT_NS;
+        let started = now_ns();
+        let (lease, uat, pool, qos, execution, slot) = loop {
+            let lease = shared.preparations.enter(true)?;
             let mut state = shared.state.lock();
             let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
             if shared.crashed.load(core::sync::atomic::Ordering::Acquire) {
                 return Err(EIO);
             }
-            let slot = firmware.queues.admission.reserve_queue()?;
-            let execution = firmware.uat.new_execution_context(vm)?;
-            (
-                firmware.uat.clone(),
-                firmware.pool.clone(),
-                firmware.queues.qos_ids.clone(),
-                execution,
-                slot,
-            )
+            let slot = firmware.queues.admission.reserve_queue().map_err(|error| {
+                if error == ENOSPC {
+                    resource_exhausted!("logical queues")
+                } else {
+                    error
+                }
+            })?;
+            match firmware.uat.new_execution_context(vm) {
+                Ok(execution) => {
+                    break (
+                        lease,
+                        firmware.uat.clone(),
+                        firmware.pool.clone(),
+                        firmware.queues.qos_ids.clone(),
+                        execution,
+                        slot,
+                    )
+                }
+                Err(error) if error == ENOSPC => {
+                    // Every open queue holds one context; this one is counted
+                    // in `queues()` already but holds none yet.
+                    let open = firmware.queues.admission.queues().saturating_sub(1);
+                    let closing = firmware.uat.execution_contexts_in_use().saturating_sub(open);
+                    if closing == 0 || now_ns().saturating_sub(started) >= RETAINED_CONTEXT_WAIT_NS {
+                        return Err(resource_exhausted!("execution contexts"));
+                    }
+                    drop(slot);
+                    drop(state);
+                    drop(lease);
+                    // Nothing is visible yet: a signalled creator restarts.
+                    if kernel::current!().signal_pending() {
+                        return Err(ERESTARTSYS);
+                    }
+                    shared.queue_events();
+                    kernel::time::delay::fsleep(kernel::time::Delta::from_millis(1));
+                }
+                Err(error) => return Err(error),
+            }
         };
+        let dev = shared.drm()?;
         let alloc = super::object::Allocator {
             dev: &dev,
             uat: &uat,
@@ -429,6 +627,8 @@ impl Backend {
                     context,
                     owner,
                     backlog: core::sync::atomic::AtomicU32::new(0),
+                    compute_backlog: core::sync::atomic::AtomicU32::new(0),
+                    binding: core::sync::atomic::AtomicBool::new(false),
                 },
                 GFP_KERNEL,
             )?,
@@ -438,9 +638,9 @@ impl Backend {
 
     /// The shared aperture has exactly one builder. Other queues sleep without
     /// holding the device mutex; recovery joins its lease before closing roots.
-    fn shared_compute(&self) -> Result {
+    fn shared_compute(&self, wait: Wait) -> Result {
         loop {
-            let lease = self.shared.preparations.enter(false)?;
+            let lease = self.enter_preparation(wait)?;
             let dev = self.shared.drm()?;
             let uat = {
                 let mut state = self.shared.state.lock();
@@ -462,6 +662,9 @@ impl Backend {
                     if !firmware.queues.compute_building {
                         firmware.queues.compute_building = true;
                         break firmware.uat.clone();
+                    }
+                    if wait.expired()? {
+                        return Err(self.wait_expired(EBUSY, "the shared compute aperture"));
                     }
                     self.shared.changed.wait(&mut state);
                 }
@@ -551,7 +754,7 @@ impl Backend {
         result
     }
 
-    fn grow_compute(&self, required: usize) -> Result {
+    fn grow_compute(&self, required: usize, wait: Wait) -> Result {
         use kernel::time::{delay::fsleep, Delta};
         {
             let state = self.shared.state.lock();
@@ -560,14 +763,13 @@ impl Backend {
                 return Ok(());
             }
         }
-        let lease = self.shared.preparations.enter(false)?;
+        let lease = self.enter_preparation(wait)?;
         let dev = self.shared.drm()?;
         let uat = self.shared.state.lock().as_ref().ok_or(ENODEV)?.uat.clone();
         let alloc = super::object::Allocator { dev: &dev, uat: &uat };
         let mut pages = Some(super::freelist::Pages::compute_sized(&alloc, required)?);
         let mut alias = Some(pages.as_ref().ok_or(EIO)?.map_client(self.context.vm())?);
         let mut deferred = DeferredBatch::publication()?;
-        let started = now_ns();
         loop {
             let result = (|| {
                 let mut state = self.shared.state.lock();
@@ -586,19 +788,26 @@ impl Backend {
             deferred.finish();
             match result {
                 Ok(old) => { drop(old); return Ok(()); }
-                Err(error) if error == EAGAIN && lease.is_current()
-                    && now_ns().saturating_sub(started) < WORK_RING_WAIT_NS => {
-                        self.shared.queue_events();
-                        fsleep(Delta::from_millis(1));
+                Err(error) if error == EAGAIN && lease.is_current() => {
+                    if wait.expired()? {
+                        return Err(self.wait_expired(error, "compute pool growth"));
                     }
+                    self.shared.queue_events();
+                    fsleep(Delta::from_millis(1));
+                }
                 Err(error) => return Err(error),
             }
         }
     }
 
-    fn build_compute(&self, required: usize) -> Result {
+    /// Off-lock binding: a released queue, a re-armed vacant one, growth, or a
+    /// fresh QID. ENOSPC leaves the owner unbound. Taking over another live
+    /// owner's idle queue happens only in publication's device-locked rebind,
+    /// which publishes under the same mutex hold. Submission never waits for
+    /// or fails on physical capacity: it leaves binding to publication.
+    fn build_compute(&self, required: usize, wait: Wait) -> Result {
         loop {
-            match self.shared_compute() {
+            match self.shared_compute(wait) {
                 Err(error) if error == EAGAIN => continue,
                 result => {
                     result?;
@@ -607,7 +816,7 @@ impl Backend {
             }
         }
         loop {
-            let lease = self.shared.preparations.enter(false)?;
+            let lease = self.enter_preparation(wait)?;
             let dev = self.shared.drm()?;
             let (uat, reservation) = {
                 let mut state = self.shared.state.lock();
@@ -621,10 +830,40 @@ impl Backend {
                 }
                 match firmware.queues.rebind_compute(self.owner, &self.context, required)? {
                     Rebind::Done => return Ok(()),
-                    Rebind::Grow => { drop(state); return self.grow_compute(required); }
+                    Rebind::Grow => { drop(state); return self.grow_compute(required, wait); }
                     Rebind::Rearm(qid) => (firmware.uat.clone(), Err(qid)),
                     Rebind::Fresh => {
-                        let reservation = firmware.queues.reserve_compute(self.owner)?;
+                        let reservation = match firmware.queues.reserve_compute(self.owner) {
+                            Ok(reservation) => reservation,
+                            // A pool release is still in flight: the event worker
+                            // observes it and drops the vacated backing off this
+                            // mutex. The caller retries after it.
+                            Err(error) if error == EAGAIN => {
+                                drop(state);
+                                self.shared.queue_events();
+                                return Err(ENOSPC);
+                            }
+                            Err(error) if error == ENOSPC => {
+                                // Cancelling an unused render reservation frees
+                                // compute capacity only beyond the render reserve.
+                                let surplus = firmware
+                                    .queues
+                                    .qids
+                                    .render_surplus(firmware.queues.admission.queues());
+                                let reclaimed = if surplus >= 2 {
+                                    firmware.queues.reclaim_unused_render_spare(None, true)?
+                                } else {
+                                    None
+                                };
+                                if reclaimed.is_none() {
+                                    return Err(error);
+                                }
+                                drop(state);
+                                drop(reclaimed);
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        };
                         (firmware.uat.clone(), Ok(reservation))
                     }
                 }
@@ -892,6 +1131,11 @@ impl compute::Host for ComputeHost<'_> {
 }
 
 impl super::Firmware {
+    /// One snapshot of every finite queue resource.
+    pub(in crate::g17) fn capacity(&self) -> render::Capacity {
+        self.queues.capacity(self.render_ids.in_use(), self.uat.execution_contexts_in_use())
+    }
+
     fn publish_compute(
         &mut self,
         owner: u64,
@@ -918,6 +1162,15 @@ impl super::Firmware {
             .filter_map(|entry| entry.queue.as_deref_mut())
             .find(|queue| queue.owner() == Some(owner))
             .ok_or(EIO)?;
+        // The first command after an owner change waits while the scheduler
+        // the queue was bound to is being released: a live previous owner may
+        // have closed after giving up the queue.
+        if queue
+            .pending_switch_from()
+            .is_some_and(|previous| queues.teardown.releasing(previous))
+        {
+            return Err(EAGAIN);
+        }
         let mut host = ComputeHost {
             init: &self.init,
             primary: &mut self.primary,
@@ -1053,12 +1306,76 @@ impl super::Firmware {
 }
 
 impl Backend {
+    /// Submission-time binding: never takes over another owner's queue and
+    /// reports ENOSPC when no physical queue is free, leaving publication to bind.
     fn ensure_compute(&self, scs_pages: u16) -> Result {
         let required = super::fw::compute_pool::required_blocks(self.shared.active_cores, scs_pages)?;
+        // The submit ioctl never sleeps for contention: publication binds.
+        match self.bind_compute(required, Wait::Never) {
+            Err(error) if error == FALLBACK => Err(EAGAIN),
+            result => result,
+        }
+    }
+
+    /// A publication gave up waiting for `what` at its deadline and fails with
+    /// `error`. Names the wait, its source line and the owner, at most once a
+    /// second, so a lost device reported for contention is attributable from
+    /// the kernel log alone. Only reached on that failure path.
+    #[track_caller]
+    pub(super) fn wait_expired(&self, error: Error, what: impl kernel::fmt::Display) -> Error {
+        use core::sync::atomic::AtomicU64;
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+        let now = now_ns();
+        let next = NEXT.load(Ordering::Relaxed);
+        if now < next
+            || NEXT
+                .compare_exchange(next, now + 1_000_000_000, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+            return error;
+        }
+        let at = core::panic::Location::caller();
+        dev_warn!(
+            self.shared.dev.as_ref(),
+            "G17 publication of pid {} gave up waiting for {} ({:?}, {}:{}); {} similar since the last report\n",
+            self.context.owner_pid(),
+            what,
+            error,
+            at.file().rsplit("asahi/").next().unwrap_or(at.file()),
+            at.line(),
+            SUPPRESSED.swap(0, Ordering::Relaxed)
+        );
+        error
+    }
+
+    /// The preparation lease. From the ioctl, a recovery that has closed the
+    /// preparation epoch is contention.
+    fn enter_preparation(&self, wait: Wait) -> Result<super::preparation::Lease> {
+        match wait {
+            Wait::Never => self
+                .shared
+                .preparations
+                .try_enter()
+                .map_err(|error| if error == EAGAIN { FALLBACK } else { error }),
+            Wait::Until(_) => self.shared.preparations.enter(false),
+        }
+    }
+
+    /// EAGAIN while another binder of this owner runs; it binds for both.
+    fn bind_compute(&self, required: usize, wait: Wait) -> Result {
         use kernel::time::{delay::fsleep, Delta};
-        const SPARED_WAIT_MS: usize = 200;
+        if self
+            .binding
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(EAGAIN);
+        }
+        let _binder = Binder(&self.binding);
         let mut deferred = DeferredBatch::publication()?;
-        for _ in 0..SPARED_WAIT_MS {
+        loop {
             let pending = (|| {
                 let mut state = self.shared.state.lock();
                 let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
@@ -1070,15 +1387,135 @@ impl Backend {
             deferred.finish();
             let pending = pending?;
             if !pending {
-                return self.build_compute(required);
+                return self.build_compute(required, wait);
             }
-            // Other owners continue submitting while this owner gives its
-            // queue-local drain witness time to arrive.
+            // Keep the spared queue and its retained work intact until a later
+            // admission observes its witness. Other owners continue submitting
+            // while this owner gives its queue-local drain witness time to arrive.
+            if wait.expired()? {
+                return Err(self.wait_expired(EBUSY, "a spared compute queue's drain witness"));
+            }
             fsleep(Delta::from_millis(1));
         }
-        // No new command has been accepted. Keep the spared queue and its
-        // retained work intact until a later admission observes its witness.
-        Err(EBUSY)
+    }
+
+    /// Publishes a dependency-free compute command from the submitting ioctl,
+    /// as renders are, instead of waking the scheduler's worker for it. Only a
+    /// queue already bound to this owner that fits the command and has room
+    /// qualifies, and only while no earlier compute command of this owner
+    /// still waits in the scheduler, so publication order stays submission
+    /// order. The ioctl never binds, grows, replays or sleeps: any of those
+    /// returns false before anything became visible and leaves the command to
+    /// the scheduler.
+    pub(in crate::g17) fn try_compute_early(&self, packet: &Arc<super::job::Packet>) -> bool {
+        if self.compute_backlog.load(Ordering::Acquire) != 0 || packet.has_dependencies() {
+            return false;
+        }
+        let super::command::Validated::Compute { scratch, .. } = &packet.command else {
+            return false;
+        };
+        let Ok(required) =
+            super::fw::compute_pool::required_blocks(self.shared.active_cores, scratch.pages())
+        else {
+            return false;
+        };
+        {
+            let state = self.shared.state.lock();
+            let Some(firmware) = (*state).as_deref() else {
+                return false;
+            };
+            if firmware.recovery.pending()
+                || self.binding.load(Ordering::Acquire)
+                || !firmware
+                    .queues
+                    .compute(self.owner)
+                    .is_some_and(|queue| queue.pool_fits(required) && queue.room())
+            {
+                return false;
+            }
+        }
+        if !packet.begin_publication() {
+            packet.completion.fail_unpublished(ECANCELED);
+            packet.set_early_result(Err(ECANCELED));
+            return true;
+        }
+        let mut deferred = match DeferredBatch::publication() {
+            Ok(deferred) => deferred,
+            Err(error) => {
+                if packet.completion.status().get() != 0 {
+                    <Self as super::job::Backend>::fail_vm(self, error);
+                }
+                packet.completion.fail_unpublished(error);
+                packet.set_early_result(Err(error));
+                return true;
+            }
+        };
+        let result = self.publish_compute_early(packet, required, &mut deferred);
+        if matches!(result, Err(error) if error == FALLBACK) && !packet.is_published() {
+            deferred.finish();
+            packet.abandon_publication();
+            return false;
+        }
+        let result = self
+            .finish_publication(packet, result, &mut deferred)
+            .map(|_| ());
+        packet.set_early_result(result);
+        true
+    }
+
+    /// The ioctl's single publication attempt, under one device mutex hold on
+    /// the owner's bound queue. Contention returns `FALLBACK` unpublished.
+    fn publish_compute_early(
+        &self,
+        packet: &Arc<super::job::Packet>,
+        required: usize,
+        deferred: &mut DeferredBatch,
+    ) -> Result {
+        if packet.completion.status().get() != 0 {
+            return Err(EIO);
+        }
+        let lease = self.enter_preparation(Wait::Never)?;
+        match packet.completion.work_state()?.acquire() {
+            Err(error) if error == EBUSY => return Err(FALLBACK),
+            result => {
+                result?;
+            }
+        }
+        let mut state = self.shared.state.lock();
+        let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
+        if packet.cancel_requested() {
+            return Err(ECANCELED);
+        }
+        if self.shared.crashed.load(Ordering::Acquire) {
+            return Err(EIO);
+        }
+        if !lease.is_current()
+            || firmware.recovery.pending()
+            || super::recovery::Memory::recovery_state(&firmware.init)? != 0
+            || self.binding.load(Ordering::Acquire)
+            // Replays of recovered commands publish first, from the scheduler.
+            || firmware
+                .queues
+                .compute
+                .iter()
+                .flatten()
+                .filter_map(|entry| entry.queue.as_deref())
+                .any(|queue| queue.replay_commands() != 0)
+            || !firmware
+                .queues
+                .compute(self.owner)
+                .is_some_and(|queue| queue.pool_fits(required) && queue.room())
+        {
+            return Err(FALLBACK);
+        }
+        let dependencies = firmware.queues.render_prefix(self.owner, packet)?;
+        match firmware.publish_compute(self.owner, packet.clone(), dependencies.as_slice(), deferred)
+        {
+            Err(error) if !packet.is_published() && [EAGAIN, EBUSY].contains(&error) => {
+                Err(FALLBACK)
+            }
+            result => result,
+        }
     }
 
     /// Called after taking this packet's publication claim. All waits and work
@@ -1087,16 +1524,38 @@ impl Backend {
         &self,
         packet: &Arc<super::job::Packet>,
         deferred: &mut DeferredBatch,
+        wait: Wait,
     ) -> Result {
         packet.check_dependencies()?;
+        let super::command::Validated::Compute { scratch, .. } = &packet.command else {
+            return Err(EINVAL);
+        };
+        let required =
+            super::fw::compute_pool::required_blocks(self.shared.active_cores, scratch.pages())?;
         let mut recovery_polls = 0;
-        let mut outer_wait = None;
+        let mut state_delay = 20i64;
+        let mut contended = false;
         loop {
             if packet.completion.status().get() != 0 {
                 return Err(EIO);
             }
-            let lease = self.shared.preparations.enter(false)?;
-            packet.completion.work_state()?.acquire()?;
+            let lease = self.enter_preparation(wait)?;
+            // Work states free as this context's earlier commands retire.
+            match packet.completion.work_state()?.acquire() {
+                Err(error) if error == EBUSY => {
+                    drop(lease);
+                    if wait.expired()? {
+                        return Err(self.wait_expired(error, "a free compute work state"));
+                    }
+                    self.shared.queue_events();
+                    kernel::time::delay::fsleep(kernel::time::Delta::from_micros(state_delay));
+                    state_delay = (state_delay * 2).min(1000);
+                    continue;
+                }
+                result => {
+                    result?;
+                }
+            }
             let mut state = self.shared.state.lock();
             let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
             if !lease.is_current() {
@@ -1115,8 +1574,8 @@ impl Backend {
             }
             let recovery_state = super::recovery::Memory::recovery_state(&firmware.init)?;
             if firmware.recovery.pending() || recovery_state != 0 {
-                if recovery_polls == RECOVERY_SETTLE_POLLS {
-                    return Err(EBUSY);
+                if wait.expired()? || recovery_polls == RECOVERY_SETTLE_POLLS {
+                    return Err(self.wait_expired(EBUSY, "GPU recovery to settle"));
                 }
                 recovery_polls += 1;
                 drop(state);
@@ -1126,6 +1585,52 @@ impl Backend {
                 continue;
             }
             firmware.replay_compute(deferred)?;
+            if !firmware
+                .queues
+                .compute(self.owner)
+                .is_some_and(|queue| queue.pool_fits(required))
+            {
+                // Submission found no free physical queue, or another owner
+                // took this idle one. Bind again; a takeover publishes under
+                // the same mutex hold. Capacity frees whenever any queue's
+                // published work retires or times out, so the wait is bounded.
+                if wait.expired()? {
+                    return Err(self.wait_expired(EBUSY, "a compute queue to bind"));
+                }
+                // An off-lock binder of this owner may hold a reservation or
+                // a queue being re-armed: binding here could give the owner a
+                // second queue. Its flag is raised before its first decision.
+                let taken = !self.binding.load(Ordering::Acquire)
+                    && firmware.queues.compute(self.owner).is_none()
+                    && match firmware.queues.rebind_or_take_over_compute(
+                        self.owner,
+                        &self.context,
+                        required,
+                        contended,
+                    ) {
+                        Err(error) if error == ENOSPC => false,
+                        result => result?,
+                    };
+                if !taken {
+                    drop(state);
+                    drop(lease);
+                    // Replays collected above belong to other packets; do not
+                    // hold their fences while this one waits for a queue.
+                    deferred.finish();
+                    match self.bind_compute(required, wait) {
+                        Ok(()) => {}
+                        Err(error) if [ENOSPC, EBUSY, EAGAIN].contains(&error) => {
+                            // No released queue, fresh QID or spare: the next
+                            // locked attempt may take an idle queue over.
+                            contended |= error != EAGAIN;
+                            self.shared.queue_events();
+                            kernel::time::delay::fsleep(kernel::time::Delta::from_millis(1));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                    continue;
+                }
+            }
             let dependencies = firmware.queues.render_prefix(self.owner, packet)?;
             let result = firmware.publish_compute(
                 self.owner,
@@ -1138,8 +1643,8 @@ impl Backend {
                 && (firmware.recovery.pending()
                     || super::recovery::Memory::recovery_state(&firmware.init)? != 0)
             {
-                if recovery_polls == RECOVERY_SETTLE_POLLS {
-                    return Err(EBUSY);
+                if wait.expired()? || recovery_polls == RECOVERY_SETTLE_POLLS {
+                    return Err(self.wait_expired(EBUSY, "GPU recovery to settle"));
                 }
                 recovery_polls += 1;
                 drop(state);
@@ -1149,10 +1654,20 @@ impl Backend {
                 continue;
             }
             if matches!(result, Err(EAGAIN)) && !packet.is_published() {
-                let now = now_ns();
-                let since = *outer_wait.get_or_insert(now);
-                if now.saturating_sub(since) >= WORK_RING_WAIT_NS {
-                    return Err(EBUSY);
+                if wait.expired()? {
+                    let releasing = firmware.queues.compute(self.owner).is_some_and(|queue| {
+                        queue
+                            .pending_switch_from()
+                            .is_some_and(|previous| firmware.queues.teardown.releasing(previous))
+                    });
+                    return Err(self.wait_expired(
+                        EBUSY,
+                        if releasing {
+                            "the previous owner's scheduler release"
+                        } else {
+                            "compute ring room"
+                        },
+                    ));
                 }
                 // Backpressure owns no firmware-visible attempt. Other queues
                 // can submit and the event worker can retire while we sleep.
@@ -1262,9 +1777,16 @@ impl super::Firmware {
         if self.render_control_backpressured() {
             return Ok(None);
         }
+        // While the shared lower window refuses free-list backing, no idle
+        // retained compute pool stays warm: render and new compute need it more.
+        let cap = if super::freelist::lower_pressure() {
+            0
+        } else {
+            COMPUTE_WARM_CAP
+        };
         let (published, next) = self.queues.vacate_idle_pools(
             &self.init,
-            COMPUTE_WARM_CAP,
+            cap,
             now,
             COMPUTE_WARM_EXPIRY_NS,
         )?;

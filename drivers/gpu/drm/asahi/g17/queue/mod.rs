@@ -27,7 +27,12 @@ use kernel::{
     xarray,
 };
 
-const EARLY_DEPTH: usize = 2;
+/// Commands of one engine (render, compute) still in flight below which a
+/// dependency-free command is published from its ioctl rather than from the
+/// scheduler's worker, whose hop costs ~100 us per command on Neo. Compute
+/// streams of three or four dispatches publish inline; renders keep the
+/// shallow limit.
+const EARLY_DEPTH: [usize; 2] = [2, 4];
 static FENCE_KEY: Pin<&LockClassKey> = kernel::static_lock_class!();
 
 pub(crate) mod admission;
@@ -129,7 +134,13 @@ impl<B: Backend> Queue<B> {
 
     fn ensure_compute(&mut self, scs_pages: u16) -> Result {
         // Admission is checked even when this queue already owns a scheduler.
-        self.backend.ensure_compute(scs_pages)?;
+        // Physical queues held by other live owners (ENOSPC) and a concurrent
+        // binder of this owner (EAGAIN) are contention, not client errors:
+        // publication binds before the command becomes visible, bounded.
+        match self.backend.ensure_compute(scs_pages) {
+            Err(error) if error == ENOSPC || error == EAGAIN => {}
+            result => result?,
+        }
         if self.compute.is_none() {
             self.compute = Some(Scheduler::new(
                 &self.dev,
@@ -274,9 +285,8 @@ impl<B: Backend> Queue<B> {
                 checked_inputs.push(fence.clone(), GFP_KERNEL)?;
             }
         }
-        let early = engine == Engine::Render
-            && dependencies.is_empty()
-            && self.frontiers[index].len() < EARLY_DEPTH;
+        let early = dependencies.is_empty()
+            && self.frontiers[index].len() < EARLY_DEPTH[index];
         let packet = Packet::new(
             id,
             self.context.clone(),

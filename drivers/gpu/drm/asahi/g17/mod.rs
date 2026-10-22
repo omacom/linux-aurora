@@ -17,6 +17,26 @@
 //! Completions are signalled after dropping it. Lock order: `Shared::state` -> UAT shared state
 //! -> VM exec lock -> GEM reservation. `RoleState::ack` nests inside nothing.
 
+/// A finite device resource refused an allocation: evaluates to `ENOSPC`.
+/// The first refusal at each call site is reported once per module load,
+/// naming the resource and site, so a client's ENOSPC can be attributed.
+macro_rules! resource_exhausted {
+    ($what:literal) => {{
+        static REPORTED: ::core::sync::atomic::AtomicBool =
+            ::core::sync::atomic::AtomicBool::new(false);
+        if !REPORTED.swap(true, ::core::sync::atomic::Ordering::Relaxed) {
+            let file = ::core::file!();
+            ::kernel::pr_warn!(
+                "asahi: G17 {} exhausted ({}:{})\n",
+                $what,
+                file.rsplit("asahi/").next().unwrap_or(file),
+                ::core::line!()
+            );
+        }
+        ::kernel::error::code::ENOSPC
+    }};
+}
+
 mod buffer;
 mod channel;
 mod command;
@@ -42,6 +62,9 @@ mod queue;
 mod recovery;
 mod runtime;
 pub(crate) mod status;
+mod statistics;
+mod load;
+mod telemetry;
 mod teardown;
 mod timeout;
 mod validation;
@@ -479,6 +502,8 @@ struct Firmware {
     registration_power_release_pending: bool,
     queues: runtime::Registry,
     pool: Arc<object::Pool>,
+    /// Render kick ring storage, kept and reused for the life of the device.
+    render_rings: Arc<kick::RenderRings>,
     render_ids: Arc<freelist::RenderIds>,
     init: initdata::InitData,
     _render_global: mmu::Vm,
@@ -611,6 +636,7 @@ struct Shared {
     descriptor_flags: [u32; 2],
     crashed: AtomicBool,
     feed: Arc<feed::Feed>,
+    statistics: Arc<statistics::Statistics>,
     #[pin]
     feed_work: Work<Shared, FEED_WORK>,
     preparations: Arc<preparation::Gate>,
@@ -791,6 +817,7 @@ impl Shared {
 
     /// Marks the device lost without a crash log.
     fn lose_device_quietly(self: &Arc<Self>) {
+        self.statistics.load.invalidate();
         self.preparations.fail();
         if !self.crashed.swap(true, Ordering::AcqRel) {
             dev_err!(self.dev.as_ref(), "GPU runtime stopped, device lost\n");
@@ -802,6 +829,7 @@ impl Shared {
     ///
     /// The firmware cannot be restarted: outstanding and future work fails.
     fn lose_device(self: &Arc<Self>, role: Role, crashlog: Option<&[u8]>) {
+        self.statistics.load.invalidate();
         self.preparations.fail();
         self.crashed.store(true, Ordering::Release);
         dev_err!(
@@ -824,6 +852,52 @@ pub(crate) struct Gpu {
     geometry: mmu::UatGeometry,
     ids: gpu::SequenceIDs,
     shared: Arc<Shared>,
+    _memory: Pin<KBox<kernel::debugfs::File<crate::agx_memory_stats::View>>>,
+    _statistics: Pin<KBox<kernel::debugfs::File<StatisticsView>>>,
+    _capacity: Pin<KBox<kernel::debugfs::File<CapacityView>>>,
+    _telemetry: Option<telemetry::Telemetry>,
+}
+
+/// One line of queue resource counts, taken with the device mutex. `contexts`
+/// counts leased application contexts against the TTBAT limit; `closing` are
+/// those still held by closed queues whose scheduler release has not completed.
+struct CapacityView(Arc<Shared>);
+
+impl kernel::debugfs::Writer for CapacityView {
+    fn write(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        let state = self.0.state.lock();
+        match (*state).as_deref() {
+            Some(firmware) => writeln!(f, "version=1 {}", firmware.capacity()),
+            None => writeln!(f, "version=1 stopped"),
+        }
+    }
+}
+
+struct StatisticsView(Arc<statistics::Statistics>);
+
+impl kernel::debugfs::Writer for StatisticsView {
+    fn write(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        self.0.request_capture(now_ns());
+        writeln!(f, "version=2 payload=raw_firmware_words received_clock=monotonic_ns capture_window_ns={}", statistics::CAPTURE_NS)?;
+        for role in 0..2 {
+            for tag in 16..=30 {
+                let Some(report) = self.0.snapshot(role, tag) else {
+                    writeln!(f, "role={} tag={:#x} busy=1", role, tag)?;
+                    continue;
+                };
+                if report.count == 0 {
+                    continue;
+                }
+                write!(f, "role={} tag={:#x} count={} received_ns={} words=",
+                       role, tag, report.count, report.received_ns)?;
+                for word in report.words {
+                    write!(f, "{:08x} ", word)?;
+                }
+                writeln!(f)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Gpu {
@@ -857,6 +931,19 @@ impl Gpu {
         let preparations = preparation::Gate::new()?;
         let reclaim = runtime::teardown::ReclaimBatch::new()?;
         let feed = feed::Feed::new()?;
+        let statistics = Arc::new(statistics::Statistics::new(), GFP_KERNEL)?;
+        let report_statistics = statistics.clone();
+        let telemetry = if *crate::module_parameters::stats_export.value() == 0 {
+            None
+        } else {
+            match telemetry::Telemetry::new(pdev.as_ref(), statistics.clone()) {
+                Ok(telemetry) => Some(telemetry),
+                Err(error) => {
+                    dev_warn!(pdev.as_ref(), "GPU telemetry registration failed: {:?}\n", error);
+                    None
+                }
+            }
+        };
         let active_cores = id.core_masks.iter().map(|mask| mask.count_ones()).sum();
         let shared = Arc::pin_init(
             pin_init!(Shared {
@@ -867,6 +954,7 @@ impl Gpu {
                 descriptor_flags: [id.perf_control, id.perf_map[0]],
                 crashed: AtomicBool::new(false),
                 feed,
+                statistics,
                 feed_work <- new_work!("g17::Shared::feed_work"),
                 preparations,
                 work <- new_work!("g17::Shared::work"),
@@ -882,6 +970,19 @@ impl Gpu {
             GFP_KERNEL,
         )?;
 
+        let directory = kernel::debugfs::Dir::new(c"asahi-g17");
+        let memory = KBox::pin_init(
+            directory.read_only_file(c"memory", crate::agx_memory_stats::View),
+            GFP_KERNEL,
+        )?;
+        let statistics = KBox::pin_init(
+            directory.read_only_file(c"statistics", StatisticsView(report_statistics)),
+            GFP_KERNEL,
+        )?;
+        let capacity = KBox::pin_init(
+            directory.read_only_file(c"capacity", CapacityView(shared.clone())),
+            GFP_KERNEL,
+        )?;
         let gpu = Arc::new(
             Gpu {
                 cfg,
@@ -890,6 +991,10 @@ impl Gpu {
                 geometry,
                 ids: Default::default(),
                 shared,
+                _memory: memory,
+                _statistics: statistics,
+                _capacity: capacity,
+                _telemetry: telemetry,
             },
             GFP_KERNEL,
         )?;
@@ -965,6 +1070,7 @@ impl Gpu {
                 registration_power_release_pending: false,
                 queues <- runtime::Registry::new(shared.clusters, shared.descriptor_flags),
                 pool: object::Pool::new()?,
+                render_rings: kick::RenderRings::new()?,
                 render_ids: Arc::new(freelist::RenderIds::new(), GFP_KERNEL)?,
                 init: initdata::InitData::new(),
                 _render_global: render_global,
@@ -1029,6 +1135,7 @@ impl Gpu {
 
     /// Stops the firmware and releases everything it used.
     pub(crate) fn shutdown(&self) {
+        self.shared.statistics.load.invalidate();
         self.shared.feed.begin_shutdown();
         self.shared.preparations.remove();
         self.shared.stop_queues();

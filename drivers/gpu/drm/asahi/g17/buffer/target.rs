@@ -114,6 +114,7 @@ struct Object {
 impl Object {
     fn new(dev: &AsahiDrmDevice, vm: &mmu::Vm, size: usize) -> Result<Self> {
         let backing = KernelObject::backing(dev, size, CpuMap::WriteCombined)?;
+        backing.classify_memory(crate::agx_memory_stats::KernelCategory::RenderTarget);
         let prot = mmu::PROT_GPU_FW_SHARED_RW;
         let mapping = compact_alias(&backing, vm, 0..size, cfg::TVB_PAGE, prot, mmu::UAT_PGSZ)?;
         Ok(Self {

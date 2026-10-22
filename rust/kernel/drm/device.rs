@@ -191,8 +191,7 @@ impl<T: drm::Driver> UnregisteredDevice<T> {
         gem_prime_import_sg_table: T::Object::ALLOC_OPS.gem_prime_import_sg_table,
         dumb_create: T::Object::ALLOC_OPS.dumb_create,
         dumb_map_offset: T::Object::ALLOC_OPS.dumb_map_offset,
-
-        show_fdinfo: None,
+        show_fdinfo: T::SHOW_FDINFO,
         fbdev_probe: None,
 
         major: T::INFO.major,

@@ -144,7 +144,8 @@ impl HostOutput {
     }
 }
 
-/// Firmware writes two aligned words in a fresh write-combined page per compute command.
+/// Firmware writes two aligned words in a write-combined page of its own per
+/// compute command.
 struct ComputeTimestamps {
     // Remove the GPU alias before releasing its backing.
     mapping: mmu::KernelMapping,
@@ -166,6 +167,81 @@ impl ComputeTimestamps {
     }
 }
 
+/// Compute timestamp pages of one context, kept mapped for its next commands.
+///
+/// A fresh page costs a GEM object, its write-combined kernel mapping and a
+/// GPU mapping on the submission path, and their teardown when the command's
+/// completion is dropped. A page comes back here only from that drop, which
+/// follows exact retirement or a kill witness, so the firmware no longer
+/// writes it; both words are cleared before the page is handed out again.
+#[pin_data]
+pub(crate) struct ComputeTimestampCache {
+    #[pin]
+    pages: Mutex<KVec<ComputeTimestamps>>,
+}
+
+impl ComputeTimestampCache {
+    /// Pages retained per context; deeper pipelines allocate the rest.
+    const RETAINED: usize = 8;
+
+    pub(crate) fn new() -> Result<Arc<Self>> {
+        let pages = KVec::with_capacity(Self::RETAINED, GFP_KERNEL)?;
+        Arc::pin_init(
+            pin_init!(Self {
+                pages <- new_mutex!(pages, "G17 compute timestamp pages"),
+            }),
+            GFP_KERNEL,
+        )
+    }
+
+    fn take(self: &Arc<Self>, dev: &AsahiDrmDevice, vm: &mmu::Vm) -> Result<PooledTimestamps> {
+        let reused = self.pages.lock().pop();
+        let page = match reused {
+            Some(page) => {
+                page.object.dword(0)?.store(0, Ordering::Relaxed);
+                page.object.dword(8)?.store(0, Ordering::Relaxed);
+                barrier(Ordering::SeqCst);
+                page
+            }
+            None => ComputeTimestamps::new(dev, vm)?,
+        };
+        Ok(PooledTimestamps {
+            page: Some(page),
+            cache: self.clone(),
+        })
+    }
+
+    fn put(&self, page: ComputeTimestamps) {
+        let rejected = {
+            let mut pages = self.pages.lock();
+            pages.push_within_capacity(page).err()
+        };
+        // Teardown of a page beyond the retained count runs unlocked.
+        drop(rejected);
+    }
+}
+
+/// A compute timestamp page lent to one command, returned to its context's
+/// cache when the command's completion is dropped.
+struct PooledTimestamps {
+    page: Option<ComputeTimestamps>,
+    cache: Arc<ComputeTimestampCache>,
+}
+
+impl PooledTimestamps {
+    fn page(&self) -> Result<&ComputeTimestamps> {
+        self.page.as_ref().ok_or(EINVAL)
+    }
+}
+
+impl Drop for PooledTimestamps {
+    fn drop(&mut self) {
+        if let Some(page) = self.page.take() {
+            self.cache.put(page);
+        }
+    }
+}
+
 #[pin_data]
 pub(crate) struct Completion {
     status: Arc<VmStatus>,
@@ -173,7 +249,7 @@ pub(crate) struct Completion {
     // Present only when this command's public result may wait for a render
     // predecessor's host writes. DRM credits must follow the terminal result.
     terminal: Option<UserFence<CompletionFence>>,
-    compute: Option<ComputeTimestamps>,
+    compute: Option<PooledTimestamps>,
     feed: Option<Arc<super::feed::Feed>>,
     #[pin]
     vm_job: Mutex<Option<mmu::VmJobGuard>>,
@@ -216,7 +292,7 @@ impl Completion {
             HostOutput::Immediate(output)
         };
         let compute = if compute {
-            Some(ComputeTimestamps::new(dev, context.vm())?)
+            Some(context.compute_timestamps().take(dev, context.vm())?)
         } else {
             None
         };
@@ -278,14 +354,14 @@ impl Completion {
     }
 
     pub(crate) fn compute_timestamp_va(&self) -> Result<u64> {
-        Ok(self.compute.as_ref().ok_or(EINVAL)?.mapping.iova())
+        Ok(self.compute.as_ref().ok_or(EINVAL)?.page()?.mapping.iova())
     }
 
     /// The caller has proved that firmware retired this command, or has
     /// received its scheduler kill acknowledgement with recovery closed.
     /// These are the command's public timestamp words, not queue-private state.
     pub(crate) fn compute_words(&self) -> Result<[u64; 2]> {
-        let object = &self.compute.as_ref().ok_or(EINVAL)?.object;
+        let object = &self.compute.as_ref().ok_or(EINVAL)?.page()?.object;
         let words = [
             object.dword(0)?.load(Ordering::Relaxed),
             object.dword(8)?.load(Ordering::Relaxed),
@@ -335,7 +411,7 @@ impl Completion {
         if self.signalled.load(Ordering::Acquire) {
             return Err(ECANCELED);
         }
-        let object = &self.compute.as_ref().ok_or(EINVAL)?.object;
+        let object = &self.compute.as_ref().ok_or(EINVAL)?.page()?.object;
         let start = object.dword(0)?;
         let end = object.dword(8)?;
         start.store(0, Ordering::Relaxed);
@@ -399,6 +475,12 @@ impl Completion {
         }
         *render = Some(lease);
         Ok(())
+    }
+
+    /// An ioctl publication that met contention returns its lease before the
+    /// scheduler publishes the command. Nothing referred to it yet.
+    pub(crate) fn detach_render_lease(&self) -> Option<super::queue::admission::RenderLease> {
+        self.render.lock().take()
     }
 
     pub(crate) fn render_slot(&self) -> Option<u8> {

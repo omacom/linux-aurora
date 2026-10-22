@@ -19,7 +19,11 @@ pub(super) struct DriverMappings {
     mappings: KVec<KernelMapping>,
     reserved: KVec<Range<u64>>,
     compute: Option<PoolMappings>,
-    render: [Option<PoolMappings>; crate::hw::t8140::queues::RENDER_SLOTS],
+    /// Parameter-buffer views by render pair, one for each graph of this VM
+    /// that keeps one: a graph displaced from an open queue keeps its view
+    /// until that queue's scheduler release, while another queue of the same
+    /// VM installs its own graph on the pair.
+    render: [KVec<PoolMappings>; crate::hw::t8140::queues::RENDER_SLOTS],
 }
 
 struct PoolMappings {
@@ -37,7 +41,7 @@ impl DriverMappings {
                     self.compute.iter().flat_map(|pool| pool.mappings.iter()),
                     self.render
                         .iter()
-                        .flatten()
+                        .flat_map(|views| views.iter())
                         .flat_map(|pool| pool.mappings.iter()),
                 ),
             )
@@ -143,7 +147,7 @@ impl Vm {
             mappings,
             reserved,
             compute: None,
-            render: core::array::from_fn(|_| None),
+            render: core::array::from_fn(|_| KVec::new()),
         });
         Ok(())
     }
@@ -171,12 +175,13 @@ impl Vm {
             .as_ref()?
             .render
             .get(usize::from(slot))?
-            .as_ref()
-            .filter(|pool| pool.id == id)
+            .iter()
+            .find(|pool| pool.id == id)
             .map(|pool| pool.blocks)
     }
 
-    /// Retains a new generation after all references to a replaced pool retire.
+    /// Retains the view of a new graph on pair `slot`. Views of other graphs
+    /// of this VM on the pair stay until their own graphs are dropped.
     pub(crate) fn install_render_pool_mappings(
         &self,
         slot: u8,
@@ -190,16 +195,20 @@ impl Vm {
         let lifetime = self.lifetime.as_ref().ok_or(EINVAL)?;
         let mut driver = lifetime.driver.lock();
         let driver = Option::as_mut(&mut *driver).ok_or(EINVAL)?;
-        let pool = driver.render.get_mut(usize::from(slot)).ok_or(EINVAL)?;
-        if pool.is_some() {
+        let views = driver.render.get_mut(usize::from(slot)).ok_or(EINVAL)?;
+        if views.iter().any(|pool| pool.id == id) {
             return Err(EBUSY);
         }
-        *pool = Some(PoolMappings {
-            id,
-            blocks,
-            mappings,
-        });
-        Ok(())
+        // Reserve first: no refusal drops the aliases while the lock is held,
+        // since unmapping them takes GPUVM locks.
+        views.reserve(1, GFP_KERNEL)?;
+        views
+            .push_within_capacity(PoolMappings {
+                id,
+                blocks,
+                mappings,
+            })
+            .map_err(|_| EIO)
     }
 
     /// Consumes aliases only after the exact cached owner and complete append
@@ -220,8 +229,7 @@ impl Vm {
         let mut driver = lifetime.driver.lock();
         let pool = Option::as_mut(&mut *driver)
             .and_then(|driver| driver.render.get_mut(usize::from(slot)))
-            .and_then(Option::as_mut)
-            .filter(|pool| pool.id == id)
+            .and_then(|views| views.iter_mut().find(|pool| pool.id == id))
             .ok_or(EINVAL)?;
         if pool.blocks != previous {
             return Err(EBUSY);
@@ -258,8 +266,7 @@ impl Vm {
         let mut driver = lifetime.driver.lock();
         let pool = Option::as_mut(&mut *driver)
             .and_then(|driver| driver.render.get_mut(usize::from(slot)))
-            .and_then(Option::as_mut)
-            .filter(|pool| pool.id == id)
+            .and_then(|views| views.iter_mut().find(|pool| pool.id == id))
             .ok_or(EINVAL)?;
         if pool.blocks != blocks || pool.mappings.len() < count {
             return Err(EBUSY);
@@ -280,10 +287,9 @@ impl Vm {
         }
         let previous = self.lifetime.as_ref().and_then(|lifetime| {
             let mut driver = lifetime.driver.lock();
-            Option::as_mut(&mut *driver)
-                .and_then(|driver| driver.render.get_mut(usize::from(slot)))
-                .filter(|pool| pool.as_ref().is_some_and(|pool| pool.id == id))
-                .and_then(Option::take)
+            let views = Option::as_mut(&mut *driver)?.render.get_mut(usize::from(slot))?;
+            let index = views.iter().position(|pool| pool.id == id)?;
+            views.remove(index).ok()
         });
         drop(previous);
     }

@@ -34,7 +34,8 @@ impl event::Transport for Service<'_> {
         let firmware = &mut self.firmware;
         firmware
             .rings
-            .drain_statistics(&firmware.primary.state.shared.dev, &firmware.init, role);
+            .drain_statistics(&firmware.primary.state.shared.dev, &firmware.init, role,
+                              &firmware.primary.state.shared.statistics);
     }
     fn drain(
         &mut self,
@@ -419,7 +420,7 @@ impl crate::g17::Shared {
                 .iter()
                 .flatten()
                 .filter_map(|entry| entry.queue.as_deref())
-                .any(|queue| queue.retirement_polling());
+                .any(|queue| queue.retirement_polling() || queue.pool_release_pending());
         if polling {
             self.queue_poll();
         }

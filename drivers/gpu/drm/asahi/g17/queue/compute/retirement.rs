@@ -156,10 +156,11 @@ pub(crate) struct Batch {
 }
 
 impl Batch {
-    pub(crate) fn new() -> Result<Self> {
-        Ok(Self {
+    /// Initialized in place: the slot table is too large to stage on the probe stack.
+    pub(crate) fn new() -> impl Init<Self, Error> {
+        kernel::try_init!(Self {
             requests: KVVec::with_capacity(QIDS * IN_FLIGHT, GFP_KERNEL)?,
-            slots: [(0, 0); QIDS],
+            slots <- pin_init::init_zeroed(),
             open: None,
         })
     }

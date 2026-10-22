@@ -298,6 +298,10 @@ static inline int drm_gem_shmem_object_mmap(struct drm_gem_object *obj, struct v
  * Driver ops
  */
 
+enum drm_gem_object_status
+drm_gem_shmem_object_status(struct drm_gem_object *obj);
+size_t drm_gem_shmem_object_rss(struct drm_gem_object *obj);
+
 struct drm_gem_object *
 drm_gem_shmem_prime_import_sg_table(struct drm_device *dev,
 				    struct dma_buf_attachment *attach,

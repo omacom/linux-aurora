@@ -16,6 +16,7 @@ use kernel::{prelude::*, sync::Arc};
 struct BuildResources {
     uat: Arc<crate::mmu::Uat>,
     objects: Arc<Pool>,
+    rings: Arc<crate::g17::kick::RenderRings>,
     ids: Arc<crate::g17::freelist::RenderIds>,
     global: crate::mmu::Vm,
     metrics: Arc<KernelObject>,
@@ -28,6 +29,7 @@ impl BuildResources {
         Ok(Self {
             uat: firmware.uat.clone(),
             objects: firmware.pool.clone(),
+            rings: firmware.render_rings.clone(),
             ids: firmware.render_ids.clone(),
             global: firmware._render_global.clone(),
             metrics: firmware._pm_metrics.clone(),
@@ -72,8 +74,14 @@ struct BuildContext<'a> {
 }
 
 impl super::super::Backend {
-    fn build_render_pair(&self, slot: u8, first: &Arc<Packet>, optional: bool) -> Result {
-        let lease = self.shared.preparations.enter(false)?;
+    fn build_render_pair(
+        &self,
+        slot: u8,
+        first: &Arc<Packet>,
+        optional: bool,
+        wait: super::super::Wait,
+    ) -> Result {
+        let lease = self.enter_preparation(wait)?;
         let dev = self.shared.drm()?;
         let (resources, build) = {
             let mut state = self.shared.state.lock();
@@ -133,6 +141,13 @@ impl super::super::Backend {
                         if !pair.reusable()? {
                             return Err(EBUSY);
                         }
+                        // The release of the pair's scheduler is armed or still being
+                        // consumed: the firmware may process it against these queues.
+                        // The teardown parks the pair once the release is witnessed;
+                        // the new owner then installs it with fresh queue records.
+                        if firmware.queues.teardown.releasing(pair.context()) {
+                            return Err(EBUSY);
+                        }
                         let foreign = !Arc::ptr_eq(pair.context().status(), self.context.status());
                         if foreign {
                             firmware
@@ -164,6 +179,8 @@ impl super::super::Backend {
                             .is_some_and(|pair| pair.published_in_flight());
                         entry.borrowed_dependencies =
                             entry.pair.as_ref().map(|pair| pair.dependency_snapshot());
+                        entry.borrowed_switch =
+                            entry.pair.as_ref().and_then(|pair| pair.switch_in_flight());
                         Build::Rebind {
                             pair: entry.pair.take().ok_or(EIO)?,
                             buffer,
@@ -242,6 +259,7 @@ impl super::super::Backend {
             Pair::new(
                 &alloc,
                 &resources.objects,
+                &resources.rings,
                 reservation.ids,
                 slot,
                 self.owner,
@@ -397,6 +415,9 @@ impl super::super::Backend {
             entry.preparing = None;
             entry.pending_owner = None;
             entry.pending_owner_closed = false;
+            if firmware.queues.render.take_missed_event(slot) {
+                self.shared.queue_events();
+            }
             firmware.render_grow_ready()
         };
         self.shared.changed.notify_all();
@@ -463,14 +484,21 @@ impl super::super::Backend {
                 if entry.pending_owner != Some(self.owner) || entry.pending_owner_closed {
                     return Err(ECANCELED);
                 }
+                // A pair forfeited by a live owner still names that owner's
+                // scheduler; only its logical close may arm the release.
+                let owner_closed = entry.closed;
+                // That owner may have closed while this binding was prepared.
+                if firmware.queues.teardown.releasing(pair.context()) {
+                    return Err(EBUSY);
+                }
                 if firmware.queues.render.retired.len()
                     == firmware.queues.render.retired.capacity()
                 {
-                    return Err(ENOSPC);
+                    return Err(resource_exhausted!("retired render bindings"));
                 }
                 firmware.queues.teardown.displace(
                     pair.context(),
-                    true,
+                    owner_closed,
                     super::super::now_ns(),
                 )?;
                 pair.bind_owner(
@@ -499,6 +527,10 @@ impl super::super::Backend {
             entry.pending_owner_closed = false;
             entry.pair = Some(pair);
             entry.borrowed_dependencies = None;
+            entry.borrowed_switch = None;
+            if firmware.queues.render.take_missed_event(slot) {
+                self.shared.queue_events();
+            }
             (result, firmware.render_grow_ready())
         };
         drop(prepared);
@@ -556,8 +588,13 @@ impl super::super::Backend {
         firmware.queues.render.pools.warm(&firmware.init, &pool)
     }
 
-    pub(super) fn ensure_render(&self, packet: &Arc<Packet>, slot: u8) -> Result {
-        self.build_render_pair(slot, packet, false)?;
+    pub(super) fn ensure_render(
+        &self,
+        packet: &Arc<Packet>,
+        slot: u8,
+        wait: super::super::Wait,
+    ) -> Result {
+        self.build_render_pair(slot, packet, false, wait)?;
         let sibling = {
             let state = self.shared.state.lock();
             (*state)
@@ -568,10 +605,16 @@ impl super::super::Backend {
                 .warmable_sibling(self.owner, slot)
         };
         if let Some(sibling) = sibling {
+            // The host lease excludes capacity reclamation until this off-lock
+            // construction and its final device-locked install have finished.
             // An optional sibling may be borrowed or waiting for recovery.
             // The selected pair is revalidated by prepare_render before publication.
-            match self.build_render_pair(sibling, packet, true) {
-                Err(error) if error == EBUSY || error == EAGAIN => {}
+            // Warming is optional: exhausted identities, VA or memory must not
+            // fail a command whose own pair is ready. Its failed construction
+            // leaves the reservation unchanged, as for the primary pair.
+            match self.build_render_pair(sibling.slot(), packet, true, wait) {
+                Err(error)
+                    if [EBUSY, EAGAIN, ENOSPC, ENOMEM, super::super::FALLBACK].contains(&error) => {}
                 result => result?,
             }
         }
@@ -583,8 +626,9 @@ impl super::super::Backend {
         slot: u8,
         packet: &Arc<Packet>,
         deferred: &mut super::super::DeferredBatch,
+        wait: super::super::Wait,
     ) -> Result {
-        let lease = self.shared.preparations.enter(false)?;
+        let lease = self.enter_preparation(wait)?;
         let dev = self.shared.drm()?;
         let (uat, mut pair, addresses, growth_target) = {
             let mut state = self.shared.state.lock();
@@ -660,6 +704,9 @@ impl super::super::Backend {
         let mut state = self.shared.state.lock();
         let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
         firmware.queues.render.return_pair(slot, &mut returned)?;
+        if firmware.queues.render.take_missed_event(slot) {
+            self.shared.queue_events();
+        }
         if firmware.queues.render.entry(slot)?.closed {
             firmware
                 .queues

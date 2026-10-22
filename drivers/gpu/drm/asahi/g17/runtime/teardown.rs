@@ -116,7 +116,7 @@ impl Host for Service<'_> {
             .iter()
             .flatten()
             .filter_map(|entry| entry.queue.as_ref())
-            .all(|queue| queue.idle_for_context(context))
+            .all(|queue| queue.idle_for_context(context) && !queue.switching_from(context))
     }
     fn flists_released(&self, context: &Arc<Context>) -> bool {
         self.render.teardown_pools_released(context)
