@@ -194,6 +194,7 @@ static const struct dcp_v14_board dcp_v14_board_j516c = {
 	 * at most), as the e272b67 path on this J516C presented it.
 	 */
 	.panel_nits = true,
+	.base_edid = true,
 };
 
 /*
@@ -1732,6 +1733,11 @@ const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
 bool dcp_v14_board_stamps_swaps(const struct dcp_v14_board *board, bool external)
 {
 	return board && !external && board->swap_timestamps;
+}
+
+bool iomfb_v14_7_base_edid(const struct apple_dcp *dcp)
+{
+	return dcp->v14 && dcp->v14->board && dcp->v14->board->base_edid;
 }
 
 int iomfb_v14_7_probe(struct apple_dcp *dcp)
