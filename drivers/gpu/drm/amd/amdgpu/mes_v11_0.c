@@ -867,7 +867,8 @@ static int mes_v11_0_allocate_ucode_buffer(struct amdgpu_device *adev,
 		return r;
 	}
 
-	memcpy(adev->mes.ucode_fw_ptr[pipe], fw_data, fw_size);
+	amdgpu_bo_memcpy_to(adev->mes.ucode_fw_obj[pipe],
+			    adev->mes.ucode_fw_ptr[pipe], fw_data, fw_size);
 
 	amdgpu_bo_kunmap(adev->mes.ucode_fw_obj[pipe]);
 	amdgpu_bo_unreserve(adev->mes.ucode_fw_obj[pipe]);
@@ -908,7 +909,8 @@ static int mes_v11_0_allocate_ucode_data_buffer(struct amdgpu_device *adev,
 		return r;
 	}
 
-	memcpy(adev->mes.data_fw_ptr[pipe], fw_data, fw_size);
+	amdgpu_bo_memcpy_to(adev->mes.data_fw_obj[pipe],
+			    adev->mes.data_fw_ptr[pipe], fw_data, fw_size);
 
 	amdgpu_bo_kunmap(adev->mes.data_fw_obj[pipe]);
 	amdgpu_bo_unreserve(adev->mes.data_fw_obj[pipe]);
@@ -1117,7 +1119,8 @@ static int mes_v11_0_allocate_eop_buf(struct amdgpu_device *adev,
 
 static int mes_v11_0_mqd_init(struct amdgpu_ring *ring)
 {
-	struct v11_compute_mqd *mqd = ring->mqd_ptr;
+	struct v11_compute_mqd *mqd = ring->mqd_obj->tbo.resource->bus.is_nonposted ?
+		ring->adev->mes.mqd_backup[ring->pipe] : ring->mqd_ptr;
 	uint64_t hqd_gpu_addr, wb_gpu_addr, eop_base_addr;
 	uint32_t tmp;
 
@@ -1215,13 +1218,17 @@ static int mes_v11_0_mqd_init(struct amdgpu_ring *ring)
 	mqd->cp_hqd_iq_timer = regCP_HQD_IQ_TIMER_DEFAULT;
 	mqd->cp_hqd_quantum = regCP_HQD_QUANTUM_DEFAULT;
 
+	if (ring->mqd_obj->tbo.resource->bus.is_nonposted)
+		amdgpu_bo_memcpy_to(ring->mqd_obj, ring->mqd_ptr, mqd, sizeof(*mqd));
+
 	amdgpu_device_flush_hdp(ring->adev, NULL);
 	return 0;
 }
 
 static void mes_v11_0_queue_init_register(struct amdgpu_ring *ring)
 {
-	struct v11_compute_mqd *mqd = ring->mqd_ptr;
+	struct v11_compute_mqd *mqd = ring->mqd_obj->tbo.resource->bus.is_nonposted ?
+		ring->adev->mes.mqd_backup[ring->pipe] : ring->mqd_ptr;
 	struct amdgpu_device *adev = ring->adev;
 	uint32_t data = 0;
 
@@ -1409,7 +1416,7 @@ static int mes_v11_0_mqd_sw_init(struct amdgpu_device *adev,
 		return r;
 	}
 
-	memset(ring->mqd_ptr, 0, mqd_size);
+	amdgpu_bo_memset(ring->mqd_obj, ring->mqd_ptr, 0, mqd_size);
 
 	/* prepare MQD backup */
 	adev->mes.mqd_backup[pipe] = kmalloc(mqd_size, GFP_KERNEL);

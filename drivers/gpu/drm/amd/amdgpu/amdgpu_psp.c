@@ -2197,21 +2197,25 @@ static int psp_ras_send_cmd(struct psp_context *psp,
 
 	mutex_lock(&psp->ras_context.mutex);
 	ras_cmd = (struct ta_ras_shared_memory *)psp->ras_context.context.mem_context.shared_buf;
-	memset(ras_cmd, 0, sizeof(struct ta_ras_shared_memory));
+	amdgpu_bo_memset(psp->ras_context.context.mem_context.shared_bo, ras_cmd, 0,
+			 sizeof(struct ta_ras_shared_memory));
 
 	switch (cmd) {
 	case TA_RAS_COMMAND__ENABLE_FEATURES:
 	case TA_RAS_COMMAND__DISABLE_FEATURES:
-		memcpy(&ras_cmd->ras_in_message,
-			in, sizeof(ras_cmd->ras_in_message));
+		amdgpu_bo_memcpy_to(psp->ras_context.context.mem_context.shared_bo,
+				    &ras_cmd->ras_in_message,
+				    in, sizeof(ras_cmd->ras_in_message));
 		break;
 	case TA_RAS_COMMAND__TRIGGER_ERROR:
-		memcpy(&ras_cmd->ras_in_message.trigger_error,
-			in, sizeof(ras_cmd->ras_in_message.trigger_error));
+		amdgpu_bo_memcpy_to(psp->ras_context.context.mem_context.shared_bo,
+				    &ras_cmd->ras_in_message.trigger_error,
+				    in, sizeof(ras_cmd->ras_in_message.trigger_error));
 		break;
 	case TA_RAS_COMMAND__QUERY_ADDRESS:
-		memcpy(&ras_cmd->ras_in_message.address,
-			in, sizeof(ras_cmd->ras_in_message.address));
+		amdgpu_bo_memcpy_to(psp->ras_context.context.mem_context.shared_bo,
+				    &ras_cmd->ras_in_message.address,
+				    in, sizeof(ras_cmd->ras_in_message.address));
 		break;
 	default:
 		dev_err(psp->adev->dev, "Invalid ras cmd id: %u\n", cmd);
@@ -2225,15 +2229,18 @@ static int psp_ras_send_cmd(struct psp_context *psp,
 	switch (cmd) {
 	case TA_RAS_COMMAND__TRIGGER_ERROR:
 		if (!ret && out)
-			memcpy(out, &ras_cmd->ras_status, sizeof(ras_cmd->ras_status));
+			amdgpu_bo_memcpy_from(psp->ras_context.context.mem_context.shared_bo,
+					      out, &ras_cmd->ras_status,
+					      sizeof(ras_cmd->ras_status));
 		break;
 	case TA_RAS_COMMAND__QUERY_ADDRESS:
 		if (ret || ras_cmd->ras_status || psp->cmd_buf_mem->resp.status)
 			ret = -EINVAL;
 		else if (out)
-			memcpy(out,
-				&ras_cmd->ras_out_message.address,
-				sizeof(ras_cmd->ras_out_message.address));
+			amdgpu_bo_memcpy_from(psp->ras_context.context.mem_context.shared_bo,
+					      out,
+					      &ras_cmd->ras_out_message.address,
+					      sizeof(ras_cmd->ras_out_message.address));
 		break;
 	default:
 		break;
@@ -4625,8 +4632,8 @@ int psp_copy_fw(struct psp_context *psp, uint8_t *start_addr, uint32_t bin_size)
 		return -EINVAL;
 	}
 
-	memset(psp->fw_pri_buf, 0, PSP_1_MEG);
-	memcpy(psp->fw_pri_buf, start_addr, bin_size);
+	amdgpu_bo_memset(psp->fw_pri_bo, psp->fw_pri_buf, 0, PSP_1_MEG);
+	amdgpu_bo_memcpy_to(psp->fw_pri_bo, psp->fw_pri_buf, start_addr, bin_size);
 
 	drm_dev_exit(idx);
 	return 0;

@@ -2825,8 +2825,10 @@ static int dm_dmub_sw_init(struct amdgpu_device *adev)
 	 * TODO: Move this into GART.
 	 */
 	r = amdgpu_bo_create_kernel(adev, region_info.fb_size, PAGE_SIZE,
-				    AMDGPU_GEM_DOMAIN_VRAM |
-				    AMDGPU_GEM_DOMAIN_GTT,
+				    (pci_resource_flags(adev->pdev, 0) &
+				     IORESOURCE_MEM_NONPOSTED) ?
+				    AMDGPU_GEM_DOMAIN_GTT :
+				    AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT,
 				    &adev->dm.dmub_bo,
 				    &adev->dm.dmub_bo_gpu_addr,
 				    &adev->dm.dmub_bo_cpu_addr);
