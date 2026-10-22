@@ -49,16 +49,27 @@ for example with `systemctl edit aurora-sep.service`:
 Environment=AURORA_SEP_READY_TIMEOUT=180
 ```
 
-The driver defaults to `xart_writes=1`. It exports no module alias, so udev
-never loads it on its own: the service above loads it, once the iBoot system
-container is reachable. Writes are accepted only when the APFS `.gl`
+The driver exports its module alias, so udev loads it on every Mac whose device
+tree enables the SEP and the enclave is booted early: on the M1 and M2 laptops
+the Secure Enclave sits in the path of the microphone data lines, and the
+microphones only work once it runs. If udev loads the driver before the iBoot
+system container's partition link exists, the boot waits up to 30 s for it and
+then runs without the xART store (Touch ID and trusted keys stay unavailable
+until the next boot). The service above remains harmless and is no longer
+required to load the driver.
+
+The driver defaults to `xart_writes=0 provision_keybag=0`: read-only operation,
+which boots the enclave but refuses Touch ID enrol and verify. The Touch ID
+package installs `/usr/lib/modprobe.d/apple-sep.conf` with
+`options apple_sep xart_writes=1 provision_keybag=1`; a `--read-only` install
+overrides it with `options apple_sep xart_writes=0 provision_keybag=0` in
+`/etc/modprobe.d/`. Writes are accepted only when the APFS `.gl`
 extent passes the driver's narrow ownership checks: one physical extent, no snapshots or revert
 state, and a single extent reference owned by the `.gl` inode. The kernel
 resolves that extent from checksum-validated APFS metadata; unsupported layouts
-fail closed. Set `options apple_sep xart_writes=0 provision_keybag=0` in a
-modprobe configuration to retain read-only operation. `provision_keybag=1`
-is also the default: first boot creates the Linux identity needed for trusted
-keys, and later boots recover that identity and its machine reference key.
+fail closed. With `provision_keybag=1`, the first boot creates the Linux
+identity needed for trusted keys, and later boots recover that identity and its
+machine reference key.
 An existing unreadable or invalid identity is not silently replaced.
 Enabling writes has been tested on m2 with identity-keybag provisioning,
 trusted-key seal/unseal, and reboot reload. The raw iBoot container hash did not
