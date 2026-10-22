@@ -2178,7 +2178,7 @@ static int apple_pcie_config_write(struct pci_bus *bus, unsigned int devfn,
 	int ret;
 
 	ret = pci_generic_config_write(bus, devfn, where, size, val);
-	if (ret || !pcie || !pcie->kernel_init)
+	if (ret || !pcie || !(pcie->kernel_init || pcie->tunnel_cold_init))
 		return ret;
 	/* Root-port prefetchable window. The port block has to be told too. */
 	if (bus->number != cfg->busr.start || devfn)
