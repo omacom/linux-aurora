@@ -41,6 +41,7 @@
 #include <linux/dma-buf.h>
 #include <linux/sizes.h>
 #include <linux/module.h>
+#include <linux/dma-map-ops.h>
 
 #include <drm/drm_drv.h>
 #include <drm/ttm/ttm_bo.h>
@@ -1214,7 +1215,12 @@ static struct ttm_tt *amdgpu_ttm_tt_create(struct ttm_buffer_object *bo,
 	else
 		gtt->pool_id = abo->xcp_id;
 
-	if (abo->flags & AMDGPU_GEM_CREATE_CPU_GTT_USWC)
+	/*
+	 * Behind a non-posted BAR the host is an Apple Silicon tunnel whose PCI DMA is not cache coherent: dirty CPU cache lines would
+	 * be invisible to the GPU, so map GTT pages write-combined there.
+	 */
+	if ((abo->flags & AMDGPU_GEM_CREATE_CPU_GTT_USWC) ||
+	    ((pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED) && !dev_is_dma_coherent(adev->dev)))
 		caching = ttm_write_combined;
 	else
 		caching = ttm_cached;
