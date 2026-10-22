@@ -52,6 +52,17 @@ static int psp_load_smu_fw(struct psp_context *psp);
 static int psp_rap_terminate(struct psp_context *psp);
 static int psp_securedisplay_terminate(struct psp_context *psp);
 
+/*
+ * The PSP command, fence and ring buffers and the TA shared buffers are read and written through plain CPU pointers. Behind a
+ * non-posted BAR a VRAM placement turns those into Device-nGnRnE accesses that fault on plain stores, so place them in GTT.
+ */
+static u32 psp_cpu_buf_domain(struct amdgpu_device *adev)
+{
+	if (pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED)
+		return AMDGPU_GEM_DOMAIN_GTT;
+	return AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT;
+}
+
 static const char * const amdgpu_ptl_fmt_str[] = {
 	[AMDGPU_PTL_FMT_I8]      = "I8",
 	[AMDGPU_PTL_FMT_F16]     = "F16",
@@ -74,11 +85,10 @@ static int psp_ring_init(struct psp_context *psp,
 
 	ring->ring_type = ring_type;
 
-	/* allocate 4k Page of Local Frame Buffer memory for ring */
+	/* allocate a 4k page for the ring (GTT instead of VRAM behind a non-posted BAR) */
 	ring->ring_size = 0x1000;
 	ret = amdgpu_bo_create_kernel(adev, ring->ring_size, PAGE_SIZE,
-				      AMDGPU_GEM_DOMAIN_VRAM |
-				      AMDGPU_GEM_DOMAIN_GTT,
+				      psp_cpu_buf_domain(adev),
 				      &adev->firmware.rbuf,
 				      &ring->ring_mem_mc_addr,
 				      (void **)&ring->ring_mem);
@@ -546,8 +556,7 @@ static int psp_sw_init(struct amdgpu_ip_block *ip_block)
 		return ret;
 
 	ret = amdgpu_bo_create_kernel(adev, PSP_FENCE_BUFFER_SIZE, PAGE_SIZE,
-				      AMDGPU_GEM_DOMAIN_VRAM |
-				      AMDGPU_GEM_DOMAIN_GTT,
+				      psp_cpu_buf_domain(adev),
 				      &psp->fence_buf_bo,
 				      &psp->fence_buf_mc_addr,
 				      &psp->fence_buf);
@@ -555,8 +564,7 @@ static int psp_sw_init(struct amdgpu_ip_block *ip_block)
 		goto failed1;
 
 	ret = amdgpu_bo_create_kernel(adev, PSP_CMD_BUFFER_SIZE, PAGE_SIZE,
-				      AMDGPU_GEM_DOMAIN_VRAM |
-				      AMDGPU_GEM_DOMAIN_GTT,
+				      psp_cpu_buf_domain(adev),
 				      &psp->cmd_buf_bo, &psp->cmd_buf_mc_addr,
 				      (void **)&psp->cmd_buf_mem);
 	if (ret)
@@ -1760,8 +1768,7 @@ int psp_ta_init_shared_buf(struct psp_context *psp,
 	 * physical) for ta to host memory
 	 */
 	return amdgpu_bo_create_kernel(psp->adev, mem_ctx->shared_mem_size,
-				      PAGE_SIZE, AMDGPU_GEM_DOMAIN_VRAM |
-				      AMDGPU_GEM_DOMAIN_GTT,
+				      PAGE_SIZE, psp_cpu_buf_domain(psp->adev),
 				      &mem_ctx->shared_bo,
 				      &mem_ctx->shared_mc_addr,
 				      &mem_ctx->shared_buf);
