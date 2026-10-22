@@ -2876,6 +2876,22 @@ int dcp_get_modes(struct drm_connector *connector)
 			if (dcp->hw.link_report)
 				dcp_note_edid(apple_connector, apple_connector->drm_edid);
 		}
+	} else if (nr_modes && dcp_is_v14_7_panel(dcp) && dcp->panel.id.vendor[0]) {
+		/*
+		 * No EDID comes for this panel: publish the base block of its
+		 * node, sized as the connector is (the firmware's size, else the
+		 * node's), then give the connector back its size in millimetres.
+		 */
+		int update;
+
+		dcp_update_connector_dimensions(dcp, connector);
+		update = dcp_panel_edid_update(connector, &dcp->panel.id,
+					       connector->display_info.width_mm,
+					       connector->display_info.height_mm);
+		dcp_update_connector_dimensions(dcp, connector);
+		apple_connector->drm_edid_firmware_derived = false;
+		if (update)
+			dev_warn_once(dcp->dev, "panel EDID publication failed: %d\n", update);
 	} else {
 		u64 generation = 0;
 		u32 defaults = 0;

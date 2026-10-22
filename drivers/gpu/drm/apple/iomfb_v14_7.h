@@ -28,6 +28,8 @@ const __be32 *of_translate_dma_region_checked(struct device_node *dev,
  */
 const struct dcp_v14_board *iomfb_v14_7_board(struct device *dev);
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board);
+/* Whether the internal panel's board record gives it a base EDID. */
+bool iomfb_v14_7_base_edid(const struct apple_dcp *dcp);
 
 /* Platform probe: firmware identity, boot loader handoff, PMP acknowledgment. */
 int iomfb_v14_7_probe(struct apple_dcp *dcp);

@@ -6358,6 +6358,8 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		panel_np = of_get_compatible_child(dev->of_node, "apple,panel");
 
 	if (panel_np) {
+		const char *compatible;
+
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 			/*
 			 * Desktop 26.x swaps carry nits, and the panel node
@@ -6376,6 +6378,12 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		}
 
 		dcp_panel_read_dimensions(dcp, panel_np);
+		/* The most specific compatible names the panel for its EDID. */
+		if (iomfb_v14_7_base_edid(dcp) &&
+		    !of_property_read_string_index(panel_np, "compatible", 0, &compatible) &&
+		    dcp_panel_id_from_compatible(&dcp->panel.id, compatible))
+			dev_dbg(dev, "no EDID make and product in '%s'\n", compatible);
+
 		of_node_put(panel_np);
 		/* Read target metadata for H17P and desktop firmware alike. */
 		dcp_panel_read_adt(dcp);

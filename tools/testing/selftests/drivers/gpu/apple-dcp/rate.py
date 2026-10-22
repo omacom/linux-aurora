@@ -757,7 +757,7 @@ def publication(root):
     state = n['state']
     state = state.replace('struct apple_connector {', '''struct drm_device { void *dev; struct { bool mutex; } mode_config; };
 struct drm_connector { struct drm_device *dev; int registration_state; void *state;
-    struct { struct { unsigned min_vfreq,max_vfreq; } monitor_range; } display_info;
+    struct { struct { unsigned min_vfreq,max_vfreq; } monitor_range; int width_mm,height_mm; } display_info;
 };
 struct apple_connector {''')
     state = state.replace('    struct { int registration_state; } base;', '    struct drm_connector base;')
@@ -772,7 +772,7 @@ struct apple_connector {''')
     int fw_compat,width_mm,height_mm,fixed_connector_type; unsigned notch_height;
     bool modes_lock,modes_admitted,modes_provisional,placeholder_retried,external_native; int external_held;
     u64 modes_generation,dimensions_generation; struct work_struct dimensions_wq;
-    struct { int width_mm,height_mm; } panel;
+    struct { int width_mm,height_mm; struct { char vendor[4]; } id; } panel;
     struct { size_t length,received; void *data; bool contiguous,payload_complete; u64 modes_generation;
         u64 av_service_epoch,automatic_connection_sequence; bool automatic_service_pending;
         struct dcp_metadata_ticket metadata_ticket,mode_ticket;
@@ -834,6 +834,10 @@ static void dcp_external_audio_start(struct apple_dcp *d) { assert(!d->external_
 /* The stubbed read always carries an EDID: nothing asks for a re-probe. */
 static bool dcpavserv_edid_retry(struct apple_dcp *d,u64 e) { (void)d;(void)e;assert(0);return false; }
 static void dcpavserv_edid_retry_reset(struct apple_dcp *d) { assert(d->dcpavserv.lock); }
+/* These H17P scenarios never reach the 14.7 panel's base EDID. */
+#define dev_warn_once(...) ((void)0)
+static bool dcp_is_v14_7_panel(const struct apple_dcp *d) { (void)d; return false; }
+static int dcp_panel_edid_update(struct drm_connector *c,const void *id,int w,int h) { (void)c;(void)id;(void)w;(void)h;assert(false);return 0; }
 static void dpavservep_detach(struct apple_dcp *d);
 static struct apple_dcp *probing;
 static struct drm_edid transport_edid;
@@ -1204,10 +1208,9 @@ def panel_dimensions(root):
     unit = unit.replace('bool modes_lock,modes_admitted,',
                         'bool external_physically_absent,modes_lock,modes_admitted,', 1)
     # The connector's physical size, which DRM keeps in display_info.
-    old = 'struct { struct { unsigned min_vfreq,max_vfreq; } monitor_range; } display_info;'
-    assert unit.count(old) == 1
-    unit = unit.replace(old, 'struct { struct { unsigned min_vfreq,max_vfreq; } monitor_range; '
-                        'int width_mm,height_mm; } display_info;')
+    # publication() already gives display_info its size for the panel EDID path.
+    assert unit.count('struct { struct { unsigned min_vfreq,max_vfreq; } monitor_range; '
+                      'int width_mm,height_mm; } display_info;') == 1
     dcp = (root / 'drivers/gpu/drm/apple/dcp.c').read_text()
     unit = unit.replace(block(unit, 'static bool __attribute__((unused)) dcp_has_panel('),
                         block(dcp, 'bool dcp_has_panel('))
