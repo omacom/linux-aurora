@@ -2191,11 +2191,62 @@ static int apple_pcie_config_write(struct pci_bus *bus, unsigned int devfn,
 	return 0;
 }
 
+/*
+ * The tunnel wait covers only the root port's link. A switch Downstream Port
+ * with a slot but no hot-plug capability (an eGPU behind an ASM2464PD) trains
+ * its own link later, yet its bus is scanned once: a card that answers after
+ * that scan is never enumerated with the tunnel, whose bus numbers and windows
+ * are then fixed. Give such a link the same time before its bus is scanned,
+ * plus 100 ms (PCIe r7.0 sec 6.6.1 requires it after training above 5 GT/s;
+ * it is waited for at every speed here, which is conservative).
+ * Hot-plug capable ports are left to pciehp.
+ */
+static int apple_pcie_add_bus(struct pci_bus *bus)
+{
+	struct pci_config_window *cfg = bus->sysdata;
+	struct pci_dev *port = bus->self;
+	unsigned long start = jiffies;
+	unsigned long timeout = start +
+				msecs_to_jiffies(APPLE_PCIE_TUNNEL_READY_MS);
+	u16 lnksta, sltsta;
+
+	if (!port || pci_pcie_type(port) != PCI_EXP_TYPE_DOWNSTREAM ||
+	    !(pcie_caps_reg(port) & PCI_EXP_FLAGS_SLOT) ||
+	    port->is_hotplug_bridge || !port->link_active_reporting ||
+	    !apple_pcie_lookup(cfg->parent)->hw->tunneled)
+		return 0;
+
+	if (pcie_capability_read_word(port, PCI_EXP_LNKSTA, &lnksta) ||
+	    (lnksta & PCI_EXP_LNKSTA_DLLLA))
+		return 0;
+
+	if (pcie_capability_read_word(port, PCI_EXP_SLTSTA, &sltsta))
+		return 0;
+	pci_info(port, "slot link down before scan (SltSta %#06x), waiting up to %d ms\n",
+		 sltsta, APPLE_PCIE_TUNNEL_READY_MS);
+	do {
+		msleep(10);
+		if (pcie_capability_read_word(port, PCI_EXP_LNKSTA, &lnksta))
+			return 0;
+		if (lnksta & PCI_EXP_LNKSTA_DLLLA) {
+			pci_info(port, "slot link up after %u ms\n",
+				 jiffies_to_msecs(jiffies - start));
+			msleep(PCIE_RESET_CONFIG_WAIT_MS);
+			return 0;
+		}
+	} while (time_before(jiffies, timeout));
+
+	pci_info(port, "slot link still down after %d ms\n",
+		 APPLE_PCIE_TUNNEL_READY_MS);
+	return 0;
+}
+
 static const struct pci_ecam_ops apple_pcie_cfg_ecam_ops = {
 	.init		= apple_pcie_init,
 	.enable_device	= apple_pcie_enable_device,
 	.disable_device	= apple_pcie_disable_device,
 	.pci_ops	= {
+		.add_bus	= apple_pcie_add_bus,
 		.map_bus	= apple_pcie_map_bus,
 		.read		= pci_generic_config_read,
 		.write		= apple_pcie_config_write,
