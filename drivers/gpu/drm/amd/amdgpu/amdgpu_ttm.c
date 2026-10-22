@@ -649,6 +649,7 @@ static int amdgpu_ttm_io_mem_reserve(struct ttm_device *bdev,
 {
 	struct amdgpu_device *adev = amdgpu_ttm_adev(bdev);
 
+	mem->bus.is_nonposted = false;
 	switch (mem->mem_type) {
 	case TTM_PL_SYSTEM:
 		/* system memory */
@@ -657,6 +658,8 @@ static int amdgpu_ttm_io_mem_reserve(struct ttm_device *bdev,
 	case AMDGPU_PL_PREEMPT:
 		break;
 	case TTM_PL_VRAM:
+		mem->bus.is_nonposted = pci_resource_flags(adev->pdev, 0) &
+					IORESOURCE_MEM_NONPOSTED;
 		mem->bus.offset = mem->start << PAGE_SHIFT;
 
 		if (adev->mman.aper_base_kaddr &&
@@ -668,12 +671,17 @@ static int amdgpu_ttm_io_mem_reserve(struct ttm_device *bdev,
 		mem->bus.is_iomem = true;
 		break;
 	case AMDGPU_PL_DOORBELL:
+		mem->bus.is_nonposted = pci_resource_flags(adev->pdev, 2) &
+					IORESOURCE_MEM_NONPOSTED;
 		mem->bus.offset = mem->start << PAGE_SHIFT;
 		mem->bus.offset += adev->doorbell.base;
 		mem->bus.is_iomem = true;
 		mem->bus.caching = ttm_uncached;
 		break;
 	case AMDGPU_PL_MMIO_REMAP:
+		mem->bus.is_nonposted = pci_resource_flags(adev->pdev,
+				adev->asic_type >= CHIP_BONAIRE ? 5 : 2) &
+					IORESOURCE_MEM_NONPOSTED;
 		mem->bus.offset = mem->start << PAGE_SHIFT;
 		mem->bus.offset += adev->rmmio_remap.bus_addr;
 		mem->bus.is_iomem = true;
@@ -2127,6 +2135,10 @@ int amdgpu_ttm_init(struct amdgpu_device *adev)
 	/* Change the size here instead of the init above so only lpfn is affected */
 	amdgpu_ttm_disable_buffer_funcs(adev);
 #ifdef CONFIG_64BIT
+	if (pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED)
+		adev->mman.aper_base_kaddr = ioremap_np(adev->gmc.aper_base,
+				adev->gmc.visible_vram_size);
+	else
 #ifdef CONFIG_X86
 	if (adev->gmc.xgmi.connected_to_cpu)
 		adev->mman.aper_base_kaddr = ioremap_cache(adev->gmc.aper_base,
