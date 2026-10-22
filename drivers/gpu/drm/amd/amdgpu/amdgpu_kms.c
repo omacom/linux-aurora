@@ -826,10 +826,13 @@ int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file *filp)
 		vram_gtt.vram_size = adev->gmc.real_vram_size -
 			atomic64_read(&adev->vram_pin_size) -
 			AMDGPU_VM_RESERVED_VRAM;
-		vram_gtt.vram_cpu_accessible_size =
-			min(adev->gmc.visible_vram_size -
-			    atomic64_read(&adev->visible_pin_size),
-			    vram_gtt.vram_size);
+		if (pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED)
+			vram_gtt.vram_cpu_accessible_size = 0;
+		else
+			vram_gtt.vram_cpu_accessible_size =
+				min(adev->gmc.visible_vram_size -
+				    atomic64_read(&adev->visible_pin_size),
+				    vram_gtt.vram_size);
 		vram_gtt.gtt_size = ttm_manager_type(&adev->mman.bdev, TTM_PL_TT)->size;
 		vram_gtt.gtt_size -= atomic64_read(&adev->gart_pin_size);
 		return copy_to_user(out, &vram_gtt,
@@ -851,16 +854,19 @@ int amdgpu_info_ioctl(struct drm_device *dev, void *data, struct drm_file *filp)
 				ttm_resource_manager_usage(vram_man) : 0;
 		mem.vram.max_allocation = mem.vram.usable_heap_size * 3 / 4;
 
-		mem.cpu_accessible_vram.total_heap_size =
-			adev->gmc.visible_vram_size;
-		mem.cpu_accessible_vram.usable_heap_size =
-			min(adev->gmc.visible_vram_size -
-			    atomic64_read(&adev->visible_pin_size),
-			    mem.vram.usable_heap_size);
-		mem.cpu_accessible_vram.heap_usage =
-			amdgpu_vram_mgr_vis_usage(&adev->mman.vram_mgr);
-		mem.cpu_accessible_vram.max_allocation =
-			mem.cpu_accessible_vram.usable_heap_size * 3 / 4;
+		if (!(pci_resource_flags(adev->pdev, 0) &
+		      IORESOURCE_MEM_NONPOSTED)) {
+			mem.cpu_accessible_vram.total_heap_size =
+				adev->gmc.visible_vram_size;
+			mem.cpu_accessible_vram.usable_heap_size =
+				min(adev->gmc.visible_vram_size -
+				    atomic64_read(&adev->visible_pin_size),
+				    mem.vram.usable_heap_size);
+			mem.cpu_accessible_vram.heap_usage =
+				amdgpu_vram_mgr_vis_usage(&adev->mman.vram_mgr);
+			mem.cpu_accessible_vram.max_allocation =
+				mem.cpu_accessible_vram.usable_heap_size * 3 / 4;
+		}
 
 		mem.gtt.total_heap_size = gtt_man->size;
 		mem.gtt.usable_heap_size = mem.gtt.total_heap_size -
