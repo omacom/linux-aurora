@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple Mac mini (M6), J873g: peripherals that have a driver in this tree.
+ *
+ * Only addresses, interrupt numbers and wiring are described here. The boot
+ * loader adds the register tunables that some of these blocks need. The
+ * power-management (PMGR) domains are not described yet, so nodes that need
+ * them are left out.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	soc {
+		/* GPIO controller of the always-on block. Pin 39 releases the reset of the front-port USB hub. */
+		nub_pinctrl: pinctrl@3081f0000 {
+			compatible = "apple,t8152-pinctrl", "apple,t8103-pinctrl";
+			reg = <3 0x081f0000 0 0x4000>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&nub_pinctrl 0 0 40>;
+			apple,npins = <40>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 665 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 666 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 667 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 668 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 669 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 670 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 671 IRQ_TYPE_LEVEL_HIGH>;
+
+			vl822-reset-n-hog {
+				gpio-hog;
+				gpios = <39 GPIO_ACTIVE_HIGH>;
+				output-high;
+				line-name = "vl822-reset-n";
+			};
+		};
+
+		/* Power state director: one service slot per USB port, 0x100 bytes each. */
+		psd_atc0_usb: power-controller@303a14700 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a14700 0x0 0x100>;
+			#power-domain-cells = <0>;
+			label = "psd_atc0_usb";
+		};
+
+		psd_atc1_usb: power-controller@303a14800 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a14800 0x0 0x100>;
+			#power-domain-cells = <0>;
+			label = "psd_atc1_usb";
+		};
+
+		psd_atc2_usb: power-controller@303a14900 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a14900 0x0 0x100>;
+			#power-domain-cells = <0>;
+			label = "psd_atc2_usb";
+		};
+
+		psd_atc3_usb: power-controller@303a14a00 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a14a00 0x0 0x100>;
+			#power-domain-cells = <0>;
+			label = "psd_atc3_usb";
+		};
+	};
+};

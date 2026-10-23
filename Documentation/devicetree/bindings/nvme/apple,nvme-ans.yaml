@@ -29,6 +29,7 @@ properties:
               - apple,t8112-nvme-ans2
               - apple,t6000-nvme-ans2
           - const: apple,nvme-ans2
+      - const: apple,t8152-nvme-ans2
 
   reg:
     minItems: 2
@@ -125,13 +126,24 @@ allOf:
         reg-names:
           maxItems: 2
 
+  # T8152 has no reset line and no PMGR power domains for the ANS: the ANS is
+  # a virtual PMGR device there.
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              const: apple,t8152-nvme-ans2
+    then:
+      required:
+        - resets
+        - power-domains
+        - power-domain-names
+
 required:
   - compatible
   - reg
   - reg-names
-  - resets
-  - power-domains
-  - power-domain-names
   - mboxes
   - interrupts
   - apple,sart
