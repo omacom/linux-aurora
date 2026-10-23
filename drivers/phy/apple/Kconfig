@@ -51,3 +51,15 @@ config PHY_APPLE_T8152_USB2
 	help
 	  Enable the USB2-only PHY for fixed host ports on Apple T8152.
 	  This does not configure the USB3 or USB4 lanes.
+
+config PHY_APPLE_T8152_ATC
+	tristate "Apple T8152 Type-C PHY (SuperSpeed and USB4 lanes)"
+	depends on (ARCH_APPLE || COMPILE_TEST) && OF
+	depends on TYPEC
+	select GENERIC_PHY
+	select APPLE_TUNABLE
+	help
+	  Enable the SuperSpeed and USB4 (CIO) side of the ATC ports of the
+	  Apple M6 (T8152). It brings the PHY up for USB3 or CIO, routes the
+	  dwc3 PIPE to it and follows the cable orientation from the Type-C
+	  switch. The USB2 side is PHY_APPLE_T8152_USB2.
