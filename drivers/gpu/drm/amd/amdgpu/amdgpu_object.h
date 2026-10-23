@@ -28,6 +28,7 @@
 #ifndef __AMDGPU_OBJECT_H__
 #define __AMDGPU_OBJECT_H__
 
+#include <linux/io.h>
 #include <drm/amdgpu_drm.h>
 #include "amdgpu.h"
 #include "amdgpu_res_cursor.h"
@@ -246,6 +247,33 @@ static inline bool amdgpu_bo_explicit_sync(struct amdgpu_bo *bo)
 static inline bool amdgpu_bo_encrypted(struct amdgpu_bo *bo)
 {
 	return bo->flags & AMDGPU_GEM_CREATE_ENCRYPTED;
+}
+
+static inline void amdgpu_bo_memset(struct amdgpu_bo *bo, void *dst,
+				   int value, size_t count)
+{
+	if (bo->tbo.resource->bus.is_nonposted)
+		memset_io((void __iomem *)dst, value, count);
+	else
+		memset(dst, value, count);
+}
+
+static inline void amdgpu_bo_memcpy_to(struct amdgpu_bo *bo, void *dst,
+				      const void *src, size_t count)
+{
+	if (bo->tbo.resource->bus.is_nonposted)
+		memcpy_toio((void __iomem *)dst, src, count);
+	else
+		memcpy(dst, src, count);
+}
+
+static inline void amdgpu_bo_memcpy_from(struct amdgpu_bo *bo, void *dst,
+					const void *src, size_t count)
+{
+	if (bo->tbo.resource->bus.is_nonposted)
+		memcpy_fromio(dst, (const void __iomem *)src, count);
+	else
+		memcpy(dst, src, count);
 }
 
 bool amdgpu_bo_is_amdgpu_bo(struct ttm_buffer_object *bo);

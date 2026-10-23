@@ -350,6 +350,7 @@ void ttm_resource_init(struct ttm_buffer_object *bo,
 	res->bus.addr = NULL;
 	res->bus.offset = 0;
 	res->bus.is_iomem = false;
+	res->bus.is_nonposted = false;
 	res->bus.caching = ttm_cached;
 	res->bo = bo;
 
@@ -859,12 +860,20 @@ ttm_kmap_iter_linear_io_init(struct ttm_kmap_iter_linear_io *iter_io,
 	}
 
 	if (mem->bus.addr) {
-		iosys_map_set_vaddr(&iter_io->dmap, mem->bus.addr);
+		if (mem->bus.is_nonposted)
+			iosys_map_set_vaddr_iomem(&iter_io->dmap,
+						  (void __iomem *)mem->bus.addr);
+		else
+			iosys_map_set_vaddr(&iter_io->dmap, mem->bus.addr);
 		iter_io->needs_unmap = false;
 	} else {
 		iter_io->needs_unmap = true;
 		memset(&iter_io->dmap, 0, sizeof(iter_io->dmap));
-		if (mem->bus.caching == ttm_write_combined)
+		if (mem->bus.is_nonposted)
+			iosys_map_set_vaddr_iomem(&iter_io->dmap,
+						  ioremap_np(mem->bus.offset,
+							     mem->size));
+		else if (mem->bus.caching == ttm_write_combined)
 			iosys_map_set_vaddr_iomem(&iter_io->dmap,
 						  ioremap_wc(mem->bus.offset,
 							     mem->size));
@@ -876,7 +885,7 @@ ttm_kmap_iter_linear_io_init(struct ttm_kmap_iter_linear_io *iter_io,
 						     MEMREMAP_WC));
 
 		/* If uncached requested or if mapping cached or wc failed */
-		if (iosys_map_is_null(&iter_io->dmap))
+		if (!mem->bus.is_nonposted && iosys_map_is_null(&iter_io->dmap))
 			iosys_map_set_vaddr_iomem(&iter_io->dmap,
 						  ioremap(mem->bus.offset,
 							  mem->size));

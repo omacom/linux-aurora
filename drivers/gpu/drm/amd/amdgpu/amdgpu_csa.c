@@ -46,7 +46,7 @@ int amdgpu_allocate_static_csa(struct amdgpu_device *adev, struct amdgpu_bo **bo
 	if (!*bo)
 		return -ENOMEM;
 
-	memset(ptr, 0, size);
+	amdgpu_bo_memset(*bo, ptr, 0, size);
 	adev->virt.csa_cpu_addr = ptr;
 	return 0;
 }
