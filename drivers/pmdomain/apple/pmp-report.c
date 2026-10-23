@@ -690,6 +690,44 @@ static int apple_pmp_report_wait_t6030_14(struct device *supplier, unsigned int 
 	return ret;
 }
 
+/*
+ * The T8122 (M3 MacBook Air) GPU on its 14.8.3 firmware, for the M3 runtime
+ * (APPLE_T8122_GPU_PMP_LINK): the unique T8122 report linked to this PMP, and
+ * its display request (DISP, reg 7) READY and acknowledged before AGX, as on
+ * the 7.1.12 kernel that runtime was qualified with.
+ */
+static int apple_pmp_report_wait_t8122_14(struct device *supplier, unsigned int timeout_ms)
+{
+	struct device_node *np, *report = NULL, *pmp, *entry;
+	int ret;
+
+	if (!IS_ENABLED(CONFIG_APPLE_T8122_GPU_PMP_LINK) ||
+	    !of_machine_is_compatible("apple,t8122") ||
+	    !of_device_is_compatible(supplier->of_node, "apple,t8122-pmp-v2"))
+		return -ENODEV;
+	for_each_compatible_node(np, NULL, "apple,t8122-pmp-v2-report") {
+		if (report) {
+			of_node_put(np);
+			of_node_put(report);
+			return -ENODEV;
+		}
+		report = of_node_get(np);
+	}
+	if (!report || !of_device_is_available(report) ||
+	    of_property_count_u32_elems(report, "apple,pmp") != 1) {
+		of_node_put(report);
+		return -ENODEV;
+	}
+	pmp = of_parse_phandle(report, "apple,pmp", 0);
+	entry = apple_pmp_report_t6030_entry(report);
+	ret = pmp == supplier->of_node && entry ?
+		apple_pmp_report_wait_ready(entry, msecs_to_jiffies(timeout_ms)) : -ENODEV;
+	of_node_put(entry);
+	of_node_put(pmp);
+	of_node_put(report);
+	return ret;
+}
+
 /* The native 25G83 PMP starts through its supplier topology, after requests
  * are seeded. Its report is pinned against removal while readiness is read.
  */
@@ -704,8 +742,11 @@ int apple_pmp_report_wait_supplier_ready(struct device *supplier, unsigned int t
 	int ret;
 
 	/* A declared report always takes the existing native25 path below. */
-	if (!np && !of_property_present(supplier->of_node, "apple,pmp-report"))
+	if (!np && !of_property_present(supplier->of_node, "apple,pmp-report")) {
+		if (of_machine_is_compatible("apple,t8122"))
+			return apple_pmp_report_wait_t8122_14(supplier, timeout_ms);
 		return apple_pmp_report_wait_t6030_14(supplier, timeout_ms);
+	}
 	if (!np || !of_device_is_compatible(np, t8132 ?
 		"apple,t8132-pmp-v2-report" : "apple,j613-25g83-pmp-report")) {
 		of_node_put(np);
