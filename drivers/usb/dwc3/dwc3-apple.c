@@ -293,6 +293,24 @@ static int dwc3_apple_t8152_parse_tunables(struct platform_device *pdev,
 #define T8152_PIPE_AON_GEN_DWC3_RESET_N	BIT(0)
 #define T8152_PIPE_NONSELECTED_DEVICE	0x9332
 
+/*
+ * GCTL.PWRDNSCALE specifies how many suspend_clk periods fit into a 16 kHz clock period (see
+ * dwc3_set_power_down_clk_scale()). The boot value is 1560 and the vendor driver writes 13 on
+ * T8152. With 1560 the SuperSpeed port waits about 1.6 s between RxDetect and Polling; with 13
+ * that step takes under 90 ms.
+ */
+#define T8152_GCTL_PWRDNSCALE		13
+
+static void dwc3_apple_t8152_set_pwrdnscale(struct dwc3_apple *appledwc)
+{
+	void __iomem *gctl_reg = appledwc->dwc.regs + DWC3_GCTL - DWC3_GLOBALS_REGS_START;
+	u32 gctl = readl(gctl_reg);
+
+	gctl &= ~DWC3_GCTL_PWRDNSCALE_MASK;
+	gctl |= DWC3_GCTL_PWRDNSCALE(T8152_GCTL_PWRDNSCALE);
+	writel(gctl, gctl_reg);
+}
+
 static void dwc3_apple_t8152_apply_tunables(struct dwc3_apple *appledwc,
 					    enum dwc3_apple_state state)
 {
@@ -550,6 +568,8 @@ static int dwc3_apple_core_start(struct dwc3_apple *appledwc, enum dwc3_apple_st
 	 * Now that the core is initialized and already went through dwc3_core_soft_reset we can
 	 * configure some unknown Apple-specific settings and then bring up xhci or gadget mode.
 	 */
+	if (appledwc->t8152_usb2)
+		dwc3_apple_t8152_set_pwrdnscale(appledwc);
 	dwc3_apple_setup_cio(appledwc);
 	appledwc->core_active = true;
 	appledwc->usb2_power_off_pending = BIT(appledwc->dwc.num_usb2_ports) - 1;

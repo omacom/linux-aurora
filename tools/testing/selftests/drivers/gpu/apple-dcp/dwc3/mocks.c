@@ -294,6 +294,10 @@ static void dwc3_apple_setup_cio(struct dwc3_apple *a)
 	(void)a;
 	setup_cio++;
 }
+static void dwc3_apple_t8152_set_pwrdnscale(struct dwc3_apple *a)
+{
+	(void)a;
+}
 static int dwc3_apple_usb2_mode_before_reset(enum dwc3_apple_state s,
 					     enum phy_mode *m)
 {
