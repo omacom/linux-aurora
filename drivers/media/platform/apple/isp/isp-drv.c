@@ -203,7 +203,9 @@ static int apple_isp_init_iommu(struct apple_isp *isp)
 	 * firmware's main memory only up to the end of it. The rest, up to
 	 * the heap top, is the host's to back.
 	 */
-	err = isp_of_region_iova(dev, "data", &data_base, &data_size);
+	err = -ENOENT;
+	if (isp->hw->gen == ISP_GEN_T6040)
+		err = isp_of_region_iova(dev, "data", &data_base, &data_size);
 	if (!err) {
 		isp->fw.data_top = data_base + data_size;
 		if (isp->fw.data_top <= isp->fw.heap_base ||

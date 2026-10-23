@@ -425,7 +425,8 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 	memcpy(isp->data_surf->virt, fw->data, len);
 	memset(isp->data_surf->virt + len, 0, setfile->size - len);
 	release_firmware(fw);
-	if (isp->hw->fw_abi == ISP_FW_ABI_H17)
+	/* Seen on T6040 only; T8140 runs its setfiles as they are. */
+	if (isp->hw->gen == ISP_GEN_T6040)
 		isp_setfile_fixup_h17(isp->data_surf->virt, len);
 
 	return isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
