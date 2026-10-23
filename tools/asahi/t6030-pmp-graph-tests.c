@@ -20,6 +20,7 @@ typedef uint8_t u8;
 #define BIT(n) (1U << (n))
 #define IS_ENABLED(x) (x)
 #define CONFIG_APPLE_T6030_GPU_PMP_LINK 1
+#define CONFIG_APPLE_T8122_GPU_PMP_LINK 0
 #define PMP_REPORT_READY 1
 #define GFP_KERNEL 0
 #define GENPD_FLAG_ACTIVE_WAKEUP 1

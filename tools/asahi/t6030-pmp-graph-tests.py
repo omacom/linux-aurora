@@ -60,6 +60,12 @@ def main():
                         'static int apple_pmp_report_entry_resume_noirq(']
     offsets = re.search(r'static const struct apple_pmp_report_offsets apple_pmp_offsets_t6030 = \{.*?\n\};', source, re.S)[0]
     functions = '\n'.join(extract.function(source, n) for n in names)
+    # The T8122 14.x wait (CONFIG_APPLE_T8122_GPU_PMP_LINK=0 here) precedes the dispatch; it is
+    # added after the mutations are placed, so they target the T6030 path only.
+    t8122 = extract.function(source, 'static int apple_pmp_report_wait_t8122_14(') + '\n'
+    dispatch = 'int apple_pmp_report_wait_supplier_ready('
+    def with_t8122(text):
+        return text.replace(dispatch, t8122 + dispatch, 1)
     validation = re.sub(r'^#include .*\n', '', (ROOT / 'drivers/pmdomain/apple/pmp-report-validation.h').read_text(), flags=re.M)
     dram_type = re.search(r'struct apple_pmp_dram \{.*?\n\};',
                           (ROOT / 'drivers/pmdomain/apple/pmp-dram.h').read_text(), re.S)[0]
@@ -78,7 +84,7 @@ def main():
             '\n' + dram_attrs + '\n' + functions)
     # The actual overlay must still describe a halted supplier and disabled DMA/mailbox.
     assert overlay.count('status = \"disabled\";') >= 3
-    (args.output / 'production.h').write_text(code)
+    (args.output / 'production.h').write_text(with_t8122(code))
     (args.output / 'overlay.h').write_text('static const struct overlay_entry overlay_entries[] = {\n' + entry_data + '\n};\n')
     compiler = shlex.split(os.environ.get('CC', 'clang'))
     command = compiler + ['-std=gnu11', '-g', '-O1', '-Wall', '-Wextra', '-Werror',
@@ -133,13 +139,13 @@ def main():
             ]
         for name, old, new in controls:
             assert code.count(old) == 1, (name, code.count(old))
-            (args.output / 'production.h').write_text(code.replace(old, new))
+            (args.output / 'production.h').write_text(with_t8122(code.replace(old, new)))
             built = subprocess.run(command, capture_output=True, text=True)
             # A mutant must compile; compilation failure is not regression evidence.
             ran = subprocess.run([str(args.output / 'graph')], capture_output=True, text=True) if not built.returncode else None
             (args.output / (name + '.log')).write_text(built.stdout + built.stderr + (ran.stdout + ran.stderr if ran else ''))
             mutations.append({'name': name, 'build_rc': built.returncode, 'run_rc': ran.returncode if ran else None})
-        (args.output / 'production.h').write_text(code)
+        (args.output / 'production.h').write_text(with_t8122(code))
         assert all(m['build_rc'] == 0 and m['run_rc'] != 0 for m in mutations), mutations
     (args.output / 'receipt.json').write_text(json.dumps({'source_ref': args.ref, 'source_sha256': hashlib.sha256(code.encode()).hexdigest(),
          'overlay_sha256': hashlib.sha256(overlay.encode()).hexdigest(), 'overlay_entries': entries,
