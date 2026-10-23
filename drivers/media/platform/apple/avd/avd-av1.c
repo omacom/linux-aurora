@@ -1211,6 +1211,19 @@ static int avd_av1_run_preamble(struct avd_ctx *ctx, struct avd_av1_run *run)
 	    run->frame->frame_height_minus_1 + 1 > ctx->decoded_fmt.fmt.pix_mp.height)
 		return -EINVAL;
 
+	/*
+	 * The CDF and segmentation map loads index the reference arrays with
+	 * these, and the control framework does not range-check them.
+	 */
+	if (run->frame->primary_ref_frame > AV1_PRIMARY_REF_NONE)
+		return -EINVAL;
+	if (run->frame->primary_ref_frame != AV1_PRIMARY_REF_NONE) {
+		s8 idx = run->frame->ref_frame_idx[run->frame->primary_ref_frame];
+
+		if (idx < 0 || idx >= V4L2_AV1_TOTAL_REFS_PER_FRAME)
+			return -EINVAL;
+	}
+
 	ctrl = v4l2_ctrl_find(&ctx->ctrl_hdl,
 			      V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY);
 	if (WARN_ON(!ctrl))
