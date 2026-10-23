@@ -208,6 +208,11 @@ static bool unstable_edid = true;
 module_param(unstable_edid, bool, 0644);
 MODULE_PARM_DESC(unstable_edid, "Enable unstable EDID retrival support");
 
+bool external_srgb = true;
+module_param(external_srgb, bool, 0644);
+MODULE_PARM_DESC(external_srgb,
+		 "Tag RGB framebuffers for external displays as sRGB so DCP converts them to the panel's native gamut (default: Y)");
+
 static void disconnected_hpd_event(struct apple_connector *connector);
 
 bool dcp_is_external_h17p(struct apple_dcp *dcp)

@@ -24,6 +24,9 @@
 #include "dcp-announce.h"
 #include "dcp-display-metadata.h"
 #include "dcp-metadata-epoch.h"
+
+/* dcp.c: appledrm.external_srgb module parameter */
+extern bool external_srgb;
 #include "dcp-180hz.h"
 #include "iomfb.h"
 #include "iomfb_h17p.h"
