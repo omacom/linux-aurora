@@ -256,3 +256,4 @@
 #include "t8152-j873-usb0.dtsi"
 #include "t8152-j873-drd2.dtsi"
 #include "t8152-j873-drd1.dtsi"
+#include "t8152-j873-atcphy.dtsi"
