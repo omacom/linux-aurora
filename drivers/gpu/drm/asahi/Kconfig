@@ -84,6 +84,7 @@ config DRM_ASAHI_M3_T8122
 	depends on DRM_ASAHI
 	# The runtime adopts the firmware's UAT through the G15 backend's handoff helpers.
 	depends on DRM_ASAHI_G15
+	select APPLE_T8122_GPU_PMP_LINK
 	select CRYPTO_LIB_SHA256
 	default n
 	help

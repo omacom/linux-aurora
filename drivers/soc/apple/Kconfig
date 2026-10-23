@@ -376,6 +376,15 @@ config APPLE_DISPLAY_GATE
 	  Say 'y' if you want the native display on M3 Pro, M3 Max, M3 and
 	  M4 Pro Macs.
 
+config APPLE_T8122_GPU_PMP_LINK
+	bool
+	depends on APPLE_PMP_REPORT
+	default n
+	help
+	  Let T8122 (M3 MacBook Air) GPU power commands wait for the display
+	  request the PMP report acknowledges on the 14.8.3 firmware, as the
+	  M3 runtime of DRM_ASAHI_M3_T8122 requires.
+
 config APPLE_T6030_GPU_PMP_LINK
 	bool
 	depends on APPLE_DISPLAY_GATE

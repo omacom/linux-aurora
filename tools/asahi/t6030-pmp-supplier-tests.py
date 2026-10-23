@@ -56,6 +56,7 @@ def run(out, name, code, compiler, configs=(0, 1)):
         command = compiler + ["-std=gnu11", "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                               "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
                               f"-DCONFIG_APPLE_T6030_GPU_PMP_LINK={config}",
+                              "-DCONFIG_APPLE_T8122_GPU_PMP_LINK=0",
                               "-I", str(dest),
                               str(ROOT / "tools/asahi/t6030-pmp-supplier-tests.c"),
                               "-o", str(binary)]
@@ -148,6 +149,17 @@ def main():
             assert code.count(old) == 1, (name, code.count(old))
             variants.append((name, code.replace(old, new)))
         variants.append(("control-after", code))
+    # The T8122 14.x wait is built with CONFIG_APPLE_T8122_GPU_PMP_LINK=0 here; it is added to
+    # every variant after the T6030 mutations are placed, so they target the T6030 path only.
+    dispatch = "int apple_pmp_report_wait_supplier_ready("
+    t8122 = function(report, "static int apple_pmp_report_wait_t8122_14(") + "\n"
+    def with_t8122(source):
+        if dispatch not in source:
+            return source
+        return source.replace(dispatch, t8122 + dispatch, 1)
+    variants = [(name, with_t8122(source)) for name, source in variants]
+    if baseline_code and "apple_pmp_report_wait_t8122_14(" in baseline_code:
+        baseline_code = with_t8122(baseline_code)
     results = [run(args.output, name, source, compiler) for name, source in variants]
     if baseline_code:
         results.append(run(args.output, "control-prior-config-off", baseline_code, compiler, (0,)))
