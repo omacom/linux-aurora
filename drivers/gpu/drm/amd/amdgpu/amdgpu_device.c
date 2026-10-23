@@ -4003,7 +4003,12 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 	for (i = 0; i < AMD_IP_BLOCK_TYPE_NUM; i++)
 		atomic_set(&adev->pm.pwr_state[i], POWER_STATE_UNKNOWN);
 
-	adev->rmmio = ioremap(adev->rmmio_base, adev->rmmio_size);
+	if (pci_resource_flags(adev->pdev,
+			       adev->asic_type >= CHIP_BONAIRE ? 5 : 2) &
+	    IORESOURCE_MEM_NONPOSTED)
+		adev->rmmio = ioremap_np(adev->rmmio_base, adev->rmmio_size);
+	else
+		adev->rmmio = ioremap(adev->rmmio_base, adev->rmmio_size);
 	if (!adev->rmmio)
 		return -ENOMEM;
 

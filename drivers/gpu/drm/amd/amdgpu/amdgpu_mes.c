@@ -77,7 +77,8 @@ static int amdgpu_mes_event_log_init(struct amdgpu_device *adev)
 		return r;
 	}
 
-	memset(adev->mes.event_log_cpu_addr, 0, adev->mes.event_log_size);
+	amdgpu_bo_memset(adev->mes.event_log_gpu_obj,
+			 adev->mes.event_log_cpu_addr, 0, adev->mes.event_log_size);
 
 	return  0;
 
