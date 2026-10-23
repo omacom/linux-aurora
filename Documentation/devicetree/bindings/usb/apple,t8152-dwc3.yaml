@@ -16,6 +16,9 @@ description: |
   switches roles at runtime.
   The dr_mode and maximum-speed properties must select host or peripheral and
   high-speed.
+  A port is USB2-only unless the board also describes the SuperSpeed PHY of
+  the port (apple,t8152-atcphy) as a second entry, named usb3-phy; without
+  that entry the controller ignores the USB3 side of the port.
   Firmware supplies device-specific calibration records as offset, clear-mask,
   set-value triples. Offsets are relative to each native register bank, not
   the combined Linux window. The core window ends at 0xcd00. The Apple window
@@ -58,11 +61,14 @@ properties:
     maxItems: 1
 
   phys:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   phy-names:
+    minItems: 1
     items:
       - const: usb2-phy
+      - const: usb3-phy
 
   dr_mode:
     enum: [ host, peripheral ]

@@ -828,7 +828,15 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(appledwc->usb2_phy),
 				     "Failed to get the USB2 PHY\n");
 
-	if (!appledwc->t8152_usb2)
+	/*
+	 * A T8152 port runs USB2-only unless the board describes the SuperSpeed PHY
+	 * (apple,t8152-atcphy): set_mode() on it brings the PHY up and routes the PIPE,
+	 * see dwc3_apple_set_role(). Without one the PHY is NULL and every call on it
+	 * succeeds.
+	 */
+	if (appledwc->t8152_usb2)
+		appledwc->usb3_phy = devm_phy_optional_get(dev, "usb3-phy");
+	else
 		appledwc->usb3_phy = devm_phy_get(dev, "usb3-phy");
 	if (IS_ERR(appledwc->usb3_phy))
 		return dev_err_probe(dev, PTR_ERR(appledwc->usb3_phy),
