@@ -498,6 +498,17 @@ static void reset(void)
 	lockable = present_device = link_ok = 1;
 	status_word = PMP_REPORT_READY;
 }
+/* The T8122 (M3 Air) 14.x graph: the same report shape, with T8122 compatibles. */
+static void t8122(void)
+{
+	machine = "apple,t8122";
+	gate_soc = &gate_t8122;
+	supplier_node.compatible = "apple,t8122-pmp-v2";
+	other_node.compatible = "apple,t8122-pmp-v2";
+	gpu.compatible = "apple,agx-t8122";
+	report14.compatible = "apple,t8122-pmp-v2-report";
+	apple_pmp_starts.first = &managed_start;
+}
 static int power(void)
 {
 	return apple_pmp_set_device_power(0x0f, 5, 1);
@@ -527,6 +538,7 @@ int main(void)
 	(void)gate_find_one;
 	(void)apple_pmp_report_t6030_entry;
 	(void)apple_pmp_report_wait_t6030_14;
+	(void)apple_pmp_report_wait_t8122_14;
 	reset();
 	assert(apple_pmp_offsets_t6030.starts_pmp ==
 	       !!CONFIG_APPLE_T6030_GPU_PMP_LINK);
@@ -583,9 +595,50 @@ int main(void)
 	RUN((void)0, -ENODEV, 0, 0);
 	assert(!find_calls);
 #endif
-	/* T8122 current14 remains unsupported by this supplier API. */
+	/* A T8122 supplier never takes the T6030 report. */
 	RUN(machine = "apple,t8122";
 	    supplier_node.compatible = "apple,t8122-pmp-v2", -ENODEV, 0, 0);
+#if CONFIG_APPLE_T8122_GPU_PMP_LINK
+	/* The T8122 14.x wait: one available report linked to this PMP, DISP (reg 7) acked. */
+	RUN(t8122(), 0, 0, 1);
+	RUN(t8122(); report14.child = &entry7; entry7.sibling = &entry17;
+	    entry17.sibling = NULL, 0, 0, 1);
+	RUN(t8122(); apple_pmp_starts.first = NULL, -ENODEV, 0, 0);
+	RUN(t8122(); apple_pmp_starts.first = NULL;
+	    apple_pmp_reports.first = NULL, -EPROBE_DEFER, 0, 0);
+	RUN(t8122(); managed_start.stopping = true, -ENODEV, 0, 0);
+	RUN(t8122(); ready_result = -ETIMEDOUT, -ETIMEDOUT, 0, 0);
+	RUN(t8122(); passive_words[apple_pmp_offsets_t6030.status / 8] = 0, -EIO,
+	    0, 0);
+	RUN(t8122(); passive_words[apple_pmp_offsets_t6030.actual / 8] = 0, -EIO,
+	    0, 0);
+	RUN(t8122(); power_result = -EIO, -EIO, 0, 1);
+	RUN(t8122(); machine = "apple,t6030", -ENODEV, 0, 0);
+	RUN(t8122(); machine = "apple,t8112", -ENODEV, 0, 0);
+	RUN(t8122(); supplier_node.compatible = "apple,t6030-pmp-v2", -ENODEV, 0,
+	    0);
+	RUN(t8122(); report14.compatible = NULL, -ENODEV, 0, 0);
+	RUN(t8122(); report14.compatible = "apple,t6030-pmp-v2-report", -ENODEV,
+	    0, 0);
+	RUN(t8122(); extra_report = report14, -ENODEV, 0, 0);
+	RUN(t8122(); extra_report = report14; extra_report.available = false,
+	    -ENODEV, 0, 0);
+	RUN(t8122(); report14.available = false, -ENODEV, 0, 0);
+	RUN(t8122(); report14.has_pmp = false, -ENODEV, 0, 0);
+	RUN(t8122(); report14.pmp_cells = 0, -ENODEV, 0, 0);
+	RUN(t8122(); report14.pmp_cells = 2, -ENODEV, 0, 0);
+	RUN(t8122(); report14.pmp = NULL, -ENODEV, 0, 0);
+	RUN(t8122(); report14.pmp = &other_node, -ENODEV, 0, 0);
+	RUN(t8122(); entry17.sibling = NULL, -ENODEV, 0, 0);
+	RUN(t8122(); entry7.reg = 8, -ENODEV, 0, 0);
+	RUN(t8122(); entry7.available = false, -ENODEV, 0, 0);
+	RUN(t8122(); entry7.compatible = "apple,other", -ENODEV, 0, 0);
+	RUN(t8122(); entry7.no_ack = true, -ENODEV, 0, 0);
+	RUN(t8122(); entry17.reg = 7, -ENODEV, 0, 0);
+#else
+	/* Without APPLE_T8122_GPU_PMP_LINK, even a well-formed T8122 graph is refused. */
+	RUN(t8122(), -ENODEV, 0, 0);
+#endif
 	/* A declared report, including malformed/unresolved data, never falls back. */
 	RUN(supplier_node.has_report = true;
 	    supplier_node.report_cells = 0, -ENODEV, 0, 0);
@@ -725,7 +778,8 @@ int main(void)
 	assert(apple_pmp_link_device(&consumer) == -EINVAL);
 	balanced();
 	case_count++;
-	printf("PASS: %d T6030 PMP cases, config=%d; reference, lock and command boundaries checked\n",
-	       case_count, CONFIG_APPLE_T6030_GPU_PMP_LINK);
+	printf("PASS: %d T6030/T8122 PMP cases, config=%d/%d; reference, lock and command boundaries checked\n",
+	       case_count, CONFIG_APPLE_T6030_GPU_PMP_LINK,
+	       CONFIG_APPLE_T8122_GPU_PMP_LINK);
 	return 0;
 }

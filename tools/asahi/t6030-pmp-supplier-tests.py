@@ -46,17 +46,23 @@ def no_core():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
-def run(out, name, code, compiler, configs=(0, 1)):
+# (CONFIG_APPLE_T6030_GPU_PMP_LINK, CONFIG_APPLE_T8122_GPU_PMP_LINK): off, G15 only, and G15
+# with the M3 runtime (DRM_ASAHI_M3_T8122 depends on DRM_ASAHI_G15).
+CONFIGS = ((0, 0), (1, 0), (1, 1))
+
+
+def run(out, name, code, compiler, configs=CONFIGS):
     dest = out / name
     dest.mkdir()
     (dest / "t6030-pmp-production.h").write_text(code)
     results = []
-    for config in configs:
+    for t6030, t8122 in configs:
+        config = f"{t6030}{t8122}"
         binary = dest / f"config-{config}"
         command = compiler + ["-std=gnu11", "-g", "-O1", "-Wall", "-Wextra", "-Werror",
                               "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-                              f"-DCONFIG_APPLE_T6030_GPU_PMP_LINK={config}",
-                              "-DCONFIG_APPLE_T8122_GPU_PMP_LINK=0",
+                              f"-DCONFIG_APPLE_T6030_GPU_PMP_LINK={t6030}",
+                              f"-DCONFIG_APPLE_T8122_GPU_PMP_LINK={t8122}",
                               "-I", str(dest),
                               str(ROOT / "tools/asahi/t6030-pmp-supplier-tests.c"),
                               "-o", str(binary)]
@@ -149,20 +155,43 @@ def main():
             assert code.count(old) == 1, (name, code.count(old))
             variants.append((name, code.replace(old, new)))
         variants.append(("control-after", code))
-    # The T8122 14.x wait is built with CONFIG_APPLE_T8122_GPU_PMP_LINK=0 here; it is added to
-    # every variant after the T6030 mutations are placed, so they target the T6030 path only.
+    # The T8122 14.x wait mirrors the T6030 one, so it is added to every variant after the
+    # T6030 mutations are placed; its own mutants change only its text.
     dispatch = "int apple_pmp_report_wait_supplier_ready("
     t8122 = function(report, "static int apple_pmp_report_wait_t8122_14(") + "\n"
-    def with_t8122(source):
+    def with_t8122(source, text=t8122):
         if dispatch not in source:
             return source
-        return source.replace(dispatch, t8122 + dispatch, 1)
+        return source.replace(dispatch, text + dispatch, 1)
     variants = [(name, with_t8122(source)) for name, source in variants]
+    if args.mutations:
+        t8122_mutations = [
+            ("t8122-config-scope", "if (!IS_ENABLED(CONFIG_APPLE_T8122_GPU_PMP_LINK) ||", "if (false ||"),
+            ("t8122-supplier-compat", '!of_device_is_compatible(supplier->of_node, "apple,t8122-pmp-v2"))', "false)"),
+            ("t8122-report-compat", 'for_each_compatible_node(np, NULL, "apple,t8122-pmp-v2-report")',
+             'for_each_compatible_node(np, NULL, "apple,t6030-pmp-v2-report")'),
+            ("t8122-duplicate-report", "\t\tif (report) {", "\t\tif (false) {"),
+            ("t8122-disabled-report", "!of_device_is_available(report) ||", "false ||"),
+            ("t8122-report-phandle-shape", 'of_property_count_u32_elems(report, "apple,pmp") != 1', "false"),
+            ("t8122-supplier-identity", "pmp == supplier->of_node && entry ?", "entry ?"),
+            ("t8122-readiness-error", "apple_pmp_report_wait_ready(entry, msecs_to_jiffies(timeout_ms)) : -ENODEV;",
+             "(apple_pmp_report_wait_ready(entry, msecs_to_jiffies(timeout_ms)), 0) : -ENODEV;"),
+            ("t8122-entry-reference", "\tof_node_put(entry);\n\tof_node_put(pmp);", "\tof_node_put(pmp);"),
+        ]
+        for name, old, new in t8122_mutations:
+            assert t8122.count(old) == 1, (name, t8122.count(old))
+            variants.insert(-1, (name, with_t8122(code, t8122.replace(old, new))))
+        # The dispatch owns the machine scope: T8122 takes the T8122 wait, every other SoC the
+        # T6030 one. (The wait's own machine check repeats it and cannot be reached otherwise.)
+        machine = 'if (of_machine_is_compatible("apple,t8122"))'
+        assert code.count(machine) == 1
+        for name, new in (("t8122-dispatch-never", "if (false)"), ("t8122-dispatch-always", "if (true)")):
+            variants.insert(-1, (name, with_t8122(code.replace(machine, new))))
     if baseline_code and "apple_pmp_report_wait_t8122_14(" in baseline_code:
         baseline_code = with_t8122(baseline_code)
     results = [run(args.output, name, source, compiler) for name, source in variants]
     if baseline_code:
-        results.append(run(args.output, "control-prior-config-off", baseline_code, compiler, (0,)))
+        results.append(run(args.output, "control-prior-config-off", baseline_code, compiler, ((0, 0),)))
     valid = True
     for item in results:
         control = item["name"].startswith("control-")
