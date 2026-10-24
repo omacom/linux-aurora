@@ -38,12 +38,14 @@ use kernel::{
     bindings, device,
     io::Io,
     prelude::*,
-    sync::Arc,
     time::{delay::fsleep, Delta, Instant, Monotonic},
 };
+#[cfg(CONFIG_DRM_ASAHI_G15)]
+use kernel::sync::Arc;
 
 use super::hw;
 use super::regs::{mb, rmb, wmb, Mapping};
+#[cfg(CONFIG_DRM_ASAHI_G15)]
 use crate::driver::AsahiDrmDevice as AsahiDevice;
 use crate::{mmu, pgtable};
 
@@ -69,6 +71,7 @@ const fn indices(va: u64) -> [usize; 3] {
 }
 
 /// Creates the adopted UAT over the ADT regions (step 2 above).
+#[cfg(CONFIG_DRM_ASAHI_G15)]
 pub(crate) fn adopt(
     dev: &AsahiDevice,
     cfg: &'static super::Config,
@@ -201,6 +204,7 @@ pub(crate) struct Window {
 
 impl Window {
     /// Maps the UAT handoff regions ([`Mapping::region`]).
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
     pub(crate) fn new(adt: &super::adt::GpuAdt) -> Result<Self> {
         Self::from_regions(adt.handoff.start, adt.ttbs.start, adt.tables.start, adt.shared_l2.start)
     }

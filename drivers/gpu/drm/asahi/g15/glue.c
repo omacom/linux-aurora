@@ -29,9 +29,6 @@ void asahi_g15_release_power(struct device *dev);
 void asahi_g15_reprobe(void);
 void asahi_g15_report_loader_gpu(void);
 int asahi_g15_adt_phram(u64 *start, u64 *size);
-bool asahi_g15_ram_disjoint(u64 start, u64 size);
-bool asahi_g15_ram_within(u64 start, u64 size);
-unsigned int asahi_g15_memory_mode(u64 start, u64 size);
 void __iomem *asahi_g15_ioremap_wc(u64 start, size_t size);
 bool asahi_g15_dma_coherent(struct device *dev);
 int asahi_g15_pmp_prepare(struct device *dev);
@@ -275,13 +272,6 @@ int asahi_g15_adt_phram(u64 *start, u64 *size)
 	return 0;
 }
 
-/* The range is disjoint from System RAM (ADT region admission). */
-bool asahi_g15_ram_disjoint(u64 start, u64 size)
-{
-	return region_intersects(start, size, IORESOURCE_SYSTEM_RAM, IORES_DESC_NONE) ==
-	       REGION_DISJOINT;
-}
-
 /*
  * Whether DMA mappings of the device skip cache maintenance. The G15 firmware
  * objects rely on the DMA mapping cleaning their pages to the point of
@@ -290,42 +280,6 @@ bool asahi_g15_ram_disjoint(u64 start, u64 size)
 bool asahi_g15_dma_coherent(struct device *dev)
 {
 	return dev_is_dma_coherent(dev);
-}
-
-/*
- * Every page must be valid, System RAM and still reserved from the allocator.
- * REGION_INTERSECTS alone also accepts RAM mixed with undefined memory holes.
- */
-bool asahi_g15_ram_within(u64 start, u64 size)
-{
-	u64 end, pa;
-
-	if (!size || !IS_ALIGNED(start, PAGE_SIZE) ||
-	    !IS_ALIGNED(size, PAGE_SIZE) || check_add_overflow(start, size, &end))
-		return false;
-	for (pa = start; pa < end; pa += PAGE_SIZE) {
-		unsigned long pfn = PHYS_PFN(pa);
-
-		if (!pfn_valid(pfn) || !page_is_ram(pfn) ||
-		    !PageReserved(pfn_to_page(pfn)))
-			return false;
-	}
-	return true;
-}
-
-/* One classification for every adopted-UAT and firmware-region CPU mapping. */
-unsigned int asahi_g15_memory_mode(u64 start, u64 size)
-{
-	u64 end;
-
-	if (!size || !IS_ALIGNED(start, PAGE_SIZE) ||
-	    !IS_ALIGNED(size, PAGE_SIZE) || check_add_overflow(start, size, &end))
-		return 0;
-	if (asahi_g15_ram_within(start, size))
-		return MEMREMAP_WB;
-	if (asahi_g15_ram_disjoint(start, size))
-		return MEMREMAP_WC;
-	return 0;
 }
 
 /* The inherited RTKit buffer inside firmware DATA. */

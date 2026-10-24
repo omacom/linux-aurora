@@ -7,6 +7,7 @@
 
 use core::ops::Range;
 
+#[cfg(CONFIG_DRM_ASAHI_G15)]
 pub(crate) mod t6031;
 
 /// Identification register values of a qualified G15S.
@@ -91,6 +92,7 @@ pub(crate) struct ComputeRegs {
 }
 
 /// The T6030 configuration.
+#[cfg(CONFIG_DRM_ASAHI_G15)]
 pub(crate) mod t6030 {
     use super::super::Config;
     use super::{ComputeRegs, FirmwareBuild, HwId, Layout};
