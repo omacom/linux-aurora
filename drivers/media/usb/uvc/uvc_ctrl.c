@@ -3126,6 +3126,16 @@ int uvc_xu_ctrl_query(struct uvc_video_chain *chain,
 		goto done;
 	}
 
+	/*
+	 * A control whose GET_LEN is 0 has no value to get or set. Querying
+	 * it would issue a zero-length IN transfer and leave uvc_query_ctrl()
+	 * with a ZERO_SIZE_PTR buffer.
+	 */
+	if (size == 0) {
+		ret = -ENODATA;
+		goto done;
+	}
+
 	if (size != xqry->size) {
 		ret = -ENOBUFS;
 		goto done;
