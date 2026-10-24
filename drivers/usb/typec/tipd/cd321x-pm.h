@@ -355,12 +355,14 @@ static inline void cd321x_pm_remove(struct cd321x_pm_state *pm)
 /*
  * A display mux reports -ENOSPC when every display pipeline is driving
  * another port.  That lasts until the other display goes away, so the port's
- * USB path is set up without the display and nothing is retried.  Any other
- * error, such as -EBUSY from a PHY in the middle of a transition, is retried.
+ * USB path is set up without the display and nothing is retried.  The DCP
+ * fabric reports it as -ENOSPC on every SoC now; older trees used -EBUSY
+ * outside H17, which is still accepted there.  Any other error, such as
+ * -EBUSY from an H17 PHY in the middle of a transition, is retried.
  */
 static inline bool cd321x_display_taken(int ret, bool enospc)
 {
-	return ret == (enospc ? -ENOSPC : -EBUSY);
+	return ret == -ENOSPC || (!enospc && ret == -EBUSY);
 }
 
 enum cd321x_dp_send {
