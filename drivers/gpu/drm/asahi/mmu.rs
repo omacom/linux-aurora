@@ -3557,7 +3557,7 @@ impl Uat {
     }
 
     /// Discards the CPU's cached lines of the no-map table regions after the firmware built its
-    /// root there during boot, before the first host edit (`UatQuirks::reserved_tables`).
+    /// root there during boot (`UatQuirks::reserved_tables`; see `ReservedTables::invalidate`).
     pub(crate) fn invalidate_reserved_tables(&self) {
         if let Some(reserved) = self.inner.reserved.as_ref() {
             reserved.invalidate();

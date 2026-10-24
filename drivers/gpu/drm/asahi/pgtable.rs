@@ -183,6 +183,15 @@ impl ReservedTables {
 
     /// Drops the CPU's cached lines of every region, so that later reads see what the firmware
     /// wrote while booting. Lines the host dirtied are written back first, never discarded.
+    ///
+    /// This runs once, after the firmware booted. The host has written table entries by then
+    /// (fixed kernel objects are mapped before the boot), but the T6040, the only SoC with
+    /// reserved tables, also sets `UatQuirks::clean_tables`: every host table store is cleaned
+    /// to the PoC as it is made, so this drops only clean lines and loses no host write.
+    ///
+    /// The regions are not invalidated again, which assumes the firmware no longer writes the
+    /// tables the host walks once it has booted. That is not proven by a trace; the J616s has
+    /// run this way since its GPU came up without a fault traced to a stale table.
     pub(crate) fn invalidate(&self) {
         for map in self.regions.iter() {
             clean_invalidate_poc(map.ptr(), map.size());
@@ -192,7 +201,9 @@ impl ReservedTables {
 }
 
 /// Runs `f` on a pointer to `len` bytes at `offset` in the page-table page at `phys`, through the
-/// reserved mapping when the page lies in a reserved region, else through `struct page`.
+/// reserved mapping when the page lies in a reserved region, else through `struct page`. With
+/// reserved regions, a page outside them that is not System RAM with a `struct page` (other
+/// no-map memory) is refused with `EIO`.
 ///
 /// # Safety
 ///
@@ -211,8 +222,14 @@ unsafe fn with_table<T>(
         // SAFETY: lookup() checked that the whole page is mapped.
         return f(unsafe { base.add(offset) });
     }
-    // SAFETY: The caller guarantees an allocated page-table page in RAM.
-    let page = unsafe { Page::borrow_phys_unchecked(&phys) };
+    let page = if reserved.is_some() {
+        // SAFETY: The caller guarantees the page stays allocated; borrow_phys() checks that it
+        // is System RAM with a struct page.
+        unsafe { Page::borrow_phys(&phys) }.ok_or(EIO)?
+    } else {
+        // SAFETY: The caller guarantees an allocated page-table page in RAM.
+        unsafe { Page::borrow_phys_unchecked(&phys) }
+    };
     page.with_pointer_into_page(offset, len, f)
 }
 
