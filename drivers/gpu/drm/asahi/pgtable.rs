@@ -369,7 +369,7 @@ impl Prot {
 
     /// The protection bits of a leaf with this protection (no address, table type or non-global
     /// bits), for checking that a firmware leaf word round-trips through [`Self::from_pte`].
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     pub(crate) const fn leaf_bits(&self) -> u64 {
         self.as_pte()
     }

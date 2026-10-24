@@ -505,10 +505,10 @@ fn lock_vm(
     Ok(VmExecGuard(unsafe { gpuvm.exec_lock(obj, interruptible)? }))
 }
 
-#[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+#[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
 pub(crate) struct VmReadGuard(VmExecGuard);
 
-#[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+#[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
 impl VmReadGuard {
     #[cfg(CONFIG_DRM_ASAHI_G15)]
     pub(crate) fn covers_range(&mut self, address: u64, size: u64, read: bool, write: bool) -> bool {
@@ -2596,7 +2596,7 @@ impl Vm {
     /// Attach a status and job lifetime tracking before sharing a newly created user VM with
     /// queues, without the G17 canonical context views, shared-object footprints and idle
     /// residency reclaim of [`Self::with_status`]. Used by G15, whose user objects stay pinned.
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     pub(crate) fn with_tracked_status(mut self) -> Result<Self> {
         self.status = Some(Arc::pin_init(
             crate::g17::status::VmStatus::new(),
@@ -2624,17 +2624,17 @@ impl Vm {
     /// and invalidated to the point of coherency first (never only invalidated: CPU-written lines
     /// may be dirty), so the copy sees what the GPU or a write-combined CPU view stored. The
     /// mappings cannot change during the copy (GPUVM exec lock).
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     pub(crate) fn read_user(&self, va: u64, buf: &mut [u8]) -> Result {
         self.read_lock()?.read_user(va, buf)
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     pub(crate) fn read_lock(&self) -> Result<VmReadGuard> {
         Ok(VmReadGuard(lock_vm(&self.gpuvm, None, false)?))
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     fn read_user_locked(inner: &mut VmInner, va: u64, buf: &mut [u8]) -> Result {
         let mut done = 0usize;
         while done < buf.len() {
@@ -3477,7 +3477,7 @@ impl Drop for VmInner {
 
 /// Physical regions of a UAT whose handoff the generation has already established itself
 /// ([`Uat::new_adopted`]). None of them needs to be in the kernel linear map.
-#[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+#[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
 pub(crate) struct AdoptedRegions {
     /// The handoff region (PPL magic, lock and flush requests).
     pub(crate) handoff: Range<PhysicalAddr>,
@@ -3500,7 +3500,7 @@ impl Uat {
         })
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     /// Map a region given by its physical range, write-combined.
     fn map_physical(
         range: &Range<PhysicalAddr>,
@@ -3521,7 +3521,7 @@ impl Uat {
         let res: io::resource::Resource =
             unsafe { core::mem::transmute(kernel::types::Opaque::new(raw)) };
         let flags = io::mem::MemFlag::WC;
-        #[cfg(CONFIG_DRM_ASAHI_G15)]
+        #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
         let flags = if reserved_ram {
             // G15 admits only whole reserved RAM pages or wholly non-RAM carveouts.
             if crate::g15::memory_mode(range.start, size as u64)?
@@ -3534,7 +3534,7 @@ impl Uat {
         } else {
             flags
         };
-        #[cfg(not(CONFIG_DRM_ASAHI_G15))]
+        #[cfg(not(CONFIG_DRM_ASAHI_UAT_ADOPTION))]
         let _ = reserved_ram;
         // SAFETY: The UAT regions are only accessed through this mapping by the CPU;
         // the GPU reaches them through its own translation.
@@ -3545,7 +3545,7 @@ impl Uat {
         })
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     /// Creates a `Uat` for a handoff that the caller establishes itself (G15).
     ///
     /// This only maps the handoff and the TTBAT (write-combined); neither is written here. The
@@ -3595,7 +3595,7 @@ impl Uat {
         Self::new_adopted_inner(dev, geometry, regions, map_kernel_to_user, true)
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     fn new_adopted_inner(
         dev: &driver::AsahiDrmDevice,
         geometry: UatGeometry,
@@ -3686,13 +3686,13 @@ impl Uat {
         })
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     /// Root of the kernel lower `Vm`, for TTBAT context 0 of an adopted handoff.
     pub(crate) fn kernel_lower_root(&self) -> PhysicalAddr {
         self.kernel_lower_vm.ttb()
     }
 
-    #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
+    #[cfg(any(CONFIG_DRM_ASAHI_UAT_ADOPTION, CONFIG_DRM_ASAHI_G16))]
     /// Root whose driver-window entry names the second-level table of [`Self::kernel_vm`]'s
     /// driver window. With [`Self::new_adopted`] this is the shadow root that no context names.
     pub(crate) fn kernel_window_root(&self) -> PhysicalAddr {

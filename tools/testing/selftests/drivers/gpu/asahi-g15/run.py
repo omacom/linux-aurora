@@ -260,13 +260,15 @@ def main():
     with tempfile.TemporaryDirectory(prefix="asahi-g15-host-") as temp:
         temp = Path(temp)
         glue = (G15 / "glue.c").read_text()
+        # The UAT adoption's helpers, shared with the T8122 runtime.
+        uat_glue = (G15 / "uat_glue.c").read_text()
         functions = []
         for signature in ["bool asahi_g15_ram_disjoint", "bool asahi_g15_ram_within",
                           "unsigned int asahi_g15_memory_mode"]:
             marker = signature + "(u64 start, u64 size)\n{"
-            start = glue.index(marker)
-            end = glue.index("\n}", start) + 2
-            functions.append(glue[start:end])
+            start = uat_glue.index(marker)
+            end = uat_glue.index("\n}", start) + 2
+            functions.append(uat_glue[start:end])
         c_source = temp / "memory.c"
         c_source.write_text(MEMORY_PREFIX + "\n".join(functions) + MEMORY_CASES)
         subprocess.run([os.environ.get("HOSTCC", "cc"), "-std=gnu11", "-Wall", "-Wextra",

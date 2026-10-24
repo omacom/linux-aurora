@@ -79,11 +79,20 @@ config DRM_ASAHI_DEBUG_ALLOCATOR
 	  Say N unless you are debugging firmware structures or porting to a
 	  new firmware version.
 
+config DRM_ASAHI_UAT_ADOPTION
+	bool
+	help
+	  The firmware UAT handoff adoption shared by the G15 backend and the
+	  T8122 runtime (g15/uat.rs, g15/regs.rs).
+
 config DRM_ASAHI_M3_T8122
 	bool "M3 MacBook Air GPU runtime (T8122, 14.8.3 firmware)"
 	depends on DRM_ASAHI
-	# The runtime adopts the firmware's UAT through the G15 backend's handoff helpers.
-	depends on DRM_ASAHI_G15
+	# The runtime adopts the firmware's UAT as the G15 backend does, without
+	# needing that backend: M3 Pro/Max keep their own setting.
+	# Its PMP votes call apple-pmp directly (m3_device.rs).
+	depends on APPLE_PMP=y || (APPLE_PMP=m && DRM_ASAHI=m)
+	select DRM_ASAHI_UAT_ADOPTION
 	select APPLE_T8122_GPU_PMP_LINK
 	select CRYPTO_LIB_SHA256
 	default n
@@ -102,6 +111,7 @@ config DRM_ASAHI_G15
 	depends on DRM_APPLE=y || (DRM_APPLE=m && DRM_ASAHI=m)
 	select APPLE_T6030_GPU_PMP_LINK
 	select CRYPTO_LIB_SHA256
+	select DRM_ASAHI_UAT_ADOPTION
 	default y
 	help
 	  Backend for the M3 Pro (T6030) and M3 Max (T6031) GPUs on the

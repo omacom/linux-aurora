@@ -125,7 +125,7 @@ impl Mapping {
         if size == 0 {
             return Err(EINVAL);
         }
-        let mode = super::boot::glue::memory_mode(phys, size as u64)?;
+        let mode = super::memory_mode(phys, size as u64)?;
         if mode == bindings::MEMREMAP_WC as u32 {
             return Self::write_combined(phys, size);
         }
@@ -252,6 +252,7 @@ impl Regs {
 
     /// Reads the identification words and the enabled-core mask (once the GPU is powered). A
     /// SoC with more than 32 core slots carries the mask in two words.
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
     pub(crate) fn identity(&self, cfg: &super::Config) -> Result<Identity> {
         let version = self.sgx.io().try_read32(SGX_ID)?;
         let counts = self.sgx.io().try_read32(SGX_ID + 0x10)?;

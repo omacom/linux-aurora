@@ -5,6 +5,7 @@ aurora-y := asahi_core.o fwid.o legacy_sched.o sysfs.o g17/sync_input.o g17/sync
 CFLAGS_g17/trace.o := -I$(src)/g17
 
 aurora-$(CONFIG_DRM_ASAHI_G15) += g15/glue.o
+aurora-$(CONFIG_DRM_ASAHI_UAT_ADOPTION) += g15/uat_glue.o
 
 aurora-$(CONFIG_DRM_ASAHI_G16) += g16/glue.o
 
