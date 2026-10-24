@@ -81,12 +81,12 @@ static const char *const apple_pcie_tunnel_cold_init_machines[] = {
  * apple_pcie_tunnel_needs_cold_init() - whether the kernel brings up a port
  * @np: PCIe-C host node
  *
- * No m1n1 performs the PCIe-C preinit handoff on T600x/T602x, so the kernel
- * cold-initializes these ports instead; pcie_apple.tunnel_kernel_init=0 turns
- * that off. It is a parameter rather than a DT property because m1n1 hands
- * every installed kernel the same DT. The tunnel's DART cannot probe without
- * its tunables, which m1n1 does not provide, so ports whose DART lacks them
- * are refused.
+ * No m1n1 performs the PCIe-C preinit handoff on T600x/T602x, nor on T8152,
+ * so the kernel cold-initializes these ports instead;
+ * pcie_apple.tunnel_kernel_init=0 turns that off. It is a parameter rather
+ * than a DT property because m1n1 hands every installed kernel the same DT.
+ * The tunnel's DART cannot probe without its tunables, which m1n1 does not
+ * provide, so ports whose DART lacks them are refused.
  *
  * Unlike "apple,pciec-kernel-init" (t8103), this does not select the t8103
  * power and resume sequences.
@@ -95,12 +95,15 @@ bool apple_pcie_tunnel_needs_cold_init(struct device_node *np)
 {
 	struct of_phandle_args iommu_spec = {};
 	struct device_node *dart;
-	bool tunables;
+	bool tunables, supported;
 	u32 status;
 
-	if (!tunnel_kernel_init ||
-	    !of_device_is_compatible(np, "apple,t6000-pciec") ||
-	    !of_machine_compatible_match(apple_pcie_tunnel_cold_init_machines))
+	if (of_device_is_compatible(np, "apple,t6000-pciec"))
+		supported = of_machine_compatible_match(apple_pcie_tunnel_cold_init_machines);
+	else
+		supported = of_device_is_compatible(np, "apple,t8152-pciec") &&
+			    of_machine_is_compatible("apple,t8152");
+	if (!tunnel_kernel_init || !supported)
 		return false;
 
 	if (!of_property_read_u32(np, "apple,pciec-preinit-status", &status) &&
@@ -205,10 +208,11 @@ EXPORT_SYMBOL_GPL(apple_pcie_tunnel_needs_cold_init);
 #define   PORT_OUTS_PREQS_HDR_MASK	GENMASK(9, 0)
 #define PORT_OUTS_PREQS_DATA		0x00984
 #define   PORT_OUTS_PREQS_DATA_MASK	GENMASK(15, 0)
-#define PORT_TUNCTRL			0x00988
+/* T8152 moves both registers by hw->tun_delta (macOS uses +0x1088/+0x108c). */
+#define PORT_TUNCTRL(port)		(0x00988 + (port)->pcie->hw->tun_delta)
 #define   PORT_TUNCTRL_PERST_ON		BIT(0)
 #define   PORT_TUNCTRL_PERST_ACK_REQ	BIT(1)
-#define PORT_TUNSTAT			0x0098c
+#define PORT_TUNSTAT(port)		(0x0098c + (port)->pcie->hw->tun_delta)
 #define   PORT_TUNSTAT_PERST_ON		BIT(0)
 #define   PORT_TUNSTAT_PERST_ACK_PEND	BIT(1)
 #define PORT_PREFMEM_ENABLE		0x00994
@@ -250,6 +254,8 @@ struct hw_info {
 	bool retain_clocks;
 	bool root_bus_only;
 	bool tunneled;
+	bool cold_order;
+	u32 tun_delta;
 };
 
 static const struct hw_info t8103_hw = {
@@ -313,6 +319,21 @@ static const struct hw_info t8122_pciec_hw = {
 	.port_msimap		= PORT_T602X_MSIMAP,
 	.max_rid2sid		= 64,
 	.tunneled		= true,
+};
+
+/*
+ * T8152 PCIe-C: the tunnel reset control and status registers sit 0x700
+ * higher, and the port clock must be running with READY set before the
+ * first config-space access.
+ */
+static const struct hw_info t8152_pciec_hw = {
+	.port_msiaddr		= PORT_MSIADDR,
+	.port_perst		= PORT_PERST,
+	.port_rid2sid		= PORT_RID2SID,
+	.max_rid2sid		= 64,
+	.tunneled		= true,
+	.cold_order		= true,
+	.tun_delta		= 0x700,
 };
 
 struct apple_pcie {
@@ -859,12 +880,12 @@ static int apple_pcie_tunnel_release_reset(struct apple_pcie_port *port)
 	 * Releasing it means writing zero to PORT_TUNCTRL, waiting for the
 	 * reset-active indication to clear, and only then enabling the LTSSM.
 	 */
-	apple_pcie_port_writel(port, 0, PORT_TUNCTRL);
+	apple_pcie_port_writel(port, 0, PORT_TUNCTRL(port));
 	ret = read_poll_timeout_atomic(apple_pcie_port_readl, stat,
 				       !(stat & PORT_TUNSTAT_PERST_ON),
 				       1000,
 				       port->pcie->kernel_init ? 250000 : 100000,
-				       false, port, PORT_TUNSTAT);
+				       false, port, PORT_TUNSTAT(port));
 	if (ret)
 		dev_err(port->pcie->dev,
 			"port %pOF tunnel reset release timed out\n", port->np);
@@ -943,6 +964,29 @@ static int apple_pcie_tunnel_reinitialize(struct apple_pcie_port *port)
 	apple_pcie_tunnel_reset_hardware(port);
 	apple_pcie_tunnel_apply_tunable(port->base, port->tunable);
 
+	if (pcie->hw->cold_order) {
+		/*
+		 * Release PERST, enable the port clock and wait for READY
+		 * before the first config-space access; clear the clock-gate
+		 * disable, then configure the root complex.
+		 */
+		apple_pcie_port_rmw_set(port, PORT_PERST_OFF, pcie->hw->port_perst);
+		apple_pcie_port_rmw_set(port, PORT_APPCLK_EN, PORT_APPCLK);
+		ret = read_poll_timeout_atomic(apple_pcie_port_readl, stat,
+					       stat & PORT_STATUS_READY,
+					       10, 250000, false, port, PORT_STATUS);
+		if (ret)
+			return dev_err_probe(pcie->dev, ret,
+					     "PCIe-C port did not enter RUN\n");
+		apple_pcie_port_rmw_clear(port, PORT_APPCLK_CGDIS, PORT_APPCLK);
+		apple_pcie_tunnel_apply_tunable(pcie->cfg->win, pcie->rc_tunable);
+		apple_pcie_port_writel(port, PORT_COUNTER_ENABLE, PORT_COUNTER_CTRL);
+		apple_pcie_port_writel(port, ~0, PORT_INTSTAT);
+		apple_pcie_port_writel(port, ~0, PORT_LINKCMDSTS);
+		apple_pcie_tunnel_pulse_intr2axi(pcie);
+		goto link_idle;
+	}
+
 	/*
 	 * Keep the port disabled and its downstream reset asserted while the
 	 * root complex is configured.  The enable sequence does this explicitly
@@ -971,6 +1015,7 @@ static int apple_pcie_tunnel_reinitialize(struct apple_pcie_port *port)
 		return dev_err_probe(pcie->dev, ret,
 				     "PCIe-C port did not enter RUN after hot reconnect\n");
 
+link_idle:
 	ret = read_poll_timeout_atomic(apple_pcie_port_readl, stat,
 				       !(stat & PORT_LINKSTS_BUSY),
 				       10, 250000, false, port, PORT_LINKSTS);
@@ -1029,6 +1074,9 @@ static int apple_pcie_tunnel_cold_init(struct apple_pcie_port *port)
 			return dev_err_probe(pcie->dev, ret,
 					     "port %pOF cold init: RUN not set (status %#x)\n",
 					     port->np, stat);
+		/* T8152 clears the clock-gate disable before the root complex is configured. */
+		if (pcie->hw->cold_order)
+			apple_pcie_port_rmw_clear(port, PORT_APPCLK_CGDIS, PORT_APPCLK);
 	} else {
 		apple_pcie_port_rmw_clear(port, PORT_APPCLK_CGDIS, PORT_APPCLK);
 	}
@@ -1040,7 +1088,7 @@ static int apple_pcie_tunnel_cold_init(struct apple_pcie_port *port)
 						pcie->oe_fabric_tunable);
 	apple_pcie_tunnel_apply_tunable(pcie->cfg ? pcie->cfg->win : pcie->early_cfg,
 					pcie->rc_tunable);
-	if (!pcie->kernel_init)
+	if (!pcie->kernel_init && !pcie->hw->cold_order)
 		apple_pcie_port_rmw_clear(port, PORT_APPCLK_CGDIS, PORT_APPCLK);
 
 	apple_pcie_port_writel(port, PORT_COUNTER_ENABLE, PORT_COUNTER_CTRL);
@@ -1069,7 +1117,7 @@ static int apple_pcie_tunnel_cold_init(struct apple_pcie_port *port)
 		 port->np,
 		 apple_pcie_port_readl(port, PORT_STATUS),
 		 apple_pcie_port_readl(port, PORT_LINKSTS),
-		 apple_pcie_port_readl(port, PORT_TUNSTAT));
+		 apple_pcie_port_readl(port, PORT_TUNSTAT(port)));
 	return 0;
 }
 
@@ -1329,10 +1377,10 @@ static int apple_pcie_tunnel_stop(struct apple_pcie_port *port)
 	 * tunneled reset request, and the root port must acknowledge it before
 	 * ACIO loses power. A cable disconnect requires that same ordering.
 	 */
-	apple_pcie_port_rmw_set(port, PORT_TUNCTRL_PERST_ON, PORT_TUNCTRL);
+	apple_pcie_port_rmw_set(port, PORT_TUNCTRL_PERST_ON, PORT_TUNCTRL(port));
 	ret = read_poll_timeout_atomic(apple_pcie_port_readl, stat,
 				       stat & PORT_TUNSTAT_PERST_ON,
-				       1000, 100000, false, port, PORT_TUNSTAT);
+				       1000, 100000, false, port, PORT_TUNSTAT(port));
 	if (ret)
 		dev_warn(pcie->dev, "port %pOF tunnel reset assertion timed out\n",
 			 port->np);
@@ -1351,13 +1399,13 @@ static int apple_pcie_tunnel_stop(struct apple_pcie_port *port)
 	if (ret && !err)
 		err = ret;
 
-	apple_pcie_port_rmw_set(port, PORT_TUNCTRL_PERST_ACK_REQ, PORT_TUNCTRL);
+	apple_pcie_port_rmw_set(port, PORT_TUNCTRL_PERST_ACK_REQ, PORT_TUNCTRL(port));
 	/* M1 reports an outstanding acknowledgment until ACK_PEND clears. */
 	ret = read_poll_timeout_atomic(apple_pcie_port_readl, stat,
 				       pcie->kernel_init ?
 				       !(stat & PORT_TUNSTAT_PERST_ACK_PEND) :
 				       stat & PORT_TUNSTAT_PERST_ACK_PEND,
-				       1000, 1000000, false, port, PORT_TUNSTAT);
+				       1000, 1000000, false, port, PORT_TUNSTAT(port));
 	if (ret) {
 		dev_warn(pcie->dev,
 			 "port %pOF tunnel reset acknowledgment timed out\n",
@@ -1373,7 +1421,7 @@ static int apple_pcie_tunnel_stop(struct apple_pcie_port *port)
 			err = ret;
 	}
 	apple_pcie_port_rmw_clear(port, PORT_TUNCTRL_PERST_ACK_REQ,
-				  PORT_TUNCTRL);
+				  PORT_TUNCTRL(port));
 	WRITE_ONCE(port->started, false);
 	port->needs_stop = err || (apple_pcie_port_readl(port, PORT_STATUS) &
 				  PORT_STATUS_READY);
@@ -1659,12 +1707,14 @@ static int apple_pcie_setup_port(struct apple_pcie *pcie,
 		 * port reset against that live handoff raises an asynchronous
 		 * SError. t8103 boots with ATC_PCIE off and no handoff, so
 		 * apple,pciec-kernel-init selects the in-kernel sequence, as
-		 * pcie_apple.tunnel_kernel_init does on T600x/T602x.
+		 * pcie_apple.tunnel_kernel_init does on T600x/T602x. T8152 has no
+		 * handoff either: cold_order brings the port up from its stopped
+		 * state in apple_pcie_tunnel_reinitialize().
 		 */
 		ret = of_property_read_u32(pcie->dev->of_node,
 					   "apple,pciec-preinit-status",
 					   &preinit_status);
-		preinit_ok = !ret && preinit_status == 1;
+		preinit_ok = (!ret && preinit_status == 1) || pcie->hw->cold_order;
 		if ((pcie->kernel_init || pcie->tunnel_cold_init) && !preinit_ok) {
 			stat = apple_pcie_port_readl(port, PORT_STATUS);
 			if (stat & PORT_STATUS_READY) {
@@ -2846,6 +2896,7 @@ static int apple_pcie_walk_tunnel_darts(struct apple_pcie *pcie,
 		if (!of_device_is_compatible(child, "apple,t8103-dart") &&
 		    !of_device_is_compatible(child, "apple,t8103-usb4-dart") &&
 		    !of_device_is_compatible(child, "apple,t8110-dart") &&
+		    !of_device_is_compatible(child, "apple,t8152-dart") &&
 		    !of_device_is_compatible(child, "apple,t6000-dart"))
 			continue;
 
@@ -3116,6 +3167,15 @@ static struct apple_tunable *apple_pcie_tunable_once(struct device_node *np,
  */
 static const struct of_device_id apple_pcie_of_match[];
 
+/* A port whose hardware table asks for the cold start order (T8152) is clocked here too. */
+static bool apple_pcie_tunnel_has_cold_order(struct device_node *np)
+{
+	const struct of_device_id *match = of_match_node(apple_pcie_of_match, np);
+	const struct hw_info *hw = match ? match->data : NULL;
+
+	return hw && hw->cold_order;
+}
+
 int apple_pcie_tunnel_prepare(struct device *dev, struct device_node *tunnel)
 {
 	struct device_node *np, *port_np = NULL;
@@ -3132,7 +3192,8 @@ int apple_pcie_tunnel_prepare(struct device *dev, struct device_node *tunnel)
 	for_each_available_child_of_node(tunnel, np) {
 		kernel_init = of_device_is_compatible(np, "apple,t8103-pciec") &&
 			      of_property_read_bool(np, "apple,pciec-kernel-init");
-		if (kernel_init || apple_pcie_tunnel_needs_cold_init(np))
+		if (kernel_init || apple_pcie_tunnel_needs_cold_init(np) ||
+		    apple_pcie_tunnel_has_cold_order(np))
 			break;
 	}
 	if (!np)
@@ -3442,13 +3503,13 @@ static int apple_pcie_reset_for_resume(struct apple_pcie *pcie)
 
 		/* A failed cold setup still owns partially enabled hardware. */
 		port->needs_stop = true;
-		apple_pcie_port_writel(port, PORT_TUNCTRL_PERST_ON, PORT_TUNCTRL);
+		apple_pcie_port_writel(port, PORT_TUNCTRL_PERST_ON, PORT_TUNCTRL(port));
 		ret = apple_pcie_tunnel_cold_init(port);
 		if (ret)
 			return ret;
 		ret = read_poll_timeout_atomic(apple_pcie_port_readl, stat,
 					       stat & PORT_TUNSTAT_PERST_ON,
-					       1000, 100000, false, port, PORT_TUNSTAT);
+					       1000, 100000, false, port, PORT_TUNSTAT(port));
 		if (ret)
 			return ret;
 		apple_pcie_tunnel_restore_irq_hw(port);
@@ -3544,6 +3605,7 @@ static const struct dev_pm_ops apple_pcie_pm_ops = {
 
 static const struct of_device_id apple_pcie_of_match[] = {
 	{ .compatible = "apple,t8122-pciec",	.data = &t8122_pciec_hw },
+	{ .compatible = "apple,t8152-pciec",	.data = &t8152_pciec_hw },
 	{ .compatible = "apple,t8103-pciec",	.data = &t8103_pciec_hw },
 	{ .compatible = "apple,t6000-pciec",	.data = &t8103_pciec_hw },
 	{ .compatible = "apple,t6020-pcie",	.data = &t602x_hw },

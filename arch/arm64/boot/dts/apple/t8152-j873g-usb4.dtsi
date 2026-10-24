@@ -1,0 +1,232 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple T8152 (M6) J873: USB4/Thunderbolt host router, ACIO port 3 (ATC3, the free rear port).
+ * ACIO0 (the NCM tether) and ACIO1 (Studio Display cable) are not described; there is no ACIO2.
+ *
+ * Addresses are physical: ADT bus address + 0x200000000 for every ADT address below
+ * 0x400000000 (arm-io ranges[0]); config space 0x1c80000000 is above that and unchanged.
+ * The register ranges, interrupts and DART data come from the ADT nodes acio3, acio-cpu3,
+ * dart-acio3, apciec3 and dart-apciec3; the power-domain slots and the mailbox layout come
+ * from the macOS driver and its power-manager tables.
+ *
+ * The probe of the acio node maps registers and registers the Type-C switch; nothing powers
+ * ACIO until a cable event. The boot loader fills apple,tunable-rc, -pcie-adapter, -nhi,
+ * -debug and -fabric, the port tunable and apple,thunderbolt-drom through the aliases below
+ * (it accepts both spellings). Not described here: pinctrl (the ADT LSTX pin is an AOP
+ * GPIO), the Type-C graph link to the port controller, and the ATC3 PHY CIO mode.
+ */
+
+/ {
+	aliases {
+		usb4-3-acio = &usb4_3_acio;
+		usb4-3-nhi = &usb4_3_nhi;
+		usb4-3-pcie-adapter = &usb4_3_acio;
+	};
+
+	soc {
+		/*
+		 * PSD slots of ATC3 (macOS slot-name table): ATC3_CIO 70, ATC3_CIOPCIE 66,
+		 * ATC3_CIOUSB 62, ATC3_PCIE 89. The parent power state of the three CIO slots is
+		 * not known; ps_atc3_usb_aon is a guess. The slot active state is not decoded.
+		 */
+		psd_atc3_cio: power-controller@303a14600 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a14600 0x0 0x100>;
+			#power-domain-cells = <0>;
+			power-domains = <&ps_atc3_usb_aon>;
+			label = "psd_atc3_cio";
+		};
+
+		psd_atc3_cio_pcie: power-controller@303a14200 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a14200 0x0 0x100>;
+			#power-domain-cells = <0>;
+			power-domains = <&ps_atc3_usb_aon>;
+			label = "psd_atc3_cio_pcie";
+		};
+
+		psd_atc3_cio_usb: power-controller@303a13e00 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a13e00 0x0 0x100>;
+			#power-domain-cells = <0>;
+			power-domains = <&ps_atc3_usb_aon>;
+			label = "psd_atc3_cio_usb";
+		};
+
+		psd_atc3_pcie: power-controller@303a15900 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a15900 0x0 0x100>;
+			#power-domain-cells = <0>;
+			power-domains = <&ps_atc3_usb_aon>;
+			label = "psd_atc3_pcie";
+		};
+
+		/*
+		 * ACIO coprocessor mailbox (IOP wrapper v2 layout): acio-cpu3 reg[0] 0x411178000 +
+		 * 0x80, counted FIFO, RX +0, TX +0x10, STATUS +0x20, same layout as the SMC and ANS
+		 * mailboxes. The ADT lists the interrupts as [1873, 1872]: 1873 is inbox empty and
+		 * 1872 is outbox not empty.
+		 */
+		usb4_3_mbox: mailbox@411178080 {
+			compatible = "apple,t8152-acio-mailbox";
+			reg = <0x4 0x11178080 0x0 0x80>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1872 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 1873 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "recv-not-empty", "send-empty";
+			#mbox-cells = <0>;
+		};
+
+		usb4_3_acio: cio@411ac0000 {
+			compatible = "apple,t8152-usb4-acio", "apple,t8103-usb4-acio";
+			/*
+			 * rc = ADT acio3 reg[1..3] (three adjacent 0x4000 blocks). sram is at the
+			 * same offset from the ACIO base as on t8112 (+0x80000) and lies inside
+			 * acio-cpu3 reg[2]; the ADT does not name it. cpu = acio-cpu3 reg[1], the
+			 * coprocessor wrapper: CPU run control +0x28, idle +0x44 bit 1.
+			 */
+			reg = <0x4 0x11ac0000 0x0 0xc000>,
+			      <0x4 0x11080000 0x0 0x20000>,
+			      <0x4 0x11100000 0x0 0x4000>;
+			reg-names = "rc", "sram", "cpu";
+
+			mboxes = <&usb4_3_mbox>;
+			power-domains = <&psd_atc3_cio>,
+					<&psd_atc3_cio_pcie>,
+					<&psd_atc3_cio_usb>,
+					<&psd_atc3_pcie>;
+
+			thunderbolt-switch;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+			/*
+			 * child 0 = ACIO block; child 0x2000000 = the shared gen3 DART TLBI
+			 * doorbell page (physical 0x200000000, ADT tlbi-aperture-offset 0x280)
+			 */
+			ranges = <0x0 0x4 0x11000000 0x1000000>,
+				 <0x2000000 0x2 0x00000000 0x1000>;
+			nonposted-mmio;
+
+			/* The Type-C graph link to the port controller is not wired yet. */
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@1 {
+					reg = <1>;
+					usb4_3_acio_tbt: endpoint {
+					};
+				};
+			};
+
+			usb4_3_dart: iommu@a80000 {
+				compatible = "apple,t8152-dart";
+				/*
+				 * ADT dart-acio3 (dart,gen3, manual-availability): reg 0x411a80000,
+				 * 28 SIDs, vm-base 0x10000000000 vm-size 0x30000000000
+				 */
+				reg = <0xa80000 0xc000>, <0x2000280 0x10>;
+				interrupt-parent = <&aic>;
+				interrupts = <AIC_IRQ 1869 IRQ_TYPE_LEVEL_HIGH>;
+				#iommu-cells = <1>;
+				apple,static-topology;
+				apple,num-streams = <28>;
+				apple,dma-range = /bits/ 64 <0x10000000000 0x30000000000>;
+				/* ADT dart-tunables-instance-0 as (offset, mask, value) */
+				apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x800 0x000f003f 0x00010000>,
+					<0x804 0x000f003f 0x00010002>,
+					<0x808 0x000f003f 0x00010004>,
+					<0x80c 0x000f003f 0x00020006>,
+					<0x810 0x000f003f 0x0002000a>,
+					<0x814 0x000f003f 0x0002000e>,
+					<0x818 0x000f003f 0x00020012>,
+					<0x81c 0x000f003f 0x00020016>,
+					<0x820 0x000f003f 0x0002001a>,
+					<0x824 0x000f003f 0x0002001e>,
+					<0x828 0x000f003f 0x00020022>,
+					<0x82c 0x000f003f 0x00020026>,
+					<0x830 0x000f003f 0x0002002a>,
+					<0x834 0x000f003f 0x0002002e>,
+					<0x838 0x000f003f 0x00020032>,
+					<0x83c 0x000f003f 0x00010036>,
+					<0x4600 0x00000002 0x00000002>;
+			};
+
+			usb4_3_nhi: nhi@f00000 {
+				compatible = "apple,t8152-usb4-nhi", "apple,t8103-usb4-nhi";
+				/*
+				 * nhi = ADT acio3 reg[0]. There is no "pdf" range: the ACIO +
+				 * 0xdb0000 block that M1/M2 device trees map for it takes a
+				 * synchronous external abort on a read on T8152.
+				 */
+				reg = <0xf00000 0x100000>;
+				reg-names = "nhi";
+				interrupt-parent = <&aic>;
+				/*
+				 * tx = 1842..1853, rx = 1854..1865 (the ADT lists 1854.. first).
+				 * The TX ring 0 completion raised 1842 and the RX ring 0 interrupt
+				 * raised 1854; the other rings were not seen to fire.
+				 */
+				interrupts = <AIC_IRQ 1842 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1843 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1844 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1845 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1846 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1847 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1848 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1849 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1850 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1851 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1852 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1853 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1854 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1855 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1856 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1857 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1858 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1859 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1860 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1861 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1862 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1863 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1864 IRQ_TYPE_LEVEL_HIGH>,
+					<AIC_IRQ 1865 IRQ_TYPE_LEVEL_HIGH>;
+				interrupt-names =
+					"txring0", "txring1", "txring2",
+					"txring3", "txring4", "txring5",
+					"txring6", "txring7", "txring8",
+					"txring9", "txring10", "txring11",
+					"rxring0", "rxring1", "rxring2",
+					"rxring3", "rxring4", "rxring5",
+					"rxring6", "rxring7", "rxring8",
+					"rxring9", "rxring10", "rxring11";
+				/*
+				 * ADT dart-acio3 mappers: mapper-acio3-tx-N reg N (SIDs 0-11),
+				 * mapper-acio3-rx-N reg 16+N (SIDs 16-27). With only SID 1 bound
+				 * the first ring read came from SID 16 and the DART rejected it,
+				 * which ended in a system error; every ring SID is bound.
+				 */
+				iommus = <&usb4_3_dart 0>, <&usb4_3_dart 1>, <&usb4_3_dart 2>,
+					 <&usb4_3_dart 3>, <&usb4_3_dart 4>, <&usb4_3_dart 5>,
+					 <&usb4_3_dart 6>, <&usb4_3_dart 7>, <&usb4_3_dart 8>,
+					 <&usb4_3_dart 9>, <&usb4_3_dart 10>, <&usb4_3_dart 11>,
+					 <&usb4_3_dart 16>, <&usb4_3_dart 17>, <&usb4_3_dart 18>,
+					 <&usb4_3_dart 19>, <&usb4_3_dart 20>, <&usb4_3_dart 21>,
+					 <&usb4_3_dart 22>, <&usb4_3_dart 23>, <&usb4_3_dart 24>,
+					 <&usb4_3_dart 25>, <&usb4_3_dart 26>, <&usb4_3_dart 27>;
+				/*
+				 * filled by the loader (alias usb4-3-nhi / usb4_3_nhi):
+				 * apple,thunderbolt-drom, apple,tunable-nhi
+				 */
+				apple,thunderbolt-drom = [00];
+			};
+		};
+	};
+};

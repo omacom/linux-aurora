@@ -13,12 +13,15 @@
 #include <linux/mutex.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/pm_wakeup.h>
 #include <linux/reset.h>
+#include <linux/soc/apple/tunable.h>
 #include <linux/usb/phy.h>
 
 #include "dwc3-apple-state.h"
 #include "glue.h"
+#include "io.h"
 
 /*
  * This platform requires a very specific sequence of operations to bring up dwc3 and its USB3 PHY:
@@ -86,6 +89,13 @@
  * dwc3_apple_init(). In host mode xHCI then keeps running in suspend-to-idle when a USB device
  * may wake the system, as a halted xHC could not signal the wakeup.
  *
+ * The T8152 USB2-only profile starts a fixed host, without a physical hub, or —
+ * with dr_mode = "peripheral" on the debug-cable port — a fixed peripheral. A
+ * fixed peripheral programs the pipe handler with the m1n1 device-console
+ * sequence (mux to the dummy backend, DWC3 reset released, device non-selected
+ * override word) and applies only the default calibration lists plus the USB2
+ * PHY device calibration; the host lists stay unused.
+ *
  * enum dwc3_apple_state is defined in dwc3-apple-state.h.
  */
 
@@ -100,7 +110,11 @@
  *	      sets host mode
  * @usb3_phy: USB3 PHY, configured after the core is brought up
  * @role_sw: USB role switch
- * @fixed_hub: A fixed hub sits on the controller's USB2 port, the controller stays in host mode
+ * @fixed_hub: A physical hub child node sits on the controller's USB2 port
+ * @t8152_usb2: T8152 fixed-role calibration and USB2-only PHY profile
+ * @fixed_peripheral: T8152 started as a fixed peripheral (dr_mode = "peripheral")
+ * @tunable_regs: Non-overlapping calibration windows, with the core mapped by dwc3
+ * @tunables: Native host calibration lists in application order
  * @lock: Mutex for synchronizing access
  * @state: Current state of the controller, see enum dwc3_apple_state and the comment above
  * @core_active: Core still owns initialized PHYs
@@ -121,6 +135,10 @@ struct dwc3_apple {
 	struct phy *usb3_phy;
 	struct usb_role_switch *role_sw;
 	bool fixed_hub;
+	bool t8152_usb2;
+	bool fixed_peripheral;
+	void __iomem *tunable_regs[6];
+	struct apple_tunable *tunables[11];
 
 	struct mutex lock;
 
@@ -191,6 +209,120 @@ static void dwc3_apple_setup_cio(struct dwc3_apple *appledwc)
 	dwc3_apple_mask(appledwc, APPLE_DWC3_CIO_LINK_TIMER, APPLE_DWC3_CIO_PM_ENTRY_TIMER,
 			FIELD_PREP(APPLE_DWC3_CIO_PM_ENTRY_TIMER,
 				   APPLE_DWC3_CIO_PM_ENTRY_TIMER_VALUE));
+}
+
+static const struct {
+	const char *name;
+	u8 resource;
+	u32 offset;
+	bool optional;
+	bool host_only;
+} t8152_host_tunables[] = {
+	{ "apple,tunable-bulk-fabric-default", 4, 0 },
+	{ "apple,tunable-pipe-handler-default", 2, 0 },
+	{ "apple,tunable-pipe-handler-host", 2, 0, true, true },
+	{ "apple,tunable-pwr-ctrl-default", 3, 0, true },
+	{ "apple,tunable-drd-usb31-gbl-default", 0, 0xc100 },
+	{ "apple,tunable-drd-usb31-gbl-host", 0, 0xc100, false, true },
+	{ "apple,tunable-drd-cio-regs-default", 1, 0x20, true },
+	{ "apple,tunable-drd-usb31-dbg-default", 1, 0xb00 },
+	{ "apple,tunable-drd-usb31-cfg-host", 1, 0x3300, false, true },
+	{ "apple,tunable-link-regs-default", 1, 0x300 },
+	{ "apple,tunable-ausbc-debug-default", 5, 0 },
+};
+
+static int dwc3_apple_t8152_parse_tunables(struct platform_device *pdev,
+					struct dwc3_apple *appledwc)
+{
+	static const char * const names[] = {
+		"dwc3-core", "dwc3-apple", "pipe-handler",
+		"pwr-ctrl", "bulk-fabric", "ausbc-debug",
+	};
+	struct device *dev = &pdev->dev;
+	struct resource *resources[ARRAY_SIZE(names)];
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		resources[i] = platform_get_resource_byname(pdev, IORESOURCE_MEM, names[i]);
+		if (!resources[i])
+			return dev_err_probe(dev, -EINVAL, "Missing %s MMIO\n", names[i]);
+		if (i < 2)
+			continue;
+		appledwc->tunable_regs[i] = devm_ioremap_resource(dev, resources[i]);
+		if (IS_ERR(appledwc->tunable_regs[i]))
+			return PTR_ERR(appledwc->tunable_regs[i]);
+	}
+	if (resource_size(resources[0]) != 0xcd00 ||
+	    resource_size(resources[1]) < 0x4b00 ||
+	    resources[1]->start != resources[0]->start + 0xcd00 ||
+	    resource_size(resources[2]) < 0x24)
+		return dev_err_probe(dev, -EINVAL, "Invalid T8152 register windows\n");
+	appledwc->tunable_regs[1] = appledwc->apple_regs;
+
+	for (i = 0; i < ARRAY_SIZE(t8152_host_tunables); i++) {
+		struct resource window = *resources[t8152_host_tunables[i].resource];
+		struct apple_tunable *tunable;
+
+		/* A fixed peripheral never applies the host-only lists, so they may be absent. */
+		if (appledwc->fixed_peripheral && t8152_host_tunables[i].host_only)
+			continue;
+		if (resource_size(&window) <= t8152_host_tunables[i].offset)
+			return -EINVAL;
+		window.start += t8152_host_tunables[i].offset;
+		tunable = devm_apple_tunable_parse(dev, dev->of_node,
+						 t8152_host_tunables[i].name, &window);
+		if (IS_ERR(tunable)) {
+			if (PTR_ERR(tunable) == -ENOENT && t8152_host_tunables[i].optional)
+				continue;
+			return dev_err_probe(dev, PTR_ERR(tunable), "Invalid %s\n",
+					     t8152_host_tunables[i].name);
+		}
+		appledwc->tunables[i] = tunable;
+	}
+	return 0;
+}
+
+/*
+ * T8152 pipe handler registers programmed by m1n1 src/usb.c usb_phy_bringup()
+ * for the USB2 device console: route the mux to the dummy backend, release the
+ * DWC3 reset, and write the whole non-selected override word.
+ */
+#define T8152_PIPE_MUX_CTRL		0x0c
+#define T8152_PIPE_AON_GEN		0x1c
+#define T8152_PIPE_NONSELECTED_OVERRIDE	0x20
+#define T8152_PIPE_MUX_CTRL_DUMMY	0x22
+#define T8152_PIPE_AON_GEN_DWC3_RESET_N	BIT(0)
+#define T8152_PIPE_NONSELECTED_DEVICE	0x9332
+
+static void dwc3_apple_t8152_apply_tunables(struct dwc3_apple *appledwc,
+					    enum dwc3_apple_state state)
+{
+	bool device = state == DWC3_APPLE_DEVICE;
+	void __iomem *pipe = appledwc->tunable_regs[2];
+	unsigned int i;
+	u32 value;
+
+	for (i = 0; i < ARRAY_SIZE(t8152_host_tunables); i++) {
+		u8 resource = t8152_host_tunables[i].resource;
+		u32 offset = t8152_host_tunables[i].offset;
+		void __iomem *base = resource ? appledwc->tunable_regs[resource] :
+			appledwc->dwc.regs;
+
+		if (device && t8152_host_tunables[i].host_only)
+			continue;
+		if (!resource)
+			offset -= DWC3_GLOBALS_REGS_START;
+		apple_tunable_apply(base + offset, appledwc->tunables[i]);
+	}
+
+	if (device)
+		return;
+
+	writel(readl(pipe + 0x20) | BIT(15), pipe + 0x20);
+	value = dwc3_readl(&appledwc->dwc, 0xc680);
+	dwc3_writel(&appledwc->dwc, 0xc680, value & ~BIT(13));
+	value = dwc3_readl(&appledwc->dwc, 0xc680);
+	dwc3_writel(&appledwc->dwc, 0xc680, value & ~BIT(13));
 }
 
 static void dwc3_apple_set_ptrcap(struct dwc3_apple *appledwc, u32 mode)
@@ -374,7 +506,40 @@ static int dwc3_apple_core_start(struct dwc3_apple *appledwc, enum dwc3_apple_st
 	appledwc->reset_pending = true;
 	/* Keep register access powered until both PHY shutdown and reset finish. */
 	dev_pm_syscore_device(appledwc->dev, true);
+
+	if (appledwc->t8152_usb2) {
+		void __iomem *pipe = appledwc->tunable_regs[2];
+
+		if (state == DWC3_APPLE_DEVICE) {
+			writel(T8152_PIPE_MUX_CTRL_DUMMY, pipe + T8152_PIPE_MUX_CTRL);
+			writel(T8152_PIPE_NONSELECTED_DEVICE, pipe + T8152_PIPE_NONSELECTED_OVERRIDE);
+		}
+		/*
+		 * The AON block gates every DWC3 core register with its reset.
+		 * dwc3_core_probe() reads GSNPSID/GHWPARAMS first, so the reset
+		 * must be released here for the host role too, not only for the
+		 * peripheral (verified on port 1; port 2 returned garbage on the
+		 * first hardware run without this).
+		 */
+		writel(T8152_PIPE_AON_GEN_DWC3_RESET_N, pipe + T8152_PIPE_AON_GEN);
+	}
+
+	if (appledwc->t8152_usb2) {
+		ret = phy_init(appledwc->usb2_phy);
+		if (ret)
+			goto err_stop;
+		ret = phy_power_on(appledwc->usb2_phy);
+		if (ret) {
+			phy_exit(appledwc->usb2_phy);
+			goto err_stop;
+		}
+	}
+
 	ret = dwc3_apple_core_init(appledwc);
+	if (appledwc->t8152_usb2) {
+		phy_power_off(appledwc->usb2_phy);
+		phy_exit(appledwc->usb2_phy);
+	}
 	if (ret) {
 		ret_reset = dwc3_apple_core_stop(appledwc);
 		if (ret_reset)
@@ -392,6 +557,12 @@ static int dwc3_apple_core_start(struct dwc3_apple *appledwc, enum dwc3_apple_st
 	appledwc->usb3_power_off_pending = BIT(appledwc->dwc.num_usb3_ports) - 1;
 
 	return 0;
+
+err_stop:
+	ret_reset = dwc3_apple_core_stop(appledwc);
+	if (ret_reset)
+		dev_warn(appledwc->dev, "Failed to finish core shutdown, err=%d\n", ret_reset);
+	return ret;
 }
 
 /* Select the role in the core and route the USB3 PHY, before xhci or the gadget is started */
@@ -414,6 +585,27 @@ static void dwc3_apple_set_role(struct dwc3_apple *appledwc, enum dwc3_apple_sta
 	ret = phy_set_mode(appledwc->usb3_phy, host ? PHY_MODE_USB_HOST : PHY_MODE_USB_DEVICE);
 	if (ret)
 		dev_warn(appledwc->dev, "USB3 PHY setup failed, USB2 only, err=%d\n", ret);
+	if (appledwc->t8152_usb2)
+		dwc3_apple_t8152_apply_tunables(appledwc, state);
+}
+
+/*
+ * A T8152 controller never switches roles: it starts as a fixed host (with or
+ * without a hub child) or — with dr_mode = "peripheral" — as a fixed
+ * peripheral. Returns false for the dynamic-role profiles.
+ */
+static bool dwc3_apple_fixed_state(const struct dwc3_apple *appledwc,
+				   enum dwc3_apple_state *state)
+{
+	if (appledwc->fixed_peripheral) {
+		*state = DWC3_APPLE_DEVICE;
+		return true;
+	}
+	if (appledwc->fixed_hub || appledwc->t8152_usb2) {
+		*state = DWC3_APPLE_HOST;
+		return true;
+	}
+	return false;
 }
 
 static int dwc3_apple_init(struct dwc3_apple *appledwc, enum dwc3_apple_state state)
@@ -505,6 +697,16 @@ static int dwc3_usb_role_switch_set(struct usb_role_switch *sw, enum usb_role ro
 	if (appledwc->fixed_hub)
 		return 0;
 
+	if (appledwc->t8152_usb2) {
+		enum usb_role fixed_role = appledwc->fixed_peripheral ?
+			USB_ROLE_DEVICE : USB_ROLE_HOST;
+		if (role != fixed_role) {
+			dev_err(appledwc->dev, "Invalid target role: %d\n", role);
+			return -EINVAL;
+		}
+		return 0;
+	}
+
 	/*
 	 * Skip role switches if appledwc is already in the desired state. The
 	 * USB-C port controller on M2 and M1/M2 Pro/Max/Ultra devices issues
@@ -590,6 +792,7 @@ static bool dwc3_apple_has_fixed_hub(struct device *dev)
 
 static int dwc3_apple_probe(struct platform_device *pdev)
 {
+	enum dwc3_apple_state fixed_state;
 	struct device *dev = &pdev->dev;
 	struct dwc3_apple *appledwc;
 	int ret;
@@ -599,10 +802,24 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	appledwc->dev = &pdev->dev;
+	appledwc->t8152_usb2 = of_device_is_compatible(dev->of_node, "apple,t8152-dwc3");
 	appledwc->fixed_hub = dwc3_apple_has_fixed_hub(dev);
+	if (appledwc->t8152_usb2) {
+		enum usb_dr_mode dr_mode = usb_get_dr_mode(dev);
+
+		if ((dr_mode != USB_DR_MODE_HOST && dr_mode != USB_DR_MODE_PERIPHERAL) ||
+		    usb_get_maximum_speed(dev) != USB_SPEED_HIGH)
+			return dev_err_probe(dev, -EINVAL,
+			     "T8152 requires dr_mode = \"host\" or \"peripheral\" and maximum-speed = \"high-speed\"\n");
+		appledwc->fixed_peripheral = dr_mode == USB_DR_MODE_PERIPHERAL;
+		if (appledwc->fixed_peripheral && appledwc->fixed_hub)
+			return dev_err_probe(dev, -EINVAL,
+					     "A hub child node requires dr_mode = \"host\"\n");
+	}
 	mutex_init(&appledwc->lock);
 
-	appledwc->reset = devm_reset_control_get_exclusive(dev, NULL);
+	if (!appledwc->t8152_usb2)
+		appledwc->reset = devm_reset_control_get_exclusive(dev, NULL);
 	if (IS_ERR(appledwc->reset))
 		return dev_err_probe(&pdev->dev, PTR_ERR(appledwc->reset),
 				     "Failed to get reset control\n");
@@ -612,7 +829,8 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(appledwc->usb2_phy),
 				     "Failed to get the USB2 PHY\n");
 
-	appledwc->usb3_phy = devm_phy_get(dev, "usb3-phy");
+	if (!appledwc->t8152_usb2)
+		appledwc->usb3_phy = devm_phy_get(dev, "usb3-phy");
 	if (IS_ERR(appledwc->usb3_phy))
 		return dev_err_probe(dev, PTR_ERR(appledwc->usb3_phy),
 				     "Failed to get the USB3 PHY\n");
@@ -633,6 +851,11 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 	if (IS_ERR(appledwc->apple_regs))
 		return dev_err_probe(dev, PTR_ERR(appledwc->apple_regs),
 				     "Failed to map Apple-specific MMIO\n");
+	if (appledwc->t8152_usb2) {
+		ret = dwc3_apple_t8152_parse_tunables(pdev, appledwc);
+		if (ret)
+			return ret;
+	}
 
 	/*
 	 * Like a PCI xHCI controller, allow USB devices to wake the system by default. This has
@@ -654,16 +877,11 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to setup role switch\n");
 
-	if (!appledwc->fixed_hub)
+	if (!dwc3_apple_fixed_state(appledwc, &fixed_state))
 		return 0;
 
-	/*
-	 * The hub is the controller's permanent USB2 peer, and the PHY has kept
-	 * its USB2 path up for it since its own probe, so there is nothing to
-	 * wait for: bring the host up now.
-	 */
 	scoped_guard(mutex, &appledwc->lock)
-		ret = dwc3_apple_init(appledwc, DWC3_APPLE_HOST);
+		ret = dwc3_apple_init(appledwc, fixed_state);
 	if (ret) {
 		/* A failed cleanup remains visible even when probe cannot be retried. */
 		if (appledwc->core_active || appledwc->reset_pending)
@@ -671,7 +889,8 @@ static int dwc3_apple_probe(struct platform_device *pdev)
 		if (appledwc->state != DWC3_APPLE_PROBE_PENDING)
 			dwc3_core_remove_no_shutdown(&appledwc->dwc);
 		usb_role_switch_unregister(appledwc->role_sw);
-		return dev_err_probe(dev, ret, "Failed to start host mode\n");
+		return dev_err_probe(dev, ret, "Failed to start fixed %s mode\n",
+				     fixed_state == DWC3_APPLE_DEVICE ? "peripheral" : "host");
 	}
 
 	return 0;
@@ -699,6 +918,7 @@ static void dwc3_apple_remove(struct platform_device *pdev)
 
 static const struct of_device_id dwc3_apple_of_match[] = {
 	{ .compatible = "apple,t8103-dwc3" },
+	{ .compatible = "apple,t8152-dwc3" },
 	{}
 };
 MODULE_DEVICE_TABLE(of, dwc3_apple_of_match);
