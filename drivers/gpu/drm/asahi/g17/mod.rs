@@ -1239,6 +1239,7 @@ impl Gpu {
         let version = Self::os_firmware_version(dev);
         if let Some(build) = builds.iter().find(|build| Some(build.os_version) == version) {
             dev_info!(dev.as_ref(), "GPU firmware: {}\n", build.name);
+            Self::identify_image(dev, build).map_err(|_| ENODEV)?;
             return Ok(build.variant);
         }
         dev_err!(
@@ -1250,6 +1251,24 @@ impl Gpu {
             dev_err!(dev.as_ref(), "Supported GPU firmware: {}\n", build.name);
         }
         Err(ENODEV)
+    }
+
+    /// Checks that the loaded TEXT (the `fw-text` region) is `build`'s image, with the DATA size
+    /// of the `fw-data` region. The version property only says which build to expect.
+    fn identify_image(dev: &AsahiDrmDevice, build: &'static fw::variant::Build) -> Result {
+        let node = dev.as_ref().as_ref().of_node().ok_or(EINVAL)?;
+        let text = node.reserved_mem_region_to_resource_byname(c_str!("fw-text"))?;
+        let data = node.reserved_mem_region_to_resource_byname(c_str!("fw-data"))?;
+        let start = text.start();
+        let end = start.checked_add(text.size()).ok_or(EINVAL)?;
+        crate::fwid::identify(
+            dev.as_ref().as_ref(),
+            start..end,
+            data.size(),
+            core::slice::from_ref(&build.image),
+        )
+        .inspect_err(|e| dev_err!(dev.as_ref(), "GPU firmware image not admitted: {:?}\n", e))?;
+        Ok(())
     }
 
     /// The macOS version the boot loader reports for the boot firmware that loaded the GPU

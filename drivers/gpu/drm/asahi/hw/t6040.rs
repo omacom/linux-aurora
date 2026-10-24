@@ -62,6 +62,17 @@ pub(crate) const CONFIG: Config = Config {
     firmware: fw::variant::Firmware::Identified(&[fw::variant::Build {
         os_version: [26, 6, 2],
         name: "macOS 26.6.2 (25G83, iBoot mBoot-18000.161.10)",
+        image: crate::fwid::FirmwareBuild {
+            name: "Apple GFX 25G83 for T6040 (normalized loaded image)",
+            text_size: 0x60000,
+            data_size: 0x138000,
+            entropy: [0x59839, 0x5991c],
+            text_sha256: [
+                0x03, 0xdf, 0x75, 0x48, 0x4a, 0x7f, 0xdd, 0x6e, 0x4b, 0x47, 0x7f, 0x95, 0x6c, 0xaa,
+                0x5b, 0x44, 0x06, 0xdf, 0xff, 0x4d, 0x19, 0x17, 0x28, 0x62, 0x7f, 0x53, 0x10, 0xe0,
+                0x63, 0x87, 0x6d, 0xcd,
+            ],
+        },
         variant: &fw::variant::V25G83,
     }]),
     // Measured on the 20-core M4 Pro; other core counts are refused at probe.

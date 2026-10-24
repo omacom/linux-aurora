@@ -59,7 +59,6 @@ pub(crate) mod fw;
 mod gate;
 mod graph;
 pub(crate) mod hw;
-mod identity;
 mod initdata;
 mod job;
 mod object;

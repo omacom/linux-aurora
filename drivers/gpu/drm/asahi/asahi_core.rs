@@ -12,6 +12,7 @@ mod driver;
 mod event;
 mod file;
 mod float;
+mod fwid;
 mod fw;
 mod gem;
 mod g17;
