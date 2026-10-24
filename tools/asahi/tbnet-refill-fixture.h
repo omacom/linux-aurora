@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 #define TBNET_RING_SIZE 256
 #define TBNET_FRAME_SIZE 4096
@@ -92,7 +93,17 @@ static bool in_softirq(void){return fake_softirq;}
 static int smp_processor_id(void){return 0;}
 static void schedule_work(struct work_struct *w){}
 static bool queue_delayed_work(int wq,struct delayed_work *w,unsigned long delay){assert(delay==100);pthread_mutex_lock(&gate);bool new=!w->pending;if(new){w->pending=true;retry_queues++;retry_delay=delay;}pthread_mutex_unlock(&gate);return new;}
-static void cancel_delayed_work_sync(struct delayed_work *w){pthread_mutex_lock(&gate);cancel_waiting=true;while(w->running)pthread_cond_wait(&cv,&gate);w->pending=false;cancel_waiting=false;pthread_mutex_unlock(&gate);}
+static void cancel_delayed_work_sync(struct delayed_work *w)
+{
+	pthread_mutex_lock(&gate);
+	cancel_waiting = true;
+	pthread_cond_broadcast(&cv);
+	while (w->running)
+		pthread_cond_wait(&cv, &gate);
+	w->pending = false;
+	cancel_waiting = false;
+	pthread_mutex_unlock(&gate);
+}
 static void fire_retry(struct delayed_work *w){pthread_mutex_lock(&gate);assert(w->pending&&!w->running);w->pending=false;w->running=true;pthread_mutex_unlock(&gate);w->work.fn(&w->work);pthread_mutex_lock(&gate);w->running=false;pthread_cond_broadcast(&cv);pthread_mutex_unlock(&gate);}
 
 static void nhi_ring_interrupt_mask(struct tb_ring *r,bool mask){r->masked=mask;}
