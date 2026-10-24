@@ -40,6 +40,7 @@
 #include "dcp-lifecycle.h"
 #include "iomfb_internal.h"
 #include "iomfb_v14_7.h"
+#include "iomfb_v14_7_backlight.h"
 #include "iomfb_v14_7_board.h"
 #include "iomfb_v14_7_link.h"
 #include "iomfb_v14_7_swap.h"
@@ -102,6 +103,7 @@ static const struct dcp_v14_board dcp_v14_board_t6030 = {
 	.firmware_uuid = DCP_V14_FIRMWARE_UUID,
 	.handoff = "apple,t6030-handoff",
 	.promotion = true,
+	.panel_nits = true,
 };
 
 /*
@@ -289,6 +291,19 @@ struct apple_dcp_v14 {
 	struct drm_framebuffer *active_fb;
 	u64 swaps;
 	u64 swap_ns_max;
+
+	/* Immutable probe admission: only the J514S/J516S internal panel. */
+	bool panel_nits;
+	/* Copy of the last accepted surface; active_fb pins its DMA under lock. */
+	u8 shown_surface[DCP_V14_SURFACE_SIZE];
+	u64 shown_iova;
+	u32 shown_width, shown_height, shown_dst_y;
+	struct delayed_work backlight_work;
+	/* Serializes gate transitions with queue admission. */
+	spinlock_t bl_gate_lock;
+	enum dcp_v14_bl_gate bl_gate;
+	u32 nits_sent;
+	u64 nits_presents, brightness_presents, nits_refused;
 };
 
 /*
@@ -300,6 +315,135 @@ static bool dcp_v14_panel_session;
 
 static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_size,
 			    void *output, u32 out_size);
+
+static void dcp_v14_backlight_work(struct work_struct *work);
+
+/* The internal panel of a board whose swap level block was validated (T6030). */
+static bool dcp_v14_board_nits(const struct apple_dcp_v14 *v14)
+{
+	return !v14->external && v14->panel_nits && v14->board && v14->board->panel_nits;
+}
+
+bool iomfb_v14_7_panel_nits(struct apple_dcp *dcp)
+{
+	return dcp_is_v14_7_panel(dcp) && dcp->v14 && dcp_v14_board_nits(dcp->v14);
+}
+
+static enum dcp_v14_bl_gate dcp_v14_bl_gate_get(struct apple_dcp_v14 *v14)
+{
+	enum dcp_v14_bl_gate gate;
+	unsigned long flags;
+
+	spin_lock_irqsave(&v14->bl_gate_lock, flags);
+	gate = v14->bl_gate;
+	spin_unlock_irqrestore(&v14->bl_gate_lock, flags);
+	return gate;
+}
+
+/* Queues a brightness-only present, unless the gate is shut. */
+static void dcp_v14_bl_queue(struct apple_dcp_v14 *v14, unsigned long delay)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&v14->bl_gate_lock, flags);
+	if (dcp_v14_bl_may_queue(v14->bl_gate))
+		mod_delayed_work(system_dfl_wq, &v14->backlight_work, delay);
+	spin_unlock_irqrestore(&v14->bl_gate_lock, flags);
+}
+
+/*
+ * Shuts the gate, until resume or (@for_good, unbind and remove) for good,
+ * then drains the work. The RPC lock waits for a running present; the
+ * gate lock excludes late queueing. Cancellation runs outside the RPC lock.
+ */
+static void dcp_v14_bl_shut(struct apple_dcp_v14 *v14, bool for_good)
+{
+	unsigned long flags;
+
+	mutex_lock(&v14->lock);
+	spin_lock_irqsave(&v14->bl_gate_lock, flags);
+	v14->bl_gate = for_good ? DCP_V14_BL_CLOSED : dcp_v14_bl_gate_suspend(v14->bl_gate);
+	spin_unlock_irqrestore(&v14->bl_gate_lock, flags);
+	mutex_unlock(&v14->lock);
+	cancel_delayed_work_sync(&v14->backlight_work);
+}
+
+/* The class device may be platform devres, outside the component bind group. */
+static void dcp_v14_stop_backlight(struct apple_dcp_v14 *v14)
+{
+	struct apple_dcp *dcp = READ_ONCE(v14->dcp);
+
+	if (dcp)
+		WRITE_ONCE(dcp->quiescing, true);
+	dcp_v14_bl_shut(v14, true);
+	if (!dcp)
+		return;
+	dcp_backlight_stop(dcp);
+	cancel_work_sync(&dcp->bl_register_wq);
+	cancel_work_sync(&dcp->bl_update_wq);
+	/* Never hold this mutex while waiting for its registration worker. */
+	guard(mutex)(&dcp->bl_register_mutex);
+	if (dcp->brightness.bl_dev) {
+		devm_backlight_device_unregister(dcp->dev, dcp->brightness.bl_dev);
+		dcp->brightness.bl_dev = NULL;
+	}
+}
+
+/* The policy's kick (dcp_backlight.c): only queues; the RPC runs in the work. */
+static void dcp_v14_backlight_kick(struct apple_dcp *dcp)
+{
+	if (iomfb_v14_7_panel_nits(dcp) && !READ_ONCE(dcp->quiescing))
+		dcp_v14_bl_queue(dcp->v14, 0);
+}
+
+/*
+ * The panel's level policy, set up once the panel runs: at most 500 nits
+ * (less if the panel's DT record says so), and no fades. No boot loader
+ * level is known, so none is presented until userspace sets one; until
+ * then the backlight reports DCP_V14_NITS_DEFAULT as its requested level
+ * and no actual level (dcp_backlight.c). dcp_backlight_configure()
+ * registers the device from bl_register_wq.
+ */
+static void dcp_v14_configure_backlight(struct apple_dcp *dcp)
+{
+	struct apple_dcp_v14 *v14 = dcp->v14;
+	u32 maximum = DCP_V14_NITS_MAX;
+	int ret;
+
+	if (!iomfb_v14_7_panel_nits(dcp) || READ_ONCE(dcp->quiescing) ||
+	    !v14->started || dcp_backlight_active(dcp) ||
+	    !dcp_has_panel(dcp) || !dcp->crtc)
+		return;
+	/* A described panel maximum may only lower the wire bound. */
+	if (dcp->brightness.maximum)
+		maximum = min(maximum, dcp->brightness.maximum);
+	ret = dcp_backlight_configure(dcp, maximum, false, 0, true,
+				      min_t(u32, maximum, DCP_V14_NITS_DEFAULT),
+				      dcp_v14_backlight_kick);
+	if (ret && ret != -EBUSY)
+		dev_err_once(dcp->dev, "%s backlight unavailable: %d\n", v14->board->name, ret);
+}
+
+void iomfb_v14_7_backlight_suspend(struct apple_dcp *dcp)
+{
+	if (iomfb_v14_7_panel_nits(dcp))
+		dcp_v14_bl_shut(dcp->v14, false);
+}
+
+/* Pending levels ride the next normal CRTC restore present after admission opens. */
+void iomfb_v14_7_backlight_resume(struct apple_dcp *dcp)
+{
+	struct apple_dcp_v14 *v14 = dcp->v14;
+	unsigned long flags;
+
+	if (!iomfb_v14_7_panel_nits(dcp))
+		return;
+	mutex_lock(&v14->lock);
+	spin_lock_irqsave(&v14->bl_gate_lock, flags);
+	v14->bl_gate = dcp_v14_bl_gate_resume(v14->bl_gate);
+	spin_unlock_irqrestore(&v14->bl_gate_lock, flags);
+	mutex_unlock(&v14->lock);
+}
 
 /*
  * An external session stopped on a link error, not a crash: its display is
@@ -338,6 +482,8 @@ static int dcp_v14_call_guarded(struct apple_dcp_v14 *v14, u32 tag, const void *
 	bool vetoed;
 	int ret;
 
+	KUNIT_STATIC_STUB_REDIRECT(dcp_v14_call_guarded, v14, tag, in, in_size,
+				   out, out_size, completion, admit, admit_cookie);
 	if (v14->failed)
 		return -EIO;
 	dev_dbg(v14->dev, "call %#x in %u out %u\n", tag, in_size, out_size);
@@ -1457,6 +1603,8 @@ static void dcp_v14_release(void *data)
 {
 	struct apple_dcp_v14 *v14 = data;
 
+	if (dcp_v14_board_nits(v14))
+		dcp_v14_stop_backlight(v14);
 	if (!v14->rtk)
 		kfree(v14);
 }
@@ -1538,6 +1686,13 @@ const struct dcp_v14_board *iomfb_v14_7_board(struct device *dev)
 	return NULL;
 }
 
+static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
+				     dcp_v14_compat_fn machine_is, const void *ctx)
+{
+	return board && board->panel_nits &&
+		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s"));
+}
+
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
 {
 	return board->name;
@@ -1601,10 +1756,13 @@ int iomfb_v14_7_probe(struct apple_dcp *dcp)
 		return -ENOMEM;
 	v14->dev = dev;
 	v14->board = board;
+	v14->panel_nits = dcp_v14_panel_nits_admit(board, dcp_v14_machine_is, np);
 	v14->dcp = dcp;
 	mutex_init(&v14->lock);
 	init_waitqueue_head(&v14->described_wait);
 	INIT_WORK(&v14->idle_work, dcp_v14_idle);
+	INIT_DELAYED_WORK(&v14->backlight_work, dcp_v14_backlight_work);
+	spin_lock_init(&v14->bl_gate_lock);
 	ret = devm_add_action_or_reset(dev, dcp_v14_release, v14);
 	if (ret)
 		return ret;
@@ -2057,6 +2215,8 @@ static int dcpext_boot(struct apple_dcp *dcp)
 	mutex_init(&v14->lock);
 	init_waitqueue_head(&v14->described_wait);
 	INIT_WORK(&v14->idle_work, dcp_v14_idle);
+	INIT_DELAYED_WORK(&v14->backlight_work, dcp_v14_backlight_work);
+	spin_lock_init(&v14->bl_gate_lock);
 	INIT_WORK(&v14->stopped_work, dcp_v14_stopped_work);
 	dcp->v14 = v14;
 	dcp_v14_link_init(&v14->link, dev, NULL);
@@ -2287,6 +2447,8 @@ void iomfb_v14_7_unbind(struct apple_dcp *dcp)
 		flush_work(&v14->idle_work);
 		cancel_work_sync(&v14->stopped_work);
 	} else {
+		if (dcp_v14_board_nits(v14))
+			dcp_v14_stop_backlight(v14);
 		WRITE_ONCE(v14->dcp, NULL);
 	}
 	if (v14->rtk)
@@ -2326,6 +2488,8 @@ void iomfb_v14_7_remove(struct apple_dcp *dcp)
 	 * Callbacks that already loaded the old pointer finish before the
 	 * flush returns; later ones see NULL.
 	 */
+	if (dcp_v14_board_nits(v14))
+		dcp_v14_stop_backlight(v14);
 	WRITE_ONCE(v14->dcp, NULL);
 	if (v14->rtk)
 		apple_rtkit_flush_rx(v14->rtk);
@@ -2478,6 +2642,7 @@ int iomfb_v14_7_start(struct apple_dcp *dcp)
 		dcp->mode_state.valid = true;
 	dcp->active = true;
 	complete(&dcp->start_done);
+	dcp_v14_configure_backlight(dcp);
 
 	mutex_lock(&dcp->modes_lock);
 	selected = dcp->modes[0].mode;
@@ -2583,20 +2748,64 @@ static bool dcp_v14_swap_admit(void *cookie)
 	return connector && READ_ONCE(connector->connected);
 }
 
+static bool dcp_v14_swap_nits(struct apple_dcp_v14 *v14, u8 *swap,
+			      struct dcp_backlight_present *present)
+{
+	struct apple_dcp *dcp = READ_ONCE(v14->dcp);
+
+	lockdep_assert_held(&v14->lock);
+	/* The policy exists only on the T6030 panel: nothing else is asked. */
+	if (!dcp || !dcp_v14_board_nits(v14) || !dcp_backlight_active(dcp))
+		return false;
+	if (!dcp_v14_swap_takes_nits(true, v14->external, dcp_is_typec_output(dcp), true))
+		return false;
+	/* -EALREADY: no change; -ENODATA/-EBUSY: nothing to present now. */
+	if (dcp_backlight_prepare(dcp, true, present))
+		return false;
+	/* The policy's maximum is at most the wire bound; never above it. */
+	if (WARN_ON_ONCE(dcp_v14_encode_nits(swap, true, present->nits))) {
+		dcp_backlight_complete(dcp, present->sequence, false);
+		v14->nits_refused++;
+		return false;
+	}
+	return true;
+}
+
+static void dcp_v14_swap_nits_done(struct apple_dcp_v14 *v14,
+				   const struct dcp_backlight_present *present, bool accepted)
+{
+	struct apple_dcp *dcp = READ_ONCE(v14->dcp);
+
+	if (!dcp)
+		return;
+	if (!dcp_backlight_complete(dcp, present->sequence, accepted))
+		return;
+	if (accepted) {
+		v14->nits_sent = present->nits;
+		v14->nits_presents++;
+		return;
+	}
+	v14->nits_refused++;
+	/* The internal swap failure is final: swap_locked latches failed. */
+}
+
 /*
  * Swap start, then the swap; returns once the firmware completed that swap.
  * @ctm_state, if set, carries the colour matrix to send first.
  */
-static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
-			u32 width, u32 height, u32 dst_y,
-			const struct drm_crtc_state *ctm_state)
+static int dcp_v14_swap_locked(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
+			       u32 width, u32 height, u32 dst_y,
+			       const struct drm_crtc_state *ctm_state)
 {
 	struct dcp_v14_swap_admission admission = { .v14 = v14 };
 	__le32 start[4] = {}, started[2] = {}, result[3];
+	struct dcp_backlight_present present;
+	bool nits;
 	u8 *swap;
 	u32 id;
 	int ret;
 
+	lockdep_assert_held(&v14->lock);
 	if (surface && (!iova || !width || width > v14->panel_width || !height ||
 			dst_y > v14->panel_height || height > v14->panel_height - dst_y))
 		return -EINVAL;
@@ -2604,7 +2813,6 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
 	if (!swap)
 		return -ENOMEM;
 
-	mutex_lock(&v14->lock);
 	admission.generation = v14->description_generation;
 	/*
 	 * A colour matrix the firmware refuses costs night light, not the
@@ -2623,11 +2831,14 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
 				    dst_y, DCP_V14_LAYER);
 		if (dcp_v14_board_stamps_swaps(v14->board, v14->external))
 			dcp_v14_swap_timestamps(swap);
+		nits = dcp_v14_swap_nits(v14, swap, &present);
 		ret = dcp_v14_call_guarded(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
 				   id, dcp_v14_swap_admit, &admission);
 		/* The swap status sits at byte 5 of the reply. */
 		if (!ret && get_unaligned_le32((u8 *)result + 5))
 			ret = -EIO;
+		if (nits)
+			dcp_v14_swap_nits_done(v14, &present, !ret);
 	}
 	/*
 	 * An external display can go away under a swap: the firmware then
@@ -2636,10 +2847,32 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
 	 */
 	if (ret && !v14->external)
 		v14->failed = true;
-	mutex_unlock(&v14->lock);
 
 	kfree(swap);
 	return ret;
+}
+
+/* Publish a successful swap while the RPC lock still pins both surfaces. */
+static struct drm_framebuffer *dcp_v14_publish_surface(struct apple_dcp_v14 *v14,
+						       struct drm_framebuffer *fb,
+						       const u8 *surface, u64 iova,
+						       u32 width, u32 height, u32 dst_y)
+{
+	struct drm_framebuffer *old;
+
+	KUNIT_STATIC_STUB_REDIRECT(dcp_v14_publish_surface, v14, fb, surface, iova,
+				   width, height, dst_y);
+	lockdep_assert_held(&v14->lock);
+	old = v14->active_fb;
+	v14->active_fb = fb;
+	if (fb) {
+		memcpy(v14->shown_surface, surface, sizeof(v14->shown_surface));
+		v14->shown_iova = iova;
+		v14->shown_width = width;
+		v14->shown_height = height;
+		v14->shown_dst_y = dst_y;
+	}
+	return old;
 }
 
 /*
@@ -2647,15 +2880,17 @@ static int dcp_v14_swap(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
  * after the colour matrix of @ctm_state if that is set,
  * and keeps @fb until the next swap.
  */
-static bool dcp_v14_present(struct apple_dcp_v14 *v14, struct drm_framebuffer *fb,
-			    u32 width, u32 height, u32 dst_y,
-			    const struct drm_crtc_state *ctm_state)
+static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebuffer *fb,
+				   u32 width, u32 height, u32 dst_y,
+				   const struct drm_crtc_state *ctm_state,
+				   struct drm_framebuffer **retired)
 {
 	u8 surface[DCP_V14_SURFACE_SIZE];
 	struct drm_framebuffer *old;
 	u64 iova = 0, start, elapsed, swaps;
 	int ret;
 
+	lockdep_assert_held(&v14->lock);
 	if (READ_ONCE(v14->failed))
 		return false;
 	if (fb) {
@@ -2665,13 +2900,12 @@ static bool dcp_v14_present(struct apple_dcp_v14 *v14, struct drm_framebuffer *f
 		iova = drm_fb_dma_get_gem_obj(fb, 0)->dma_addr;
 	}
 	start = ktime_get_ns();
-	ret = dcp_v14_swap(v14, fb ? surface : NULL, iova, fb ? width : 0,
-			   fb ? height : 0, dst_y, ctm_state);
+	ret = dcp_v14_swap_locked(v14, fb ? surface : NULL, iova, fb ? width : 0,
+				  fb ? height : 0, dst_y, ctm_state);
 	elapsed = ktime_get_ns() - start;
 	if (ret && v14->external && !READ_ONCE(v14->failed)) {
 		/* Refused before it was taken: the old framebuffer stays on screen. */
-		if (fb)
-			drm_framebuffer_put(fb);
+		*retired = fb;
 		WRITE_ONCE(v14->mode_swaps, 0);
 		dev_warn_ratelimited(v14->dev, "display refused a swap: %d\n", ret);
 		return false;
@@ -2681,20 +2915,89 @@ static bool dcp_v14_present(struct apple_dcp_v14 *v14, struct drm_framebuffer *f
 		dev_err(v14->dev, "native DCP flip failed %d; buffers pinned until reboot\n", ret);
 		return false;
 	}
-	mutex_lock(&v14->lock);
-	old = v14->active_fb;
-	v14->active_fb = fb;
+	old = dcp_v14_publish_surface(v14, fb, surface, iova, width, height, dst_y);
 	swaps = ++v14->swaps;
 	if (fb)
 		v14->mode_swaps++;
 	v14->swap_ns_max = max(v14->swap_ns_max, elapsed);
-	mutex_unlock(&v14->lock);
-	if (old)
-		drm_framebuffer_put(old);
+	*retired = old;
 	if (swaps <= 3)
 		dev_info(v14->dev, "swap %llu complete: surface %d, imported %d, %llu us\n",
 			 swaps, !!fb, fb && fb->obj[0]->import_attach, elapsed / NSEC_PER_USEC);
 	return true;
+}
+
+static bool dcp_v14_present(struct apple_dcp_v14 *v14, struct drm_framebuffer *fb,
+			    u32 width, u32 height, u32 dst_y,
+			    const struct drm_crtc_state *ctm_state)
+{
+	struct drm_framebuffer *retired = NULL;
+	bool shown;
+
+	mutex_lock(&v14->lock);
+	shown = dcp_v14_present_locked(v14, fb, width, height, dst_y, ctm_state, &retired);
+	mutex_unlock(&v14->lock);
+	if (retired)
+		drm_framebuffer_put(retired);
+	return shown;
+}
+
+static void dcp_v14_backlight_work(struct work_struct *work)
+{
+	struct apple_dcp_v14 *v14 = container_of(to_delayed_work(work), struct apple_dcp_v14,
+						 backlight_work);
+	struct dcp_v14_bl_facts facts;
+	struct drm_framebuffer *fb;
+	struct apple_dcp *dcp;
+	int ret;
+
+	guard(mutex)(&v14->lock);
+	dcp = READ_ONCE(v14->dcp);
+	if (!dcp)
+		return;
+	fb = v14->active_fb;
+	facts = (struct dcp_v14_bl_facts) {
+		.gate = dcp_v14_bl_gate_get(v14),
+		.panel_nits = dcp_v14_board_nits(v14),
+		.external = v14->external,
+		.typec = dcp_is_typec_output(dcp),
+		.started = v14->started,
+		.failed = READ_ONCE(v14->failed),
+		.crashed = READ_ONCE(dcp->crashed),
+		.quiescing = READ_ONCE(dcp->quiescing),
+		.pending = dcp_v14_board_nits(v14) && dcp_backlight_active(dcp) &&
+			   dcp_backlight_pending(dcp),
+		.frame = !!fb,
+		.mode_valid = READ_ONCE(dcp->mode_state.valid),
+	};
+	if (dcp_v14_bl_plan(&facts) != DCP_V14_BL_REPRESENT)
+		return;
+	ret = dcp_v14_swap_locked(v14, v14->shown_surface, v14->shown_iova,
+				  v14->shown_width, v14->shown_height, v14->shown_dst_y, NULL);
+	if (!ret)
+		v14->brightness_presents++;
+	else if (ret != -EAGAIN)
+		dev_err(v14->dev, "brightness present failed: %d\n", ret);
+}
+
+static bool dcp_v14_bl_dpms_applies(struct apple_dcp_v14 *v14, struct apple_dcp *dcp)
+{
+	if (!dcp_v14_board_nits(v14) || !dcp_backlight_active(dcp))
+		return false;
+	return dcp_v14_bl_follow_dpms(true, true, dcp_backlight_level_known(dcp));
+}
+
+static void dcp_v14_blank(struct apple_dcp_v14 *v14, struct apple_dcp *dcp)
+{
+	struct drm_framebuffer *retired = NULL;
+
+	mutex_lock(&v14->lock);
+	if (dcp_v14_bl_dpms_applies(v14, dcp))
+		dcp_backlight_dpms(dcp, false);
+	dcp_v14_present_locked(v14, NULL, 0, 0, 0, NULL, &retired);
+	mutex_unlock(&v14->lock);
+	if (retired)
+		drm_framebuffer_put(retired);
 }
 
 /* Releases helper waiters without reporting a completed flip. */
@@ -3029,6 +3332,8 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 		dcp_drm_crtc_vblank(dcp->crtc);
 		return;
 	}
+	if (!dcp->external)
+		dcp_v14_configure_backlight(dcp);
 	dcp->swap_start = ktime_get();
 	if (dcp->v14 && dcp_v14_present(dcp->v14, fb,
 					 fb ? (dcp->external ? p->src_w >> 16 : fb->width) : 0,
@@ -3041,7 +3346,9 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 
 void iomfb_v14_7_poweron(struct apple_dcp *dcp)
 {
-	/* The panel stays on; the next swap shows the plane again. */
+	/* The next present restores a level only after Linux has set one. */
+	if (dcp->v14 && dcp_v14_bl_dpms_applies(dcp->v14, dcp))
+		dcp_backlight_dpms(dcp, true);
 }
 
 void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
@@ -3064,9 +3371,11 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 	}
 	/* Blank to black; the panel and the DCP stay powered. */
 	if (v14 && v14->started)
-		dcp_v14_present(v14, NULL, 0, 0, 0, NULL);
+		dcp_v14_blank(v14, dcp);
 }
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
 #include "iomfb_v14_7_external_audio_test.c"
+#include "iomfb_v14_7_backlight_test.c"
+#include "iomfb_v14_7_backlight_lifetime_test.c"
 #endif

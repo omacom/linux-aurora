@@ -700,6 +700,7 @@ static inline void dcp_test_point(struct apple_dcp *dcp, enum dcp_test_point poi
 }
 
 #if IS_ENABLED(CONFIG_KUNIT)
+void dcp_work_register_backlight(struct work_struct *work);
 void dcp_comp_unbind(struct device *dev, struct device *main, void *data);
 void dcp_platform_shutdown(struct platform_device *pdev);
 void dcp_disable_typec_work(struct apple_dcp *dcp, bool release_cable);

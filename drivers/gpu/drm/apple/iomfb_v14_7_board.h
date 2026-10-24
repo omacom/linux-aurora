@@ -51,6 +51,8 @@ struct dcp_v14_board {
 	 * 16.7 ms, so a 120 Hz panel presents at 60 fps.
 	 */
 	bool swap_timestamps;
+	/* This board has a qualified panel level block; machine admission is separate. */
+	bool panel_nits;
 };
 
 /* Whether the DCP node or the machine (as @ctx gives them) has @compat. */

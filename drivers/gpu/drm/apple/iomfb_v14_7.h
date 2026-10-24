@@ -33,6 +33,17 @@ bool iomfb_v14_7_base_edid(const struct apple_dcp *dcp);
 
 /* Platform probe: firmware identity, boot loader handoff, PMP acknowledgment. */
 int iomfb_v14_7_probe(struct apple_dcp *dcp);
+/*
+ * Whether @dcp is a 14.x internal panel whose swaps carry its level (the
+ * T6030 board record): its backlight is the nits policy in dcp_backlight.c.
+ */
+bool iomfb_v14_7_panel_nits(struct apple_dcp *dcp);
+/*
+ * System sleep: no brightness-only present may be queued or run from
+ * _suspend() until _resume().
+ */
+void iomfb_v14_7_backlight_suspend(struct apple_dcp *dcp);
+void iomfb_v14_7_backlight_resume(struct apple_dcp *dcp);
 /* Component bind: the running DCP's RTKit session. */
 int iomfb_v14_7_bind(struct apple_dcp *dcp);
 int iomfb_v14_7_external_start(struct apple_dcp *dcp);
