@@ -152,6 +152,17 @@ const DART_T8112: DartWindow = DartWindow {
     range: [0x0, 0x4000, 0x0, 0xffff_0000],
 };
 
+/// The T8132 SEP DART input aperture is the BIT(40) alias itself,
+/// 0x100_0000_4000 + 0xffff0000 (J715 ADT `dart-sep` vm-base-0 and
+/// vm-size-0), given as a range with no offset. Unlike [`DART_HIGH_ALIAS`]
+/// it reaches the SEP whether or not the DART driver applies
+/// `apple,dma-offset`.
+const DART_T8132: DartWindow = DartWindow {
+    name: "no offset, range 0x10000004000..+0xffff0000",
+    offset: [0x0, 0x0],
+    range: [0x100, 0x4000, 0x0, 0xffff_0000],
+};
+
 pub(crate) struct PlatformProfile {
     pub(crate) name: &'static str,
     /// Capacity of the boot shared-memory window. The layout is still checked
@@ -425,6 +436,23 @@ pub(crate) const T8122: PlatformProfile = PlatformProfile {
     ..T8112
 };
 
+/// MacBook Air 15-inch M4 (J715). The J715 ADT has `sepfw-booted`: iBoot
+/// hands over a running SEP, so this is T8122's warm registration,
+/// shared-memory geometry and variant-5 key store. The SEP DART window is the
+/// ADT's own (see [`DART_T8132`]). The Mesa sensor sits on spi2 at
+/// `0x3ad108000`; its identity and wiring are unchecked, so capture stays
+/// unqualified. Like the M3, its enclave is shared with macOS.
+pub(crate) const T8132: PlatformProfile = PlatformProfile {
+    name: "T8132/J715",
+    sensor: SensorProfile {
+        controller_base: 0x3_ad10_8000,
+        capture_qualified: false,
+        ..T8122.sensor
+    },
+    dart_window: &DART_T8132,
+    ..T8122
+};
+
 static_assert!(T8103.shmem_capacity == 0x30000);
 static_assert!(T6020.shmem_capacity == 0x40000);
 static_assert!(T8140.shmem_capacity == 0x40000);
@@ -440,6 +468,8 @@ static_assert!(T8112.sensor.controller_base == T8103.sensor.controller_base);
 static_assert!(T8122.shmem_capacity == T8112.shmem_capacity);
 static_assert!(T8122.sensor.controller_base == 0x2a1108000);
 static_assert!(T8122.wide_dma_mask);
+static_assert!(T8132.wide_dma_mask);
+static_assert!(T8132.shmem_capacity == T8122.shmem_capacity);
 
 /// Whether the machine root declares `compatible`.
 ///
@@ -586,6 +616,10 @@ pub(crate) fn detect() -> Result<&'static PlatformProfile> {
     if machine_has(b"apple,t8122") && (machine_has(b"apple,j613") || machine_has(b"apple,j615")) {
         return Ok(&T8122);
     }
+    // Only the board whose ADT was read.
+    if machine_has(b"apple,t8132") && machine_has(b"apple,j715") {
+        return Ok(&T8132);
+    }
     Err(ENODEV)
 }
 
@@ -630,6 +664,10 @@ mod tests {
         assert!(T8122.wide_dma_mask);
         assert!(T8122.shmem_capacity == T8112.shmem_capacity);
         assert!(T8122.sensor.controller_base == 0x2_a110_8000);
+        assert!(!T8132.nonce_session);
+        assert!(T8132.wide_dma_mask);
+        assert!(T8132.xart_guard == T8122.xart_guard);
+        assert!(!T8132.sensor.capture_qualified);
     }
 }
 
@@ -664,5 +702,17 @@ mod dart_window_tests {
             assert_eq!(offset(profile.dart_window), 1 << 40);
             assert_eq!(range(profile.dart_window), (0, 1 << 32));
         }
+    }
+
+    #[test]
+    fn t8132_uses_the_adt_window_without_an_offset() {
+        assert_eq!(offset(T8132.dart_window), 0);
+        assert_eq!(
+            range(T8132.dart_window),
+            (0x100_0000_4000, 0x100_0000_4000 + 0xffff_0000)
+        );
+        // The window sits at the BIT(40) alias, inside a 42-bit DMA mask.
+        assert!(range(T8132.dart_window).0 >= 1 << 40);
+        assert!(range(T8132.dart_window).1 <= 1 << 42);
     }
 }
