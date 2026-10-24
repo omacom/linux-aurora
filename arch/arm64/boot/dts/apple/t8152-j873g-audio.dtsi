@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J873g audio: the 24 MHz reference clock, the SIO pinctrl, the two I2C
+ * audio codecs and the sound card.
+ *
+ * ADT facts:
+ *   i2c1 is at 0x331014000 (AIC 1414, service gate 15) with the child
+ *        audio-codec-output (cs42l84, reg 0x4b, interrupt gpio 203,
+ *        reset gpio 204).
+ *   i2c3 is at 0x33101c000 (AIC 1416, service gate 17) with the child
+ *        audio-speaker (sn012776, reg 0x38, interrupt gpio 193, reset
+ *        gpio 202; speaker-config: one channel, amp gain 15, voltage
+ *        sense slot 0, current sense slot 2).
+ *   Service gates below 170 index the PSD slots: slot 15 = SIO_I2C1,
+ *   slot 17 = SIO_I2C3, window 0x303a10000 + (slot << 8). The I2C PMGR
+ *   devices have no power state register, so the PSD slot is the only
+ *   power step.
+ */
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	clkref: clock-ref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+
+	soc {
+		pinctrl_ap: pinctrl@31a000000 {
+			compatible = "apple,t8152-pinctrl", "apple,t8103-pinctrl";
+			reg = <0x3 0x1a000000 0x0 0x100000>;
+
+			gpio-controller;
+			#gpio-cells = <2>;
+			gpio-ranges = <&pinctrl_ap 0 0 224>;
+			apple,npins = <224>;
+
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 433 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 434 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 435 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 436 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 437 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 438 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 439 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		psd_sio_i2c1: power-controller@303a10f00 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a10f00 0x0 0x100>;
+			#power-domain-cells = <0>;
+			label = "psd_sio_i2c1";
+		};
+
+		psd_sio_i2c3: power-controller@303a11100 {
+			compatible = "apple,t8152-psd";
+			reg = <0x3 0x03a11100 0x0 0x100>;
+			#power-domain-cells = <0>;
+			label = "psd_sio_i2c3";
+		};
+
+		i2c1: i2c@331014000 {
+			compatible = "apple,t8103-i2c", "apple,i2c";
+			reg = <0x3 0x31014000 0x0 0x4000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1414 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&psd_sio_i2c1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			jack_codec: codec@4b {
+				compatible = "cirrus,cs42l84";
+				reg = <0x4b>;
+				reset-gpios = <&pinctrl_ap 204 GPIO_ACTIVE_HIGH>;
+				interrupts-extended = <&pinctrl_ap 203 IRQ_TYPE_LEVEL_LOW>;
+				#sound-dai-cells = <0>;
+				sound-name-prefix = "Jack";
+			};
+		};
+
+		i2c3: i2c@33101c000 {
+			compatible = "apple,t8103-i2c", "apple,i2c";
+			reg = <0x3 0x3101c000 0x0 0x4000>;
+			clocks = <&clkref>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1416 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&psd_sio_i2c3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			speaker_codec: codec@38 {
+				compatible = "ti,sn012776";
+				reg = <0x38>;
+				shutdown-gpios = <&pinctrl_ap 202 GPIO_ACTIVE_HIGH>;
+				interrupts-extended = <&pinctrl_ap 193 IRQ_TYPE_LEVEL_LOW>;
+				#sound-dai-cells = <0>;
+				sound-name-prefix = "Speaker";
+				ti,imon-slot-no = <2>;
+				ti,vmon-slot-no = <0>;
+			};
+		};
+	};
+
+	sound {
+		compatible = "apple,j873-macaudio", "apple,macaudio";
+		model = "Mac mini J873";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		dai-link@0 {
+			reg = <0>;
+			link-name = "Headphone Jack";
+
+			cpu {
+				sound-dai = <&aop_audio 0>;
+			};
+
+			codec {
+				sound-dai = <&jack_codec>;
+			};
+		};
+
+		/*
+		 * The speaker stays disabled by the card driver until a
+		 * speaker-safety profile exists for this machine.
+		 */
+		dai-link@1 {
+			reg = <1>;
+			link-name = "Speaker";
+
+			cpu {
+				sound-dai = <&aop_audio 4>;
+			};
+
+			codec {
+				sound-dai = <&speaker_codec>;
+			};
+		};
+	};
+};
