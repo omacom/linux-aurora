@@ -4,6 +4,17 @@ if ARCH_APPLE || COMPILE_TEST
 
 menu "Apple SoC drivers"
 
+config APPLE_CPU_CONTEXT_LAB
+	bool "J314s secondary CPU context-loss lab experiment"
+	depends on ARM64 && ARCH_APPLE && SMP && CPU_PM && DEBUG_FS
+	help
+	  Build a one-shot diagnostic for CPU1 on a J314s using the matching
+	  AURA lab loader. It is disabled unless apple_cpu_context=1 is set.
+	  An explicit root debugfs write can power off one core. Failure may
+	  require an external hardware reset. This is not a suspend driver.
+
+	  Say N except on the dedicated M1 Pro lab target.
+
 config APPLE_DOCKCHANNEL
 	tristate "Apple DockChannel FIFO"
 	depends on ARCH_APPLE || COMPILE_TEST
