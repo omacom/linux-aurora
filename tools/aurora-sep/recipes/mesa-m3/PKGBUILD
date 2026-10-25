@@ -10,7 +10,7 @@
 # No profile selection substitutes another Mac's firmware or calibration.
 pkgname=mesa-m3
 pkgver=26.1.4.m3.2
-pkgrel=5
+pkgrel=6
 _commit=7ff89a4da387bd561b78efd5f09c98ca8ae18538
 pkgdesc="Mesa in /opt/mesa-m3 for the M3 Pro (G15S) and M3 (G15G) GPUs; used by uwsm sessions on T6030, and on T8122 when opted in"
 arch=('aarch64')
@@ -65,7 +65,8 @@ source=("mesa-m3-src-${_commit:0:11}.tar.zst"
         72-mesa-m3-render-node.rules
         mesa-m3-session-confirm
         mesa-m3-session-confirm.service
-        mesa-m3-wlcheck.c)
+        mesa-m3-wlcheck.c
+        mesa-m3-system-check.c)
 sha256sums=('7ed24969985dce91f089d34dbe1c55cbcb8c95765e3e5bc0f268d27fbead2222'
             '535e26266e1d173bfd2f73e63be07eccf32eb9cb329ea8955e32a4fa45278ce8'
             '9be098fc0a1ec38632678ece7d6d7b743d25df4a1af59ce3d17ba3a4eed34db7'
@@ -84,18 +85,19 @@ sha256sums=('7ed24969985dce91f089d34dbe1c55cbcb8c95765e3e5bc0f268d27fbead2222'
             '10abda78df16e650a77443f50cc46a15e418c42d4d9680c6a61616b232c9bdef'
             '6c98fab6f9d70449bd7f5258c34eac773836908e060ce5bef86dc5b0ce595e61'
             '826016665cd0424a614b67add921c0c79c3c698a4d104ea5712518449b75f27c'
-            '2b2eb627459f73aa596812503c48fc64331e925015bb7121e1888d18cac65b5e'
+            '444fd73d505c3ffa7252bb44845457deac2550a411464bbcec075e14f21b2063'
             '6144af8b2e0f04ea615e8c4149e69c45ac49e630c46b2a58f0d1095d977798b2'
             '530948fc1a124de21c030a497e2ef5351742ba4ad4653484fe30fd1697ad7141'
             '644cf4a5ab57b7badec75843e2899b68d41490c4851d6885227180d6090c25ea'
             '9a26a232fd050b6207bd0d385035723f72ffd2b6b72a25d6ac92ae2f99ea5b66'
             '34f8bb3fa505718dab176b6283dde0d4de9cae4c3928922bca18e6052434bca7'
-            '7e7914877c5f1ccc85b985b071c838271608c78f858489d69b7a3ba64c4f51f0'
+            'a446e2b3fa075a1ef239439539119eb12472b372a84ecb9411c4e65ca3112999'
             '8f19ebea2b8e669a764d7c4b40ecbc11e8234acfc3a2bfe7910e22de0b64a49d'
             '9c7c3050d3ec15fce80a6e59d099567b396f1844a43695aa4377e02ac696f566'
             '2a15cfdbc160b78e5a3a8e99d5898d40a54db28592f1a4ce04a600990a731f87'
             '7eaae7de828e15208fccc84db2b910f38bb1288176419f7af7f4675b5c542ce4'
-            'c888e9dce99e8379aa21e9c5895cbe1b7e879a9319bca144193eddc66f9d4051')
+            'c888e9dce99e8379aa21e9c5895cbe1b7e879a9319bca144193eddc66f9d4051'
+            'e80947130044c2dc3671c24c7bff4f523dcc033f7e96f71e334d89a663e2742e')
 
 # The qualified M3 Pro build's generated kernel files and libclc. build() stops
 # when one of ours differs. libagx_shaders.c is compared through kernel-digest.py:
@@ -296,6 +298,8 @@ EOF
   ${CC:-cc} ${CFLAGS} -Wall -I. -o mesa-m3-probe mesa-m3-probe.c ${LDFLAGS} \
     -lEGL -lGLESv2 -lvulkan -lwayland-client -lwayland-egl
   ${CC:-cc} ${CFLAGS} -Wall -o mesa-m3-loadcheck mesa-m3-loadcheck.c ${LDFLAGS}
+  ${CC:-cc} ${CFLAGS} -std=c11 -Wall -Wextra -Werror -I"$_src/include" \
+    -o mesa-m3-system-check mesa-m3-system-check.c ${LDFLAGS} -ldl
   ${CC:-cc} ${CFLAGS} -Wall -I"$_src/include" $(pkg-config --cflags libdrm) \
     -o mesa-m3-abi-check mesa-m3-abi-check.c ${LDFLAGS} $(pkg-config --libs libdrm)
   ${CC:-cc} ${CFLAGS} -Wall -DMESA_M3_GL_ONLY -I. -o mesa-m3-native-probe mesa-m3-probe.c ${LDFLAGS} \
@@ -341,6 +345,7 @@ package_mesa-m3() {
   install -Dm755 gpu-heat "${pkgdir}${_prefix}/bin/gpu-heat"
   install -Dm755 mesa-m3-probe "${pkgdir}${_prefix}/bin/mesa-m3-probe"
   install -Dm755 mesa-m3-loadcheck "${pkgdir}${_prefix}/libexec/mesa-m3-loadcheck"
+  install -Dm755 mesa-m3-system-check "${pkgdir}${_prefix}/libexec/mesa-m3-system-check"
   install -Dm644 mesa-m3-session-env "${pkgdir}${_prefix}/libexec/mesa-m3-session-env"
   install -Dm755 mesa-m3-user-setup "${pkgdir}${_prefix}/libexec/mesa-m3-user-setup"
   install -Dm644 user-setup.list "${pkgdir}${_prefix}/share/mesa-m3/user-setup.list"
