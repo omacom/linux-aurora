@@ -665,5 +665,156 @@ echo j613-25g83-hal200 > "$J516S/etc/mesa-m3/t8122-profile"
 expect "$J516S" profile-mismatch J613
 rm "$J516S/etc/mesa-m3/t8122-profile"
 
+
+# System Mesa handoff: opt-out must not strand a qualified native /usr
+# installation in software rendering. Every failed admission retains recovery.
+# The helper is a stub here; its real board/renderer/provenance tests are separate.
+system_root() {
+	case "$2" in
+	air) _hd="apple,j613 apple,t8122"; _hg=$G15G ;;
+	*) _hd="apple,j516s apple,t6030"; _hg=$G15S ;;
+	esac
+	_hr=$(mkroot "handoff-$1" "$_hd" "$_hg" yes 1 yes)
+	mkdir -p "$_hr/etc/mesa-m3"
+	: > "$_hr/etc/mesa-m3/disable"
+	cat > "$_hr/opt/mesa-m3/libexec/mesa-m3-system-check" <<'H'
+#!/bin/sh
+here=${0%/*}
+printf '%s\n' "$@" > "$here/system-check.args"
+env | sort > "$here/system-check.env"
+[ ! -e "$here/system-check.sleep" ] || sleep 8
+[ ! -e "$here/system-check.fail" ]
+H
+	chmod +x "$_hr/opt/mesa-m3/libexec/mesa-m3-system-check"
+	echo "$_hr"
+}
+handoff() { # ROOT FALLBACK HELPER_CALLED [VAR=value...]
+	_hr=$1 _hfb=$2 _hc=$3
+	shift 3
+	rm -f "$_hr/opt/mesa-m3/libexec/system-check.args"
+	_ha="$_hr$T/home/.local/state/mesa-m3/attempt"
+	_hbefore=missing
+	[ ! -f "$_ha" ] || _hbefore=$(sha256sum "$_ha" | cut -d' ' -f1)
+	_ho=$(env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE_LOG="$T/log" \
+		XDG_CURRENT_DESKTOP=Hyprland "$@" sh -c '
+		MESA_M3_SESSION_ENV_NO_RUN=1 . "$1"
+		mesa_m3_session_env "$2"
+		printf "software=%s\nmarker=%s\nlegacy=%s\n" "${LIBGL_ALWAYS_SOFTWARE:-}" "${MESA_M3_FALLBACK:-}" "${MESA_M3_SESSION:-}"
+		cat "$2/run/user/$(id -u)/mesa-m3-session.state"
+	' sh "$ENVFILE" "$_hr")
+	_hafter=missing
+	[ ! -f "$_ha" ] || _hafter=$(sha256sum "$_ha" | cut -d' ' -f1)
+	_hcalled=no
+	[ ! -e "$_hr/opt/mesa-m3/libexec/system-check.args" ] || _hcalled=yes
+	if printf '%s\n' "$_ho" | grep -qx "fallback=$_hfb" &&
+		printf '%s\n' "$_ho" | grep -qx 'decision=inactive' &&
+		printf '%s\n' "$_ho" | grep -qx 'reason=opt-out' &&
+		printf '%s\n' "$_ho" | grep -qx 'legacy=' &&
+		[ "$_hc" = "$_hcalled" ] && [ "$_hbefore" = "$_hafter" ]; then
+		echo "ok    ${_hr##*/}: fallback=$_hfb helper=$_hc, legacy attempt unchanged"
+	else
+		echo "FAIL  ${_hr##*/}: want fallback=$_hfb helper=$_hc; got helper=$_hcalled attempt=$_hbefore/$_hafter: $_ho"
+		fail=1
+	fi
+	if [ "$_hfb" = none ]; then
+		if ! printf '%s\n' "$_ho" | grep -qx 'software=' ||
+			! printf '%s\n' "$_ho" | grep -qx 'marker=' ||
+			! printf '%s\n' "$_ho" | grep -q 'detail=.*system Mesa on /usr admits'; then
+			echo "FAIL  ${_hr##*/}: system admission exports or state detail: $_ho"; fail=1
+		fi
+	else
+		if ! printf '%s\n' "$_ho" | grep -qx 'software=1' ||
+			! printf '%s\n' "$_ho" | grep -qx 'marker=software' ||
+			printf '%s\n' "$_ho" | grep -q 'detail=.*system Mesa on /usr admits'; then
+			echo "FAIL  ${_hr##*/}: recovery exports or state detail: $_ho"; fail=1
+		fi
+	fi
+}
+HRA=$(system_root user-optout air)
+rm "$HRA/etc/mesa-m3/disable"
+mkdir -p "$HRA$T/home/.config/mesa-m3"
+: > "$HRA$T/home/.config/mesa-m3/disable"
+handoff "$HRA" none yes
+if [ "$(cat "$HRA/opt/mesa-m3/libexec/system-check.args")" = "$(printf '/dev/dri/renderD128\nt8122')" ] &&
+	grep -qx 'PATH=/usr/bin:/bin' "$HRA/opt/mesa-m3/libexec/system-check.env" &&
+	[ -z "$(grep -vE '^(PATH=/usr/bin:/bin|PWD=.*|SHLVL=[0-9]+|_=.*)$' "$HRA/opt/mesa-m3/libexec/system-check.env")" ]; then
+	echo 'ok    handoff: helper receives exact device/SoC and empty selector environment'
+else echo 'FAIL  handoff: helper argv/environment'; fail=1; fi
+HRP=$(system_root root-optout pro)
+handoff "$HRP" none yes
+handoff "$HRP" none yes LIBGL_ALWAYS_SOFTWARE=1 MESA_M3_FALLBACK=software
+for mode in fail sleep; do
+	HR=$(system_root "probe-$mode" pro)
+	: > "$HR/opt/mesa-m3/libexec/system-check.$mode"
+	handoff "$HR" software yes
+done
+for mode in missing not-executable; do
+	HR=$(system_root "probe-$mode" pro)
+	if [ "$mode" = missing ]; then rm "$HR/opt/mesa-m3/libexec/mesa-m3-system-check";
+	else chmod 600 "$HR/opt/mesa-m3/libexec/mesa-m3-system-check"; fi
+	handoff "$HR" software no
+done
+for mode in missing-cmdline missing-detector; do
+	HR=$(system_root "$mode" pro)
+	if [ "$mode" = missing-cmdline ]; then rm "$HR/proc/cmdline";
+	else rm "$HR/opt/mesa-m3/libexec/mesa-m3-user-setup"; fi
+	handoff "$HR" software no
+done
+for flag in mesa_m3=off nomodeset; do
+	HR=$(system_root "kernel-$flag" pro)
+	echo "root=UUID=x rw $flag quiet" > "$HR/proc/cmdline"
+	handoff "$HR" software no
+done
+for journal in noperm error match bank dcp g15g verdict; do
+	HR=$(system_root "journal-$journal" pro)
+	handoff "$HR" software no FAKE_JOURNAL="$journal"
+done
+for dt in 'apple,j615 apple,t8122' 'apple,j514s apple,t6030' \
+	'apple,j614s apple,t6030' 'apple,j613 apple,j615 apple,t8122' \
+	'apple,j613 apple,t6030' 'apple,j516s apple,t6030 apple,t8122'; do
+	HR=$(system_root "board-$(printf '%s' "$dt" | tr ' ,' '--')" pro)
+	nul $dt > "$HR/proc/device-tree/compatible"
+	# Match the GPU to the ambiguous board's first SoC so the old fallback
+	# remains observable; the system handoff must still refuse it.
+	case "$dt" in *t8122*) nul apple,agx-t8122 apple,agx-t6030 > "$HR/sys/devices/platform/gpu0/of_node/compatible" ;; esac
+	handoff "$HR" software no
+done
+HR=$(system_root no-display pro)
+rm "$HR/sys/class/drm/card2/device"
+handoff "$HR" software no
+HR=$(system_root wrong-display pro)
+nul apple,t8122-display-subsystem > "$HR/sys/devices/platform/display/of_node/compatible"
+handoff "$HR" software no
+HR=$(system_root two-nodes pro)
+mkdir "$HR/sys/class/drm/renderD129"
+handoff "$HR" software no
+for variable in LIBGL_ALWAYS_SOFTWARE=1 \
+	LD_LIBRARY_PATH=/opt/mesa-m3/lib \
+	VK_DRIVER_FILES=/opt/mesa-m3/share/vulkan/icd.d/asahi_icd.aarch64.json \
+	__EGL_VENDOR_LIBRARY_FILENAMES=/opt/mesa-m3/share/glvnd/egl_vendor.d/50_mesa.json \
+	ASAHI_M3_EXPERIMENTAL=1 XDG_CURRENT_DESKTOP=chonkstep; do
+	HR=$(system_root "override-${variable%%=*}" pro)
+	handoff "$HR" software no "$variable"
+done
+for value in 'LIBGL_DRIVERS_PATH=/opt/mesa-m3/lib/dri' 'VK_DRIVER_FILES=$UNKNOWN'; do
+	HR=$(system_root "late-${value%%=*}" pro)
+	mkdir -p "$HR$T/home/.config/uwsm"
+	printf '%s\n' "$value" > "$HR$T/home/.config/uwsm/env"
+	handoff "$HR" software no
+done
+HR=$(system_root failed-legacy-login pro)
+HATT="$HR$T/home/.local/state/mesa-m3/attempt"
+HOK="$HR$T/home/.local/state/mesa-m3/session-ok"
+mkdir -p "${HATT%/*}"
+printf 'schema=aurora.mesa-m3-attempt/2\nboot_id=boot-a\nsession_id=5\nhook_run_id=old-run\n' > "$HATT"
+handoff "$HR" software no
+printf 'schema=aurora.mesa-m3-session-ok/1\nboot_id=boot-a\nsession_id=wrong\nhook_run_id=old-run\n' > "$HOK"
+handoff "$HR" software no
+sed -i 's/session_id=wrong/session_id=5/' "$HOK"
+handoff "$HR" none yes
+rm "$HOK"
+sed -i 's/boot_id=boot-a/boot_id=old-boot/' "$HATT"
+handoff "$HR" none yes
+
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "SOME FAILED"
 exit "$fail"

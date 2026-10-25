@@ -4,6 +4,7 @@
 
     mesa-m3-user-setup --home HOME [--config-home DIR] [--env | --environ FILE]
                        [--session-desktops NAMES] [--list FILE] [--root DIR]
+                       [--system-provider]
 
 The one definition of "the user's own M3 Mesa setup", used by the mesa-m3
 session hook at every login and by the installer. What counts is listed in
@@ -20,6 +21,8 @@ see the comments there.
                      as in XDG_CURRENT_DESKTOP (uwsm exports them before it reads
                      any environment file); empty or absent: unknown
   --root DIR         prefix every path with DIR (tests)
+  --system-provider  also refuse legacy /opt selectors and session flags when
+                     checking whether the real desktop will use system Mesa
 
 Nothing is sourced or evaluated. Files are read as text and split into words
 the way a POSIX shell would (quotes, backslashes, comments, ";"), with no
@@ -79,10 +82,14 @@ def fail(msg):
 
 def parse_args(argv):
     opts = {'home': None, 'config': None, 'env': False, 'environ': None, 'list': DEFAULT_LIST, 'root': '',
-            'desktops': None}
+            'desktops': None, 'system_provider': False}
     i = 0
     while i < len(argv):
         a = argv[i]
+        if a == '--system-provider':
+            opts['system_provider'] = True
+            i += 1
+            continue
         if a == '--env':
             opts['env'] = True
             i += 1
@@ -248,6 +255,14 @@ class Finder:
         for k, i in items:
             if k in ('variable', 'flag', 'prefix', 'ldpath'):
                 self.kind[i] = k
+        if opts['system_provider']:
+            # These may be left over from an active legacy session. The
+            # admission helper's clean environment cannot prove that the
+            # real desktop will use /usr while these remain in its setup.
+            for name in ('LD_PRELOAD', 'LD_AUDIT', 'MESA_M3_SESSION', 'MESA_M3_PROFILE',
+                         'ASAHI_M3_EXPERIMENTAL', 'AGX_MESA_DEBUG', 'HK_DEBUG_LOG',
+                         'VK_LOADER_LAYERS_DISABLE', 'QSG_RHI_BACKEND'):
+                self.kind[name] = 'flag'
 
     def real(self, p):
         return self.o['root'] + p
@@ -297,7 +312,9 @@ class Finder:
 
     def ours(self, path):
         p = os.path.normpath(path) if path.startswith('/') else path
-        return p == PREFIX or p.startswith(PREFIX + '/')
+        # A system-Mesa handoff must also detect the old prefix. The normal
+        # legacy gate deliberately accepts it and keeps its original behavior.
+        return not self.o['system_provider'] and (p == PREFIX or p.startswith(PREFIX + '/'))
 
     def holds_mesa(self, d):
         r = self.real(d)
