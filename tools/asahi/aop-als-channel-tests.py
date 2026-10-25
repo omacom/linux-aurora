@@ -119,6 +119,58 @@ fn read<T:MessageProcessor+'static,const N:usize>(data:&AopSensorData<T,N>,chann
  assert_eq!(f32_to_micro((-0.25f32).to_bits()),Some(0));
  assert_eq!(f32_to_micro(1u32),Some(0));
 }
+fn ct720(counts:[u32;4],flag:u8,cct:f32,integ:(u32,u32),lux:f32)->[u8;55] {
+ let mut report=[0u8;55];
+ for (i,count) in counts.iter().enumerate() { report[0x0d+4*i..0x11+4*i].copy_from_slice(&count.to_le_bytes()); }
+ put(&mut report,0x1d,lux); report[0x2a]=flag; put(&mut report,0x2b,cct);
+ report[0x2f..0x33].copy_from_slice(&integ.0.to_le_bytes()); report[0x33..0x37].copy_from_slice(&integ.1.to_le_bytes());
+ report
+}
+#[test] fn ct720_color_channels() {
+ const T:[u32;6]=[5,9,9,9,9,6];
+ let data=AopSensorData::new_channels(std::sync::Arc::new(device::Device),T,MsgProc(LUX_OFFSET_CT720)).unwrap();
+ let all=|data:&AopSensorData<MsgProc,6>| -> Vec<(i32,i32,i32)> { (0..6).map(|c| read(data,c as u64,T[c])).collect() };
+ for channel in 0..6 { assert_eq!(read(&data,channel as u64,T[channel]).0,-61); }
+ // Red, green, blue, clear in report order; lux and the color temperature as floats.
+ data.process_fakehid_report(&ct720([100,200,300,400],1,5460.5,(197380,197380),12.5)).unwrap();
+ assert_eq!(all(&data),[(2,12,500000),(2,100,0),(2,200,0),(2,300,0),(2,400,0),(2,5460,500000)]);
+ // Too little light for a color temperature: the counts stay, the temperature reads ENODATA.
+ data.process_fakehid_report(&ct720([1,2,3,11],1,788.0,(197380,197380),0.5)).unwrap();
+ assert_eq!(all(&data),[(2,0,500000),(2,1,0),(2,2,0),(2,3,0),(2,11,0),(-61,-1,-1)]);
+ data.process_fakehid_report(&ct720([1,2,3,12],1,2904.0,(197380,197380),0.5)).unwrap();
+ assert_eq!(read(&data,5,6),(2,2904,0));
+ // The firmware's validity byte, and a zero, negative or non-finite temperature.
+ for (flag,cct) in [(0,5000.0),(1,0.0),(1,-5000.0),(1,f32::NAN),(1,f32::INFINITY)] {
+  data.process_fakehid_report(&ct720([10,20,30,40],1,4000.0,(197380,197380),1.0)).unwrap();
+  assert_eq!(read(&data,5,6),(2,4000,0));
+  data.process_fakehid_report(&ct720([10,20,30,40],flag,cct,(197380,197380),1.0)).unwrap();
+  assert_eq!(read(&data,5,6).0,-61); assert_eq!(read(&data,4,9),(2,40,0));
+ }
+ // Not the layout the color fields are read from: lux advances, the color sample is withdrawn.
+ for integ in [(197380,197381),(0,0),(10_000_001,10_000_001)] {
+  data.process_fakehid_report(&ct720([10,20,30,40],1,4000.0,(197380,197380),1.0)).unwrap();
+  data.process_fakehid_report(&ct720([70,80,90,95],1,6000.0,integ,2.0)).unwrap();
+  assert_eq!(all(&data),[(2,2,0),(-61,-1,-1),(-61,-1,-1),(-61,-1,-1),(-61,-1,-1),(-61,-1,-1)]);
+ }
+ data.process_fakehid_report(&ct720([10,20,30,40],1,4000.0,(10_000_000,10_000_000),1.0)).unwrap();
+ assert_eq!(read(&data,1,9),(2,10,0));
+ // A short report still carries lux.
+ data.process_fakehid_report(&ct720([70,80,90,95],1,6000.0,(197380,197380),3.0)[..54]).unwrap();
+ assert_eq!(read(&data,0,5),(2,3,0)); assert_eq!(read(&data,1,9).0,-61);
+ // A report with no lux reading leaves every channel as it was.
+ data.process_fakehid_report(&ct720([10,20,30,40],1,4000.0,(197380,197380),1.0)).unwrap();
+ let before=all(&data);
+ data.process_fakehid_report(&ct720([70,80,90,95],0,6000.0,(1,2),f32::NAN)).unwrap();
+ assert_eq!(all(&data),before);
+ // A count of u32::MAX saturates the stored reading without touching its neighbours.
+ data.process_fakehid_report(&ct720([u32::MAX,20,30,40],1,4000.0,(197380,197380),1.0)).unwrap();
+ assert_eq!(read(&data,1,9),(2,i32::MAX,999999)); assert_eq!(read(&data,2,9),(2,20,0));
+ // The other parts keep their channels: no CT720 field is read at another lux offset.
+ let report=ct720([100,200,300,400],1,5460.5,(197380,197380),12.5);
+ for offset in [LUX_OFFSET_VD6286,LUX_OFFSET_CT817] {
+  for channel in 1..6 { assert_eq!(MsgProc(offset).process_channel(&report,channel),None); assert!(!MsgProc(offset).channel_withdrawn(&report,channel)); }
+ }
+}
 '''
 
 
@@ -130,6 +182,12 @@ def main():
         'cct-zero-valid': ('.filter(|value| *value != 0)', ''),
         'channel-alias': ('report_float(message, CCT_OFFSET_VD6286)', 'report_float(message, LUX_OFFSET_VD6286)'),
         'missing-saturation': ('value.min(MAX_MICRO)', 'value'),
+        'ct720-clear-gate': ('CT720_CCT_MIN_CLEAR: u32 = 12', 'CT720_CCT_MIN_CLEAR: u32 = 1'),
+        'ct720-integration-copies': ('integ != 0 && integ == again && ', 'integ != 0 && again != 0 && '),
+        'ct720-integration-bound': (' && integ <= CT720_INTEG_MAX', ''),
+        'ct720-count-order': ('[0x0d, 0x11, 0x15, 0x19]', '[0x11, 0x0d, 0x15, 0x19]'),
+        'ct720-keeps-stale-color': ('self.0 == LUX_OFFSET_CT720 && channel != 0 && self.process(message).is_some()', 'self.0 == LUX_OFFSET_CT720 && channel != 0 && self.process(message).is_none()'),
+        'ct720-validity-byte': (' || message.get(CT720_CCT_FLAG).copied() == Some(0)', ''),
     }
     with tempfile.TemporaryDirectory(prefix='aop-als-channels-') as directory:
         directory = Path(directory)
