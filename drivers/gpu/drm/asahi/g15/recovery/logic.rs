@@ -37,9 +37,18 @@ pub(crate) const DRAIN_POLLS: u32 = 1000;
 pub(crate) const FURTHER_HALTS: u32 = 4;
 
 /// Stamp cell `obs` reached the own target `own`, bounded by the newest published target
-/// `tail`. Stamps are seeded so that a written stamp is never 0 and has a zero low byte.
+/// `tail`. Written stamps have a zero low byte, including at counter wrap.
 pub(crate) const fn stamp_reached(obs: u32, own: u32, tail: u32) -> bool {
-    obs != 0 && obs & 0xff == 0 && obs.wrapping_sub(own) <= tail.wrapping_sub(own)
+    obs & 0xff == 0 && obs.wrapping_sub(own) <= tail.wrapping_sub(own)
+}
+
+/// The position of unfinished work; zero is a valid position after stamp wrap.
+pub(crate) const fn pending_stamp(obs: u32, own: u32, tail: u32) -> Option<u32> {
+    if stamp_reached(obs, own, tail) {
+        None
+    } else {
+        Some(obs)
+    }
 }
 
 /// Cursor `c` of a ring of `m` entries passed the end `h` of entries starting at `b`, within
@@ -73,9 +82,9 @@ pub(crate) struct Receipts {
     pub(crate) fs_start: u32,
     /// Host channel producers (TA, FS, compute) after the prefix's records.
     pub(crate) rec: [u32; 3],
-    /// Compute member j's FW stamp target, and the FS target it waits on directly (0: none).
+    /// Compute member j's FW stamp target, and the FS target it waits on directly.
     pub(crate) cstamp: [u32; 16],
-    pub(crate) cwait: [u32; 16],
+    pub(crate) cwait: [Option<u32>; 16],
 }
 
 /// The newest published receipts.
@@ -136,8 +145,10 @@ pub(crate) fn compute_hang(f: &Receipts, t: &Tail, o: &Observed) -> bool {
     if j == computes {
         return false;
     }
-    if f.cwait[j] != 0 && !stamp_reached(o.fs_stamp, f.cwait[j], t.fs_target) {
-        return false; // still waiting on a render of the prefix
+    if let Some(target) = f.cwait[j] {
+        if !stamp_reached(o.fs_stamp, target, t.fs_target) {
+            return false; // still waiting on a render of the prefix
+        }
     }
     if o.consumer[COMPUTE] != f.rec[COMPUTE] {
         return false; // its record not consumed yet
@@ -332,8 +343,18 @@ mod tests {
         assert!(!stamp_reached(stamp(4), stamp(1), stamp(3)));
         // Across the u32 wrap.
         let own = 0xffffff00u32;
+        assert!(stamp_reached(0, own, 0x00000200));
+        assert!(stamp_reached(0, 0, 0));
+        assert!(!stamp_reached(0xffffff00, 0, 0x100));
         assert!(stamp_reached(0x00000100, own, 0x00000200));
         assert!(!stamp_reached(0xfffffe00, own, 0x00000200));
+    }
+
+    #[test]
+    fn progress_at_zero_wrap() {
+        assert_eq!(pending_stamp(0, 0x100, 0x200), Some(0));
+        assert_eq!(pending_stamp(0, 0, 0x100), None);
+        assert_eq!(pending_stamp(0xffffff00, 0, 0x100), Some(0xffffff00));
     }
 
     #[test]
@@ -401,12 +422,18 @@ mod tests {
         assert!(!compute_hang(&f, &t, &o));
         o.compute_read = 15;
         // The running compute waits on an FS of the prefix that has not completed.
-        f.cwait[1] = 0x3d000300;
+        f.cwait[1] = Some(0x3d000300);
         o.fs_stamp = 0x3d000200;
         let mut t2 = t;
         t2.fs_target = 0x3d000400;
         assert!(!compute_hang(&f, &t2, &o));
         o.fs_stamp = 0x3d000300;
+        assert!(compute_hang(&f, &t2, &o));
+        f.cwait[1] = Some(0);
+        t2.fs_target = 0x100;
+        o.fs_stamp = 0xffffff00;
+        assert!(!compute_hang(&f, &t2, &o));
+        o.fs_stamp = 0;
         assert!(compute_hang(&f, &t2, &o));
         // No compute in the prefix.
         f.computes = 0;

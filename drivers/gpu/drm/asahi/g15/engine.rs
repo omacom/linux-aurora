@@ -155,10 +155,10 @@ pub(crate) struct Flight {
     pub(crate) fs_start: u32,
     /// Channel producers (TA, FS, compute) after the prefix's records.
     pub(crate) rec: [u32; 3],
-    /// Compute member j's FW stamp target, and the FS target it waits on directly (0: none):
+    /// Compute member j's FW stamp target, and the FS target it waits on directly:
     /// its predecessors in the prefix (for the compute-hang check).
     pub(crate) cstamp: [u32; sizes::COMPUTE_SLOTS],
-    pub(crate) cwait: [u32; sizes::COMPUTE_SLOTS],
+    pub(crate) cwait: [Option<u32>; sizes::COMPUTE_SLOTS],
     /// Compute slots, pass slots and clustering buffers it holds.
     pub(crate) claims: Claims,
     /// The prefix rebuilds the render allocators (priming); nothing is published behind it.
@@ -189,7 +189,7 @@ impl Flight {
             fs_start: 0,
             rec: [0; 3],
             cstamp: [0; sizes::COMPUTE_SLOTS],
-            cwait: [0; sizes::COMPUTE_SLOTS],
+            cwait: [None; sizes::COMPUTE_SLOTS],
             claims: Claims::new(),
             rebuild: false,
             doomed: false,
@@ -387,7 +387,7 @@ pub(crate) struct Engine {
     pub(crate) chan_wait: bool,
     /// Progress tracking of the oldest prefix.
     pub(crate) progress_flight: u64,
-    pub(crate) progress: [u32; 3],
+    pub(crate) progress: [Option<u32>; 3],
     pub(crate) stats: Stats,
     /// Phase timers (debug_flags bit 49).
     pub(crate) prof: Prof,
@@ -425,7 +425,7 @@ impl Engine {
             rebuild_live: false,
             chan_wait: false,
             progress_flight: 0,
-            progress: [0; 3],
+            progress: [None; 3],
             stats: Stats::default(),
             prof: Prof::default(),
             debugfs: None,
@@ -1191,11 +1191,7 @@ impl Firmware {
         }
         let j = pf.computes as usize;
         f.cstamp[j] = t;
-        f.cwait[j] = if pf.prev == Prev::Render {
-            pf.last_fs
-        } else {
-            0
-        };
+        f.cwait[j] = (pf.prev == Prev::Render).then_some(pf.last_fs);
         g.ring.w64(8 * pf.c_head as usize, s.work.va)?;
         pf.c_head = (pf.c_head + 1) % sizes::QUEUE_CAP;
         lap.lap(&mut self.engine.prof.write_ns);

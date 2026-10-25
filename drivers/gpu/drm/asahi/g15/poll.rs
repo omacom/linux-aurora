@@ -189,10 +189,7 @@ impl Shared {
     }
 }
 
-/// Stamp cell `obs` reached its own target, bounded by the newest published target `tail`.
-pub(crate) fn stamp_reached(obs: u32, own: u32, tail: u32) -> bool {
-    obs != 0 && obs & 0xff == 0 && obs.wrapping_sub(own) <= tail.wrapping_sub(own)
-}
+pub(crate) use super::recovery::logic::stamp_reached;
 
 /// Cursor `c` of a ring of `m` entries passed end `h` of entries from `b`, within tail `t`.
 pub(crate) fn ring_passed(c: u32, b: u32, h: u32, t: u32, m: u32) -> bool {
@@ -498,23 +495,25 @@ impl Firmware {
             return;
         };
         let (g, r, e) = (&self.graph.compute, &self.graph.render, &self.engine);
-        let (mut c, mut ta, mut fs) = (0, 0, 0);
+        let pending = super::recovery::logic::pending_stamp;
+        let (mut c, mut ta, mut fs) = (None, None, None);
 
         if f.computes != 0 {
-            c = g.fw_stamp.r32(0).unwrap_or(0);
-            if stamp_reached(c, f.target, e.target) {
-                c = 0; // its computes are done: later work does not count
-            }
+            c = g
+                .fw_stamp
+                .r32(0)
+                .ok()
+                .and_then(|v| pending(v, f.target, e.target));
         }
         if f.renders != 0 {
-            ta = r.fw_stamp[0].r32(0).unwrap_or(0);
-            fs = r.fw_stamp[1].r32(0).unwrap_or(0);
-            if stamp_reached(ta, f.ta_target, e.ta_target) {
-                ta = 0;
-            }
-            if stamp_reached(fs, f.fs_target, e.fs_target) {
-                fs = 0;
-            }
+            ta = r.fw_stamp[0]
+                .r32(0)
+                .ok()
+                .and_then(|v| pending(v, f.ta_target, e.ta_target));
+            fs = r.fw_stamp[1]
+                .r32(0)
+                .ok()
+                .and_then(|v| pending(v, f.fs_target, e.fs_target));
         }
         let moved = e.progress_flight == f.published_ns && [c, ta, fs] != e.progress;
         let published = f.published_ns;

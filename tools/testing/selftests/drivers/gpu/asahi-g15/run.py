@@ -303,6 +303,23 @@ def main():
         # checks that canonical normal/G17 UAPI remains unchanged; there is no global
         # Rust bindgen header selector in this integration.
         harness = RUST_PREFIX + f'\n#[path = "{G15 / "gate.rs"}"] mod gate;\n'
+        encode = (G15 / "encode.rs").read_text()
+        start = encode.index("pub(crate) const fn stamp_seed(")
+        end = encode.index("\n}", start) + 2
+        harness += encode[start:end] + '''
+#[test]
+fn firmware_stamp_wrap() {
+    for seed in [0xc1000000u32, 0x7a000000, 0x3d000000] {
+        let wrap = ((1u64 << 32) - seed as u64) / 0x100;
+        assert_eq!(stamp_seed(seed, 0), seed);
+        assert_eq!(stamp_seed(seed, wrap - 1), 0xffffff00);
+        assert_eq!(stamp_seed(seed, wrap), 0);
+        assert_eq!(stamp_seed(seed, wrap + 1), 0x100);
+        assert_eq!(stamp_seed(seed, 1 << 24), seed);
+        assert_eq!(stamp_seed(seed, u64::MAX), seed.wrapping_sub(0x100));
+    }
+}
+'''
         harness += f'#[path = "{G15 / "recovery/logic.rs"}"] mod recovery;\n'
         harness += f'#[path = "{G15 / "power/idle.rs"}"] mod idle;\n'
         harness += f'#[path = "{G15 / "power/pstate.rs"}"] mod pstate;\n'

@@ -64,10 +64,9 @@ const fn align(n: u64, a: u64) -> u64 {
 }
 
 /// Firmware stamp value of ordinal `n` on the queue with this seed.
-/// Stamps step by 0x100 through 0xffffff values and never read 0.
+/// Stamps step by 0x100, including zero when the counter wraps.
 pub(crate) const fn stamp_seed(seed: u32, n: u64) -> u32 {
-    let base = (seed / 0x100) as u64;
-    ((((base - 1 + n % 0xffffff) % 0xffffff) + 1) * 0x100) as u32
+    seed.wrapping_add((n as u32).wrapping_mul(0x100))
 }
 
 /// Compute stamp of ordinal `n`.
