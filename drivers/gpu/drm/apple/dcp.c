@@ -6246,6 +6246,21 @@ static int dcp_ext26_start_resident(struct apple_dcp *dcp)
 	return ret;
 }
 
+/*
+ * J313 BrightnessLCD::nitsToDBV rejects 395 nits and above.  iDAC 1956 is
+ * accepted and 1957 is not, so 394 is the brightest level that applies.
+ * apple,max-brightness on this panel is 420; 100% must land on 394.
+ */
+#define DCP_J313_MAX_NITS 394U
+
+static bool dcp_panel_is_j313(const struct dcp_panel_id *id,
+			      const char *compatible)
+{
+	if (compatible && !strcmp(compatible, "apple,panel-j313"))
+		return true;
+	return id && !strcmp(id->name, "J313");
+}
+
 static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *data)
 {
 	struct device_node *panel_np;
@@ -6358,7 +6373,7 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		panel_np = of_get_compatible_child(dev->of_node, "apple,panel");
 
 	if (panel_np) {
-		const char *compatible;
+		const char *compatible = NULL;
 
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 			/*
@@ -6378,11 +6393,25 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		}
 
 		dcp_panel_read_dimensions(dcp, panel_np);
+		if (of_property_read_string_index(panel_np, "compatible", 0,
+						  &compatible))
+			compatible = NULL;
 		/* The most specific compatible names the panel for its EDID. */
-		if (iomfb_v14_7_base_edid(dcp) &&
-		    !of_property_read_string_index(panel_np, "compatible", 0, &compatible) &&
+		if (iomfb_v14_7_base_edid(dcp) && compatible &&
 		    dcp_panel_id_from_compatible(&dcp->panel.id, compatible))
 			dev_dbg(dev, "no EDID make and product in '%s'\n", compatible);
+		/*
+		 * Only this panel.  The backlight device's maximum is this
+		 * value, so 100% asks the firmware for DCP_J313_MAX_NITS.
+		 */
+		if (dcp_panel_is_j313(&dcp->panel.id, compatible) &&
+		    dcp->brightness.maximum > DCP_J313_MAX_NITS) {
+			dcp->brightness.maximum = DCP_J313_MAX_NITS;
+			if (dcp->brightness.nits > (int)DCP_J313_MAX_NITS)
+				dcp->brightness.nits = DCP_J313_MAX_NITS;
+			dev_info(dev, "capping panel backlight at %u nits\n",
+				 DCP_J313_MAX_NITS);
+		}
 
 		of_node_put(panel_np);
 		/* Read target metadata for H17P and desktop firmware alike. */
