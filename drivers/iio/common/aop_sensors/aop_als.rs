@@ -8,7 +8,9 @@ use kernel::{
     bindings, c_str,
     device::Core,
     firmware::Firmware,
-    iio::common::aop_sensors::{AopSensorData, IIORegistration, MessageProcessor, MICRO},
+    iio::common::aop_sensors::{
+        AopSensorData, ChannelSpec, IIORegistration, MessageProcessor, MICRO,
+    },
     module_platform_driver, of, platform,
     prelude::*,
     soc::apple::aop::{EPICService, FakehidRegistration, AOP},
@@ -172,6 +174,72 @@ fn f32_to_micro(f: u32) -> Option<u64> {
     })
 }
 
+// FireFish2 / CT720 report, 55 bytes, lux float at +0x1d. The four counts are
+// red, green, blue, clear. Clear is the wideband count (largest in room light;
+// the calibration gains are 8, 8, 8, 4). Under the ~5460 K light captured on
+// a J313 the first three ranked green, red, blue. Byte +0x2a is non-zero
+// when the color temperature at +0x2b is valid. The integration time is stored
+// twice at +0x2f (the AOP logs 197380 µs when it arms this sensor); disagreeing
+// copies mean this is not that layout, and color is left unpublished.
+const CT720_LEN: usize = 55;
+const CT720_COUNT_OFF: [usize; 4] = [0x0d, 0x11, 0x15, 0x19];
+const CT720_CCT_FLAG: usize = 0x2a;
+const CT720_CCT_OFF: usize = 0x2b;
+const CT720_INTEG_OFF: usize = 0x2f;
+const CT720_INTEG_MAX: u32 = 10_000_000;
+/// Clear counts at or below 11 on a covered J313 still had the firmware CCT
+/// byte set, and the published temperatures were 788 K, 1288 K, 2904 K and
+/// 6781 K. Publish CCT only when clear is at least this. Not hardware-tested.
+const CT720_CCT_MIN_CLEAR: u32 = 12;
+
+/// Channels of a CT720. Channel 0 is the lux channel every part has.
+const CT720_RED: usize = 1;
+const CT720_CLEAR: usize = 4;
+const CT720_CCT: usize = 5;
+const CT720_CHANS: usize = 6;
+
+fn u32_at(message: &[u8], off: usize) -> Option<u32> {
+    let b = message.get(off..off + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Whether a CT720 report has the layout the color fields are read from.
+fn ct720_layout(message: &[u8]) -> bool {
+    if message.len() < CT720_LEN {
+        return false;
+    }
+    match (
+        u32_at(message, CT720_INTEG_OFF),
+        u32_at(message, CT720_INTEG_OFF + 4),
+    ) {
+        (Some(integ), Some(again)) => integ != 0 && integ == again && integ <= CT720_INTEG_MAX,
+        _ => false,
+    }
+}
+
+/// A color channel of a CT720 report: a count in whole units, or the color temperature.
+fn ct720_color(message: &[u8], channel: usize) -> Option<u64> {
+    if !ct720_layout(message) {
+        return None;
+    }
+    if (CT720_RED..=CT720_CLEAR).contains(&channel) {
+        let count = u32_at(message, CT720_COUNT_OFF[channel - CT720_RED])?;
+        return Some(u64::from(count).saturating_mul(MICRO));
+    }
+    if channel != CT720_CCT || message.get(CT720_CCT_FLAG).copied() == Some(0) {
+        return None;
+    }
+    if u32_at(message, CT720_COUNT_OFF[CT720_CLEAR - CT720_RED])? < CT720_CCT_MIN_CLEAR {
+        return None;
+    }
+    let bits = u32_at(message, CT720_CCT_OFF)?;
+    if bits & 0x8000_0000 != 0 {
+        return None;
+    }
+    // Zero does not describe a colour temperature.
+    f32_to_micro(bits).filter(|value| *value != 0)
+}
+
 struct MsgProc(usize);
 
 fn report_float(message: &[u8], offset: usize) -> Option<u64> {
@@ -191,8 +259,17 @@ impl MessageProcessor for MsgProc {
                 // Zero and negative CCT do not describe a colour temperature.
                 report_float(message, CCT_OFFSET_VD6286).filter(|value| *value != 0)
             }
+            _ if self.0 == LUX_OFFSET_CT720 => ct720_color(message, channel),
             _ => None,
         }
+    }
+
+    /// A CT720 report that carries lux but not a color channel (another layout, no valid
+    /// color temperature, too little light for one) withdraws that channel's last reading:
+    /// it reads `ENODATA` rather than a stale color. A report with no lux reading leaves
+    /// every channel as it was.
+    fn channel_withdrawn(&self, message: &[u8], channel: usize) -> bool {
+        self.0 == LUX_OFFSET_CT720 && channel != 0 && self.process(message).is_some()
     }
 }
 
@@ -203,6 +280,59 @@ enum AlsIio {
     Color {
         _registration: IIORegistration<MsgProc, 2>,
     },
+    Ct720 {
+        _registration: IIORegistration<MsgProc, CT720_CHANS>,
+    },
+}
+
+/// Lux and color temperature are processed values; the four counts are raw.
+fn ct720_channels() -> [ChannelSpec; CT720_CHANS] {
+    let raw = 1 << bindings::BINDINGS_IIO_CHAN_INFO_RAW;
+    let processed = 1 << bindings::BINDINGS_IIO_CHAN_INFO_PROCESSED;
+    let count = |modifier| ChannelSpec {
+        ty: bindings::BINDINGS_IIO_INTENSITY,
+        modifier: Some(modifier),
+        info_mask: raw,
+    };
+    [
+        ChannelSpec {
+            ty: bindings::BINDINGS_IIO_LIGHT,
+            modifier: None,
+            info_mask: processed,
+        },
+        count(bindings::BINDINGS_IIO_MOD_LIGHT_RED),
+        count(bindings::BINDINGS_IIO_MOD_LIGHT_GREEN),
+        count(bindings::BINDINGS_IIO_MOD_LIGHT_BLUE),
+        count(bindings::BINDINGS_IIO_MOD_LIGHT_CLEAR),
+        ChannelSpec {
+            ty: bindings::BINDINGS_IIO_COLORTEMP,
+            modifier: None,
+            info_mask: processed,
+        },
+    ]
+}
+
+fn register_ct720(
+    pdev: &platform::Device,
+    aop: &Arc<dyn AOP>,
+    service: EPICService,
+    offset: usize,
+) -> Result<(FakehidRegistration, IIORegistration<MsgProc, CT720_CHANS>)> {
+    let channels = ct720_channels();
+    let data = AopSensorData::new_channels(
+        pdev.as_ref().into(),
+        channels.map(|channel| channel.ty),
+        MsgProc(offset),
+    )?;
+    let listener = FakehidRegistration::new(aop.clone(), service, data.clone())?;
+    enable_als(aop.as_ref(), pdev, &service, offset)?;
+    let iio = IIORegistration::new_specs(
+        data,
+        c"aop-sensors-als",
+        channels,
+        kernel::module::this_module::<crate::LocalModule>(),
+    )?;
+    Ok((listener, iio))
 }
 
 struct IIOAopAlsDriver {
@@ -273,6 +403,14 @@ impl platform::Driver for IIOAopAlsDriver {
             (
                 listener,
                 AlsIio::Color {
+                    _registration: registration,
+                },
+            )
+        } else if offset == LUX_OFFSET_CT720 {
+            let (listener, registration) = register_ct720(pdev, &adata, service, offset)?;
+            (
+                listener,
+                AlsIio::Ct720 {
                     _registration: registration,
                 },
             )

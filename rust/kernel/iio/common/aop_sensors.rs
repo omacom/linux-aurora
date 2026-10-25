@@ -57,6 +57,25 @@ pub trait MessageProcessor: Send + Sync {
             None
         }
     }
+
+    /// Whether `message` says that `channel` has no reading any more, so that the reading it
+    /// last had must stop being reported: reads return `ENODATA` until the next one arrives.
+    /// It is asked only when [`Self::process_channel`] returned `None` for the same message.
+    fn channel_withdrawn(&self, _message: &[u8], _channel: usize) -> bool {
+        false
+    }
+}
+
+/// One IIO channel of a sensor: its type, an optional modifier (`IIO_MOD_*`) and the
+/// `info_mask_separate` bits it answers.
+#[derive(Clone, Copy)]
+pub struct ChannelSpec {
+    /// The `IIO_*` channel type.
+    pub ty: u32,
+    /// The `IIO_MOD_*` modifier of a modified channel.
+    pub modifier: Option<u32>,
+    /// The `IIO_CHAN_INFO_*` bits of the channel.
+    pub info_mask: usize,
 }
 
 /// The state shared between a sensor's report listener and its IIO device: the latest reading.
@@ -104,6 +123,8 @@ impl<T: MessageProcessor, const N: usize> FakehidListener for AopSensorData<T, N
                 self.value[channel].store(value.min(MAX_MICRO), Relaxed);
                 // Publishes the reading above to readers that see `valid`.
                 self.valid[channel].store(true, Release);
+            } else if self.msg_proc.channel_withdrawn(data, channel) {
+                self.valid[channel].store(false, Release);
             }
         }
         Ok(())
@@ -199,26 +220,51 @@ impl<T: MessageProcessor + 'static, const N: usize> IIORegistration<T, N> {
         info_mask: usize,
         module: &ThisModule,
     ) -> Result<Self> {
-        if ty != data.ty {
+        Self::new_specs(
+            data,
+            name,
+            ty.map(|ty| ChannelSpec {
+                ty,
+                modifier: None,
+                info_mask,
+            }),
+            module,
+        )
+    }
+
+    /// Registers the sensor's channels, each with its own modifier and info mask. The types
+    /// must match those of `data`.
+    pub fn new_specs(
+        data: Arc<AopSensorData<T, N>>,
+        name: &'static CStr,
+        channels: [ChannelSpec; N],
+        module: &ThisModule,
+    ) -> Result<Self> {
+        if channels.map(|channel| channel.ty) != data.ty {
             return Err(EINVAL);
         }
         let spec = KBox::pin(
             IIOSpec {
-                spec: core::array::from_fn(|channel| bindings::iio_chan_spec {
-                    type_: ty[channel],
-                    address: channel as _,
-                    __bindgen_anon_1: bindings::iio_chan_spec__bindgen_ty_1 {
-                        scan_type: bindings::iio_scan_type {
-                            __bindgen_anon_1: bindings::iio_scan_type__bindgen_ty_1 {
-                                format: b'u' as _,
+                spec: core::array::from_fn(|channel| {
+                    let mut spec = bindings::iio_chan_spec {
+                        type_: channels[channel].ty,
+                        channel2: channels[channel].modifier.unwrap_or(0) as _,
+                        address: channel as _,
+                        __bindgen_anon_1: bindings::iio_chan_spec__bindgen_ty_1 {
+                            scan_type: bindings::iio_scan_type {
+                                __bindgen_anon_1: bindings::iio_scan_type__bindgen_ty_1 {
+                                    format: b'u' as _,
+                                },
+                                realbits: 32,
+                                storagebits: 32,
+                                ..Default::default()
                             },
-                            realbits: 32,
-                            storagebits: 32,
-                            ..Default::default()
                         },
-                    },
-                    info_mask_separate: info_mask,
-                    ..Default::default()
+                        info_mask_separate: channels[channel].info_mask,
+                        ..Default::default()
+                    };
+                    spec.set_modified(channels[channel].modifier.is_some() as _);
+                    spec
                 }),
                 vtable: bindings::iio_info {
                     read_raw: Some(aop_read_raw::<T, N>),
