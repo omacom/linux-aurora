@@ -89,6 +89,29 @@ class SystemProviderTest(unittest.TestCase):
                 self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}, system=False).returncode, 0)
                 self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}).returncode, 3)
 
+    def test_loader_path_parsed_like_glibc(self):
+        (self.root / "provider/other").mkdir(parents=True)
+        (self.root / "provider/evil").mkdir(parents=True)
+        (self.root / "provider/evil/libEGL.so.1").touch()
+        for value, code in ((":", 3), ("/provider/other:", 3), (":/provider/other", 3),
+                            ("/provider/other::/usr/lib/extra", 3),
+                            ("/provider/other;/provider/evil", 1)):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}).returncode, code)
+
+    def test_previous_value_reference_is_not_an_empty_entry(self):
+        folder = self.root / "home/tester/.config/uwsm"
+        folder.mkdir(parents=True)
+        (self.root / "provider/other").mkdir(parents=True)
+        for line in ("export LD_LIBRARY_PATH=/provider/other:$LD_LIBRARY_PATH\n",
+                     "export LD_LIBRARY_PATH=/provider/other${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n",
+                     "export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/provider/other\n"):
+            with self.subTest(line=line):
+                (folder / "env").write_text(line)
+                self.assertEqual(self.run_detector().returncode, 0)
+        (folder / "env").write_text("export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:\n")
+        self.assertEqual(self.run_detector().returncode, 3)
+
     def test_provider_and_version_overrides(self):
         for variable, value in (("GBM_BACKEND", "nvidia-drm"),
                                 ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
