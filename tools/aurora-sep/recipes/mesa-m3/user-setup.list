@@ -18,7 +18,9 @@
 #           With --system-provider, an entry holding libEGL, libGLESv2, libGL,
 #           libGLX, libglapi, libgbm or a gbm/ directory is a finding too;
 #           entries split on ":" and ";" as glibc does, and a relative or
-#           empty entry (the current directory) is unknown.
+#           empty entry (the current directory) is unknown. A plain reference
+#           to the previous value counts as empty, since an earlier file can
+#           clear it; ${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} is the safe form.
 # envfile   a file that sets session variables, searched for the variables
 #           above. Shell, environment.d and /etc/environment lines are split
 #           like a POSIX shell (quotes, comments, "export", ";"); Hyprland
