@@ -67,6 +67,43 @@ class SystemProviderTest(unittest.TestCase):
                 (folder / "env").write_text(variable + "=/opt/mesa-m3/choice\n")
                 self.assertEqual(self.run_detector().returncode, 1)
 
+    def test_loader_only_directories_are_another_provider(self):
+        for library in ("libEGL.so.1", "libGLESv2.so.2", "libGL.so.1", "libGLX_mesa.so.0",
+                        "libglapi.so.0", "libgbm.so.1", "gbm/dri_gbm.so"):
+            with self.subTest(library=library):
+                folder = self.root / "provider" / library.replace("/", "-")
+                (folder / library).parent.mkdir(parents=True, exist_ok=True)
+                (folder / library).touch()
+                value = {"LD_LIBRARY_PATH": "/provider/" + library.replace("/", "-")}
+                self.assertEqual(self.run_detector(value, system=False).returncode, 0)
+                self.assertEqual(self.run_detector(value).returncode, 1)
+
+    def test_unrelated_library_directory_stays_clean(self):
+        (self.root / "provider/other").mkdir(parents=True)
+        (self.root / "provider/other/libfoo.so.1").touch()
+        self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "/provider/other"}).returncode, 0)
+
+    def test_relative_loader_entry_is_unknown(self):
+        for value in ("lib", "./lib", "/usr/lib/extra:lib"):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}, system=False).returncode, 0)
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}).returncode, 3)
+
+    def test_provider_and_version_overrides(self):
+        for variable, value in (("GBM_BACKEND", "nvidia-drm"),
+                                ("__GLX_VENDOR_LIBRARY_NAME", "nvidia"),
+                                ("MESA_GL_VERSION_OVERRIDE", "4.6"),
+                                ("MESA_GLES_VERSION_OVERRIDE", "3.2"),
+                                ("MESA_GLSL_VERSION_OVERRIDE", "460")):
+            with self.subTest(variable=variable):
+                self.assertEqual(self.run_detector({variable: value}, system=False).returncode, 0)
+                self.assertEqual(self.run_detector({variable: value}).returncode, 1)
+                folder = self.root / "home/tester/.config/hypr"
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "env.conf").write_text(f"env = {variable},{value}\n")
+                self.assertEqual(self.run_detector().returncode, 1)
+                (folder / "env.conf").unlink()
+
     def test_missing_file_does_not_mask_unresolved_choice(self):
         folder = self.root / "home/tester/.config/uwsm"
         folder.mkdir()
