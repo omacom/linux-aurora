@@ -214,9 +214,16 @@ pub(crate) fn power_line() -> Option<i32> {
     }
 }
 
+/// True after this driver switched the sensor on, and not since switched it
+/// off. A failed power cycle stores false: a half-finished cycle is not a
+/// sensor a status read may trust.
+static LEFT_POWERED: Atomic<bool> = Atomic::new(false);
+
 pub(crate) fn power_cycle() -> bool {
     // SAFETY: the shim holds the descriptor and applies its delays.
-    unsafe { sep_sensor_power_cycle() == 0 }
+    let ok = unsafe { sep_sensor_power_cycle() == 0 };
+    LEFT_POWERED.store(ok, Relaxed);
+    ok
 }
 
 pub(crate) fn cs_timing() -> CsTiming {
@@ -231,7 +238,17 @@ pub(crate) fn power_source() -> PowerSource {
 
 pub(crate) fn power(on: bool) -> bool {
     // SAFETY: the shim holds the descriptor and applies its delays.
-    unsafe { sep_sensor_power(if on { 1 } else { 0 }) == 0 }
+    let ok = unsafe { sep_sensor_power(if on { 1 } else { 0 }) == 0 };
+    if ok {
+        LEFT_POWERED.store(on, Relaxed);
+    }
+    ok
+}
+
+/// Whether this driver left the sensor powered. Callers use it so they do not
+/// issue an SPI status read to a sensor they have themselves switched off.
+pub(crate) fn left_powered() -> bool {
+    LEFT_POWERED.load(Relaxed)
 }
 
 /// Sets up the data-ready interrupt once, while the sensor is idle. Returns
