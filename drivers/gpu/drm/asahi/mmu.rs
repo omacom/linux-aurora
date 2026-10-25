@@ -2754,6 +2754,15 @@ impl Uat {
 
     /// Binds a `Vm` to a slot, preferring the last used one.
     pub(crate) fn bind(&self, vm: &Vm) -> Result<VmBind> {
+        self.bind_inner(vm, true)
+    }
+
+    /// Binds a VM without waiting for another slot owner to retire.
+    pub(crate) fn try_bind(&self, vm: &Vm) -> Result<VmBind> {
+        self.bind_inner(vm, false)
+    }
+
+    fn bind_inner(&self, vm: &Vm, wait: bool) -> Result<VmBind> {
         let mut binding = vm.binding.lock();
 
         if binding.binding.is_none() {
@@ -2767,7 +2776,11 @@ impl Uat {
                 None
             });
 
-            let slot = self.slots.get(binding.bind_token)?;
+            let slot = if wait {
+                self.slots.get(binding.bind_token)?
+            } else {
+                self.slots.try_get(binding.bind_token)?
+            };
             if slot.changed() {
                 mod_pr_debug!("Vm Bind [{}]: bind_token={:?}\n", vm.id, slot.token(),);
                 let idx = (slot.slot() as usize) + UAT_USER_CTX_START;

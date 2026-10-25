@@ -25,8 +25,9 @@
 //! [`clean_lower`] for the context-0 lower tree. (The cleaning in `pgtable.rs` makes these
 //! redundant but harmless.)
 //!
-//! User VMs are bound to exclusive TTBAT slots for their lifetime through `mmu::Uat::bind`
-//! (`vm.rs`); the shared layer writes TTBAT `(root | 1 | slot << 48, TABLES | 1 |
+//! Jobs acquire exclusive TTBAT slots without waiting at publication (`mmu::Uat::try_bind`)
+//! and return them after successful retirement; failed published jobs retain their slots.
+//! The shared layer writes TTBAT `(root | 1 | slot << 48, TABLES | 1 |
 //! slot << 48)` under the PPL lock and invalidates the slot's ASID.
 
 use core::ops::Range;

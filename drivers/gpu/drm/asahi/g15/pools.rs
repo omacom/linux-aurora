@@ -624,8 +624,8 @@ impl Firmware {
         if others != 0 {
             dev_err!(
                 self.dev(),
-                "PB backing: ctx {} maps {} chunks with {} flights of another VM\n",
-                vm.slot,
+                "PB backing: VM {} maps {} chunks with {} flights of another VM\n",
+                vm.id,
                 self.pools.chunks.len(),
                 others
             );
@@ -913,7 +913,7 @@ impl Firmware {
             .flights
             .iter()
             .enumerate()
-            .any(|(i, f)| self.receipts(i).renders != 0 && f.job.vm.slot == ctx);
+            .any(|(i, f)| self.receipts(i).renders != 0 && f.job.slot() == ctx);
         // At the maximum, after the refusals, the request is left unanswered: the poll pass
         // returns, and the host deadline and its recovery path apply to a stalled TA.
         if self.pools.ledger.exhausted() {

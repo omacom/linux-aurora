@@ -518,8 +518,6 @@ pub(crate) mod sizes {
     pub(crate) const AHEAD_RECORDS: u32 = 64;
     /// Policy bound on logical queues reported in QUEUE_LIMITS (not a firmware limit).
     pub(crate) const MAX_QUEUES: u32 = 58;
-    /// TTBAT user slots: user VMs hold one each for their lifetime (ASIDs 1..63).
-    pub(crate) const MAX_VMS: u32 = 63;
 }
 
 /// Firmware channels, doorbells, seeds and identifiers.

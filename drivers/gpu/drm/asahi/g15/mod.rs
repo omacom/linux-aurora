@@ -375,7 +375,7 @@ pub(crate) struct Firmware {
     pub(crate) recovery: recovery::Recovery,
     /// Render UMA/PB allocators, their spare set and parameter-buffer growth.
     pub(crate) pools: pools::Pools,
-    /// Live VMs and their exclusive TTBAT slots, and the client aliases of every user VM.
+    /// Live VMs and the client aliases of every user VM.
     pub(crate) vms: Arc<vm::Registry>,
 }
 

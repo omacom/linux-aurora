@@ -224,7 +224,7 @@ impl Firmware {
         for flight in self.engine.flights.iter_mut().skip(1) {
             flight.doomed = true;
         }
-        let ctx = self.engine.flights.first().map_or(0, |f| f.job.vm.slot);
+        let ctx = self.engine.flights.first().map_or(0, |f| f.job.slot());
         let kind = if offset == logic::FRAGMENT_KILL {
             "fragment"
         } else {
@@ -281,7 +281,7 @@ impl Firmware {
         if decision.compute_hang {
             self.report("compute hang");
         }
-        let ctx = self.engine.flights.first().map_or(0, |f| f.job.vm.slot);
+        let ctx = self.engine.flights.first().map_or(0, |f| f.job.slot());
         if decision.class0_hang {
             dev_warn!(
                 self.dev(),
@@ -323,7 +323,7 @@ impl Firmware {
     /// anything is published; if it cannot be, the GPU stops. Anything else fail-stops.
     fn fail_or_recover(&mut self, recover: bool, fault: bool, done: &mut Completions) -> Result {
         let flight = !self.engine.flights.is_empty();
-        let ctx = self.engine.flights.first().map_or(0, |f| f.job.vm.slot);
+        let ctx = self.engine.flights.first().map_or(0, |f| f.job.slot());
         self.report(if flight {
             "prefix FAILED"
         } else {
