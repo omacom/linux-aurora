@@ -8,7 +8,7 @@ use crate::g17::{
     job::{self, Engine, Packet},
 };
 use core::sync::atomic::Ordering;
-use kernel::{dma_fence::Fence, drm::sched, prelude::*, sync::Arc};
+use kernel::{dma_fence::{Fence, RawDmaFence}, drm::sched, prelude::*, sync::Arc};
 
 impl Backend {
     pub(super) fn release_backlog(&self, packet: &Packet) {
@@ -323,6 +323,26 @@ impl job::Backend for Backend {
         if result.is_err() {
             self.stop_after_error();
         }
+        // drm_sched frees the job as soon as this returns while the job's
+        // completion callback is still on its scheduler fence, so the fence
+        // must be signalled by now even when the queue could not settle the
+        // packet (a busy or failed runtime, a settle racing another queue's
+        // timeout). A completion its physical queue still owns keeps the VM
+        // pinned until the queue retires it; that later completion is a no-op.
+        if !packet.completion.signalled() {
+            packet.completion.fail_while_owned(ECANCELED);
+        }
+        // Another thread may have claimed the completion and not yet signalled.
+        let fence = packet.completion.scheduler_fence();
+        // SAFETY: the retained fence stays alive across this bounded wait,
+        // which holds no device lock.
+        unsafe {
+            kernel::bindings::dma_fence_wait_timeout(
+                fence.raw(),
+                false,
+                kernel::time::msecs_to_jiffies(1000) as _,
+            )
+        };
     }
 
     fn long_job_beside(&self, _packet: &Arc<Packet>) -> bool {
