@@ -68,6 +68,12 @@
 # user-setup it exports nothing: the session's own Mesa setup, which it uses,
 # decides. The state file says which (fallback=software|none).
 #
+# A file opt-out (/etc/mesa-m3/disable or the user's mesa-m3/disable) on a
+# J613 (T8122) or a J516S (T6030) is the exception: when the same node,
+# display, kernel-log, user-setup and same-boot attempt checks pass and
+# mesa-m3-system-check admits /usr, the session keeps system Mesa
+# (fallback=none, no new attempt). mesa_m3=off stays on the software fallback.
+#
 # Each login writes /run/user/<uid>/mesa-m3-session.state (atomically, 0644,
 # key=value lines, first line schema=aurora.mesa-m3-session/2) and logs one
 # journal line (tag mesa-m3) with the same decision, reason and login identity,
@@ -133,16 +139,9 @@ mesa_m3_gate() {
 		echo "no-gpu render node ${_mm3_node##*/} is not the $_mm3_name GPU (apple,agx-$_mm3_soc)"; return 1
 	fi
 
-	_mm3_dcp=
-	for _mm3_c in "$_mm3_root"/sys/class/drm/card*; do
-		case "${_mm3_c##*/}" in *-*) continue ;; esac
-		if tr '\0' '\n' 2>/dev/null < "$_mm3_c/device/of_node/compatible" | grep -qx "apple,$_mm3_soc-display-subsystem"; then
-			_mm3_dcp=${_mm3_c##*/}
-		fi
-	done
-	if [ -z "$_mm3_dcp" ]; then
+	_mm3_dcp=$(_mm3_native_display "$_mm3_root" "$_mm3_soc") || {
 		echo "no-display no native display card (apple,$_mm3_soc-display-subsystem)"; return 1
-	fi
+	}
 
 	_mm3_dev="$_mm3_root/dev/dri/${_mm3_node##*/}"
 	if [ ! -r "$_mm3_dev" ] || [ ! -w "$_mm3_dev" ]; then
@@ -250,53 +249,19 @@ mesa_m3_gate() {
 		echo "load-failed mesa-m3-loadcheck exit $_mm3_rc: ${_mm3_out:-no output}"; return 1
 	fi
 
-	# The kernel log of this boot must be readable (a user without journal
-	# access would otherwise see no faults) and must show no fault of the M3
-	# GPU or of the display. journalctl exits 1 both for "no match" and for
-	# errors, so the log is read whole and searched with grep: a failed read,
-	# an empty log or a grep error refuses (fail closed). The failure state of
-	# the M3 GPU is sticky for the boot, so a fault means software rendering
-	# until reboot.
-	_mm3_out=$(journalctl -k -b -q --no-pager -o cat 2>/dev/null)
-	_mm3_rc=$?
-	if [ "$_mm3_rc" -ne 0 ] || [ -z "$_mm3_out" ]; then
-		echo "log-unreadable this user cannot read this boot's kernel log (only root and the wheel, adm and systemd-journal groups can), so GPU faults cannot be ruled out; to allow GPU acceleration, add the user to the adm group and log in again"
-		return 1
-	fi
-	_mm3_faults=$(printf '%s\n' "$_mm3_out" | grep -E \
-		-e 'M3 scheduler: execution failed|M3 G15[SG]: firmware crashed|M3 firmware error|M3 bank [0-9]|native DCP flip failed|DCP firmware crashed' \
-		-e 'M3 G15G verdict: (firmware-running-check-failed|initdata-rejected|cap-violated|job-failed-before-wait|job-faulted|job-ran-completion-missed|job-accepted-never-dispatched|job-timed-out)')
-	_mm3_rc=$?
-	if [ "$_mm3_rc" -eq 0 ]; then
-		echo "gpu-fault the M3 GPU or the display failed this boot, so GPU acceleration is off until reboot: $(printf '%s\n' "$_mm3_faults" | tail -n 1 | tr -d '\r')"
-		return 1
-	elif [ "$_mm3_rc" -ne 1 ]; then
-		echo "log-unreadable this boot's kernel log could not be searched (grep exit $_mm3_rc)"; return 1
-	fi
+	# The kernel log of this boot must be readable and must show no fault of
+	# the M3 GPU or of the display. The same fail-closed read is what a file
+	# opt-out uses before it will leave the system Mesa in place.
+	_mm3_klog=$(_mm3_kernel_log) || { echo "$_mm3_klog"; return 1; }
 
 	# A login that chose /opt/mesa-m3 earlier this boot must have a success
 	# marker bound to it (same boot_id, session_id and hook_run_id), written by
 	# mesa-m3-session-confirm.service only after its compositor was alive and
 	# answering on its Wayland socket after the settle time. Otherwise this
 	# login stays off it: no login loop when the compositor cannot run on it.
-	_mm3_att="$_mm3_root${XDG_STATE_HOME:-$HOME/.local/state}/mesa-m3/attempt"
-	_mm3_ok="$_mm3_root${XDG_STATE_HOME:-$HOME/.local/state}/mesa-m3/session-ok"
-	if [ -f "$_mm3_att" ]; then
-		_mm3_boot=
-		[ -r "$_mm3_root/proc/sys/kernel/random/boot_id" ] &&
-			IFS= read -r _mm3_boot < "$_mm3_root/proc/sys/kernel/random/boot_id"
-		if [ "$(sed -n 's/^boot_id=//p' "$_mm3_att" 2>/dev/null | head -n 1)" = "$_mm3_boot" ]; then
-			_mm3_v=$(sed -n 's/^hook_run_id=//p' "$_mm3_att" 2>/dev/null | head -n 1)
-			_mm3_val=$(sed -n 's/^session_id=//p' "$_mm3_att" 2>/dev/null | head -n 1)
-			if [ -z "$_mm3_v" ] || [ ! -f "$_mm3_ok" ] ||
-				[ "$(head -n 1 "$_mm3_ok" 2>/dev/null)" != schema=aurora.mesa-m3-session-ok/1 ] ||
-				[ "$(sed -n 's/^boot_id=//p' "$_mm3_ok" 2>/dev/null | head -n 1)" != "$_mm3_boot" ] ||
-				[ "$(sed -n 's/^hook_run_id=//p' "$_mm3_ok" 2>/dev/null | head -n 1)" != "$_mm3_v" ] ||
-				[ "$(sed -n 's/^session_id=//p' "$_mm3_ok" 2>/dev/null | head -n 1)" != "$_mm3_val" ]; then
-				echo "previous-failed the last login with /opt/mesa-m3 this boot (hook_run_id ${_mm3_v:-unknown}) has no success marker: its compositor was not seen alive and answering, so this login renders in software; to try the GPU again: rm $_mm3_att, then log out and in (or reboot)"
-				return 1
-			fi
-		fi
+	if ! _mm3_legacy_attempt_clear "$_mm3_root"; then
+		echo "previous-failed the last login with /opt/mesa-m3 this boot (hook_run_id ${_mm3_v:-unknown}) has no success marker: its compositor was not seen alive and answering, so this login renders in software; to try the GPU again: rm $_mm3_att, then log out and in (or reboot)"
+		return 1
 	fi
 
 	if [ "${_mm3_ign:-0}" -gt 0 ]; then
@@ -352,6 +317,137 @@ _mm3_node_open() {
 		[ -r "$1/dev/dri/${_mm3_n##*/}" ] && [ -w "$1/dev/dri/${_mm3_n##*/}" ] && return 0
 	done
 	return 1
+}
+
+# _mm3_native_display ROOT SOC: the card name of this SoC's native display,
+# or nothing. A connector name (card2-eDP-1) is not a card. The last match
+# wins, as the gate's own walk did.
+_mm3_native_display() {
+	_mm3_dcp=
+	for _mm3_c in "$1"/sys/class/drm/card*; do
+		case "${_mm3_c##*/}" in *-*) continue ;; esac
+		if tr '\0' '\n' 2>/dev/null < "$_mm3_c/device/of_node/compatible" | grep -qx "apple,$2-display-subsystem"; then
+			_mm3_dcp=${_mm3_c##*/}
+		fi
+	done
+	[ -n "$_mm3_dcp" ] || return 1
+	printf '%s\n' "$_mm3_dcp"
+}
+
+# Fail closed. Prints one "log-unreadable ..." or "gpu-fault ..." line and
+# returns 1 unless this boot's kernel log was read and contains none of the
+# M3 GPU or display faults. journalctl exits 1 both for "no match" and for
+# errors, so the log is read whole and searched with grep. A failed read, an
+# empty log or a grep error refuses. The GPU failure state is sticky for the
+# boot.
+_mm3_kernel_log() {
+	_mm3_out=$(journalctl -k -b -q --no-pager -o cat 2>/dev/null)
+	_mm3_rc=$?
+	if [ "$_mm3_rc" -ne 0 ] || [ -z "$_mm3_out" ]; then
+		echo "log-unreadable this user cannot read this boot's kernel log (only root and the wheel, adm and systemd-journal groups can), so GPU faults cannot be ruled out; to allow GPU acceleration, add the user to the adm group and log in again"
+		return 1
+	fi
+	_mm3_faults=$(printf '%s\n' "$_mm3_out" | grep -E \
+		-e 'M3 scheduler: execution failed|M3 G15[SG]: firmware crashed|M3 firmware error|M3 bank [0-9]|native DCP flip failed|DCP firmware crashed' \
+		-e 'M3 G15G verdict: (firmware-running-check-failed|initdata-rejected|cap-violated|job-failed-before-wait|job-faulted|job-ran-completion-missed|job-accepted-never-dispatched|job-timed-out)')
+	_mm3_rc=$?
+	if [ "$_mm3_rc" -eq 0 ]; then
+		echo "gpu-fault the M3 GPU or the display failed this boot, so GPU acceleration is off until reboot: $(printf '%s\n' "$_mm3_faults" | tail -n 1 | tr -d '\r')"
+		return 1
+	elif [ "$_mm3_rc" -ne 1 ]; then
+		echo "log-unreadable this boot's kernel log could not be searched (grep exit $_mm3_rc)"; return 1
+	fi
+	return 0
+}
+
+# Return 0 when this boot has no unmatched /opt/mesa-m3 attempt. Return 1
+# when an attempt for this boot_id has no success marker bound to its
+# hook_run_id and session_id. Never creates, deletes or rewrites either file.
+# On failure, _mm3_att and _mm3_v are the attempt path and its hook_run_id.
+_mm3_legacy_attempt_clear() {
+	_mm3_att="$1${XDG_STATE_HOME:-$HOME/.local/state}/mesa-m3/attempt"
+	_mm3_ok="$1${XDG_STATE_HOME:-$HOME/.local/state}/mesa-m3/session-ok"
+	[ -f "$_mm3_att" ] || return 0
+	_mm3_boot=
+	[ -r "$1/proc/sys/kernel/random/boot_id" ] &&
+		IFS= read -r _mm3_boot < "$1/proc/sys/kernel/random/boot_id"
+	[ "$(sed -n 's/^boot_id=//p' "$_mm3_att" 2>/dev/null | head -n 1)" = "$_mm3_boot" ] || return 0
+	_mm3_v=$(sed -n 's/^hook_run_id=//p' "$_mm3_att" 2>/dev/null | head -n 1)
+	_mm3_val=$(sed -n 's/^session_id=//p' "$_mm3_att" 2>/dev/null | head -n 1)
+	if [ -z "$_mm3_v" ] || [ ! -f "$_mm3_ok" ] ||
+		[ "$(head -n 1 "$_mm3_ok" 2>/dev/null)" != schema=aurora.mesa-m3-session-ok/1 ] ||
+		[ "$(sed -n 's/^boot_id=//p' "$_mm3_ok" 2>/dev/null | head -n 1)" != "$_mm3_boot" ] ||
+		[ "$(sed -n 's/^hook_run_id=//p' "$_mm3_ok" 2>/dev/null | head -n 1)" != "$_mm3_v" ] ||
+		[ "$(sed -n 's/^session_id=//p' "$_mm3_ok" 2>/dev/null | head -n 1)" != "$_mm3_val" ]; then
+		return 1
+	fi
+	return 0
+}
+
+# File opt-out on J613/T8122 or J516S/T6030 may keep the system Mesa. Prints
+# one detail line and returns 0 only when every check below passes. A helper
+# exit of 0 is not enough on its own. Does not write an attempt or touch a
+# marker. mesa_m3=off is not a file opt-out.
+_mm3_system_admit() {
+	case ${XDG_CURRENT_DESKTOP:-} in Hyprland|hyprland) ;; *) return 1 ;; esac
+	_mm3_cmdline=$(cat "$1/proc/cmdline" 2>/dev/null) || return 1
+	case " $_mm3_cmdline " in
+	*" mesa_m3=off "*|*" nomodeset "*) return 1 ;;
+	esac
+	if [ ! -e "$1/etc/mesa-m3/disable" ] &&
+		[ ! -e "$1${XDG_CONFIG_HOME:-$HOME/.config}/mesa-m3/disable" ]; then
+		return 1
+	fi
+	_mm3_dt=$(tr '\0' '\n' 2>/dev/null < "$1/proc/device-tree/compatible")
+	_mm3_soc=$(_mm3_soc_of "$1")
+	_mm3_chip=
+	_mm3_identity=$(printf '%s\n' "$_mm3_dt" | grep -E '^apple,j')
+	_mm3_socs=$(printf '%s\n' "$_mm3_dt" | grep -E '^apple,t')
+	case "$_mm3_soc:$_mm3_identity:$_mm3_socs" in
+	t8122:apple,j613:apple,t8122) _mm3_chip=t8122 ;;
+	t6030:apple,j516s:apple,t6030) _mm3_chip=t6030 ;;
+	*) return 1 ;;
+	esac
+	# Exactly one render node, and it is this SoC's asahi GPU, and this user
+	# can open it. An any-node match is not enough.
+	_mm3_nodes=0
+	_mm3_node=
+	for _mm3_n in "$1"/sys/class/drm/renderD*; do
+		[ -e "$_mm3_n" ] || continue
+		_mm3_nodes=$((_mm3_nodes + 1))
+		_mm3_node=$_mm3_n
+	done
+	[ "$_mm3_nodes" -eq 1 ] || return 1
+	_mm3_drv=$(basename "$(readlink -f "$_mm3_node/device/driver" 2>/dev/null)" 2>/dev/null)
+	[ "$_mm3_drv" = asahi ] || return 1
+	tr '\0' '\n' 2>/dev/null < "$_mm3_node/device/of_node/compatible" | grep -qx "apple,agx-$_mm3_chip" || return 1
+	_mm3_dev="$1/dev/dri/${_mm3_node##*/}"
+	[ -r "$_mm3_dev" ] && [ -w "$_mm3_dev" ] || return 1
+	_mm3_dcp=$(_mm3_native_display "$1" "$_mm3_chip") || return 1
+	_mm3_legacy_attempt_clear "$1" || return 1
+	_mm3_klog=$(_mm3_kernel_log) || return 1
+	if [ -n "$1" ]; then
+		_mm3_out=$("$1$_mm3_p/libexec/mesa-m3-user-setup" --home "$HOME" \
+			--config-home "${XDG_CONFIG_HOME:-$HOME/.config}" --env --system-provider \
+			--session-desktops "${XDG_CURRENT_DESKTOP:-}" --root "$1" 2>&1)
+	else
+		_mm3_out=$("$_mm3_p/libexec/mesa-m3-user-setup" --home "$HOME" \
+			--config-home "${XDG_CONFIG_HOME:-$HOME/.config}" --env --system-provider \
+			--session-desktops "${XDG_CURRENT_DESKTOP:-}" 2>&1)
+	fi
+	[ "$?" -eq 0 ] || return 1
+	if [ -n "$1" ]; then
+		_mm3_helper=$1/opt/mesa-m3/libexec/mesa-m3-system-check
+	else
+		_mm3_helper=/opt/mesa-m3/libexec/mesa-m3-system-check
+	fi
+	[ -x "$_mm3_helper" ] || return 1
+	# The helper sees a clean environment: a leaked GL preload or path must
+	# not decide /usr's renderer. Five seconds, then kill.
+	timeout -k 2 5 env -i PATH=/usr/bin:/bin "$_mm3_helper" \
+		"/dev/dri/${_mm3_node##*/}" "$_mm3_chip" >/dev/null 2>&1
+	[ "$?" -eq 0 ] || return 1
+	printf '%s\n' "system Mesa on /usr admits /dev/dri/${_mm3_node##*/} ($_mm3_chip); /opt/mesa-m3 stays inactive"
 }
 
 # _mm3_state ROOT DECISION REASON DETAIL FALLBACK: write the state file and the journal
@@ -455,23 +551,43 @@ mesa_m3_session_env() {
 		_mm3_attempt "${1:-}"
 	else
 		# Never the system Mesa on an M3 render node it can open (Hyprland
-		# would stop at start), except where this session's own setup chose.
+		# would stop at start), except where this session's own setup chose,
+		# or a file opt-out whose system-Mesa handoff passed.
 		_mm3_fb=none
-		if [ "${_mm3_decision%% *}" != user-setup ] && _mm3_node_open "${1:-}"; then
+		_mm3_detail=${_mm3_decision#* }
+		_mm3_admitted=0
+		if [ "${_mm3_decision%% *}" = opt-out ]; then
+			_mm3_sys=$(_mm3_system_admit "${1:-}")
+			if [ "$?" -eq 0 ]; then
+				_mm3_admitted=1
+				_mm3_detail="$_mm3_detail; $_mm3_sys"
+				# Only the pair this hook itself exports. Anything else in the
+				# environment, including a user's own LIBGL_ALWAYS_SOFTWARE
+				# without this marker, stays.
+				if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = 1 ] && [ "${MESA_M3_FALLBACK:-}" = software ]; then
+					unset LIBGL_ALWAYS_SOFTWARE
+					unset MESA_M3_FALLBACK
+				fi
+			fi
+		fi
+		if [ "$_mm3_admitted" -eq 0 ] && [ "${_mm3_decision%% *}" != user-setup ] && _mm3_node_open "${1:-}"; then
 			export LIBGL_ALWAYS_SOFTWARE=1
 			export MESA_M3_FALLBACK=software
 			_mm3_fb=software
 		fi
-		_mm3_state "${1:-}" inactive "${_mm3_decision%% *}" "${_mm3_decision#* }" "$_mm3_fb"
+		_mm3_state "${1:-}" inactive "${_mm3_decision%% *}" "$_mm3_detail" "$_mm3_fb"
 	fi
 }
 
 if [ -z "${MESA_M3_SESSION_ENV_NO_RUN:-}" ]; then
 	mesa_m3_session_env
-	unset -f mesa_m3_gate mesa_m3_session_env _mm3_init _mm3_state _mm3_node_open _mm3_attempt _mm3_soc_of _mm3_25g83_board
+	unset -f mesa_m3_gate mesa_m3_session_env _mm3_init _mm3_state _mm3_node_open _mm3_attempt \
+		_mm3_soc_of _mm3_25g83_board _mm3_native_display _mm3_kernel_log \
+		_mm3_legacy_attempt_clear _mm3_system_admit
 fi
 unset _mm3_root _mm3_p _mm3_nodes _mm3_node _mm3_n _mm3_drv _mm3_dcp _mm3_c _mm3_dev _mm3_f _mm3_v \
 	_mm3_val _mm3_ifs _mm3_d _mm3_out _mm3_rc _mm3_decision _mm3_on \
 	_mm3_so _mm3_uid _mm3_sid _mm3_inv _mm3_ver _mm3_boot _mm3_cr _mm3_nl \
 	_mm3_body _mm3_kv _mm3_dir _mm3_tmp _mm3_fb _mm3_run _mm3_att _mm3_ok _mm3_faults _mm3_ign _mm3_igd \
-	_mm3_soc _mm3_name _mm3_dt _mm3_base _mm3_profile _mm3_requested _mm3_files _mm3_gate_ifs _mm3_board _mm3_note
+	_mm3_soc _mm3_name _mm3_dt _mm3_base _mm3_profile _mm3_requested _mm3_files _mm3_gate_ifs _mm3_board _mm3_note \
+	_mm3_klog _mm3_sys _mm3_admitted _mm3_detail _mm3_helper _mm3_chip _mm3_identity _mm3_socs _mm3_cmdline
