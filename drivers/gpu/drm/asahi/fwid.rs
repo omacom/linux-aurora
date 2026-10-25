@@ -147,3 +147,42 @@ pub(crate) fn identify(
     }
     Err(EINVAL)
 }
+
+#[kunit_tests(asahi_fwid)]
+mod tests {
+    use super::*;
+
+    fn image() -> [u8; 64] {
+        let mut image = [0x5a; 64];
+        for (off, tag) in [0usize, 32].into_iter().zip(ENTROPY_TAGS) {
+            image[off..off + 4].copy_from_slice(&tag);
+            image[off + 4..off + 8].copy_from_slice(&8u32.to_le_bytes());
+        }
+        image
+    }
+
+    #[test]
+    fn entropy_is_normalized_without_changing_the_image() {
+        let mut first = image();
+        let original = first;
+        let digest = digest_at(&mut first, [0, 32]).unwrap();
+        assert_eq!(first, original);
+        let mut second = first;
+        second[8..16].fill(0xff);
+        second[40..48].fill(0x01);
+        assert_eq!(digest_at(&mut second, [0, 32]), Some(digest));
+        second[63] ^= 1;
+        assert_ne!(digest_at(&mut second, [0, 32]), Some(digest));
+    }
+
+    #[test]
+    fn malformed_records_are_refused_without_changing_the_image() {
+        let mut image = image();
+        assert_eq!(digest_at(&mut image, [0, 56]), None);
+        image[36] = 7;
+        let original = image;
+        assert_eq!(digest_at(&mut image, [0, 32]), None);
+        assert_eq!(image, original);
+        assert_eq!(find_entropy(&image), None);
+    }
+}
