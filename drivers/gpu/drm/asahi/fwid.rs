@@ -103,6 +103,20 @@ fn find_entropy(image: &[u8]) -> Option<[u32; 2]> {
     Some(found)
 }
 
+/// Finds an exact identity, measuring each candidate at its own entropy offsets.
+fn lookup(
+    builds: &'static [FirmwareBuild],
+    text_size: u64,
+    data_size: u64,
+    mut digest: impl FnMut([u32; 2]) -> Option<[u8; 32]>,
+) -> Option<&'static FirmwareBuild> {
+    builds.iter().find(|build| {
+        build.text_size == text_size
+            && build.data_size == data_size
+            && digest(build.entropy) == Some(build.text_sha256)
+    })
+}
+
 /// Identifies the firmware build loaded at `text` (DATA `data_size` bytes) among `builds`,
 /// before any firmware-visible write.
 pub(crate) fn identify(
@@ -118,19 +132,20 @@ pub(crate) fn identify(
         dev_err!(dev, "GPU firmware TEXT changed while it was measured\n");
         return Err(EAGAIN);
     }
-    for build in builds {
-        if build.text_size == size as u64
-            && build.data_size == data_size
-            && digest_at(&mut copy, build.entropy) == Some(build.text_sha256)
-        {
-            dev_info!(dev, "GPU firmware build: {}\n", build.name);
-            return Ok(build);
-        }
+    if let Some(build) = lookup(builds, size as u64, data_size, |at| {
+        digest_at(&mut copy, at)
+    }) {
+        dev_info!(dev, "GPU firmware build: {}\n", build.name);
+        return Ok(build);
     }
     let Some((entropy, digest)) =
         find_entropy(&copy).and_then(|at| Some((at, digest_at(&mut copy, at)?)))
     else {
-        dev_err!(dev, "unsupported GPU firmware build: TEXT {:#x} has no entropy records\n", size);
+        dev_err!(
+            dev,
+            "unsupported GPU firmware build: TEXT {:#x} has no entropy records\n",
+            size
+        );
         return Err(EINVAL);
     };
     dev_err!(
@@ -184,5 +199,70 @@ mod tests {
         assert_eq!(digest_at(&mut image, [0, 32]), None);
         assert_eq!(image, original);
         assert_eq!(find_entropy(&image), None);
+    }
+
+    fn measured(
+        builds: &'static [FirmwareBuild],
+        data_size: u64,
+        entropy: [u32; 2],
+        digest: [u8; 32],
+    ) -> Option<&'static FirmwareBuild> {
+        lookup(builds, 0x60000, data_size, |at| {
+            (at == entropy).then_some(digest)
+        })
+    }
+
+    #[test]
+    fn t6040_accepts_both_loaded_images() {
+        let crate::g17::fw::variant::Firmware::Identified(builds) =
+            crate::hw::t6040::CONFIG.firmware
+        else {
+            panic!("T6040 must identify its loaded firmware");
+        };
+        let build = builds.iter().find(|b| b.os_version == [26, 6, 2]).unwrap();
+        let digests = [
+            [
+                0x03, 0xdf, 0x75, 0x48, 0x4a, 0x7f, 0xdd, 0x6e, 0x4b, 0x47, 0x7f, 0x95, 0x6c, 0xaa,
+                0x5b, 0x44, 0x06, 0xdf, 0xff, 0x4d, 0x19, 0x17, 0x28, 0x62, 0x7f, 0x53, 0x10, 0xe0,
+                0x63, 0x87, 0x6d, 0xcd,
+            ],
+            [
+                0x19, 0x0c, 0xef, 0x19, 0x46, 0xa2, 0x3d, 0xfb, 0xde, 0x18, 0x05, 0x92, 0x62, 0x96,
+                0x31, 0xc3, 0xb2, 0x8d, 0x05, 0x09, 0xa1, 0x7e, 0xb7, 0x61, 0x08, 0xb7, 0xc9, 0xa5,
+                0x2a, 0xcc, 0xd9, 0xac,
+            ],
+        ];
+        for (i, digest) in digests.into_iter().enumerate() {
+            let found = measured(build.images, 0x138000, [0x59839, 0x5991c], digest).unwrap();
+            assert!(core::ptr::eq(found, &build.images[i]));
+            assert!(measured(build.images, 0x13c000, [0x59839, 0x5991c], digest).is_none());
+            assert!(measured(build.images, 0x138000, [0x5c8df, 0x5c9c2], digest).is_none());
+            assert!(lookup(build.images, 0x60001, 0x138000, |_| Some(digest)).is_none());
+        }
+        assert!(measured(build.images, 0x138000, [0x59839, 0x5991c], [0; 32]).is_none());
+    }
+
+    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    #[test]
+    fn j713_accepts_both_loaded_images() {
+        let builds = crate::g16::hw::t8132::CONFIG.firmware;
+        let digests = [
+            [
+                0x5f, 0x65, 0xf6, 0x14, 0x58, 0x72, 0x54, 0x70, 0xb4, 0xb0, 0xc0, 0x20, 0x28, 0x47,
+                0x7b, 0xf2, 0xea, 0x57, 0x3a, 0xfb, 0x4e, 0x0c, 0x49, 0x6e, 0xf9, 0x95, 0xe9, 0x6a,
+                0xff, 0xb0, 0xd8, 0x6c,
+            ],
+            [
+                0x3b, 0x36, 0x8e, 0xe4, 0x2d, 0xcc, 0xc6, 0x26, 0xe8, 0x49, 0x67, 0xff, 0x40, 0x87,
+                0x64, 0x71, 0x0a, 0x64, 0xbf, 0xf1, 0x59, 0x4f, 0x3c, 0xfd, 0x2c, 0x6e, 0x4d, 0x34,
+                0xd0, 0x65, 0x24, 0x8b,
+            ],
+        ];
+        for (i, digest) in digests.into_iter().enumerate() {
+            let found = measured(builds, 0x13c000, [0x5c8df, 0x5c9c2], digest).unwrap();
+            assert!(core::ptr::eq(found, &builds[i]));
+            assert!(measured(builds, 0x138000, [0x5c8df, 0x5c9c2], digest).is_none());
+        }
+        assert!(measured(builds, 0x13c000, [0x5c8df, 0x5c9c2], [0; 32]).is_none());
     }
 }

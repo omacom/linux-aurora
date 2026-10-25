@@ -71,8 +71,8 @@ pub(crate) struct Build {
     pub(crate) os_version: [u32; 3],
     /// Name, for the log.
     pub(crate) name: &'static str,
-    /// The loaded image, measured from the `fw-text` region.
-    pub(crate) image: crate::fwid::FirmwareBuild,
+    /// The admitted loaded images, measured from the `fw-text` region.
+    pub(crate) images: &'static [crate::fwid::FirmwareBuild],
     /// Layouts and rules of the build.
     pub(crate) variant: &'static Variant,
 }

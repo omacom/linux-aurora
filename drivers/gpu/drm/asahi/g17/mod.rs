@@ -1253,7 +1253,7 @@ impl Gpu {
         Err(ENODEV)
     }
 
-    /// Checks that the loaded TEXT (the `fw-text` region) is `build`'s image, with the DATA size
+    /// Checks that the loaded TEXT (the `fw-text` region) is one of `build`'s images, with the DATA size
     /// of the `fw-data` region. The version property only says which build to expect.
     fn identify_image(dev: &AsahiDrmDevice, build: &'static fw::variant::Build) -> Result {
         let node = dev.as_ref().as_ref().of_node().ok_or(EINVAL)?;
@@ -1265,7 +1265,7 @@ impl Gpu {
             dev.as_ref().as_ref(),
             start..end,
             data.size(),
-            core::slice::from_ref(&build.image),
+            build.images,
         )
         .inspect_err(|e| dev_err!(dev.as_ref(), "GPU firmware image not admitted: {:?}\n", e))?;
         Ok(())

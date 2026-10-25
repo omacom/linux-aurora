@@ -62,17 +62,30 @@ pub(crate) const CONFIG: Config = Config {
     firmware: fw::variant::Firmware::Identified(&[fw::variant::Build {
         os_version: [26, 6, 2],
         name: "macOS 26.6.2 (25G83, iBoot mBoot-18000.161.10)",
-        image: crate::fwid::FirmwareBuild {
-            name: "Apple GFX 25G83 for T6040 (normalized loaded image)",
-            text_size: 0x60000,
-            data_size: 0x138000,
-            entropy: [0x59839, 0x5991c],
-            text_sha256: [
-                0x03, 0xdf, 0x75, 0x48, 0x4a, 0x7f, 0xdd, 0x6e, 0x4b, 0x47, 0x7f, 0x95, 0x6c, 0xaa,
-                0x5b, 0x44, 0x06, 0xdf, 0xff, 0x4d, 0x19, 0x17, 0x28, 0x62, 0x7f, 0x53, 0x10, 0xe0,
-                0x63, 0x87, 0x6d, 0xcd,
-            ],
-        },
+        images: &[
+            crate::fwid::FirmwareBuild {
+                name: "Apple GFX 25G83 for T6040 (normalized loaded image)",
+                text_size: 0x60000,
+                data_size: 0x138000,
+                entropy: [0x59839, 0x5991c],
+                text_sha256: [
+                    0x03, 0xdf, 0x75, 0x48, 0x4a, 0x7f, 0xdd, 0x6e, 0x4b, 0x47, 0x7f, 0x95, 0x6c,
+                    0xaa, 0x5b, 0x44, 0x06, 0xdf, 0xff, 0x4d, 0x19, 0x17, 0x28, 0x62, 0x7f, 0x53,
+                    0x10, 0xe0, 0x63, 0x87, 0x6d, 0xcd,
+                ],
+            },
+            crate::fwid::FirmwareBuild {
+                name: "Apple GFX 25G83 for T6040 (normalized loaded image, alternate J616s fill)",
+                text_size: 0x60000,
+                data_size: 0x138000,
+                entropy: [0x59839, 0x5991c],
+                text_sha256: [
+                    0x19, 0x0c, 0xef, 0x19, 0x46, 0xa2, 0x3d, 0xfb, 0xde, 0x18, 0x05, 0x92, 0x62,
+                    0x96, 0x31, 0xc3, 0xb2, 0x8d, 0x05, 0x09, 0xa1, 0x7e, 0xb7, 0x61, 0x08, 0xb7,
+                    0xc9, 0xa5, 0x2a, 0xcc, 0xd9, 0xac,
+                ],
+            },
+        ],
         variant: &fw::variant::V25G83,
     }]),
     // Measured on the 20-core M4 Pro; other core counts are refused at probe.
@@ -122,7 +135,11 @@ const fn instances(window: RegisterWindow, instances: u32, phys_stride: u64) -> 
 /// controllers (ADT /arm-io/mcc), slot 20 the four AFR blocks.
 pub(crate) const REGISTER_WINDOWS: [RegisterWindow; 25] = [
     window(0, 0x5_0241_4000, 0x20_0000, 0x4000, 0, 2),
-    instances(window(3, 0x2_201c_4000, 0x20_8000, 0x1_8000, 0, 2), 4, 0x200_0000),
+    instances(
+        window(3, 0x2_201c_4000, 0x20_8000, 0x1_8000, 0, 2),
+        4,
+        0x200_0000,
+    ),
     window(4, 0x5_0244_c000, 0x26_c000, 0x4000, 0, 0),
     window(9, 0x5_003d_0000, 0x27_4000, 0x4000, 0, 2),
     window(10, 0x5_003c_0000, 0x27_c000, 0x4000, 0, 0),
@@ -131,7 +148,11 @@ pub(crate) const REGISTER_WINDOWS: [RegisterWindow; 25] = [
     window(14, 0x5_0040_0000, 0x29_4000, 0x1_0000, 0, 0),
     window(15, 0x5_0cdc_0000, 0x2a_8000, 0x4000, 0, 0),
     window(17, 0x2_8800_0000, 0x2b_0000, 0x2_1400, 0, 2),
-    instances(window(20, 0x2_8b00_0000, 0x2d_8000, 0x4_0000, 0, 2), 4, 0x20_0000),
+    instances(
+        window(20, 0x2_8b00_0000, 0x2d_8000, 0x4_0000, 0, 2),
+        4,
+        0x20_0000,
+    ),
     window(22, 0x2_8900_0000, 0x3d_c000, 0x8000, 0, 2),
     window(26, 0x2_88d0_4000, 0x3e_8000, 0x8000, 0xd0_4000, 2),
     window(28, 0x2_88d5_8000, 0x3f_4000, 0x8000, 0xd5_8000, 2),
