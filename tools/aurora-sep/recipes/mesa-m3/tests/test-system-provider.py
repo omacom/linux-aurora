@@ -107,10 +107,11 @@ class SystemProviderTest(unittest.TestCase):
         plain_before = "export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/provider/other\n"
         conditional = "export LD_LIBRARY_PATH=/provider/other${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"
         other_form = "export LD_LIBRARY_PATH=/provider/other:${LD_LIBRARY_PATH:-/x}\n"
-        # inherited value: unset, empty, set
-        for inherited, expect in ((None, {plain_after: 3, plain_before: 3, conditional: 0}),
-                                  ("", {plain_after: 3, plain_before: 3, conditional: 0}),
-                                  ("/usr/lib/extra", {plain_after: 0, plain_before: 0, conditional: 0})):
+        nested = "export LD_LIBRARY_PATH=/provider/other${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\n"
+        # An earlier file can clear the inherited value, so a plain reference
+        # counts as possibly empty even when the session inherits one.
+        for inherited in (None, "", "/usr/lib/extra"):
+            expect = {plain_after: 3, plain_before: 3, conditional: 0, nested: 0}
             environment = {} if inherited is None else {"LD_LIBRARY_PATH": inherited}
             for line, code in expect.items():
                 with self.subTest(inherited=inherited, line=line):
@@ -123,6 +124,11 @@ class SystemProviderTest(unittest.TestCase):
 
     def test_empty_inherited_value_is_no_entry(self):
         self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": ""}).returncode, 0)
+
+    def test_spaces_are_a_relative_entry(self):
+        for value in (" ", "/usr/lib/extra: "):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}).returncode, 3)
 
     def test_provider_and_version_overrides(self):
         for variable, value in (("GBM_BACKEND", "nvidia-drm"),
