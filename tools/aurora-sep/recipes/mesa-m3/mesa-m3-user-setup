@@ -26,7 +26,8 @@ see the comments there.
                      an LD_LIBRARY_PATH entry then also counts when it holds
                      only libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm;
                      entries split on ":" and ";", and a relative or empty
-                     entry makes the result "unknown"
+                     entry makes the result "unknown"; Bash += assignments
+                     to tracked variables are unknown too
 
 Nothing is sourced or evaluated. Files are read as text and split into words
 the way a POSIX shell would (quotes, backslashes, comments, ";"), with no
@@ -189,9 +190,11 @@ def shell_words(line):
     return words
 
 
-def shell_assignments(line):
+def shell_assignments(line, *, append_unknown=False):
     """The NAME=VALUE words of one line of shell, environment.d or
-    /etc/environment text. None when the line cannot be split."""
+    /etc/environment text. None when the line cannot be split. With
+    append_unknown, a Bash NAME+=VALUE word is emitted with a None value,
+    since its resulting value depends on earlier assignments."""
     words = shell_words(line)
     if words is None:
         return None
@@ -200,6 +203,13 @@ def shell_assignments(line):
         m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)$', w, re.S)
         if m:
             out.append((m.group(1), m.group(2)))
+        elif append_unknown:
+            # Arch's sh is Bash, which accepts += even in POSIX mode. Its
+            # value depends on earlier assignments; do not silently ignore
+            # a late provider override when admitting system Mesa.
+            m = re.match(r'([A-Za-z_][A-Za-z0-9_]*)\+=(.*)$', w, re.S)
+            if m:
+                out.append((m.group(1), None))
     return out
 
 
@@ -523,7 +533,7 @@ class Finder:
             elif is_hypr:
                 found = hyprlang_assignments(line)
             else:
-                found = shell_assignments(line)
+                found = shell_assignments(line, append_unknown=self.o['system_provider'])
                 if found is None:
                     if any(re.search(rf'(?<![A-Za-z0-9_]){re.escape(v)}(?![A-Za-z0-9_])', line) for v in names):
                         self.note(path, f'{path}:{n} cannot be split (unbalanced quotes)', sure=False)
