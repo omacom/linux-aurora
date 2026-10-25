@@ -3295,19 +3295,18 @@ static u32 dcpep_cb_set_tiling_state_v26_6(struct apple_dcp *dcp,
 
 static u8 dcpep_cb_create_backlight_service(struct apple_dcp *dcp)
 {
-#if DCP_FW_H17(DCP_FW_VER)
 	/*
-	 * H17P asks during start_ios_gated, before any mode is known, but
+	 * Firmware asks during start_ios_gated, before any mode is known, but
 	 * dcp_has_panel() only becomes true once the panel dimensions have been
-	 * parsed.  An internal panel always has a backlight, so answer for the
-	 * connector; answering false makes the firmware report that it could
-	 * not find the backlight service.
+	 * parsed.  13.5 does this as well as firmware 26 and newer.  An
+	 * internal panel always has a backlight, so answer for the connector;
+	 * answering false makes the firmware report that it could not find the
+	 * backlight service, and later writes are ignored until a modeset
+	 * power cycle.  connector_type is already eDP when the panel node has
+	 * been read.  External displays are not eDP.
 	 */
 	return dcp_has_panel(dcp) ||
 	       dcp->connector_type == DRM_MODE_CONNECTOR_eDP;
-#else
-	return dcp_has_panel(dcp);
-#endif
 }
 
 TRAMPOLINE_VOID(trampoline_nop, dcpep_cb_nop);
