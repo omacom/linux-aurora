@@ -24,8 +24,9 @@ see the comments there.
   --system-provider  also refuse legacy /opt selectors and session flags when
                      checking whether the real desktop will use system Mesa;
                      an LD_LIBRARY_PATH entry then also counts when it holds
-                     only libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm,
-                     and a relative entry makes the result "unknown"
+                     only libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm;
+                     entries split on ":" and ";", and a relative or empty
+                     entry makes the result "unknown"
 
 Nothing is sourced or evaluated. Files are read as text and split into words
 the way a POSIX shell would (quotes, backslashes, comments, ";"), with no
@@ -365,10 +366,19 @@ class Finder:
                 note(place, f'{label} replaces {name} (without ${name})')
                 return
             # Drop the references to the previous value (also ${NAME:+:$NAME}).
+            # For a system-provider check they leave a mark instead, so that
+            # an empty entry left by the removal is not taken for a real one.
+            strict = self.o['system_provider']
+            prev = '\0' if strict else ''
             rest = re.sub(r'\$\{' + re.escape(name) + r'(?::?[-+=?][^}]*)?\}|\$' + re.escape(name) + r'(?![A-Za-z0-9_])',
-                          '', value)
-            for comp in rest.split(':'):
-                comp = self.expand_home(comp.strip())
+                          prev, value)
+            # glibc's loader also splits on ";" and reads an empty entry as
+            # the current directory.
+            for comp in (re.split('[:;]', rest) if strict else rest.split(':')):
+                if strict and comp.strip() == '':
+                    note(place, f'{label} puts an empty entry in {name} (the current directory)', sure=False)
+                    continue
+                comp = self.expand_home(comp.replace('\0', '').strip())
                 if comp == '':
                     continue
                 if '$' in comp or '`' in comp:

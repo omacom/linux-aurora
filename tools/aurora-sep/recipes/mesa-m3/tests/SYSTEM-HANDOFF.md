@@ -15,11 +15,13 @@ a context but makes no draw, swap or compute calls.
 
 With `--system-provider`, the user-setup check also refuses settings the
 clean-environment helper cannot see: an `LD_LIBRARY_PATH` entry holding its
-own libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm (relative entries
-are unknown), and `GBM_BACKEND`, `__GLX_VENDOR_LIBRARY_NAME` and the Mesa
-GL/GLES/GLSL version overrides. The whole admission runs in its own `sh`
-under a 20-second timeout, so a stalled journal, home directory or scanner
-refuses instead of holding the login.
+own libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm, and
+`GBM_BACKEND`, `__GLX_VENDOR_LIBRARY_NAME` and the Mesa GL/GLES/GLSL version
+overrides. It splits `LD_LIBRARY_PATH` on `:` and `;` as glibc does, and a
+relative or empty entry (the current directory) is unknown. The admission
+returns within a 20-second timeout, so a stalled journal, home directory or
+scanner refuses instead of holding the login. The helper keeps its own
+5-second timeout.
 
 A failed check keeps the existing software fallback. `mesa_m3=off` and
 `nomodeset` remain recovery choices. Other boards, including J615, remain

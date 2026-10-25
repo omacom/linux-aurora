@@ -16,8 +16,9 @@
 #           $LD_LIBRARY_PATH), since that drops /opt/mesa-m3/lib after the
 #           session hook ran. Unrelated entries added to it are no finding.
 #           With --system-provider, an entry holding libEGL, libGLESv2, libGL,
-#           libGLX, libglapi, libgbm or a gbm/ directory is a finding too, and
-#           a relative entry is unknown.
+#           libGLX, libglapi, libgbm or a gbm/ directory is a finding too;
+#           entries split on ":" and ";" as glibc does, and a relative or
+#           empty entry (the current directory) is unknown.
 # envfile   a file that sets session variables, searched for the variables
 #           above. Shell, environment.d and /etc/environment lines are split
 #           like a POSIX shell (quotes, comments, "export", ";"); Hyprland
