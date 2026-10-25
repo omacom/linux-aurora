@@ -6,6 +6,7 @@
 /* Toplevel file. Relies on dhd_linux.c to send commands to the dongle. */
 
 #include <linux/kernel.h>
+#include <linux/delay.h>
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/vmalloc.h>
@@ -38,6 +39,9 @@
 #include "ratespec.h"
 #include "interface_create.h"
 #include "scan_timeout.h"
+#include "sleep_roam.h"
+
+static_assert(BRCMF_BCM4378_CHIP_ID == BRCM_CC_4378_CHIP_ID);
 
 #define BRCMF_SCAN_IE_LEN_MAX		2048
 
@@ -6571,11 +6575,28 @@ static s32 brcmf_get_assoc_ies(struct brcmf_cfg80211_info *cfg,
 	struct brcmf_cfg80211_edcf_acparam edcf_acparam_info[EDCF_AC_COUNT];
 	u8 *buffer = NULL, *req_ie = NULL, *resp_ie = NULL;
 	u32 req_len, resp_len, received;
+	unsigned int failures = 0;
 	s32 err;
 
+	/* Both callers run after the firmware reported connect or roam
+	 * success. On the connect path CONNECTING is already cleared and
+	 * CONNECTED is not set yet, so the retry cannot key off sme_state.
+	 */
 	brcmf_clear_assoc_ies(cfg);
-	err = brcmf_fil_iovar_data_get_len(ifp, "assoc_info", &assoc_info,
-					   sizeof(assoc_info), &received);
+	do {
+		memset(&assoc_info, 0, sizeof(assoc_info));
+		err = brcmf_fil_iovar_data_get_len(ifp, "assoc_info",
+						   &assoc_info,
+						   sizeof(assoc_info),
+						   &received);
+		if (!err)
+			break;
+		if (!brcmf_assoc_info_should_retry(drvr->bus_if->chip, err,
+						   failures, true))
+			break;
+		failures++;
+		msleep(BRCMF_ASSOC_INFO_RETRY_MS);
+	} while (failures < BRCMF_ASSOC_INFO_ATTEMPTS);
 	if (err) {
 		bphy_err(drvr, "could not get assoc info (%d)\n", err);
 		return err;

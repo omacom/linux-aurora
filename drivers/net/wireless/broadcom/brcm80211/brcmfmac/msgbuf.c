@@ -9,12 +9,15 @@
  ******************************************************************************/
 
 #include <linux/types.h>
+#include <linux/build_bug.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/ratelimit.h>
 
 #include <brcmu_utils.h>
 #include <brcmu_wifi.h>
+
+#include <brcm_hw_ids.h>
 
 #include "core.h"
 #include "debug.h"
@@ -24,7 +27,9 @@
 #include "flowring.h"
 #include "bus.h"
 #include "tracepoint.h"
+#include "sleep_roam.h"
 
+static_assert(BRCMF_BCM4378_CHIP_ID == BRCM_CC_4378_CHIP_ID);
 
 #define MSGBUF_IOCTL_RESP_TIMEOUT		msecs_to_jiffies(2000)
 
@@ -99,6 +104,17 @@
 #define BRCMF_MSGBUF_UPDATE_RX_PTR_THRS		48
 
 #define BRCMF_MAX_TXSTATUS_WAIT_RETRIES		10
+
+/* Packet-id slot state. A slot is reusable only while FREE. FILLING is
+ * owned by the allocator until skb and flowid are published. LIVE is what
+ * txstatus and flowring reclaim claim. TAKEN is the exclusive hand-off so
+ * a reclaim of one ring cannot free a pktid that a newer post reused.
+ */
+#define BRCMF_PKTID_FREE			0
+#define BRCMF_PKTID_LIVE			1
+#define BRCMF_PKTID_FILLING			2
+#define BRCMF_PKTID_TAKEN			3
+#define BRCMF_PKTID_NO_FLOW			0xffff
 
 struct msgbuf_common_hdr {
 	u8				msgtype;
@@ -318,6 +334,7 @@ struct brcmf_msgbuf {
 struct brcmf_msgbuf_pktid {
 	atomic_t  allocated;
 	u16 data_offset;
+	u16 flowid;
 	struct sk_buff *skb;
 	dma_addr_t physaddr;
 };
@@ -359,9 +376,10 @@ static int
 brcmf_msgbuf_alloc_pktid(struct device *dev,
 			 struct brcmf_msgbuf_pktids *pktids,
 			 struct sk_buff *skb, u16 data_offset,
-			 dma_addr_t *physaddr, u32 *idx)
+			 dma_addr_t *physaddr, u32 *idx, u16 flowid)
 {
 	struct brcmf_msgbuf_pktid *array;
+	struct brcmf_msgbuf_pktid *slot;
 	u32 count;
 
 	array = pktids->array;
@@ -381,9 +399,9 @@ brcmf_msgbuf_alloc_pktid(struct device *dev,
 		(*idx)++;
 		if (*idx == pktids->array_size)
 			*idx = 0;
-		if (array[*idx].allocated.counter == 0)
-			if (atomic_cmpxchg(&array[*idx].allocated, 0, 1) == 0)
-				break;
+		if (atomic_cmpxchg(&array[*idx].allocated, BRCMF_PKTID_FREE,
+				   BRCMF_PKTID_FILLING) == BRCMF_PKTID_FREE)
+			break;
 		count++;
 	} while (count < pktids->array_size);
 
@@ -393,9 +411,14 @@ brcmf_msgbuf_alloc_pktid(struct device *dev,
 		return -ENOMEM;
 	}
 
-	array[*idx].data_offset = data_offset;
-	array[*idx].physaddr = *physaddr;
-	array[*idx].skb = skb;
+	slot = &array[*idx];
+	slot->data_offset = data_offset;
+	slot->physaddr = *physaddr;
+	slot->skb = skb;
+	slot->flowid = flowid;
+	/* Publish LIVE only after flowid and skb are visible. */
+	smp_wmb();
+	atomic_set(&slot->allocated, BRCMF_PKTID_LIVE);
 
 	pktids->last_allocated_idx = *idx;
 
@@ -403,9 +426,12 @@ brcmf_msgbuf_alloc_pktid(struct device *dev,
 }
 
 
+/* Claim a LIVE pktid. When match_flow is set, a slot that belongs to
+ * another ring is put back to LIVE without being unmapped.
+ */
 static struct sk_buff *
-brcmf_msgbuf_get_pktid(struct device *dev, struct brcmf_msgbuf_pktids *pktids,
-		       u32 idx)
+brcmf_msgbuf_take_pktid(struct device *dev, struct brcmf_msgbuf_pktids *pktids,
+			u32 idx, u16 flowid, bool match_flow)
 {
 	struct brcmf_msgbuf_pktid *pktid;
 	struct sk_buff *skb;
@@ -415,19 +441,38 @@ brcmf_msgbuf_get_pktid(struct device *dev, struct brcmf_msgbuf_pktids *pktids,
 			  pktids->array_size);
 		return NULL;
 	}
-	if (pktids->array[idx].allocated.counter) {
-		pktid = &pktids->array[idx];
-		dma_unmap_single(dev, pktid->physaddr,
-				 pktid->skb->len - pktid->data_offset,
-				 pktids->direction);
-		skb = pktid->skb;
-		pktid->allocated.counter = 0;
-		return skb;
-	} else {
-		brcmf_err("Invalid packet id %d (not in use)\n", idx);
+	pktid = &pktids->array[idx];
+	if (atomic_cmpxchg(&pktid->allocated, BRCMF_PKTID_LIVE,
+			   BRCMF_PKTID_TAKEN) != BRCMF_PKTID_LIVE)
+		return NULL;
+
+	smp_rmb();
+	if (match_flow && pktid->flowid != flowid) {
+		atomic_set(&pktid->allocated, BRCMF_PKTID_LIVE);
+		return NULL;
+	}
+	if (!pktid->skb) {
+		pktid->flowid = BRCMF_PKTID_NO_FLOW;
+		atomic_set(&pktid->allocated, BRCMF_PKTID_FREE);
+		return NULL;
 	}
 
-	return NULL;
+	dma_unmap_single(dev, pktid->physaddr,
+			 pktid->skb->len - pktid->data_offset,
+			 pktids->direction);
+	skb = pktid->skb;
+	pktid->skb = NULL;
+	pktid->flowid = BRCMF_PKTID_NO_FLOW;
+	atomic_set(&pktid->allocated, BRCMF_PKTID_FREE);
+	return skb;
+}
+
+
+static struct sk_buff *
+brcmf_msgbuf_get_pktid(struct device *dev, struct brcmf_msgbuf_pktids *pktids,
+		       u32 idx)
+{
+	return brcmf_msgbuf_take_pktid(dev, pktids, idx, 0, false);
 }
 
 
@@ -442,12 +487,15 @@ brcmf_msgbuf_release_array(struct device *dev,
 	array = pktids->array;
 	count = 0;
 	do {
-		if (array[count].allocated.counter) {
+		if (atomic_read(&array[count].allocated) != BRCMF_PKTID_FREE) {
 			pktid = &array[count];
-			dma_unmap_single(dev, pktid->physaddr,
-					 pktid->skb->len - pktid->data_offset,
-					 pktids->direction);
-			brcmu_pkt_buf_free_skb(pktid->skb);
+			if (pktid->skb) {
+				dma_unmap_single(dev, pktid->physaddr,
+						 pktid->skb->len - pktid->data_offset,
+						 pktids->direction);
+				brcmu_pkt_buf_free_skb(pktid->skb);
+				pktid->skb = NULL;
+			}
 		}
 		count++;
 	} while (count < pktids->array_size);
@@ -821,7 +869,7 @@ static void brcmf_msgbuf_txflow(struct brcmf_msgbuf *msgbuf, u16 flowid)
 		skb_orphan(skb);
 		if (brcmf_msgbuf_alloc_pktid(msgbuf->drvr->bus_if->dev,
 					     msgbuf->tx_pktids, skb, ETH_HLEN,
-					     &physaddr, &pktid)) {
+					     &physaddr, &pktid, flowid)) {
 			brcmf_flowring_reinsert(flow, flowid, skb);
 			bphy_err(drvr, "No PKTID available !!\n");
 			break;
@@ -1008,7 +1056,12 @@ brcmf_msgbuf_process_txstatus(struct brcmf_msgbuf *msgbuf, void *buf)
 
 	set_bit(flowid, msgbuf->txstatus_done_map);
 	commonring = msgbuf->flowrings[flowid];
-	atomic_dec(&commonring->outstanding_tx);
+	/* BCM4378 reclaims the pktid before removing the ring and then
+	 * clears outstanding_tx. A completion that already passed
+	 * get_pktid must not drive the counter negative, and one that
+	 * loses the claim returns above with no skb.
+	 */
+	atomic_dec_if_positive(&commonring->outstanding_tx);
 
 	ifp = brcmf_get_ifp(msgbuf->drvr, tx_status->msg.ifidx);
 	/* Key on the flowring's ifidx, which the host assigned when it queued
@@ -1016,13 +1069,14 @@ brcmf_msgbuf_process_txstatus(struct brcmf_msgbuf *msgbuf, void *buf)
 	 * logged nothing for 1227 awdl0 frames each, and a completion
 	 * echoed under ifidx 0 would have been invisible to both filters.
 	 *
-	 * The ring may already be gone: brcmf_msgbuf_delete_flowring() gives up
-	 * on outstanding frames after ~75 ms and the firmware completes them
-	 * (0x0006 EXPIRED) after the ring was freed -- awdl0's VO multicast
-	 * never completes while the ring is open (observed as a NULL deref
-	 * here on `awdl-if destroy`). The skb and its pktid are unaffected.
-	 * Only the trace looks the ring up, under the ring's lock, so that a
-	 * ring removed from another context is not read while it is freed.
+	 * The ring may already be gone. On BCM4378 the host reclaims the
+	 * pktid first, so this path does not run for those frames. Other
+	 * chips still give up after ~75 ms; firmware then completes the
+	 * frame (0x0006 EXPIRED) after the ring was freed. awdl0's VO
+	 * multicast never completes while the ring is open (observed as a
+	 * NULL deref here on `awdl-if destroy`). Only the trace looks the
+	 * ring up, under the ring's lock, so that a ring removed from
+	 * another context is not read while it is freed.
 	 */
 	if (READ_ONCE(brcmf_awdl_trace)) {
 		ring_ifidx = brcmf_msgbuf_flowring_ifidx(msgbuf, flowid);
@@ -1078,7 +1132,8 @@ static u32 brcmf_msgbuf_rxbuf_data_post(struct brcmf_msgbuf *msgbuf, u32 count)
 		pktlen = skb->len;
 		if (brcmf_msgbuf_alloc_pktid(msgbuf->drvr->bus_if->dev,
 					     msgbuf->rx_pktids, skb, 0,
-					     &physaddr, &pktid)) {
+					     &physaddr, &pktid,
+					     BRCMF_PKTID_NO_FLOW)) {
 			dev_kfree_skb_any(skb);
 			bphy_err(drvr, "No PKTID available !!\n");
 			brcmf_commonring_write_cancel(commonring, alloced - i);
@@ -1188,7 +1243,8 @@ brcmf_msgbuf_rxbuf_ctrl_post(struct brcmf_msgbuf *msgbuf, bool event_buf,
 		pktlen = skb->len;
 		if (brcmf_msgbuf_alloc_pktid(msgbuf->drvr->bus_if->dev,
 					     msgbuf->rx_pktids, skb, 0,
-					     &physaddr, &pktid)) {
+					     &physaddr, &pktid,
+					     BRCMF_PKTID_NO_FLOW)) {
 			dev_kfree_skb_any(skb);
 			bphy_err(drvr, "No PKTID available !!\n");
 			brcmf_commonring_write_cancel(commonring, alloced - i);
@@ -1552,6 +1608,55 @@ int brcmf_proto_msgbuf_rx_trigger(struct device *dev)
 }
 
 
+/* Finish host state for frames BCM4378 will not complete. The ring lock is
+ * not held: txflow posts only while the ring is OPEN, and RING_CLOSING is
+ * set under that lock before this runs. take_pktid() serializes with
+ * txstatus.
+ */
+static void brcmf_msgbuf_reclaim_flowring_tx(struct brcmf_msgbuf *msgbuf,
+					     u16 flowid)
+{
+	struct brcmf_commonring *commonring;
+	struct brcmf_msgbuf_pktids *pktids = msgbuf->tx_pktids;
+	struct brcmf_if *ifp = NULL;
+	u32 idx;
+
+	if (!pktids || flowid >= msgbuf->max_flowrings)
+		return;
+	commonring = msgbuf->flowrings[flowid];
+	if (!commonring)
+		return;
+
+	if (msgbuf->flow->rings[flowid]) {
+		u8 ifidx = brcmf_flowring_ifidx_get(msgbuf->flow, flowid);
+
+		ifp = brcmf_get_ifp(msgbuf->drvr, ifidx);
+	}
+
+	for (idx = 0; idx < pktids->array_size; idx++) {
+		struct brcmf_msgbuf_pktid *slot = &pktids->array[idx];
+		struct sk_buff *skb;
+
+		/* Do not claim another ring's live pktid. A reuse of this
+		 * index is rejected again inside take_pktid().
+		 */
+		if (atomic_read(&slot->allocated) != BRCMF_PKTID_LIVE)
+			continue;
+		/* Pairs with alloc's smp_wmb() before LIVE is published. */
+		smp_rmb();
+		if (READ_ONCE(slot->flowid) != flowid)
+			continue;
+
+		skb = brcmf_msgbuf_take_pktid(msgbuf->drvr->bus_if->dev,
+					      pktids, idx, flowid, true);
+		if (!skb)
+			continue;
+		atomic_dec_if_positive(&commonring->outstanding_tx);
+		brcmf_txfinalize(ifp, skb, false);
+	}
+}
+
+
 void brcmf_msgbuf_delete_flowring(struct brcmf_pub *drvr, u16 flowid)
 {
 	struct brcmf_msgbuf *msgbuf = (struct brcmf_msgbuf *)drvr->proto->pd;
@@ -1569,14 +1674,23 @@ void brcmf_msgbuf_delete_flowring(struct brcmf_pub *drvr, u16 flowid)
 	flow->rings[flowid]->status = RING_CLOSING;
 	brcmf_commonring_unlock(commonring_del);
 
-	/* wait for commonring txflow finished */
-	while (retry && atomic_read(&commonring_del->outstanding_tx)) {
-		usleep_range(5000, 10000);
-		retry--;
-	}
-	if (!retry) {
-		brcmf_err("timed out waiting for txstatus\n");
+	if (!brcmf_flowring_wait_txstatus(drvr->bus_if->chip)) {
+		/* Firmware drops these frames across roam and sleep and
+		 * completes them late, or not at all once the bus is down.
+		 * Reclaim the pktids so a late txstatus finds them free.
+		 */
+		brcmf_msgbuf_reclaim_flowring_tx(msgbuf, flowid);
 		atomic_set(&commonring_del->outstanding_tx, 0);
+	} else {
+		/* wait for commonring txflow finished */
+		while (retry && atomic_read(&commonring_del->outstanding_tx)) {
+			usleep_range(5000, 10000);
+			retry--;
+		}
+		if (!retry) {
+			brcmf_err("timed out waiting for txstatus\n");
+			atomic_set(&commonring_del->outstanding_tx, 0);
+		}
 	}
 
 	/* no need to submit if firmware can not be reached */
