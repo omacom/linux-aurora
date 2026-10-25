@@ -255,7 +255,6 @@ class Finder:
         self.paths, self.details, self.findings = [], [], []
         self.present = self.unknown = False
         self.cur_kind = None
-        self.env = None
         self.kind = {}
         for k, i in items:
             if k in ('variable', 'flag', 'prefix', 'ldpath'):
@@ -366,38 +365,34 @@ class Finder:
                 # while the other Mesa variables still point into the prefix.
                 note(place, f'{label} replaces {name} (without ${name})')
                 return
-            ref = r'\$\{' + re.escape(name) + r'(?::?[-+=?][^}]*)?\}|\$' + re.escape(name) + r'(?![A-Za-z0-9_])'
+            n = re.escape(name)
+            ref = (r'\$\{' + n + r':\+:\$\{' + n + r'\}\}|\$\{' + n + r'(?::?[-+=?][^}]*)?\}|\$' + n +
+                   r'(?![A-Za-z0-9_])')
             strict = self.o['system_provider']
             if not strict:
                 # Drop the references to the previous value (also ${NAME:+:$NAME}).
                 rest = re.sub(ref, '', value)
                 comps = rest.split(':')
             else:
-                # Expand them with the inherited value instead: "/a:$NAME" with
-                # NAME unset leaves "/a:", whose empty entry glibc's loader
-                # reads as the current directory. Only plain references and
-                # ${NAME:+:$NAME} have a known result. glibc also splits on ";"
-                # and ignores a wholly empty value.
-                prev = (self.env or {}).get(name, '')
+                # The previous value may be empty here (unset, or cleared by an
+                # earlier file), and then "/a:$NAME" leaves "/a:", whose empty
+                # entry glibc's loader reads as the current directory. So a
+                # plain reference counts as empty; ${NAME:+:$NAME} adds nothing
+                # then and is the safe form. Any other form is unknown. glibc
+                # also splits on ";" and ignores a wholly empty value.
                 plain = ('$' + name, '${' + name + '}')
                 cond = tuple('${' + name + ':+:' + r + '}' for r in plain)
-                def expand(m):
-                    t = m.group(0)
-                    if t in plain:
-                        return prev
-                    if t in cond:
-                        return ':' + prev if prev else ''
-                    return '\0'
-                rest = re.sub(ref, expand, value)
-                comps = re.split('[:;]', rest) if rest.strip() else []
+                rest = re.sub(ref, lambda m: '' if m.group(0) in plain + cond else '\0', value)
+                comps = re.split('[:;]', rest) if rest != '' else []
             for comp in comps:
                 if strict and '\0' in comp:
                     note(place, f'{label} uses {name} in a form whose result is not known', sure=False)
                     continue
-                if strict and comp.strip() == '':
+                if strict and comp == '':
                     note(place, f'{label} leaves an empty entry in {name} (the current directory)', sure=False)
                     continue
-                comp = self.expand_home(comp.strip())
+                # glibc takes an entry as written, spaces included.
+                comp = self.expand_home(comp if strict else comp.strip())
                 if comp == '':
                     continue
                 if '$' in comp or '`' in comp:
@@ -541,7 +536,6 @@ class Finder:
                             'uses its own default prefix')
 
     def run(self, env):
-        self.env = env
         if env is not None:
             self.check_env(env, 'the environment')
         env_prefix = env.get('CHONKSTEP_M3_MESA_PREFIX') if env else None

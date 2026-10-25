@@ -18,7 +18,9 @@ clean-environment helper cannot see: an `LD_LIBRARY_PATH` entry holding its
 own libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm, and
 `GBM_BACKEND`, `__GLX_VENDOR_LIBRARY_NAME` and the Mesa GL/GLES/GLSL version
 overrides. It splits `LD_LIBRARY_PATH` on `:` and `;` as glibc does, and a
-relative or empty entry (the current directory) is unknown. The admission
+relative or empty entry (the current directory) is unknown. A plain
+`$LD_LIBRARY_PATH` reference counts as empty, because an earlier file may
+have cleared it; `${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}` passes. The admission
 returns within a 20-second timeout, so a stalled journal, home directory or
 scanner refuses instead of holding the login. The helper keeps its own
 5-second timeout.
