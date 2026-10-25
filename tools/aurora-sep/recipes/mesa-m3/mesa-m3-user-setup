@@ -366,23 +366,35 @@ class Finder:
                 note(place, f'{label} replaces {name} (without ${name})')
                 return
             n = re.escape(name)
-            ref = (r'\$\{' + n + r':\+:\$\{' + n + r'\}\}|\$\{' + n + r'(?::?[-+=?][^}]*)?\}|\$' + n +
-                   r'(?![A-Za-z0-9_])')
             strict = self.o['system_provider']
             if not strict:
                 # Drop the references to the previous value (also ${NAME:+:$NAME}).
-                rest = re.sub(ref, '', value)
+                rest = re.sub(r'\$\{' + n + r'(?::?[-+=?][^}]*)?\}|\$' + n + r'(?![A-Za-z0-9_])', '', value)
                 comps = rest.split(':')
+            elif place.startswith('environment:'):
+                # Already expanded: taken literally, as glibc does.
+                comps = re.split('[:;]', value) if value != '' else []
             else:
                 # The previous value may be empty here (unset, or cleared by an
                 # earlier file), and then "/a:$NAME" leaves "/a:", whose empty
                 # entry glibc's loader reads as the current directory. So a
-                # plain reference counts as empty; ${NAME:+:$NAME} adds nothing
-                # then and is the safe form. Any other form is unknown. glibc
-                # also splits on ";" and ignores a wholly empty value.
+                # plain reference counts as empty, and ${NAME:+:$NAME} (which
+                # then adds nothing) is the safe form. A reference must stand
+                # alone between separators: "${NAME}/x" names a directory we
+                # cannot see. Anything else is unknown. glibc also splits on
+                # ";" and ignores a wholly empty value.
+                ref = (r'\$\{' + n + r':\+:\$\{' + n + r'\}\}|\$\{' + n + r'(?::?[-+=?][^}]*)?\}|\$' + n +
+                       r'(?![A-Za-z0-9_])')
                 plain = ('$' + name, '${' + name + '}')
                 cond = tuple('${' + name + ':+:' + r + '}' for r in plain)
-                rest = re.sub(ref, lambda m: '' if m.group(0) in plain + cond else '\0', value)
+                sep = (':', ';')
+                rest, at = '', 0
+                for m in re.finditer(ref, value):
+                    t, before, after = m.group(0), value[m.start() - 1:m.start()], value[m.end():m.end() + 1]
+                    alone = (after in ('',) + sep) and (t in cond or before in ('',) + sep)
+                    rest += value[at:m.start()] + ('' if alone and t in plain + cond else '\0')
+                    at = m.end()
+                rest += value[at:]
                 comps = re.split('[:;]', rest) if rest != '' else []
             for comp in comps:
                 if strict and '\0' in comp:

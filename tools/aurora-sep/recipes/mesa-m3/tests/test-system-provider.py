@@ -125,6 +125,34 @@ class SystemProviderTest(unittest.TestCase):
     def test_empty_inherited_value_is_no_entry(self):
         self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": ""}).returncode, 0)
 
+    def test_reference_with_a_suffix_is_unknown(self):
+        (self.root / "provider/suffix").mkdir(parents=True)
+        (self.root / "provider/suffix/libEGL.so.1").touch()
+        folder = self.root / "home/tester/.config/uwsm"
+        folder.mkdir(parents=True)
+        for line in ("export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}/suffix\n",
+                     "export LD_LIBRARY_PATH=/a${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}/suffix\n",
+                     "export LD_LIBRARY_PATH=/prefix$LD_LIBRARY_PATH\n"):
+            with self.subTest(line=line):
+                (folder / "env").write_text(line)
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "/provider"}).returncode, 3)
+
+    def test_environment_value_is_literal(self):
+        self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "$LD_LIBRARY_PATH"}).returncode, 3)
+
+    def test_legacy_ldpath_rules_are_unchanged(self):
+        (self.root / "provider/mesa").mkdir(parents=True)
+        (self.root / "provider/mesa/libgallium-26.so").touch()
+        folder = self.root / "home/tester/.config/uwsm"
+        folder.mkdir(parents=True)
+        for line, code in (("export LD_LIBRARY_PATH=/x:$LD_LIBRARY_PATH\n", 0),
+                           ("export LD_LIBRARY_PATH=/provider/mesa:$LD_LIBRARY_PATH\n", 1),
+                           ("export LD_LIBRARY_PATH=lib:$LD_LIBRARY_PATH\n", 0),
+                           ("export LD_LIBRARY_PATH=/x::$LD_LIBRARY_PATH\n", 0)):
+            with self.subTest(line=line):
+                (folder / "env").write_text(line)
+                self.assertEqual(self.run_detector(system=False).returncode, code)
+
     def test_spaces_are_a_relative_entry(self):
         for value in (" ", "/usr/lib/extra: "):
             with self.subTest(value=value):
