@@ -391,7 +391,10 @@ class Finder:
                 rest, at = '', 0
                 for m in re.finditer(ref, value):
                     t, before, after = m.group(0), value[m.start() - 1:m.start()], value[m.end():m.end() + 1]
-                    alone = (after in ('',) + sep) and (t in cond or before in ('',) + sep)
+                    # A conditional append needs an entry before it, or it
+                    # starts the value with an empty entry.
+                    edge = ('',) + sep
+                    alone = after in edge and ((before not in edge) if t in cond else (before in edge))
                     rest += value[at:m.start()] + ('' if alone and t in plain + cond else '\0')
                     at = m.end()
                 rest += value[at:]
@@ -403,8 +406,12 @@ class Finder:
                 if strict and comp == '':
                     note(place, f'{label} leaves an empty entry in {name} (the current directory)', sure=False)
                     continue
-                # glibc takes an entry as written, spaces included.
-                comp = self.expand_home(comp if strict else comp.strip())
+                # glibc takes an entry as written, spaces included, and an
+                # environment value has no ~ or $HOME left to expand.
+                if not strict:
+                    comp = self.expand_home(comp.strip())
+                elif not place.startswith('environment:'):
+                    comp = self.expand_home(comp)
                 if comp == '':
                     continue
                 if '$' in comp or '`' in comp:

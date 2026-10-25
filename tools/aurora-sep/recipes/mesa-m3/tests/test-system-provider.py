@@ -138,7 +138,21 @@ class SystemProviderTest(unittest.TestCase):
                 self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "/provider"}).returncode, 3)
 
     def test_environment_value_is_literal(self):
-        self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "$LD_LIBRARY_PATH"}).returncode, 3)
+        (self.root / "home/tester/provider").mkdir(parents=True)
+        (self.root / "home/tester/provider/libEGL.so.1").touch()
+        for value in ("$LD_LIBRARY_PATH", "$HOME/provider", "~/provider"):
+            with self.subTest(value=value):
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}).returncode, 3)
+
+    def test_conditional_append_needs_an_entry_before_it(self):
+        folder = self.root / "home/tester/.config/uwsm"
+        folder.mkdir(parents=True)
+        for line in ("export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n",
+                     "export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}\n",
+                     "export LD_LIBRARY_PATH=/x:${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"):
+            with self.subTest(line=line):
+                (folder / "env").write_text(line)
+                self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "/usr/lib/extra"}).returncode, 3)
 
     def test_legacy_ldpath_rules_are_unchanged(self):
         (self.root / "provider/mesa").mkdir(parents=True)
