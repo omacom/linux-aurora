@@ -99,18 +99,30 @@ class SystemProviderTest(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": value}).returncode, code)
 
-    def test_previous_value_reference_is_not_an_empty_entry(self):
+    def test_previous_value_expands_like_the_shell(self):
         folder = self.root / "home/tester/.config/uwsm"
         folder.mkdir(parents=True)
         (self.root / "provider/other").mkdir(parents=True)
-        for line in ("export LD_LIBRARY_PATH=/provider/other:$LD_LIBRARY_PATH\n",
-                     "export LD_LIBRARY_PATH=/provider/other${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n",
-                     "export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/provider/other\n"):
-            with self.subTest(line=line):
-                (folder / "env").write_text(line)
-                self.assertEqual(self.run_detector().returncode, 0)
-        (folder / "env").write_text("export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:\n")
-        self.assertEqual(self.run_detector().returncode, 3)
+        plain_after = "export LD_LIBRARY_PATH=/provider/other:$LD_LIBRARY_PATH\n"
+        plain_before = "export LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/provider/other\n"
+        conditional = "export LD_LIBRARY_PATH=/provider/other${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\n"
+        other_form = "export LD_LIBRARY_PATH=/provider/other:${LD_LIBRARY_PATH:-/x}\n"
+        # inherited value: unset, empty, set
+        for inherited, expect in ((None, {plain_after: 3, plain_before: 3, conditional: 0}),
+                                  ("", {plain_after: 3, plain_before: 3, conditional: 0}),
+                                  ("/usr/lib/extra", {plain_after: 0, plain_before: 0, conditional: 0})):
+            environment = {} if inherited is None else {"LD_LIBRARY_PATH": inherited}
+            for line, code in expect.items():
+                with self.subTest(inherited=inherited, line=line):
+                    (folder / "env").write_text(line)
+                    self.assertEqual(self.run_detector(environment).returncode, code)
+        (folder / "env").write_text(other_form)
+        self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": "/usr/lib/extra"}).returncode, 3)
+        (folder / "env").write_text(conditional)
+        self.assertEqual(self.run_detector(system=False).returncode, 0)
+
+    def test_empty_inherited_value_is_no_entry(self):
+        self.assertEqual(self.run_detector({"LD_LIBRARY_PATH": ""}).returncode, 0)
 
     def test_provider_and_version_overrides(self):
         for variable, value in (("GBM_BACKEND", "nvidia-drm"),
