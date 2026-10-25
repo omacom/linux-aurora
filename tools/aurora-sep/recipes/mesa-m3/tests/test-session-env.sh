@@ -10,6 +10,9 @@ T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 fail=0
 UID_=$(id -u)
+# The shell this suite runs under, for the cases that must exercise it.
+TSH=sh
+[ -z "${BASH_VERSION:-}" ] || TSH=bash
 
 mkdir -p "$T/bin" "$T/home"
 # journalctl, as the hook calls it (the whole kernel log of this boot):
@@ -36,6 +39,7 @@ verdictok) normal; echo "asahi 292400000.gpu: M3 G15G verdict: firmware-running:
 g15g) normal; echo "asahi 292400000.gpu: M3 G15G: firmware crashed, retained crashlog bytes=4096" ;;
 noperm) : ;;
 error) echo "Failed to open journal: Permission denied" >&2; exit 1 ;;
+stall) sleep 60; normal ;;
 esac
 exit 0
 J
@@ -686,6 +690,8 @@ env | sort > "$here/system-check.env"
 [ ! -e "$here/system-check.fail" ]
 H
 	chmod +x "$_hr/opt/mesa-m3/libexec/mesa-m3-system-check"
+	# The bounded admission sources the installed hook again in its own sh.
+	cp "$ENVFILE" "$_hr/opt/mesa-m3/libexec/mesa-m3-session-env"
 	echo "$_hr"
 }
 handoff() { # ROOT FALLBACK HELPER_CALLED [VAR=value...]
@@ -696,7 +702,7 @@ handoff() { # ROOT FALLBACK HELPER_CALLED [VAR=value...]
 	_hbefore=missing
 	[ ! -f "$_ha" ] || _hbefore=$(sha256sum "$_ha" | cut -d' ' -f1)
 	_ho=$(env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE_LOG="$T/log" \
-		XDG_CURRENT_DESKTOP=Hyprland "$@" sh -c '
+		XDG_CURRENT_DESKTOP=Hyprland "$@" "$TSH" -c '
 		MESA_M3_SESSION_ENV_NO_RUN=1 . "$1"
 		mesa_m3_session_env "$2"
 		printf "software=%s\nmarker=%s\nlegacy=%s\n" "${LIBGL_ALWAYS_SOFTWARE:-}" "${MESA_M3_FALLBACK:-}" "${MESA_M3_SESSION:-}"
@@ -802,6 +808,28 @@ for value in 'LIBGL_DRIVERS_PATH=/opt/mesa-m3/lib/dri' 'VK_DRIVER_FILES=$UNKNOWN
 	printf '%s\n' "$value" > "$HR$T/home/.config/uwsm/env"
 	handoff "$HR" software no
 done
+for variable in GBM_BACKEND=nvidia-drm MESA_GL_VERSION_OVERRIDE=4.6; do
+	HR=$(system_root "override-${variable%%=*}" pro)
+	handoff "$HR" software no "$variable"
+done
+HR=$(system_root no-installed-hook pro)
+rm "$HR/opt/mesa-m3/libexec/mesa-m3-session-env"
+handoff "$HR" software no
+# A stalled journal or scanner refuses within the bound (20 s, then 2 s to
+# kill) and keeps the software fallback, instead of holding the login.
+HR=$(system_root stalled-journal pro)
+_hstart=$(date +%s)
+handoff "$HR" software no FAKE_JOURNAL=stall
+_hspent=$(( $(date +%s) - _hstart ))
+if [ "$_hspent" -le 30 ]; then echo "ok    stalled-journal: refused after ${_hspent}s"
+else echo "FAIL  stalled-journal: took ${_hspent}s"; fail=1; fi
+HR=$(system_root stalled-detector pro)
+printf '#!/bin/sh\nsleep 60\n' > "$HR/opt/mesa-m3/libexec/mesa-m3-user-setup"
+_hstart=$(date +%s)
+handoff "$HR" software no
+_hspent=$(( $(date +%s) - _hstart ))
+if [ "$_hspent" -le 30 ]; then echo "ok    stalled-detector: refused after ${_hspent}s"
+else echo "FAIL  stalled-detector: took ${_hspent}s"; fail=1; fi
 HR=$(system_root failed-legacy-login pro)
 HATT="$HR$T/home/.local/state/mesa-m3/attempt"
 HOK="$HR$T/home/.local/state/mesa-m3/session-ok"
