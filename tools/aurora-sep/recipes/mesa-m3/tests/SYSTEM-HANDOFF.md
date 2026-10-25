@@ -13,6 +13,14 @@ A bounded helper then opens the exact EGL device using only `/usr` libraries
 and verifies its native renderer and loaded implementation paths. It creates
 a context but makes no draw, swap or compute calls.
 
+With `--system-provider`, the user-setup check also refuses settings the
+clean-environment helper cannot see: an `LD_LIBRARY_PATH` entry holding its
+own libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm (relative entries
+are unknown), and `GBM_BACKEND`, `__GLX_VENDOR_LIBRARY_NAME` and the Mesa
+GL/GLES/GLSL version overrides. The whole admission runs in its own `sh`
+under a 20-second timeout, so a stalled journal, home directory or scanner
+refuses instead of holding the login.
+
 A failed check keeps the existing software fallback. `mesa_m3=off` and
 `nomodeset` remain recovery choices. Other boards, including J615, remain
 outside this system handoff. Explicit legacy profile selection is unchanged.
@@ -20,6 +28,14 @@ No opt-in flags, attempt records or success markers are added or removed.
 Only the exact software-fallback pair previously exported by this hook can
 be cleared. The state remains `inactive`, `reason=opt-out`, `fallback=none`
 when system Mesa admission succeeds.
+
+The helper proves only that the system EGL device and a context open. It does
+not allocate GBM buffers, render or present. A system-Mesa login that passes
+admission and then fails later is not recorded: this path writes no attempt,
+so the legacy success-marker check cannot see it, and the next login is
+admitted again. Recover with `mesa_m3=off` on the kernel command line or by
+removing the opt-out file. Separate system-Mesa attempt and success markers
+would make that recovery automatic.
 
 Run the host checks from this directory (a writable TMPDIR may be needed):
 

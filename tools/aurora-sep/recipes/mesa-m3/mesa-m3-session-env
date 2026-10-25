@@ -72,7 +72,8 @@
 # J613 (T8122) or a J516S (T6030) is the exception: when the same node,
 # display, kernel-log, user-setup and same-boot attempt checks pass and
 # mesa-m3-system-check admits /usr, the session keeps system Mesa
-# (fallback=none, no new attempt). mesa_m3=off stays on the software fallback.
+# (fallback=none, no new attempt). The whole check runs in its own sh and is
+# refused after 20 seconds. mesa_m3=off stays on the software fallback.
 #
 # Each login writes /run/user/<uid>/mesa-m3-session.state (atomically, 0644,
 # key=value lines, first line schema=aurora.mesa-m3-session/2) and logs one
@@ -450,6 +451,16 @@ _mm3_system_admit() {
 	printf '%s\n' "system Mesa on /usr admits /dev/dri/${_mm3_node##*/} ($_mm3_chip); /opt/mesa-m3 stays inactive"
 }
 
+# _mm3_system_admit in its own sh, under one timeout for the whole check. A
+# stalled journal, home directory or scanner would otherwise hold this login
+# before any fallback is exported. A timeout refuses, as any failure does.
+_mm3_system_admit_bounded() {
+	_mm3_self=${1:-}/opt/mesa-m3/libexec/mesa-m3-session-env
+	[ -r "$_mm3_self" ] || return 1
+	timeout -k 2 20 sh -c 'MESA_M3_SESSION_ENV_NO_RUN=1 . "$1" && _mm3_p=$3 && _mm3_system_admit "$2"' \
+		sh "$_mm3_self" "${1:-}" "$_mm3_p"
+}
+
 # _mm3_state ROOT DECISION REASON DETAIL FALLBACK: write the state file and the journal
 # line. A value holding a newline or carriage return is refused.
 _mm3_state() {
@@ -557,7 +568,7 @@ mesa_m3_session_env() {
 		_mm3_detail=${_mm3_decision#* }
 		_mm3_admitted=0
 		if [ "${_mm3_decision%% *}" = opt-out ]; then
-			_mm3_sys=$(_mm3_system_admit "${1:-}")
+			_mm3_sys=$(_mm3_system_admit_bounded "${1:-}")
 			if [ "$?" -eq 0 ]; then
 				_mm3_admitted=1
 				_mm3_detail="$_mm3_detail; $_mm3_sys"
@@ -583,11 +594,12 @@ if [ -z "${MESA_M3_SESSION_ENV_NO_RUN:-}" ]; then
 	mesa_m3_session_env
 	unset -f mesa_m3_gate mesa_m3_session_env _mm3_init _mm3_state _mm3_node_open _mm3_attempt \
 		_mm3_soc_of _mm3_25g83_board _mm3_native_display _mm3_kernel_log \
-		_mm3_legacy_attempt_clear _mm3_system_admit
+		_mm3_legacy_attempt_clear _mm3_system_admit _mm3_system_admit_bounded
 fi
 unset _mm3_root _mm3_p _mm3_nodes _mm3_node _mm3_n _mm3_drv _mm3_dcp _mm3_c _mm3_dev _mm3_f _mm3_v \
 	_mm3_val _mm3_ifs _mm3_d _mm3_out _mm3_rc _mm3_decision _mm3_on \
 	_mm3_so _mm3_uid _mm3_sid _mm3_inv _mm3_ver _mm3_boot _mm3_cr _mm3_nl \
 	_mm3_body _mm3_kv _mm3_dir _mm3_tmp _mm3_fb _mm3_run _mm3_att _mm3_ok _mm3_faults _mm3_ign _mm3_igd \
 	_mm3_soc _mm3_name _mm3_dt _mm3_base _mm3_profile _mm3_requested _mm3_files _mm3_gate_ifs _mm3_board _mm3_note \
-	_mm3_klog _mm3_sys _mm3_admitted _mm3_detail _mm3_helper _mm3_chip _mm3_identity _mm3_socs _mm3_cmdline
+	_mm3_klog _mm3_sys _mm3_admitted _mm3_detail _mm3_helper _mm3_chip _mm3_identity _mm3_socs _mm3_cmdline \
+	_mm3_self

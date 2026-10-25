@@ -22,7 +22,10 @@ see the comments there.
                      any environment file); empty or absent: unknown
   --root DIR         prefix every path with DIR (tests)
   --system-provider  also refuse legacy /opt selectors and session flags when
-                     checking whether the real desktop will use system Mesa
+                     checking whether the real desktop will use system Mesa;
+                     an LD_LIBRARY_PATH entry then also counts when it holds
+                     only libEGL, libGLESv2, libGL, libGLX, libglapi or libgbm,
+                     and a relative entry makes the result "unknown"
 
 Nothing is sourced or evaluated. Files are read as text and split into words
 the way a POSIX shell would (quotes, backslashes, comments, ";"), with no
@@ -259,9 +262,13 @@ class Finder:
             # These may be left over from an active legacy session. The
             # admission helper's clean environment cannot prove that the
             # real desktop will use /usr while these remain in its setup.
+            # The rest choose the desktop's GL/GBM provider or its version,
+            # which the clean-environment helper never sees.
             for name in ('LD_PRELOAD', 'LD_AUDIT', 'MESA_M3_SESSION', 'MESA_M3_PROFILE',
                          'ASAHI_M3_EXPERIMENTAL', 'AGX_MESA_DEBUG', 'HK_DEBUG_LOG',
-                         'VK_LOADER_LAYERS_DISABLE', 'QSG_RHI_BACKEND'):
+                         'VK_LOADER_LAYERS_DISABLE', 'QSG_RHI_BACKEND',
+                         'GBM_BACKEND', '__GLX_VENDOR_LIBRARY_NAME', 'MESA_GL_VERSION_OVERRIDE',
+                         'MESA_GLES_VERSION_OVERRIDE', 'MESA_GLSL_VERSION_OVERRIDE'):
                 self.kind[name] = 'flag'
 
     def real(self, p):
@@ -319,6 +326,11 @@ class Finder:
     def holds_mesa(self, d):
         r = self.real(d)
         pats = ('libgallium*', 'libEGL_mesa*', 'libvulkan_asahi*', 'dri/*_dri.so')
+        if self.o['system_provider']:
+            # Any of these replaces what the desktop loads from /usr, even
+            # without a Mesa driver of its own next to it.
+            pats += ('libEGL.so*', 'libEGL_*', 'libGLESv2.so*', 'libGL.so*', 'libGLX*',
+                     'libglapi.so*', 'libgbm.so*', 'gbm/*')
         return any(glob.glob(os.path.join(glob.escape(r), p)) for p in pats)
 
     def expand_home(self, s):
@@ -361,6 +373,9 @@ class Finder:
                     continue
                 if '$' in comp or '`' in comp:
                     note(place, f'{label} puts an unresolved entry in {name} ({comp})', sure=False)
+                elif not comp.startswith('/') and self.o['system_provider']:
+                    # Resolved against whatever directory the desktop starts in.
+                    note(place, f'{label} puts a relative entry in {name} ({comp})', sure=False)
                 elif comp.startswith('/') and not self.ours(comp) and self.holds_mesa(os.path.normpath(comp)):
                     note(place, f'{label} puts another Mesa in {name} ({os.path.normpath(comp)})')
             return
