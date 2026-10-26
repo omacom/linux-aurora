@@ -68,9 +68,9 @@ the runtime input geometry matches the source profile. An unspecified P010
 size selects 1280x720 first. Larger P010 modes require a consistent firmware
 output reply. P010 uses two little-endian 16-bit component planes with ten useful
 MSB-aligned bits, and equal 64-byte-aligned Y/UV strides. UV immediately
-follows Y, as required for contiguous P010. The standard multi-planar V4L2
-API on T6040/IMX958 reports both NV12 and P010 as **one memory plane**
-containing both component planes. The firmware still receives two component addresses.
+follows Y, as required for contiguous P010. Both NV12 and P010 use the
+standard single-planar V4L2 API with one memory plane containing both
+component planes. The firmware still receives two component addresses.
 
 At 1920x1080, stride is 3840, Y is 4147200 bytes, UV is 2073600 bytes and
 ``sizeimage`` is 6220800. At 1280x720, stride is 2560 and ``sizeimage`` is
@@ -89,10 +89,9 @@ only after the firmware report ACK and doorbell have been published.
 NV12 pool sizes and the T8140/Neo default formats, presets and command path
 retain their existing behavior.
 
-The inherited ``multiplanar`` module parameter is removed. T6040/IMX958
-supports standard single-planar and multi-planar V4L2 negotiation for these
-contiguous formats without a parameter; the non-contiguous NV12M alias is not
-advertised. Other sensors retain their shipped single-planar API. No driver
+The inherited ``multiplanar`` module parameter and its inconsistent queue-type
+hooks are removed. All sensors use the shipped single-planar V4L2 API; the
+non-contiguous NV12M alias is not advertised. No driver
 module/kernel parameter, platform flag or per-platform Kconfig option selects
 support. NV12 stays first and is the initial format because browsers/WebRTC
 and many applications do not support P010 or simply choose the first format.

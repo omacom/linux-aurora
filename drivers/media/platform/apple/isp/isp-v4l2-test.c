@@ -37,6 +37,8 @@ static void isp_test_queue_init(struct kunit *test)
 
 	KUNIT_ASSERT_EQ(test, isp_vb2_queue_init(isp), 0);
 	KUNIT_EXPECT_GE(test, isp->vbq.max_num_buffers, VB2_MAX_FRAME);
+	KUNIT_EXPECT_EQ(test, isp->vbq.type, V4L2_BUF_TYPE_VIDEO_CAPTURE);
+	KUNIT_EXPECT_FALSE(test, isp->vbq.is_multiplanar);
 	vb2_queue_release(&isp->vbq);
 }
 
@@ -140,10 +142,6 @@ static void isp_test_p010_format(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fmt->plane_size[0], (size_t)4147200);
 	KUNIT_EXPECT_EQ(test, fmt->plane_size[1], (size_t)2073600);
 	KUNIT_EXPECT_EQ(test, f.fmt.pix.quantization, V4L2_QUANTIZATION_LIM_RANGE);
-	isp_get_mp_pix_format(isp, &f, fmt);
-	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.pixelformat, V4L2_PIX_FMT_P010);
-	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.num_planes, 1);
-	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.plane_fmt[0].sizeimage, 6220800);
 
 	isp->vbq.drv_priv = isp;
 	isp_test_set_num_buffers(test, &isp->vbq, 0);
@@ -164,10 +162,7 @@ static void isp_test_p010_format(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fmt->total_size, (size_t)1382400);
 	KUNIT_EXPECT_EQ(test, isp_num_rendered(isp), ISP_MAX_BUFFERS);
 	KUNIT_EXPECT_EQ(test, isp_num_meta(isp), ISP_MAX_BUFFERS);
-	isp_get_mp_pix_format(isp, &f, fmt);
-	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.pixelformat, V4L2_PIX_FMT_NV12);
-	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.num_planes, 1);
-	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.plane_fmt[0].sizeimage, 1382400);
+
 }
 
 static void isp_test_p010_admission(struct kunit *test)

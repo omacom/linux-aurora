@@ -803,25 +803,6 @@ static inline void isp_get_sp_pix_format(struct apple_isp *isp,
 		f->fmt.pix.quantization = V4L2_QUANTIZATION_LIM_RANGE;
 }
 
-static inline void isp_get_mp_pix_format(struct apple_isp *isp,
-					 struct v4l2_format *f,
-					 struct isp_format *fmt)
-{
-	f->fmt.pix_mp.width = fmt->preset->output_dim.x;
-	f->fmt.pix_mp.height = fmt->preset->output_dim.y;
-	/* Both contiguous formats have one memory plane and two ISP components. */
-	f->fmt.pix_mp.num_planes = 1;
-	memset(f->fmt.pix_mp.plane_fmt, 0, sizeof(f->fmt.pix_mp.plane_fmt));
-	f->fmt.pix_mp.plane_fmt[0].sizeimage = fmt->total_size;
-	f->fmt.pix_mp.plane_fmt[0].bytesperline = fmt->strides[0];
-	f->fmt.pix_mp.field = V4L2_FIELD_NONE;
-	f->fmt.pix_mp.pixelformat = fmt->pixelformat;
-	f->fmt.pix_mp.colorspace = V4L2_COLORSPACE_REC709;
-	f->fmt.pix_mp.ycbcr_enc = V4L2_YCBCR_ENC_709;
-	f->fmt.pix_mp.xfer_func = V4L2_XFER_FUNC_709;
-	f->fmt.pix_mp.quantization = V4L2_QUANTIZATION_LIM_RANGE;
-}
-
 static int isp_vidioc_get_format(struct file *file, void *fh,
 				 struct v4l2_format *f)
 {
@@ -877,69 +858,6 @@ static int isp_vidioc_try_format(struct file *file, void *fh,
 	return 0;
 }
 
-static int isp_vidioc_get_format_mplane(struct file *file, void *fh,
-					struct v4l2_format *f)
-{
-	struct apple_isp *isp = video_drvdata(file);
-	struct isp_format *fmt = isp_get_current_format(isp);
-
-	if (!isp_supports_p010(isp))
-		return -ENOTTY;
-
-	isp_get_mp_pix_format(isp, f, fmt);
-
-	return 0;
-}
-
-static int isp_vidioc_set_format_mplane(struct file *file, void *fh,
-					struct v4l2_format *f)
-{
-	struct apple_isp *isp = video_drvdata(file);
-	struct isp_format *fmt = isp_get_current_format(isp);
-	struct isp_preset *preset;
-	int err;
-
-	if (!isp_supports_p010(isp))
-		return -ENOTTY;
-
-	if (vb2_is_busy(&isp->vbq))
-		return -EBUSY;
-
-	preset = isp_select_preset(isp, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
-				   f->fmt.pix_mp.pixelformat);
-	err = isp_set_preset(isp, fmt, preset, f->fmt.pix_mp.pixelformat);
-	if (err)
-		return err;
-
-	isp_get_mp_pix_format(isp, f, fmt);
-
-	isp->vbq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-
-	return 0;
-}
-
-static int isp_vidioc_try_format_mplane(struct file *file, void *fh,
-					struct v4l2_format *f)
-{
-	struct apple_isp *isp = video_drvdata(file);
-	struct isp_format fmt = *isp_get_current_format(isp);
-	struct isp_preset *preset;
-	int err;
-
-	if (!isp_supports_p010(isp))
-		return -ENOTTY;
-
-	preset = isp_select_preset(isp, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
-				   f->fmt.pix_mp.pixelformat);
-	err = isp_set_preset(isp, &fmt, preset, f->fmt.pix_mp.pixelformat);
-	if (err)
-		return err;
-
-	isp_get_mp_pix_format(isp, f, &fmt);
-
-	return 0;
-}
-
 static int isp_vidioc_enum_input(struct file *file, void *fh,
 				 struct v4l2_input *inp)
 {
@@ -972,9 +890,7 @@ static int isp_vidioc_get_param(struct file *file, void *fh,
 {
 	struct apple_isp *isp = video_drvdata(file);
 
-	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
-	    (!isp_supports_p010(isp) ||
-	     a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE))
+	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
 	a->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
@@ -990,9 +906,7 @@ static int isp_vidioc_set_param(struct file *file, void *fh,
 	struct apple_isp *isp = video_drvdata(file);
 	struct v4l2_fract *tpf = &a->parm.capture.timeperframe;
 
-	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
-	    (!isp_supports_p010(isp) ||
-	     a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE))
+	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
 		return -EINVAL;
 
 	/* The rate is configured when the stream starts. */
@@ -1041,9 +955,6 @@ static const struct v4l2_ioctl_ops isp_v4l2_ioctl_ops = {
 	.vidioc_g_fmt_vid_cap = isp_vidioc_get_format,
 	.vidioc_s_fmt_vid_cap = isp_vidioc_set_format,
 	.vidioc_try_fmt_vid_cap = isp_vidioc_try_format,
-	.vidioc_g_fmt_vid_cap_mplane = isp_vidioc_get_format_mplane,
-	.vidioc_s_fmt_vid_cap_mplane = isp_vidioc_set_format_mplane,
-	.vidioc_try_fmt_vid_cap_mplane = isp_vidioc_try_format_mplane,
 
 	.vidioc_enum_framesizes = isp_vidioc_enum_framesizes,
 	.vidioc_enum_frameintervals = isp_vidioc_enum_frameintervals,
@@ -1213,8 +1124,6 @@ int apple_isp_setup_video(struct apple_isp *isp)
 	vdev->fops = &isp_v4l2_fops;
 	vdev->ioctl_ops = &isp_v4l2_ioctl_ops;
 	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
-	if (isp_supports_p010(isp))
-		vdev->device_caps |= V4L2_CAP_VIDEO_CAPTURE_MPLANE;
 	vdev->entity.flags = MEDIA_ENT_FL_DEFAULT;
 	vdev->v4l2_dev = &isp->v4l2_dev;
 	vdev->vfl_type = VFL_TYPE_VIDEO;
