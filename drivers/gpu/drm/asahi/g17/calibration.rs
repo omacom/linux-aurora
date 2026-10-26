@@ -157,10 +157,10 @@ mod tests {
     fn chip() -> Calibration {
         Calibration {
             perf: PerfConfig {
-                states_a: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-                states_b: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                states_a: map([0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 15, 0, 0, 0, 0, 0]).unwrap(),
+                states_b: map([0, 1, 2, 3, 4, 6, 7, 9, 11, 13, 15, 0, 0, 0, 0, 0]).unwrap(),
                 relative_a: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
-                relative_b: [0, 0, 11, 22, 33, 44, 55, 66, 77, 88, 100],
+                relative_b: [0, 0, 7, 14, 21, 35, 50, 64, 78, 92, 100],
                 sram_min_mv: 810,
             },
             leakage: [0; 56],
@@ -188,14 +188,21 @@ mod tests {
         assert!(chip.check_cores(&[0x3ff, 0x3ff]).is_ok());
         assert!(chip.check_cores(&[0x3ff, 0x1ff]).is_err());
         assert!(chip.check_cores(&[0xfffff]).is_err());
-        opps[5].volt_uv[1] = 0;
+        // Both eleven-state maps must reach raw OPP 15, including its second voltage lane.
+        assert_eq!(chip.perf.states_a[PERF_STATES - 1], 15);
+        assert_eq!(chip.perf.states_b[PERF_STATES - 1], 15);
+        opps[15].volt_uv[1] = 0;
         assert!(chip.check_opps(&opps).is_err());
-        opps[5].volt_uv[1] = 800_000;
-        opps[5].freq_hz = opps[4].freq_hz;
-        assert!(chip.check_opps(&opps).is_err());
-        opps[5].freq_hz = 501_000_000;
+        opps[15].volt_uv[1] = 800_000;
         assert!(chip.check_opps(&opps).is_ok());
-        opps[5].freq_hz = 511_000_000;
+        opps[6].volt_uv[1] = 0;
+        assert!(chip.check_opps(&opps).is_err());
+        opps[6].volt_uv[1] = 800_000;
+        opps[6].freq_hz = opps[4].freq_hz;
+        assert!(chip.check_opps(&opps).is_err());
+        opps[6].freq_hz = 601_000_000;
+        assert!(chip.check_opps(&opps).is_ok());
+        opps[6].freq_hz = 611_000_000;
         assert!(chip.check_opps(&opps).is_err());
     }
 
