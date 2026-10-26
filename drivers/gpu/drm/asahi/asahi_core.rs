@@ -123,6 +123,10 @@ module! {
             default: 100,
             description: "G15: completion repoll interval, us (25..1000)",
         },
+        g15_max_inflight: u32 {
+            default: 0,
+            description: "G15: published prefixes in flight per VM at most (1..8; 0: the tuned value)",
+        },
         g15_idle_standby_us: u32 {
             default: 0,
             description: "G15: firmware idle standby time override, us (Globals +0x7a8, 100..100000; 0: the device tree's, else the tuned value)",

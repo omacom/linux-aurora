@@ -506,8 +506,11 @@ pub(crate) mod sizes {
     pub(crate) const PB_BLOCKS: u32 = 4096;
     pub(crate) const PB_LIST_RECORDS: u32 = 4096;
     pub(crate) const PB_GROW_STEP: u32 = 10;
-    /// Flights (published prefixes) in flight at most; the second must be of the same VM.
-    pub(crate) const FLIGHTS: usize = 2;
+    /// Flights (published prefixes) in flight at most; after the first, only of the same VM.
+    /// Measured on the T6031 (J516C, 26-oct-2026): with 2, a browser's one-render jobs held
+    /// publication ~3 times per job (stats hold[0]) and the GPU spent ~75% of each flight idle
+    /// (span 88 us of a 612 us flight). 8 keeps the GPU fed; pass slots (16) bound the rest.
+    pub(crate) const FLIGHTS: usize = 8;
     /// Jobs per compute horizon, and scheduler credits per queue.
     pub(crate) const HORIZON_JOBS: u32 = 16;
     /// Unconsumed records per 256-entry channel ring a prefix may be posted behind.
@@ -565,8 +568,8 @@ pub(crate) mod tuning {
     pub(crate) const PASS_FULL_RESET: bool = true;
     /// Rotating compute-slot cursor.
     pub(crate) const SLOT_ROTATE: bool = true;
-    /// Flights per VM.
-    pub(crate) const MAX_INFLIGHT: u32 = 2;
+    /// Flights per VM (tunable: `g15_max_inflight`, 0 = this value).
+    pub(crate) const MAX_INFLIGHT: u32 = 8;
     /// PB growth through event 7 / DEVCTL 7; the initial posting is `g15_pb_blocks` (64).
     pub(crate) const PB_GROW: bool = true;
     /// The most PB blocks that may be posted: one below the mapped heap's block count, so the

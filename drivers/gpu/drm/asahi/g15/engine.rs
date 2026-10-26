@@ -9,9 +9,9 @@
 //! then thresholds/counters once per prefix, then one queue WRITE per queue, then channel
 //! records, then doorbells (compute, FS, TA). A compute-only job that ends its prefix pulls
 //! further ready compute-only jobs of the same queue and VM into a *horizon* (up to 16, posted
-//! ahead at the observed depth). At most [`super::hw::sizes::FLIGHTS`] prefixes are in flight,
-//! the second only of the same VM, posted behind the first's unconsumed records
-//! (submit-ahead). Ordering is a total order, which satisfies the header barriers and
+//! ahead at the observed depth). At most [`super::hw::sizes::FLIGHTS`] prefixes are in flight
+//! (`g15_max_inflight`), after the first only of the same VM, each posted behind the previous
+//! one's unconsumed records (submit-ahead). Ordering is a total order, which satisfies the header barriers and
 //! EXACT_PRIOR ordinals validated at submission. Priming: after a recovered abort and for the
 //! first render prefix after boot, an exclusive one-render prefix rebuilds the render
 //! allocators and blocks publication behind it until it retires.
@@ -545,7 +545,7 @@ impl Firmware {
     /// Returns Err only when this call latched the engine failed (a publication error after a
     /// queue WRITE advanced, or a partly sent job): the caller latches the fail-stop.
     pub(crate) fn publish(&mut self, done: &mut Completions) -> Result {
-        let max_inflight = tuning::MAX_INFLIGHT.clamp(1, sizes::FLIGHTS as u32) as usize;
+        let max_inflight = params::max_inflight() as usize;
         let mut result = Ok(());
 
         self.engine.chan_wait = false;

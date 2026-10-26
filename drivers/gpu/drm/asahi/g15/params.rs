@@ -37,6 +37,14 @@ pub(crate) fn repoll_us() -> u32 {
 pub(crate) fn resnap_us() -> u32 {
     (*module_parameters::g15_resnap_us.value()).clamp(25, 1000)
 }
+/// Published prefixes in flight per VM at most (0: the tuned value), bounded by the flight slots.
+pub(crate) fn max_inflight() -> u32 {
+    match *module_parameters::g15_max_inflight.value() {
+        0 => hw::tuning::MAX_INFLIGHT,
+        n => n,
+    }
+    .clamp(1, hw::sizes::FLIGHTS as u32)
+}
 
 /// The explicit firmware idle standby time, us (0: not set).
 pub(crate) fn idle_standby_override_us() -> u32 {
