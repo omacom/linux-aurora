@@ -452,9 +452,9 @@ static void isp_vb2_buf_queue(struct vb2_buffer *vb)
 	list_add_tail(&buf->link, &isp->bufs_pending);
 	spin_unlock_irqrestore(&isp->buf_lock, flags);
 
-	/* A returned last lease must restart an empty P010 queue immediately. */
+	/* Restart an empty IMX958 queue when its last returned lease is queued. */
 	if (test_bit(ISP_STATE_STREAMING, &isp->state) &&
-	    (isp_is_p010(isp) || !empty)) {
+	    (isp_supports_p010(isp) || !empty)) {
 		if (isp_submit_buffers(isp, false) && isp_is_p010(isp)) {
 			apple_isp_firmware_halt(isp);
 			isp_vb2_release_buffers(isp, VB2_BUF_STATE_ERROR);

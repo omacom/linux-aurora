@@ -286,7 +286,7 @@ static int isp_test_buffer_ack(struct apple_isp *isp, struct isp_channel *chan,
 	return 0;
 }
 
-static void isp_test_p010_last_lease_requeue(struct kunit *test)
+static void isp_test_imx958_last_lease_requeue(struct kunit *test)
 {
 	struct apple_isp *isp = isp_test_alloc(test);
 	struct isp_format *fmt = isp_get_current_format(isp);
@@ -296,6 +296,7 @@ static void isp_test_p010_last_lease_requeue(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, buf);
 	isp->hw = &isp_test_t6040;
+	fmt->version = 0x958;
 	fmt->pixelformat = V4L2_PIX_FMT_P010;
 	fmt->num_planes = 2;
 	fmt->plane_size[0] = 1843200;
@@ -306,7 +307,7 @@ static void isp_test_p010_last_lease_requeue(struct kunit *test)
 	isp->chan_bh = kunit_kzalloc(test, sizeof(*isp->chan_bh), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, isp->cmd_virt);
 	KUNIT_ASSERT_NOT_NULL(test, isp->chan_bh);
-	for (unsigned int i = 0; i < isp_num_meta(isp); i++) {
+	for (unsigned int i = 0; i < ISP_MAX_BUFFERS; i++) {
 		isp->meta_surfs[i] = kunit_kzalloc(test, sizeof(struct isp_surf), GFP_KERNEL);
 		KUNIT_ASSERT_NOT_NULL(test, isp->meta_surfs[i]);
 		isp->meta_surfs[i]->submitted = true;
@@ -317,20 +318,25 @@ static void isp_test_p010_last_lease_requeue(struct kunit *test)
 	set_bit(ISP_STATE_STREAMING, &isp->state);
 	test->priv = &calls;
 	kunit_activate_static_stub(test, ipc_chan_send, isp_test_buffer_ack);
-	for (unsigned int i = 1; i <= 10000; i++) {
-		/* Both lists empty, as after the final completion was dequeued. */
-		isp_vb2_buf_queue(&buf->vb.vb2_buf);
-		KUNIT_ASSERT_EQ(test, calls, i);
-		KUNIT_ASSERT_EQ(test, buf->tag, (u64)i);
-		KUNIT_ASSERT_TRUE(test, list_empty(&isp->bufs_pending));
-		submitted = list_first_entry(&isp->bufs_submitted, struct isp_buffer, link);
-		KUNIT_ASSERT_PTR_EQ(test, submitted, buf);
-		list_del(&buf->link);
+	for (unsigned int format = 0; format < 2; format++) {
+		fmt->pixelformat = format ? V4L2_PIX_FMT_NV12 : V4L2_PIX_FMT_P010;
+		calls = 0;
+		for (unsigned int i = 1; i <= 10000; i++) {
+			/* Both lists empty, as after the last completion was dequeued. */
+			isp_vb2_buf_queue(&buf->vb.vb2_buf);
+			KUNIT_ASSERT_EQ(test, calls, i);
+			if (!format)
+				KUNIT_ASSERT_EQ(test, buf->tag, (u64)i);
+			KUNIT_ASSERT_TRUE(test, list_empty(&isp->bufs_pending));
+			submitted = list_first_entry(&isp->bufs_submitted, struct isp_buffer, link);
+			KUNIT_ASSERT_PTR_EQ(test, submitted, buf);
+			list_del(&buf->link);
+		}
 	}
 }
 
 static struct kunit_case isp_v4l2_test_cases[] = {
-	KUNIT_CASE(isp_test_p010_last_lease_requeue),
+	KUNIT_CASE(isp_test_imx958_last_lease_requeue),
 	KUNIT_CASE(isp_test_p010_report_defers_completion),
 	KUNIT_CASE(isp_test_p010_mode_selection),
 	KUNIT_CASE(isp_test_p010_format),
