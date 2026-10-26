@@ -2279,7 +2279,10 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 	offset += RSN_CAP_LEN;
 	if (mfp && (ie_len - offset >= RSN_PMKID_COUNT_LEN)) {
 		pmkid_count = ie[offset] + (ie[offset + 1] << 8);
-		offset += RSN_PMKID_COUNT_LEN + (pmkid_count * WLAN_PMKID_LEN);
+		offset += RSN_PMKID_COUNT_LEN;
+		if (pmkid_count > (ie_len - offset) / WLAN_PMKID_LEN)
+			return -EINVAL;
+		offset += pmkid_count * WLAN_PMKID_LEN;
 		if (ie_len - offset >= WPA_IE_MIN_OUI_LEN) {
 			group_mgmt_cs = &ie[offset];
 			if (memcmp(group_mgmt_cs, RSN_OUI, TLV_OUI_LEN) == 0) {
