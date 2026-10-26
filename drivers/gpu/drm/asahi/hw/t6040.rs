@@ -7,7 +7,7 @@
 
 use crate::g17::fw::{
     self,
-    initdata::{v25g83, PerfConfig, RegionCConfig, RegisterWindow, PERF_STATES},
+    initdata::{PerfConfig, RegionCConfig, RegisterWindow},
 };
 use crate::g17::{Config, CoreLayout, CrashBuffers, FixedBuffer, Identity};
 use crate::hw::{GpuGen, GpuVariant};
@@ -169,33 +169,23 @@ pub(crate) const REGISTER_WINDOWS: [RegisterWindow; 25] = [
     window(43, 0x2_88e6_0000, 0x47_4000, 0x58, 0xe6_0000, 2),
 ];
 
-/// Performance-table configuration. The device tree lists the sixteen operating points in
-/// performance-state order, with one voltage per cluster.
+/// Inert defaults. The 25G83 builder requires the loader's per-chip performance maps.
 pub(crate) const PERF: PerfConfig = PerfConfig {
-    states_a: [0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 15],
-    states_b: [0, 1, 2, 3, 4, 6, 7, 9, 11, 13, 15],
-    relative_a: [0, 9, 16, 23, 29, 38, 49, 60, 69, 79, 100],
-    relative_b: [0, 0, 22, 36, 47, 57, 68, 78, 84, 91, 100],
+    states_a: [0; 11],
+    states_b: [0; 11],
+    relative_a: [0; 11],
+    relative_b: [0; 11],
     sram_min_mv: 810,
 };
 
 /// Operating points the performance tables reference.
 pub(crate) const OPPS: usize = 16;
 
-const _: () = {
-    let mut index = 0;
-    while index < PERF_STATES {
-        assert!((PERF.states_a[index] as usize) < OPPS);
-        assert!((PERF.states_b[index] as usize) < OPPS);
-        index += 1;
-    }
-};
-
 /// Region C.
 const REGION_C: RegionCConfig = RegionCConfig {
     unk_54: 0x0fa0,
     unk_78: [1, 0, 0],
-    max_power_mw: v25g83::MAX_POWER_MW,
+    max_power_mw: 0,
     unk_9c: 0,
     unk_a0: 0,
     unk_7c4: 1500,

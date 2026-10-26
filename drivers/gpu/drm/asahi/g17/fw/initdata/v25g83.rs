@@ -379,9 +379,6 @@ impl HwData25G83 {
     }
 }
 
-/// Transitional hardware default, removed with the inert T6040 defaults.
-pub(crate) const MAX_POWER_MW: u32 = 69_116;
-
 /// Power configuration control period, in 24 MHz clocks (8 ms).
 const PERIOD_CLOCKS: u32 = 200_000;
 /// Temperature sensors read by the die and MTR temperature limiters.
