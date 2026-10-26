@@ -10,8 +10,6 @@
 #include "isp-iommu.h"
 #include "isp-regs.h"
 
-#define ISP_MAX_PRESETS 32
-
 struct isp_setfile {
 	u32 version;
 	u32 magic;
@@ -217,6 +215,110 @@ static int isp_check_presets(struct apple_isp *isp, u32 num_fw_presets)
 	return 0;
 }
 
+/* Do not mistake stacked sensor input rows for a processed output mode. */
+static bool isp_sensor_config_usable(const struct cmd_ch_camera_config *config)
+{
+	return config->in_width && config->in_height &&
+	       config->out_width && config->out_height &&
+	       config->out_width <= 16384 && config->out_height <= 16384 &&
+	       !(config->out_width & 1) && !(config->out_height & 1) &&
+	       config->out_width <= config->in_width &&
+	       config->out_height <= config->in_height &&
+	       config->in_width == config->in_width2 &&
+	       config->in_height == config->in_height2 &&
+	       config->out_width == config->out_width2 &&
+	       config->out_height == config->out_height2;
+}
+
+static int isp_ch_cache_sensor_configs(struct apple_isp *isp, u32 ch, u32 count)
+{
+	struct cmd_ch_camera_config_h17 args;
+	struct isp_preset *presets;
+	unsigned int num = isp->num_presets;
+	int err;
+
+	/* The extended reply is established only for the IMX958 T6040 path. */
+	if (!isp_supports_p010(isp))
+		return 0;
+	if (!count || count > ISP_MAX_SENSOR_CONFIGS)
+		return -EINVAL;
+
+	presets = devm_kcalloc(isp->dev, num + count, sizeof(*presets), GFP_KERNEL);
+	if (!presets)
+		return -ENOMEM;
+	memcpy(presets, isp->presets, num * sizeof(*presets));
+
+	for (u32 i = 0; i < count; i++) {
+		struct cmd_ch_camera_config *config = &args.config;
+		struct isp_sensor_config *cached = &isp->sensor_configs[i];
+		bool duplicate = false;
+
+		err = isp_cmd_ch_camera_config_get(isp, ch, i, &args);
+		if (err)
+			return err;
+		if (config->opcode != (u64)CISP_CMD_CH_CAMERA_CONFIG_GET << 32 ||
+		    config->chan != ch || config->preset != i)
+			return -EIO;
+
+		cached->input_dim = (struct coord){config->in_width, config->in_height};
+		cached->output_dim = (struct coord){config->out_width, config->out_height};
+		cached->sensor_clk = config->sensor_clk;
+		cached->usable = isp_sensor_config_usable(config);
+		dev_dbg(isp->dev, "sensor config %u: input %ux%u output %ux%u clock %u%s\n",
+			i, config->in_width, config->in_height,
+			config->out_width, config->out_height, config->sensor_clk,
+			cached->usable ? "" : " (unverified geometry)");
+		print_hex_dump_debug("apple-isp config: ", DUMP_PREFIX_OFFSET,
+				     16, 4, &args, sizeof(args), false);
+		/* Both processed preview sizes are recorded in the proxy source. */
+		for (unsigned int j = 0; j < num; j++) {
+			struct isp_preset *preset = &presets[j];
+			bool preview = i == 5 && config->in_width == 1920 &&
+				       config->in_height == 2160 &&
+				       ((preset->output_dim.x == 1280 &&
+					 preset->output_dim.y == 720) ||
+					(preset->output_dim.x == 1920 &&
+					 preset->output_dim.y == 1080));
+			bool reported = cached->usable &&
+				preset->output_dim.x == config->out_width &&
+				preset->output_dim.y == config->out_height;
+
+			if (preset->index == i &&
+			    preset->input_dim.x == config->in_width &&
+			    preset->input_dim.y == config->in_height &&
+			    !preset->crop_offset.x && !preset->crop_offset.y &&
+			    preset->crop_size.x == preset->output_dim.x &&
+			    preset->crop_size.y == preset->output_dim.y)
+				preset->p010 = preview || reported;
+		}
+		if (!cached->usable)
+			continue;
+
+		/* Keep the board's config-5 presets, including the default, first. */
+		for (unsigned int j = 0; j < num; j++) {
+			if (presets[j].output_dim.x == config->out_width &&
+			    presets[j].output_dim.y == config->out_height) {
+				duplicate = true;
+				break;
+			}
+		}
+		if (duplicate)
+			continue;
+
+		presets[num++] = (struct isp_preset){
+			.index = i,
+			.input_dim = cached->input_dim,
+			.output_dim = cached->output_dim,
+			.crop_size = cached->output_dim,
+			.p010 = true,
+		};
+	}
+	isp->num_sensor_configs = count;
+	isp->presets = presets;
+	isp->num_presets = num;
+	return 0;
+}
+
 static int isp_ch_cache_sensor_info(struct apple_isp *isp, u32 ch)
 {
 	struct isp_format *fmt = isp_get_format(isp, ch);
@@ -264,6 +366,8 @@ static int isp_ch_cache_sensor_info(struct apple_isp *isp, u32 ch)
 	}
 
 	err = isp_check_presets(isp, args->num_presets);
+	if (!err)
+		err = isp_ch_cache_sensor_configs(isp, ch, args->num_presets);
 
 exit:
 	kfree(args);
@@ -475,7 +579,7 @@ static int isp_ch_configure_pools(struct apple_isp *isp, u32 ch)
 		return 0;
 
 	return isp_cmd_ch_buffer_pool_config_set_rendered(isp, ch,
-							  ISP_MAX_BUFFERS,
+							  isp_num_rendered(isp),
 							  fmt->plane_size[0],
 							  fmt->strides[0],
 							  fmt->plane_size[1],
@@ -488,7 +592,13 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 	bool h17 = isp->hw->fw_abi == ISP_FW_ABI_H17;
 	int err;
 
-	isp_cmd_flicker_sensor_set(isp, 0);
+	err = isp_cmd_flicker_sensor_set(isp, 0);
+	if (isp_is_p010(isp) && err)
+		return err;
+
+	/* The proxy-qualified P010 route uses the firmware defaults. */
+	if (isp_is_p010(isp))
+		goto select_config;
 
 	/*
 	 * The setfile isn't requisite but then we don't get calibration. If
@@ -504,6 +614,7 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 			return err;
 	}
 
+select_config:
 	err = isp_cmd_ch_sbs_enable(isp, ch, 1);
 	if (err)
 		return err;
@@ -531,7 +642,8 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 	err = isp_cmd_ch_output_config_set(isp, ch, fmt->preset->output_dim.x,
 					   fmt->preset->output_dim.y,
 					   fmt->strides, CISP_COLORSPACE_REC709,
-					   CISP_OUTPUT_FORMAT_YUV_2PLANE);
+					   isp_is_p010(isp) ? CISP_OUTPUT_FORMAT_P010 :
+							      CISP_OUTPUT_FORMAT_YUV_2PLANE);
 	if (err)
 		return err;
 
@@ -558,6 +670,9 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 	err = isp_cmd_ch_preview_stream_set(isp, ch, 1);
 	if (err)
 		return err;
+
+	if (isp_is_p010(isp))
+		return isp_cmd_ch_master_slave_sync_mode_set(isp, ch, 0);
 
 	err = isp_cmd_ch_cnr_start(isp, ch);
 	if (err)
@@ -633,7 +748,10 @@ int apple_isp_start_camera(struct apple_isp *isp)
 	err = isp_configure_capture(isp);
 	if (err) {
 		dev_err(isp->dev, "failed to configure capture: %d\n", err);
-		apple_isp_firmware_shutdown(isp);
+		if (isp->ipc_failed)
+			apple_isp_firmware_halt(isp);
+		else
+			apple_isp_firmware_shutdown(isp);
 		return err;
 	}
 
@@ -642,7 +760,10 @@ int apple_isp_start_camera(struct apple_isp *isp)
 
 void apple_isp_stop_camera(struct apple_isp *isp)
 {
-	apple_isp_firmware_shutdown(isp);
+	if (isp->ipc_failed)
+		apple_isp_firmware_halt(isp);
+	else
+		apple_isp_firmware_shutdown(isp);
 }
 
 /*
@@ -714,9 +835,15 @@ int apple_isp_start_capture(struct apple_isp *isp)
 
 void apple_isp_stop_capture(struct apple_isp *isp)
 {
+	if (isp->ipc_failed || isp->fw_state == ISP_FW_DEAD)
+		return;
 	isp_cmd_ch_stop(isp, 0); // TODO channel mask
 	isp_cmd_ch_buffer_return(isp, isp->current_ch);
 
 	/* ... until its buffers are back. */
 	apple_isp_wdt_stop(isp);
 }
+
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+#include "isp-cam-test.c"
+#endif

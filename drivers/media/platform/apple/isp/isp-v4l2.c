@@ -21,7 +21,6 @@
 
 #define ISP_MIN_FRAMES 2
 #define ISP_MAX_PLANES 4
-#define ISP_MAX_PIX_FORMATS 2
 #define ISP_BUFFER_TIMEOUT msecs_to_jiffies(1500)
 #define ISP_STRIDE_ALIGNMENT 64
 
@@ -37,8 +36,7 @@ struct isp_buflist_buffer {
 	u32 flags[ISP_MAX_PLANES];
 	u32 num_planes;
 	u32 pool_type;
-	u32 tag;
-	u32 pad;
+	u64 tag;
 } __packed;
 static_assert(sizeof(struct isp_buflist_buffer) == ISP_BUFLIST_DESC_SIZE);
 
@@ -56,6 +54,35 @@ static_assert(ISP_CMD_AREA_SIZE(0) >= ISP_IPC_BUFEXC_STAT_SIZE);
  * as CISP_POOL_TYPE_META_CAPTURE; why the tags differ is not known.
  */
 #define ISP_BUFLIST_POOL_CAPTURE_META 2
+
+static bool isp_p010_buffer_matches(const struct isp_format *fmt,
+				    const struct isp_buffer *buf,
+				    const struct isp_buflist_buffer *desc)
+{
+	/* H17 reports zero-extended low 32 bits, not the submitted high IOVA. */
+	return desc->num_planes == 2 &&
+	       desc->pool_type == CISP_POOL_TYPE_RENDERED_SCL1 &&
+	       desc->iovas[0] == (u32)buf->surfs[0].iova &&
+	       desc->iovas[1] == (u32)(buf->surfs[0].iova + fmt->plane_size[0]) &&
+	       !desc->iovas[2] && !desc->iovas[3] && desc->tag == buf->tag;
+}
+
+void ipc_bt_complete(struct apple_isp *isp)
+{
+	struct isp_buffer *buf, *tmp;
+	unsigned long flags, i;
+
+	/* The firmware has received its ACK before userspace can reuse a lease. */
+	spin_lock_irqsave(&isp->buf_lock, flags);
+	for_each_set_bit(i, &isp->meta_returned, ISP_MAX_BUFFERS)
+		isp->meta_surfs[i]->submitted = false;
+	isp->meta_returned = 0;
+	list_for_each_entry_safe(buf, tmp, &isp->bufs_returned, link) {
+		list_del(&buf->link);
+		vb2_buffer_done(&buf->vb.vb2_buf, buf->return_state);
+	}
+	spin_unlock_irqrestore(&isp->buf_lock, flags);
+}
 
 int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 {
@@ -96,11 +123,14 @@ int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 		       bufd->pool_type); */
 
 		if (bufd->pool_type == 0) {
-			for (int j = 0; j < ARRAY_SIZE(isp->meta_surfs); j++) {
+			for (int j = 0; j < isp_num_meta(isp); j++) {
 				struct isp_surf *meta = isp->meta_surfs[j];
 				if ((u32)bufd->iovas[0] == (u32)meta->iova) {
 					WARN_ON(!meta->submitted);
-					meta->submitted = false;
+					if (isp_is_p010(isp))
+						__set_bit(j, &isp->meta_returned);
+					else
+						meta->submitted = false;
 				}
 			}
 		} else if (bufd->pool_type == ISP_BUFLIST_POOL_CAPTURE_META &&
@@ -114,8 +144,10 @@ int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 		} else {
 			list_for_each_entry_safe_reverse(
 				buf, tmp, &isp->bufs_submitted, link) {
-				if ((u32)buf->surfs[0].iova ==
-				    (u32)bufd->iovas[0]) {
+				if (isp_is_p010(isp) ?
+				    isp_p010_buffer_matches(isp_get_current_format(isp),
+							    buf, bufd) :
+				    (u32)buf->surfs[0].iova == (u32)bufd->iovas[0]) {
 					enum vb2_buffer_state state =
 						VB2_BUF_STATE_ERROR;
 
@@ -126,9 +158,13 @@ int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 					if (req->arg2 ==
 					    ISP_IPC_BUFEXC_FLAG_RENDER)
 						state = VB2_BUF_STATE_DONE;
-					vb2_buffer_done(&buf->vb.vb2_buf,
-							state);
-					list_del(&buf->link);
+					if (isp_is_p010(isp)) {
+						buf->return_state = state;
+						list_move_tail(&buf->link, &isp->bufs_returned);
+					} else {
+						vb2_buffer_done(&buf->vb.vb2_buf, state);
+						list_del(&buf->link);
+					}
 				}
 			}
 		}
@@ -166,7 +202,7 @@ static int isp_submit_buffers(struct apple_isp *isp, bool pre_start)
 	bl->type = 1;
 
 	spin_lock_irqsave(&isp->buf_lock, flags);
-	for (int i = 0; i < ARRAY_SIZE(isp->meta_surfs); i++) {
+	for (int i = 0; i < isp_num_meta(isp); i++) {
 		struct isp_surf *meta = isp->meta_surfs[i];
 
 		if (meta->submitted)
@@ -205,9 +241,13 @@ static int isp_submit_buffers(struct apple_isp *isp, bool pre_start)
 	}
 
 	/* One rendered pool per batch; the rest stays pending for the next. */
-	while (num_rendered < ISP_MAX_BUFFERS &&
+	while (num_rendered < isp_num_rendered(isp) &&
 	       (buf = list_first_entry_or_null(&isp->bufs_pending,
 					       struct isp_buffer, link))) {
+		if (isp_is_p010(isp)) {
+			buf->tag = ++isp->buffer_tag;
+			bufd->tag = buf->tag;
+		}
 		bufd->num_planes = fmt->num_planes;
 		bufd->pool_type = isp->hw->scl1 ? CISP_POOL_TYPE_RENDERED_SCL1 :
 						  CISP_POOL_TYPE_RENDERED;
@@ -249,6 +289,11 @@ send:
 
 	err = ipc_chan_send(isp, chan, ISP_BUFFER_TIMEOUT);
 	if (err) {
+		if (isp_is_p010(isp)) {
+			/* Keep leases owned until stop_camera halts the coprocessor. */
+			isp->ipc_failed = true;
+			return err;
+		}
 		/* If we fail, consider the buffer not submitted. */
 		dev_err(isp->dev,
 			"%s: failed to send bufs: [0x%llx, 0x%llx, 0x%llx]\n",
@@ -269,7 +314,7 @@ send:
 						       &isp->bufs_pending);
 				}
 			}
-			for (int j = 0; j < ARRAY_SIZE(isp->meta_surfs); j++) {
+			for (int j = 0; j < isp_num_meta(isp); j++) {
 				struct isp_surf *meta = isp->meta_surfs[j];
 				if (bufd->iovas[0] == meta->iova) {
 					meta->submitted = false;
@@ -308,10 +353,10 @@ static int isp_vb2_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
 	 * REQBUFS frees the old buffers first, CREATE_BUFS adds to them, so
 	 * count the buffers the queue already has.
 	 */
-	if (q_num_bufs >= ISP_MAX_BUFFERS)
+	if (q_num_bufs >= isp_num_rendered(isp))
 		return -ENOBUFS;
 	*nbuffers = min_t(unsigned int, *nbuffers,
-			  ISP_MAX_BUFFERS - q_num_bufs);
+			  isp_num_rendered(isp) - q_num_bufs);
 
 	if (*num_planes) {
 		if (sizes[0] < fmt->total_size)
@@ -407,8 +452,15 @@ static void isp_vb2_buf_queue(struct vb2_buffer *vb)
 	list_add_tail(&buf->link, &isp->bufs_pending);
 	spin_unlock_irqrestore(&isp->buf_lock, flags);
 
-	if (test_bit(ISP_STATE_STREAMING, &isp->state) && !empty)
-		isp_submit_buffers(isp, false);
+	/* A returned last lease must restart an empty P010 queue immediately. */
+	if (test_bit(ISP_STATE_STREAMING, &isp->state) &&
+	    (isp_is_p010(isp) || !empty)) {
+		if (isp_submit_buffers(isp, false) && isp_is_p010(isp)) {
+			apple_isp_firmware_halt(isp);
+			isp_vb2_release_buffers(isp, VB2_BUF_STATE_ERROR);
+			vb2_queue_error(&isp->vbq);
+		}
+	}
 }
 
 static int apple_isp_start_streaming(struct apple_isp *isp)
@@ -565,18 +617,23 @@ static const struct vb2_ops isp_vb2_ops = {
 };
 
 static int isp_set_preset(struct apple_isp *isp, struct isp_format *fmt,
-			  struct isp_preset *preset)
+			  struct isp_preset *preset, u32 pixelformat)
 {
+	unsigned int bytes_per_sample;
 	int i;
 	size_t total_size;
 
 	fmt->preset = preset;
 
-	/* I really fucking hope they all use NV12. */
+	/* P010 has MSB-aligned 10-bit samples in little-endian 16-bit words. */
+	fmt->pixelformat = pixelformat == V4L2_PIX_FMT_P010 &&
+			   isp_supports_p010(isp) && preset->p010 ?
+			   V4L2_PIX_FMT_P010 : V4L2_PIX_FMT_NV12;
+	bytes_per_sample = fmt->pixelformat == V4L2_PIX_FMT_P010 ? 2 : 1;
 	fmt->num_planes = 2;
-	fmt->strides[0] = ALIGN(preset->output_dim.x, ISP_STRIDE_ALIGNMENT);
-	/* UV subsampled interleaved */
-	fmt->strides[1] = ALIGN(preset->output_dim.x, ISP_STRIDE_ALIGNMENT);
+	fmt->strides[0] = ALIGN(preset->output_dim.x * bytes_per_sample,
+				ISP_STRIDE_ALIGNMENT);
+	fmt->strides[1] = fmt->strides[0];
 	fmt->plane_size[0] = fmt->strides[0] * preset->output_dim.y;
 	fmt->plane_size[1] = fmt->strides[1] * preset->output_dim.y / 2;
 
@@ -589,17 +646,25 @@ static int isp_set_preset(struct apple_isp *isp, struct isp_format *fmt,
 }
 
 static struct isp_preset *isp_select_preset(struct apple_isp *isp, u32 width,
-				     u32 height)
+				     u32 height, u32 pixelformat)
 {
 	struct isp_preset *preset, *best = &isp->presets[0];
 	int i, score, best_score = INT_MAX;
 
-	/* Default if no dimensions */
-	if (width == 0 || height == 0)
-		return &isp->presets[0];
+	bool p010 = pixelformat == V4L2_PIX_FMT_P010 && isp_has_p010(isp);
+
+	/* An unspecified P010 size selects the processed 720p preview first. */
+	if (width == 0 || height == 0) {
+		if (!p010)
+			return &isp->presets[0];
+		width = 1280;
+		height = 720;
+	}
 
 	for (i = 0; i < isp->num_presets; i++) {
 		preset = &isp->presets[i];
+		if (p010 && !preset->p010)
+			continue;
 		score = abs((int)preset->output_dim.x - (int)width) +
 		abs((int)preset->output_dim.y - (int)height);
 		if (score < best_score) {
@@ -623,22 +688,22 @@ static int isp_vidioc_querycap(struct file *file, void *priv,
 	return 0;
 }
 
-static int isp_vidioc_enum_format(struct file *file, void *fh,
-				  struct v4l2_fmtdesc *f)
+static int isp_enum_pixelformat(struct apple_isp *isp, struct v4l2_fmtdesc *f)
 {
-	struct apple_isp *isp = video_drvdata(file);
-
-	if (f->index >= ISP_MAX_PIX_FORMATS)
-		return -EINVAL;
-
 	switch (f->index) {
 	case 0:
 		f->pixelformat = V4L2_PIX_FMT_NV12;
 		break;
 	case 1:
-		if (!isp->multiplanar)
+		if (isp->multiplanar) {
+			f->pixelformat = V4L2_PIX_FMT_NV12M;
+			break;
+		}
+		fallthrough;
+	case 2:
+		if (!isp_has_p010(isp) || f->index != (isp->multiplanar ? 2 : 1))
 			return -EINVAL;
-		f->pixelformat = V4L2_PIX_FMT_NV12M;
+		f->pixelformat = V4L2_PIX_FMT_P010;
 		break;
 	default:
 		return -EINVAL;
@@ -647,20 +712,36 @@ static int isp_vidioc_enum_format(struct file *file, void *fh,
 	return 0;
 }
 
+static int isp_vidioc_enum_format(struct file *file, void *fh,
+				  struct v4l2_fmtdesc *f)
+{
+	return isp_enum_pixelformat(video_drvdata(file), f);
+}
+
 static int isp_vidioc_enum_framesizes(struct file *file, void *fh,
 				      struct v4l2_frmsizeenum *f)
 {
 	struct apple_isp *isp = video_drvdata(file);
+	struct isp_preset *preset = NULL;
+	u32 index = 0;
 
-	if (f->index >= isp->num_presets)
+	if (f->pixel_format != V4L2_PIX_FMT_NV12 &&
+	    f->pixel_format != V4L2_PIX_FMT_NV12M &&
+	    !(f->pixel_format == V4L2_PIX_FMT_P010 && isp_has_p010(isp)))
 		return -EINVAL;
 
-	if ((f->pixel_format != V4L2_PIX_FMT_NV12) &&
-	    (f->pixel_format != V4L2_PIX_FMT_NV12M))
+	for (int i = 0; i < isp->num_presets; i++) {
+		if (f->pixel_format == V4L2_PIX_FMT_P010 && !isp->presets[i].p010)
+			continue;
+		if (index++ == f->index) {
+			preset = &isp->presets[i];
+			break;
+		}
+	}
+	if (!preset)
 		return -EINVAL;
-
-	f->discrete.width = isp->presets[f->index].output_dim.x;
-	f->discrete.height = isp->presets[f->index].output_dim.y;
+	f->discrete.width = preset->output_dim.x;
+	f->discrete.height = preset->output_dim.y;
 	f->type = V4L2_FRMSIZE_TYPE_DISCRETE;
 
 	return 0;
@@ -676,10 +757,13 @@ static int isp_vidioc_enum_frameintervals(struct file *file, void *fh,
 		return -EINVAL;
 
 	if (interval->pixel_format != V4L2_PIX_FMT_NV12 &&
-	    interval->pixel_format != V4L2_PIX_FMT_NV12M)
+	    interval->pixel_format != V4L2_PIX_FMT_NV12M &&
+	    !(interval->pixel_format == V4L2_PIX_FMT_P010 && isp_has_p010(isp)))
 		return -EINVAL;
 
 	for (i = 0; i < isp->num_presets; i++) {
+		if (interval->pixel_format == V4L2_PIX_FMT_P010 && !isp->presets[i].p010)
+			continue;
 		if (isp->presets[i].output_dim.x == interval->width &&
 		    isp->presets[i].output_dim.y == interval->height)
 			break;
@@ -726,10 +810,12 @@ static inline void isp_get_sp_pix_format(struct apple_isp *isp,
 	f->fmt.pix.sizeimage = fmt->total_size;
 
 	f->fmt.pix.field = V4L2_FIELD_NONE;
-	f->fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+	f->fmt.pix.pixelformat = fmt->pixelformat;
 	f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
 	f->fmt.pix.ycbcr_enc = V4L2_YCBCR_ENC_709;
 	f->fmt.pix.xfer_func = V4L2_XFER_FUNC_709;
+	if (fmt->pixelformat == V4L2_PIX_FMT_P010)
+		f->fmt.pix.quantization = V4L2_QUANTIZATION_LIM_RANGE;
 }
 
 static inline void isp_get_mp_pix_format(struct apple_isp *isp,
@@ -746,9 +832,19 @@ static inline void isp_get_mp_pix_format(struct apple_isp *isp,
 
 	f->fmt.pix_mp.field = V4L2_FIELD_NONE;
 	f->fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
+	/* P010 is contiguous, including through the multi-planar API. */
+	if (fmt->pixelformat == V4L2_PIX_FMT_P010) {
+		f->fmt.pix_mp.pixelformat = V4L2_PIX_FMT_P010;
+		f->fmt.pix_mp.num_planes = 1;
+		f->fmt.pix_mp.plane_fmt[0].sizeimage = fmt->total_size;
+		memset(&f->fmt.pix_mp.plane_fmt[1], 0,
+		       sizeof(f->fmt.pix_mp.plane_fmt[1]));
+	}
 	f->fmt.pix_mp.colorspace = V4L2_COLORSPACE_REC709;
 	f->fmt.pix_mp.ycbcr_enc = V4L2_YCBCR_ENC_709;
 	f->fmt.pix_mp.xfer_func = V4L2_XFER_FUNC_709;
+	if (fmt->pixelformat == V4L2_PIX_FMT_P010)
+		f->fmt.pix_mp.quantization = V4L2_QUANTIZATION_LIM_RANGE;
 }
 
 static int isp_vidioc_get_format(struct file *file, void *fh,
@@ -774,8 +870,9 @@ static int isp_vidioc_set_format(struct file *file, void *fh,
 	if (vb2_is_busy(&isp->vbq))
 		return -EBUSY;
 
-	preset = isp_select_preset(isp, f->fmt.pix.width, f->fmt.pix.height);
-	err = isp_set_preset(isp, fmt, preset);
+	preset = isp_select_preset(isp, f->fmt.pix.width, f->fmt.pix.height,
+				   f->fmt.pix.pixelformat);
+	err = isp_set_preset(isp, fmt, preset, f->fmt.pix.pixelformat);
 	if (err)
 		return err;
 
@@ -794,8 +891,9 @@ static int isp_vidioc_try_format(struct file *file, void *fh,
 	struct isp_preset *preset;
 	int err;
 
-	preset = isp_select_preset(isp, f->fmt.pix.width, f->fmt.pix.height);
-	err = isp_set_preset(isp, &fmt, preset);
+	preset = isp_select_preset(isp, f->fmt.pix.width, f->fmt.pix.height,
+				   f->fmt.pix.pixelformat);
+	err = isp_set_preset(isp, &fmt, preset, f->fmt.pix.pixelformat);
 	if (err)
 		return err;
 
@@ -832,9 +930,9 @@ static int isp_vidioc_set_format_mplane(struct file *file, void *fh,
 	if (vb2_is_busy(&isp->vbq))
 		return -EBUSY;
 
-	preset = isp_select_preset(isp, f->fmt.pix_mp.width,
-				   f->fmt.pix_mp.height);
-	err = isp_set_preset(isp, fmt, preset);
+	preset = isp_select_preset(isp, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
+				   f->fmt.pix_mp.pixelformat);
+	err = isp_set_preset(isp, fmt, preset, f->fmt.pix_mp.pixelformat);
 	if (err)
 		return err;
 
@@ -856,9 +954,9 @@ static int isp_vidioc_try_format_mplane(struct file *file, void *fh,
 	if (!isp->multiplanar)
 		return -ENOTTY;
 
-	preset = isp_select_preset(isp, f->fmt.pix_mp.width,
-				   f->fmt.pix_mp.height);
-	err = isp_set_preset(isp, &fmt, preset);
+	preset = isp_select_preset(isp, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
+				   f->fmt.pix_mp.pixelformat);
+	err = isp_set_preset(isp, &fmt, preset, f->fmt.pix_mp.pixelformat);
 	if (err)
 		return err;
 
@@ -940,6 +1038,24 @@ static int isp_vidioc_set_param(struct file *file, void *fh,
 	return 0;
 }
 
+static int isp_vidioc_log_status(struct file *file, void *fh)
+{
+	struct apple_isp *isp = video_drvdata(file);
+
+	v4l2_ctrl_log_status(file, fh);
+	for (unsigned int i = 0; i < isp->num_sensor_configs; i++) {
+		const struct isp_sensor_config *config = &isp->sensor_configs[i];
+
+		v4l2_info(&isp->v4l2_dev,
+			  "sensor config %u: input %ux%u output %ux%u clock %u%s\n",
+			  i, config->input_dim.x, config->input_dim.y,
+			  config->output_dim.x, config->output_dim.y,
+			  config->sensor_clk,
+			  config->usable ? "" : " (unverified geometry)");
+	}
+	return 0;
+}
+
 static const struct v4l2_ioctl_ops isp_v4l2_ioctl_ops = {
 	.vidioc_querycap = isp_vidioc_querycap,
 
@@ -969,7 +1085,7 @@ static const struct v4l2_ioctl_ops isp_v4l2_ioctl_ops = {
 	.vidioc_streamon = vb2_ioctl_streamon,
 	.vidioc_streamoff = vb2_ioctl_streamoff,
 
-	.vidioc_log_status = v4l2_ctrl_log_status,
+	.vidioc_log_status = isp_vidioc_log_status,
 	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
 };
@@ -1044,7 +1160,7 @@ int apple_isp_setup_video(struct apple_isp *isp)
 	struct isp_format *fmt = isp_get_current_format(isp);
 	int err;
 
-	err = isp_set_preset(isp, fmt, &isp->presets[0]);
+	err = isp_set_preset(isp, fmt, &isp->presets[0], V4L2_PIX_FMT_NV12);
 	if (err) {
 		dev_err(isp->dev, "failed to set default preset: %d\n", err);
 		return err;
@@ -1054,7 +1170,8 @@ int apple_isp_setup_video(struct apple_isp *isp)
 
 	for (int i = 0; i < ARRAY_SIZE(isp->meta_surfs); i++) {
 		isp->meta_surfs[i] =
-			isp_alloc_surface_vmap(isp, isp->hw->meta_size);
+			isp_alloc_surface_vmap(isp, isp_has_p010(isp) ? 0x8000 :
+						   isp->hw->meta_size);
 		if (!isp->meta_surfs[i]) {
 			isp_err(isp, "failed to alloc meta surface\n");
 			err = -ENOMEM;

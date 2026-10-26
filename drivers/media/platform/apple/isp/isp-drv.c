@@ -551,6 +551,7 @@ static int apple_isp_probe(struct platform_device *pdev)
 	mutex_init(&isp->gc_lock);
 	INIT_LIST_HEAD(&isp->bufs_pending);
 	INIT_LIST_HEAD(&isp->bufs_submitted);
+	INIT_LIST_HEAD(&isp->bufs_returned);
 	isp->wq = alloc_workqueue("apple-isp-wq", WQ_UNBOUND, 0);
 	if (!isp->wq) {
 		dev_err(dev, "failed to create workqueue\n");

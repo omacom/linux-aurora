@@ -212,6 +212,7 @@ static const struct isp_chan_ops sm_ops = {
 
 static const struct isp_chan_ops bt_ops = {
 	.handle = ipc_bt_handle,
+	.complete = ipc_bt_complete,
 };
 
 static irqreturn_t apple_isp_isr(int irq, void *dev)

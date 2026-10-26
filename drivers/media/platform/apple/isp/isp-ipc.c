@@ -6,6 +6,10 @@
 #include "isp-regs.h"
 #include "isp-fw.h"
 
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+#include <kunit/static_stub.h>
+#endif
+
 #define ISP_IPC_FLAG_TERMINAL_ACK	0x3
 /* longer firmware log lines are cut */
 #define ISP_IPC_TERMINAL_MAX_LEN	512
@@ -66,7 +70,16 @@ static inline void chan_read_msg_index(struct apple_isp *isp,
 				       struct isp_channel *chan,
 				       struct isp_message *msg, u32 index)
 {
-	memcpy(msg, chan_msg_virt(chan, index), sizeof(*msg));
+	if (isp_is_p010(isp)) {
+		u64 *slot = chan_msg_virt(chan, index);
+
+		/* Acquire validity before consuming the firmware-owned payload. */
+		msg->arg0 = READ_ONCE(*slot);
+		dma_rmb();
+		memcpy(&msg->arg1, slot + 1, sizeof(*msg) - sizeof(msg->arg0));
+	} else {
+		memcpy(msg, chan_msg_virt(chan, index), sizeof(*msg));
+	}
 }
 
 static inline void chan_read_msg(struct apple_isp *isp,
@@ -124,6 +137,8 @@ static int chan_handle_once(struct apple_isp *isp, struct isp_channel *chan)
 	isp_mbox2_write32(isp, ISP_MBOX2_IRQ_DOORBELL, chan->doorbell);
 
 	chan_update_cursor(chan);
+	if (chan->ops->complete)
+		chan->ops->complete(isp);
 
 	return 0;
 }
@@ -139,10 +154,12 @@ static inline bool chan_rx_done(struct apple_isp *isp, struct isp_channel *chan)
 
 int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan)
 {
+	unsigned int budget = isp_is_p010(isp) ? chan->num : UINT_MAX;
 	int err = 0;
 
 	mutex_lock(&chan->lock);
-	while (1) {
+	/* A busy producer must not starve the other completion/control rings. */
+	while (budget--) {
 		chan_read_msg(isp, chan, &chan->req);
 		if (chan_rx_done(isp, chan)) {
 			err = 0;
@@ -176,6 +193,11 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 {
 	long t;
 
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+	KUNIT_STATIC_STUB_REDIRECT(ipc_chan_send, isp, chan, timeout);
+#endif
+	if (isp->ipc_failed)
+		return -EIO;
 	chan_write_msg(isp, chan, &chan->req);
 	dma_wmb();
 
@@ -186,6 +208,8 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 
 	t = wait_event_timeout(isp->wait, chan_tx_done(isp, chan), timeout);
 	if (t == 0) {
+		if (isp_is_p010(isp))
+			isp->ipc_failed = true;
 		dev_err(isp->dev,
 			"%s: timed out on request [0x%llx, 0x%llx, 0x%llx]\n",
 			chan->name, chan->req.arg0, chan->req.arg1,
