@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """The system-provider decision must see legacy selectors as overrides."""
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -225,6 +226,169 @@ class SystemProviderTest(unittest.TestCase):
         (folder / "env").write_text("VK_DRIVER_FILES=$OTHER_MESA\n")
         result = self.run_detector()
         self.assertNotEqual(result.returncode, 0, result.stdout)
+
+
+class SystemAdmissionTest(unittest.TestCase):
+    """_mm3_system_admit: which boards and nodes may keep the system Mesa.
+
+    The helper is a stub that records its arguments; its own board parser is
+    covered by test-system-board.c. Without a file opt-out the admission is
+    automatic; the same checks apply either way.
+    """
+
+    BOARDS = {"j613": ("apple,j613", "apple,t8122"),
+              "j615": ("apple,j615", "apple,t8122"),
+              "j516s": ("apple,j516s", "apple,t6030")}
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name)
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        journal = self.bin / "journalctl"
+        journal.write_text('#!/bin/sh\n[ -z "${FAKE_FAULT:-}" ] || echo "$FAKE_FAULT"\n'
+                           'echo "asahi 292400000.gpu: M3: firmware ready"\n')
+        journal.chmod(0o755)
+
+    def make_root(self, board="j615", node=True, display=True):
+        compatibles = self.BOARDS.get(board, (board, "apple,t8122"))
+        soc = compatibles[-1].split(",")[1]
+        root = self.base / ("root-" + board)
+        (root / "proc/device-tree").mkdir(parents=True)
+        (root / "proc/cmdline").write_text("root=UUID=x rw quiet\n")
+        (root / "proc/device-tree/compatible").write_bytes(
+            b"".join(c.encode() + b"\0" for c in (*compatibles, "apple,arm-platform")))
+        driver = root / "sys/bus/platform/drivers/asahi"
+        driver.mkdir(parents=True)
+        (root / "sys/class/drm").mkdir(parents=True)
+        (root / "dev/dri").mkdir(parents=True)
+        if node:
+            gpu = root / "sys/devices/platform/gpu0"
+            (gpu / "of_node").mkdir(parents=True)
+            (gpu / "of_node/compatible").write_bytes(b"apple,agx-" + soc.encode() + b"\0")
+            (gpu / "driver").symlink_to(driver)
+            (root / "sys/class/drm/renderD128").mkdir()
+            (root / "sys/class/drm/renderD128/device").symlink_to(gpu)
+            (root / "dev/dri/renderD128").touch(mode=0o600)
+        if display:
+            dcp = root / "sys/devices/platform/display"
+            (dcp / "of_node").mkdir(parents=True)
+            (dcp / "of_node/compatible").write_bytes(
+                b"apple," + soc.encode() + b"-display-subsystem\0")
+            (root / "sys/class/drm/card2").mkdir()
+            (root / "sys/class/drm/card2/device").symlink_to(dcp)
+        prefix = root / "opt/mesa-m3"
+        (prefix / "libexec").mkdir(parents=True)
+        (prefix / "share/mesa-m3").mkdir(parents=True)
+        (prefix / "lib").mkdir()
+        (prefix / "lib/libgallium-26.1.4.so").touch()
+        shutil.copy(RECIPE / "mesa-m3-user-setup", prefix / "libexec/mesa-m3-user-setup")
+        shutil.copy(RECIPE / "user-setup.list", prefix / "share/mesa-m3/user-setup.list")
+        helper = prefix / "libexec/mesa-m3-system-check"
+        helper.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "${0%/*}/args"\n'
+                          '[ ! -e "${0%/*}/refuse" ]\n')
+        helper.chmod(0o755)
+        (root / "home/tester/.config").mkdir(parents=True)
+        return root
+
+    def admit(self, root, **environment):
+        hook = RECIPE / "mesa-m3-session-env"
+        return subprocess.run(
+            ["sh", "-c", 'MESA_M3_SESSION_ENV_NO_RUN=1 . "$1" && _mm3_p=/opt/mesa-m3 && '
+             '_mm3_system_admit "$2"', "sh", str(hook), str(root)],
+            env={"PATH": str(self.bin) + ":/usr/bin:/bin", "HOME": "/home/tester",
+                 "XDG_CURRENT_DESKTOP": "Hyprland", **environment},
+            capture_output=True, text=True, timeout=30)
+
+    def helper_args(self, root):
+        path = root / "opt/mesa-m3/libexec/args"
+        return path.read_text().split() if path.exists() else None
+
+    def test_supported_boards_are_admitted_without_opt_out(self):
+        for board, chip in (("j613", "t8122"), ("j615", "t8122"), ("j516s", "t6030")):
+            with self.subTest(board=board):
+                root = self.make_root(board)
+                result = self.admit(root)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"({chip}, apple,{board})", result.stdout)
+                self.assertEqual(self.helper_args(root), ["/dev/dri/renderD128", chip])
+
+    def test_file_opt_out_still_admits(self):
+        root = self.make_root("j615")
+        (root / "etc/mesa-m3").mkdir(parents=True)
+        (root / "etc/mesa-m3/disable").touch()
+        self.assertEqual(self.admit(root).returncode, 0)
+
+    def test_unknown_or_ambiguous_boards_are_refused(self):
+        for board in ("apple,j504", "apple,j615s", "apple,j516s", "apple,j614s"):
+            with self.subTest(board=board):
+                root = self.make_root(board)
+                self.assertEqual(self.admit(root).returncode, 1)
+                self.assertIsNone(self.helper_args(root))
+        root = self.make_root("j615")
+        (root / "proc/device-tree/compatible").write_bytes(b"apple,j613\0apple,j615\0apple,t8122\0")
+        self.assertEqual(self.admit(root).returncode, 1)
+        self.assertIsNone(self.helper_args(root))
+
+    def test_j615_without_its_nodes_is_refused(self):
+        for node, display in ((False, True), (True, False)):
+            with self.subTest(node=node, display=display):
+                root = self.make_root("j615", node=node, display=display)
+                self.assertEqual(self.admit(root).returncode, 1)
+                self.assertIsNone(self.helper_args(root))
+                shutil.rmtree(root)
+
+    def test_kernel_command_line_refuses(self):
+        for flag in ("mesa_m3=off", "nomodeset"):
+            with self.subTest(flag=flag):
+                root = self.make_root("j615")
+                (root / "proc/cmdline").write_text(f"root=UUID=x rw {flag} quiet\n")
+                self.assertEqual(self.admit(root).returncode, 1)
+                self.assertIsNone(self.helper_args(root))
+                shutil.rmtree(root)
+
+    def test_helper_refusal_is_final(self):
+        root = self.make_root("j615")
+        (root / "opt/mesa-m3/libexec/refuse").touch()
+        result = self.admit(root)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.helper_args(root), ["/dev/dri/renderD128", "t8122"])
+
+    def test_kernel_fault_and_other_desktops_refuse(self):
+        root = self.make_root("j615")
+        self.assertEqual(self.admit(root, FAKE_FAULT="asahi: M3 G15G: firmware crashed").returncode, 1)
+        self.assertEqual(self.admit(root, XDG_CURRENT_DESKTOP="sway").returncode, 1)
+        self.assertIsNone(self.helper_args(root))
+
+    def test_native_25g83_profile_stays_on_its_gate_without_opt_out(self):
+        root = self.make_root("j613")
+        (root / "etc/mesa-m3").mkdir(parents=True)
+        (root / "etc/mesa-m3/t8122-profile").write_text("j613-25g83-hal200\n")
+        self.assertEqual(self.admit(root).returncode, 1)
+        (root / "etc/mesa-m3/disable").touch()
+        self.assertEqual(self.admit(root).returncode, 0)
+        root = self.make_root("j615")
+        handoff = root / "sys/devices/platform/gpu0/of_node/apple,j613-25g83-gpu-handoff"
+        handoff.write_bytes(b"\0\0\0\1")
+        self.assertEqual(self.admit(root).returncode, 1)
+        (root / "etc/mesa-m3").mkdir(parents=True)
+        (root / "etc/mesa-m3/disable").touch()
+        self.assertEqual(self.admit(root).returncode, 0)
+
+    def test_unconfirmed_attempt_of_this_boot_refuses(self):
+        root = self.make_root("j615")
+        (root / "proc/sys/kernel/random").mkdir(parents=True)
+        (root / "proc/sys/kernel/random/boot_id").write_text("boot-a\n")
+        state = root / "home/tester/.local/state/mesa-m3"
+        state.mkdir(parents=True)
+        (state / "attempt").write_text("schema=aurora.mesa-m3-attempt/2\nboot_id=boot-a\n"
+                                       "session_id=5\nhook_run_id=run-1\n")
+        self.assertEqual(self.admit(root).returncode, 1)
+        (state / "session-ok").write_text("schema=aurora.mesa-m3-session-ok/1\nboot_id=boot-a\n"
+                                          "session_id=5\nhook_run_id=run-1\n")
+        self.assertEqual(self.admit(root).returncode, 0)
 
 
 if __name__ == "__main__":

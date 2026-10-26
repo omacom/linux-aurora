@@ -1,8 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
 # mesa-m3-session-confirm [--settle SECONDS]: write the success marker of this
-# boot's login with /opt/mesa-m3, but only on live evidence that its
-# compositor is up and serving. Run by mesa-m3-session-confirm.service after
+# boot's login with /opt/mesa-m3 (or with the system Mesa that the session hook
+# admitted automatically), but only on live evidence that its compositor is up
+# and serving. Run by mesa-m3-session-confirm.service after
 # graphical-session.target (reaching the target alone proves nothing).
 #
 # The attempt (${XDG_STATE_HOME:-~/.local/state}/mesa-m3/attempt, written by

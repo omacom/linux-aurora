@@ -26,12 +26,36 @@ scanner refuses instead of holding the login. The helper keeps its own
 5-second timeout.
 
 A failed check keeps the existing software fallback. `mesa_m3=off` and
-`nomodeset` remain recovery choices. Other boards, including J615, remain
-outside this system handoff. Explicit legacy profile selection is unchanged.
-No opt-in flags, attempt records or success markers are added or removed.
+`nomodeset` remain recovery choices. Other boards remain outside this system
+handoff. Explicit legacy profile selection is unchanged.
 Only the exact software-fallback pair previously exported by this hook can
 be cleared. The state remains `inactive`, `reason=opt-out`, `fallback=none`
 when system Mesa admission succeeds.
+
+## J615 and automatic selection
+
+The 15-inch Air (J615, T8122) is admitted with the same checks as the J613, in
+the hook and in `mesa-m3-system-check`. A root that names both Airs, or one of
+them twice, is refused.
+
+The file opt-out is no longer required. In a Hyprland session on J613, J615
+or J516S, the hook runs the same bounded admission after its `/opt/mesa-m3`
+gate, whatever that gate decided, except `not-supported` and `user-setup`
+(the session's own Mesa setup still decides). When it passes, the session
+keeps system Mesa even where the gate would have used `/opt/mesa-m3`: the
+system Mesa supersedes the legacy build. The state is `inactive`,
+`reason=system-mesa`, `fallback=none`; its detail names the admitted board and
+the gate's own decision. Any refusal leaves the gate's decision and fallback
+exactly as before.
+
+An automatic admission writes the same attempt as an `/opt/mesa-m3` login.
+`mesa-m3-session-confirm` confirms it in the same way, and an unconfirmed
+login sends the next login of that boot to the software fallback, instead of
+a login loop. The file opt-out path still writes no attempt.
+
+Without a file opt-out, the 25G83 native profile stays on its own gate: an
+`/etc/mesa-m3/t8122-profile` selection, or a render node with
+`apple,j613-25g83-gpu-handoff`, is not admitted automatically.
 
 The helper proves only that the system EGL device and a context open. It does
 not allocate GBM buffers, render or present. A system-Mesa login that passes
