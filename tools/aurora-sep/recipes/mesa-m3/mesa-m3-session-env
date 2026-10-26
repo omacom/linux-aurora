@@ -71,21 +71,22 @@
 #
 # A system Mesa on /usr that drives the GPU natively is the exception, on a
 # J613 or J615 (T8122, the 13- and 15-inch M3 Air) or a J516S (T6030) in a
-# Hyprland session. It is checked after the gate above, whatever the gate
-# decided, except not-supported and user-setup (the session's own Mesa setup
-# still decides). When the node, display, kernel-log, user-setup
-# (--system-provider) and same-boot attempt checks pass and
-# mesa-m3-system-check admits /usr, the session keeps the system Mesa
-# (fallback=none) and /opt/mesa-m3 stays inactive, even where the gate would
-# have used it: the system Mesa supersedes the legacy build. The whole check
-# runs in its own sh and is refused after 20 seconds. mesa_m3=off and
-# nomodeset refuse it, and any refusal leaves the gate's decision and its
-# fallback exactly as above. Its state:
+# Hyprland session. It is checked only where the gate above ends inactive,
+# except not-supported and user-setup (the session's own Mesa setup still
+# decides): an active /opt/mesa-m3 is never replaced. When the node, display,
+# kernel-log, user-setup (--system-provider) and same-boot attempt checks pass
+# and mesa-m3-system-check admits /usr, the session keeps the system Mesa
+# (fallback=none) instead of the software fallback. The whole check runs in
+# its own sh and is refused after 20 seconds. mesa_m3=off and nomodeset refuse
+# it, and any refusal leaves the gate's decision and its fallback exactly as
+# above. Its state:
 #   system-mesa       no opt-out: the system Mesa was admitted automatically.
-#                     Like active, it records an attempt, so a login whose
-#                     compositor is not confirmed (mesa-m3-session-confirm)
+#                     Its attempt is recorded first, as for active, so a login
+#                     whose compositor is not confirmed (mesa-m3-session-confirm)
 #                     turns the next login of this boot into the software
-#                     fallback instead of a login loop.
+#                     fallback instead of a login loop. When the attempt
+#                     cannot be written, the gate's decision and fallback
+#                     stay, and the detail says the attempt was not recorded.
 #   opt-out           a file opt-out (/etc/mesa-m3/disable or the user's
 #                     mesa-m3/disable) whose system Mesa was admitted: as
 #                     before, no new attempt.
@@ -490,18 +491,24 @@ _mm3_system_admit_bounded() {
 		sh "$_mm3_self" "${1:-}" "$_mm3_p"
 }
 
-# _mm3_state ROOT DECISION REASON DETAIL FALLBACK: write the state file and the journal
-# line. A value holding a newline or carriage return is refused.
-_mm3_state() {
+# _mm3_login_ids ROOT: this login's uid, session id and boot id, as the state
+# file and the attempt record them.
+_mm3_login_ids() {
 	_mm3_uid=$(id -u)
 	_mm3_sid=${XDG_SESSION_ID:-}
 	[ -n "$_mm3_sid" ] || _mm3_sid=$(loginctl show-user "$_mm3_uid" -p Display --value 2>/dev/null)
+	_mm3_boot=
+	[ -r "$1/proc/sys/kernel/random/boot_id" ] && IFS= read -r _mm3_boot < "$1/proc/sys/kernel/random/boot_id"
+}
+
+# _mm3_state ROOT DECISION REASON DETAIL FALLBACK: write the state file and the journal
+# line. A value holding a newline or carriage return is refused.
+_mm3_state() {
+	_mm3_login_ids "$1"
 	_mm3_inv=$(systemctl show -p InvocationID --value "user@$_mm3_uid.service" 2>/dev/null)
 	_mm3_ver=
 	[ -r "$1$_mm3_p/share/mesa-m3/package-version" ] &&
 		IFS= read -r _mm3_ver < "$1$_mm3_p/share/mesa-m3/package-version"
-	_mm3_boot=
-	[ -r "$1/proc/sys/kernel/random/boot_id" ] && IFS= read -r _mm3_boot < "$1/proc/sys/kernel/random/boot_id"
 	_mm3_cr=$(printf '\r')
 	_mm3_nl='
 '
@@ -563,16 +570,29 @@ mesa_m3_session_env() {
 	[ -r /proc/sys/kernel/random/uuid ] && IFS= read -r _mm3_run < /proc/sys/kernel/random/uuid
 	_mm3_run=${_mm3_run:-unknown}
 	[ "${_mm3_decision%% *}" = not-supported ] || export MESA_M3_HOOK_RUN_ID="$_mm3_run"
-	# The system Mesa first, whatever the gate decided (see the header), except
-	# where this is neither a T6030 nor a T8122 or the session's own Mesa setup
-	# chose. A refusal leaves the gate's decision and fallback as they were.
+	# The system Mesa only where the gate ends inactive (see the header): never
+	# instead of an active /opt/mesa-m3, and not where this is neither a T6030
+	# nor a T8122 or the session's own Mesa setup chose. A refusal leaves the
+	# gate's decision and fallback as they were.
 	_mm3_admitted=0
-	case ${_mm3_decision%% *} in
-	not-supported | user-setup) ;;
-	*)
-		_mm3_sys=$(_mm3_system_admit_bounded "${1:-}")
-		[ "$?" -ne 0 ] || _mm3_admitted=1 ;;
-	esac
+	_mm3_extra=
+	if [ "$_mm3_on" -ne 0 ]; then
+		case ${_mm3_decision%% *} in
+		not-supported | user-setup) ;;
+		*)
+			_mm3_sys=$(_mm3_system_admit_bounded "${1:-}")
+			[ "$?" -ne 0 ] || _mm3_admitted=1 ;;
+		esac
+	fi
+	# Automatic: the attempt comes first. Without it no unconfirmed login could
+	# send the next one to software, so a failed write keeps the fallback.
+	if [ "$_mm3_admitted" -eq 1 ] && [ "${_mm3_decision%% *}" != opt-out ]; then
+		_mm3_login_ids "${1:-}"
+		if ! _mm3_attempt "${1:-}"; then
+			_mm3_admitted=0
+			_mm3_extra="; system Mesa admitted, but its attempt not recorded in ${XDG_STATE_HOME:-$HOME/.local/state}/mesa-m3, so this login keeps the fallback"
+		fi
+	fi
 	if [ "$_mm3_admitted" -eq 1 ]; then
 		# Only the pair this hook itself exports. Anything else in the
 		# environment, including a user's own LIBGL_ALWAYS_SOFTWARE without
@@ -585,11 +605,10 @@ mesa_m3_session_env() {
 			# A file opt-out: as before, no new attempt.
 			_mm3_state "${1:-}" inactive opt-out "${_mm3_decision#* }; $_mm3_sys" none
 		else
-			# Automatic: recorded like an active login, so that a compositor
-			# that is not confirmed sends the next login of this boot to the
-			# software fallback (previous-failed) instead of looping.
+			# Automatic: its attempt is already recorded, so a compositor that
+			# is not confirmed sends the next login of this boot to the
+			# software fallback instead of looping.
 			_mm3_state "${1:-}" inactive system-mesa "$_mm3_sys; the /opt/mesa-m3 gate said: $_mm3_decision" none
-			_mm3_attempt "${1:-}"
 		fi
 	elif [ "$_mm3_on" -eq 0 ]; then
 		case ":${LD_LIBRARY_PATH:-}:" in
@@ -627,7 +646,7 @@ mesa_m3_session_env() {
 			export MESA_M3_FALLBACK=software
 			_mm3_fb=software
 		fi
-		_mm3_state "${1:-}" inactive "${_mm3_decision%% *}" "${_mm3_decision#* }" "$_mm3_fb"
+		_mm3_state "${1:-}" inactive "${_mm3_decision%% *}" "${_mm3_decision#* }$_mm3_extra" "$_mm3_fb"
 	fi
 }
 
@@ -635,7 +654,7 @@ if [ -z "${MESA_M3_SESSION_ENV_NO_RUN:-}" ]; then
 	mesa_m3_session_env
 	unset -f mesa_m3_gate mesa_m3_session_env _mm3_init _mm3_state _mm3_node_open _mm3_attempt \
 		_mm3_soc_of _mm3_25g83_board _mm3_native_display _mm3_kernel_log \
-		_mm3_legacy_attempt_clear _mm3_system_admit _mm3_system_admit_bounded
+		_mm3_legacy_attempt_clear _mm3_system_admit _mm3_system_admit_bounded _mm3_login_ids
 fi
 unset _mm3_root _mm3_p _mm3_nodes _mm3_node _mm3_n _mm3_drv _mm3_dcp _mm3_c _mm3_dev _mm3_f _mm3_v \
 	_mm3_val _mm3_ifs _mm3_d _mm3_out _mm3_rc _mm3_decision _mm3_on \
@@ -643,4 +662,4 @@ unset _mm3_root _mm3_p _mm3_nodes _mm3_node _mm3_n _mm3_drv _mm3_dcp _mm3_c _mm3
 	_mm3_body _mm3_kv _mm3_dir _mm3_tmp _mm3_fb _mm3_run _mm3_att _mm3_ok _mm3_faults _mm3_ign _mm3_igd \
 	_mm3_soc _mm3_name _mm3_dt _mm3_base _mm3_profile _mm3_requested _mm3_files _mm3_gate_ifs _mm3_board _mm3_note \
 	_mm3_klog _mm3_sys _mm3_admitted _mm3_detail _mm3_helper _mm3_chip _mm3_identity _mm3_socs _mm3_cmdline \
-	_mm3_self _mm3_auto
+	_mm3_self _mm3_auto _mm3_extra

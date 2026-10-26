@@ -5,8 +5,8 @@
 # the exact j613-25g83-hal200 token, firmware26.6.2 handoff and runtime HAL200/USC3.
 # The J615 shares that profile experimentally: the session hook admits it only
 # with /chosen asahi,j615-25g83-experimental="1" (share/mesa-m3/native25-boards).
-# In Hyprland sessions on J613, J615 and J516S the hook prefers a system Mesa in
-# /usr that mesa-m3-system-check admits; /opt/mesa-m3 then stays inactive.
+# Where /opt/mesa-m3 is not used, Hyprland sessions on J613, J615 and J516S keep
+# a system Mesa in /usr that mesa-m3-system-check admits, not software rendering.
 # The package builds both sources sequentially and checks compiler definitions,
 # generated kernels, queue sandbox behavior, TLS loading and native MRT clears.
 # No profile selection substitutes another Mac's firmware or calibration.
@@ -87,7 +87,7 @@ sha256sums=('7ed24969985dce91f089d34dbe1c55cbcb8c95765e3e5bc0f268d27fbead2222'
             '10abda78df16e650a77443f50cc46a15e418c42d4d9680c6a61616b232c9bdef'
             '6c98fab6f9d70449bd7f5258c34eac773836908e060ce5bef86dc5b0ce595e61'
             '826016665cd0424a614b67add921c0c79c3c698a4d104ea5712518449b75f27c'
-            'bbf0bea6cb9310fd0e3f890020c14783f490761451355951e2d965800da8c1e5'
+            '8abf5fcf736b24dad81ffe6a10e137ded8727c004f17d9d723c27e04141b717f'
             '6144af8b2e0f04ea615e8c4149e69c45ac49e630c46b2a58f0d1095d977798b2'
             '530948fc1a124de21c030a497e2ef5351742ba4ad4653484fe30fd1697ad7141'
             '644cf4a5ab57b7badec75843e2899b68d41490c4851d6885227180d6090c25ea'

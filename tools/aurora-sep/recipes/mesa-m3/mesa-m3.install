@@ -9,8 +9,9 @@ post_install() {
   echo "mesa-m3: takes effect at the next login to a uwsm session on an M3 Pro (T6030),"
   echo "mesa-m3: and on an M3 (T8122) only with /etc/mesa-m3/t8122-gpu-experiment: its GPU"
   echo "mesa-m3: is experimental (the installer writes the file for --m3-gpu-experiment)."
-  echo "mesa-m3: In a Hyprland session on a 13- or 15-inch M3 Air (J613, J615) or a J516S,"
-  echo "mesa-m3: a system Mesa in /usr that drives the GPU is preferred over /opt/mesa-m3."
+  echo "mesa-m3: Where /opt/mesa-m3 is not used, a Hyprland session on a 13- or 15-inch"
+  echo "mesa-m3: M3 Air (J613, J615) or a J516S keeps a system Mesa in /usr that drives"
+  echo "mesa-m3: the GPU, instead of rendering in software; no marker file is needed."
   echo "mesa-m3: It does nothing on other machines. Each login's decision is in"
   echo "mesa-m3: /run/user/<uid>/mesa-m3-session.state and the journal (tag mesa-m3)."
   _render_note
