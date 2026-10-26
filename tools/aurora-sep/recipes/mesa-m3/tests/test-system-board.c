@@ -13,10 +13,21 @@ int main(void)
    CHECK(true, "t8122", "apple,j613\0apple,t8122\0apple,arm-platform\0");
    CHECK(true, "t6030", "apple,j516s\0apple,t6030\0apple,arm-platform\0");
    CHECK(true, "t6030", "apple,arm-platform\0apple,t6030\0apple,j516s\0");
-   CHECK(false, "t8122", "apple,j615\0apple,t8122\0");
+   CHECK(true, "t8122", "apple,j615\0apple,t8122\0apple,arm-platform\0");
+   CHECK(true, "t8122", "apple,arm-platform\0apple,t8122\0apple,j615\0");
+   CHECK(false, "t6030", "apple,j615\0apple,t6030\0");
+   CHECK(false, "t8122", "apple,j615\0apple,j615\0apple,t8122\0");
+   CHECK(false, "t8122", "apple,j615\0apple,t8122\0apple,t8122\0");
+   CHECK(false, "t8122", "apple,j615\0");
+   CHECK(false, "t8122", "apple,j615\0apple,t8122");
+   CHECK(false, "t8122", "apple,j616\0apple,t8122\0");
+   CHECK(false, "t8122", "apple,j615s\0apple,t8122\0");
+   CHECK(false, "t8122", "apple,j504\0apple,t8122\0");
+   CHECK(false, "t8122", "apple,j516s\0apple,t8122\0");
    CHECK(false, "t6030", "apple,j514s\0apple,t6030\0");
    CHECK(false, "t6030", "apple,j516s\0apple,t6031\0");
    CHECK(false, "t8122", "apple,j613\0apple,j615\0apple,t8122\0");
+   CHECK(false, "t8122", "apple,j615\0apple,j613\0apple,t8122\0");
    CHECK(false, "t8122", "apple,j613\0apple,j613\0apple,t8122\0");
    CHECK(false, "t6030", "apple,j516s\0apple,t6030\0apple,t6030\0");
    CHECK(false, "t6030", "apple,j516s\0apple,t6030\0apple,t8122\0");
@@ -27,6 +38,6 @@ int main(void)
    CHECK(false, "t6030", "apple,j516s\0");
    CHECK(false, "t8140", "apple,j516s\0apple,t6030\0");
    CHECK(false, "t6030", "");
-   puts("17 board parser controls passed");
+   puts("28 board parser controls passed");
    return 0;
 }

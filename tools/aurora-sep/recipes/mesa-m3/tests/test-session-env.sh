@@ -676,6 +676,7 @@ rm "$J516S/etc/mesa-m3/t8122-profile"
 system_root() {
 	case "$2" in
 	air) _hd="apple,j613 apple,t8122"; _hg=$G15G ;;
+	air15) _hd="apple,j615 apple,t8122"; _hg=$G15G ;;
 	*) _hd="apple,j516s apple,t6030"; _hg=$G15S ;;
 	esac
 	_hr=$(mkroot "handoff-$1" "$_hd" "$_hg" yes 1 yes)
@@ -741,11 +742,21 @@ rm "$HRA/etc/mesa-m3/disable"
 mkdir -p "$HRA$T/home/.config/mesa-m3"
 : > "$HRA$T/home/.config/mesa-m3/disable"
 handoff "$HRA" none yes
+if grep -q 'detail=.*admits /dev/dri/renderD128 (t8122, apple,j613)' "$HRA/run/user/$UID_/mesa-m3-session.state"; then
+	echo 'ok    handoff: the state names the admitted board'
+else echo 'FAIL  handoff: board in the state detail'; fail=1; fi
 if [ "$(cat "$HRA/opt/mesa-m3/libexec/system-check.args")" = "$(printf '/dev/dri/renderD128\nt8122')" ] &&
 	grep -qx 'PATH=/usr/bin:/bin' "$HRA/opt/mesa-m3/libexec/system-check.env" &&
 	[ -z "$(grep -vE '^(PATH=/usr/bin:/bin|PWD=.*|SHLVL=[0-9]+|_=.*)$' "$HRA/opt/mesa-m3/libexec/system-check.env")" ]; then
 	echo 'ok    handoff: helper receives exact device/SoC and empty selector environment'
 else echo 'FAIL  handoff: helper argv/environment'; fail=1; fi
+# The 15-inch Air (J615) passes the same file opt-out handoff as the J613.
+HRJ=$(system_root optout-j615 air15)
+handoff "$HRJ" none yes
+if [ "$(cat "$HRJ/opt/mesa-m3/libexec/system-check.args")" = "$(printf '/dev/dri/renderD128\nt8122')" ] &&
+	grep -q 'detail=.*admits /dev/dri/renderD128 (t8122, apple,j615)' "$HRJ/run/user/$UID_/mesa-m3-session.state"; then
+	echo 'ok    handoff: J615 helper receives the T8122 node and the state names apple,j615'
+else echo 'FAIL  handoff: J615 helper argv or state'; fail=1; fi
 HRP=$(system_root root-optout pro)
 handoff "$HRP" none yes
 handoff "$HRP" none yes LIBGL_ALWAYS_SOFTWARE=1 MESA_M3_FALLBACK=software
@@ -775,7 +786,7 @@ for journal in noperm error match bank dcp g15g verdict; do
 	HR=$(system_root "journal-$journal" pro)
 	handoff "$HR" software no FAKE_JOURNAL="$journal"
 done
-for dt in 'apple,j615 apple,t8122' 'apple,j514s apple,t6030' \
+for dt in 'apple,j615 apple,t6030' 'apple,j514s apple,t6030' \
 	'apple,j614s apple,t6030' 'apple,j613 apple,j615 apple,t8122' \
 	'apple,j613 apple,t6030' 'apple,j516s apple,t6030 apple,t8122'; do
 	HR=$(system_root "board-$(printf '%s' "$dt" | tr ' ,' '--')" pro)
@@ -783,6 +794,15 @@ for dt in 'apple,j615 apple,t8122' 'apple,j514s apple,t6030' \
 	# Match the GPU to the ambiguous board's first SoC so the old fallback
 	# remains observable; the system handoff must still refuse it.
 	case "$dt" in *t8122*) nul apple,agx-t8122 apple,agx-t6030 > "$HR/sys/devices/platform/gpu0/of_node/compatible" ;; esac
+	handoff "$HR" software no
+done
+# On a T8122 GPU and display, any board but the two Airs is refused, and so
+# is a root naming both of them or one twice.
+for dt in 'apple,j504 apple,t8122' 'apple,j615s apple,t8122' 'apple,j516s apple,t8122' \
+	'apple,j615 apple,j613 apple,t8122' 'apple,j615 apple,j615 apple,t8122' \
+	'apple,j615 apple,t8122 apple,t8122'; do
+	HR=$(system_root "air-board-$(printf '%s' "$dt" | tr ' ,' '--')" air15)
+	nul $dt > "$HR/proc/device-tree/compatible"
 	handoff "$HR" software no
 done
 HR=$(system_root no-display pro)
@@ -844,6 +864,198 @@ handoff "$HR" none yes
 rm "$HOK"
 sed -i 's/boot_id=boot-a/boot_id=old-boot/' "$HATT"
 handoff "$HR" none yes
+
+# Automatic system Mesa: no opt-out file. On J613, J615 and J516S a Hyprland
+# session whose /opt/mesa-m3 gate ends inactive keeps the system Mesa when
+# every check passes (reason system-mesa, fallback none, an attempt recorded
+# first for the loop guard). An active gate is never replaced. Every refusal
+# leaves the gate's decision and fallback.
+auto_root() { # NAME air|air15|pro
+	_ar=$(system_root "auto-$1" "$2")
+	rm "$_ar/etc/mesa-m3/disable"
+	echo "$_ar"
+}
+# auto_run ROOT [VAR=value...]: one hook run under $TSH; prints
+# "DECISION REASON FALLBACK helper=yes|no attempt=new|unchanged|none sw=.. legacy=..";
+# the run's exports and state are left in $T/auto.out.
+auto_run() {
+	_ar=$1; shift
+	rm -f "$_ar/opt/mesa-m3/libexec/system-check.args" "$_ar/run/user/$UID_/mesa-m3-session.state" "$T/log"
+	_aa="$_ar$T/home/.local/state/mesa-m3/attempt"
+	_ab=none
+	[ ! -f "$_aa" ] || _ab=$(sha256sum "$_aa" | cut -d' ' -f1)
+	env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE_LOG="$T/log" XDG_SESSION_ID=5 \
+		XDG_CURRENT_DESKTOP=Hyprland "$@" "$TSH" -c '
+		MESA_M3_SESSION_ENV_NO_RUN=1 . "$1"
+		mesa_m3_session_env "$2"
+		printf "software=%s\nmarker=%s\nlegacy=%s\nrun=%s\n" "${LIBGL_ALWAYS_SOFTWARE:-}" "${MESA_M3_FALLBACK:-}" "${MESA_M3_SESSION:-}" "${MESA_M3_HOOK_RUN_ID:-}"
+		cat "$2/run/user/$(id -u)/mesa-m3-session.state"
+	' sh "$ENVFILE" "$_ar" > "$T/auto.out" 2>&1
+	_aaf=none
+	[ ! -f "$_aa" ] || _aaf=$(sha256sum "$_aa" | cut -d' ' -f1)
+	if [ "$_aaf" = none ]; then _aat=none
+	elif [ "$_aaf" = "$_ab" ]; then _aat=unchanged
+	elif grep -qx "hook_run_id=$(sed -n 's/^run=//p' "$T/auto.out")" "$_aa"; then _aat=new
+	else _aat=foreign; fi
+	_ac=no
+	[ ! -e "$_ar/opt/mesa-m3/libexec/system-check.args" ] || _ac=yes
+	echo "$(sed -n 's/^decision=//p' "$T/auto.out") $(sed -n 's/^reason=//p' "$T/auto.out") $(sed -n 's/^fallback=//p' "$T/auto.out") helper=$_ac attempt=$_aat sw=$(sed -n 's/^software=//p' "$T/auto.out") legacy=$(sed -n 's/^legacy=//p' "$T/auto.out")"
+}
+expect_auto() { # NAME "WANT" ROOT [VAR=value...]
+	_en=$1 _ew=$2
+	shift 2
+	_eg=$(auto_run "$@")
+	if [ "$_eg" = "$_ew" ]; then echo "ok    auto $_en: $_eg"
+	else echo "FAIL  auto $_en: got '$_eg', want '$_ew'"; sed 's/^/      /' "$T/auto.out"; fail=1; fi
+}
+auto_fresh() { rm -f "$1$T/home/.local/state/mesa-m3/attempt" "$1$T/home/.local/state/mesa-m3/session-ok"; }
+SYS='inactive system-mesa none helper=yes attempt=new sw= legacy='
+# The 13- and 15-inch Air without the T8122 experiment marker: the gate says
+# experimental, which used to mean the software fallback.
+AJ613=$(auto_root j613 air)
+expect_auto "J613 without opt-out" "$SYS" "$AJ613"
+grep -qx 'detail=system Mesa on /usr admits /dev/dri/renderD128 (t8122, apple,j613); /opt/mesa-m3 stays inactive; the /opt/mesa-m3 gate said: experimental .*' "$T/auto.out" &&
+	echo "ok    auto J613: the state names the system Mesa, the board and the gate's own decision" ||
+	{ echo "FAIL  auto J613 detail: $(grep '^detail=' "$T/auto.out")"; fail=1; }
+AJ615=$(auto_root j615 air15)
+expect_auto "J615 without opt-out" "$SYS" "$AJ615"
+if [ "$(cat "$AJ615/opt/mesa-m3/libexec/system-check.args")" = "$(printf '/dev/dri/renderD128\nt8122')" ] &&
+	[ -z "$(grep -vE '^(PATH=/usr/bin:/bin|PWD=.*|SHLVL=[0-9]+|_=.*)$' "$AJ615/opt/mesa-m3/libexec/system-check.env")" ] &&
+	grep -q '^detail=system Mesa on /usr admits /dev/dri/renderD128 (t8122, apple,j615);' "$T/auto.out"; then
+	echo "ok    auto J615: helper receives the T8122 node and an empty environment; the state names apple,j615"
+else echo "FAIL  auto J615: helper argv/environment or detail"; fail=1; fi
+# The attempt is bound to this login exactly as an active one is, so
+# mesa-m3-session-confirm can confirm it (see test-confirm.sh).
+_arun=$(sed -n 's/^run=//p' "$T/auto.out")
+if [ "$(head -n 1 "$AJ615$T/home/.local/state/mesa-m3/attempt")" = schema=aurora.mesa-m3-attempt/2 ] &&
+	grep -qx 'boot_id=boot-a' "$AJ615$T/home/.local/state/mesa-m3/attempt" &&
+	grep -qx 'session_id=5' "$AJ615$T/home/.local/state/mesa-m3/attempt" &&
+	grep -qx "hook_run_id=$_arun" "$T/auto.out"; then
+	echo "ok    auto J615: attempt bound to boot_id, session_id and the exported hook_run_id (= state)"
+else echo "FAIL  auto J615 attempt: $(cat "$AJ615$T/home/.local/state/mesa-m3/attempt")"; fail=1; fi
+check_state "system-mesa (J615)" inactive system-mesa none "$(auto_fresh "$AJ615"; state "$AJ615" 5)"
+auto_fresh "$AJ615"
+# The leftover software pair of an earlier login is the hook's own: cleared.
+# A user's own LIBGL_ALWAYS_SOFTWARE is a user setup (below).
+expect_auto "J615 clears its own leftover pair" "$SYS" "$AJ615" LIBGL_ALWAYS_SOFTWARE=1 MESA_M3_FALLBACK=software
+auto_fresh "$AJ615"
+# An active /opt/mesa-m3 is never replaced: the J613 opted in to the
+# experiment and the J516S keep it, and the helper is not run.
+LEGACY='active active none helper=no attempt=new sw= legacy=/opt/mesa-m3'
+mkdir -p "$AJ613/etc/mesa-m3"; : > "$AJ613/etc/mesa-m3/t8122-gpu-experiment"
+auto_fresh "$AJ613"
+expect_auto "J613 opted in: /opt stays active" "$LEGACY" "$AJ613"
+rm "$AJ613/etc/mesa-m3/t8122-gpu-experiment"; auto_fresh "$AJ613"
+AJ516A=$(auto_root j516s-active pro)
+expect_auto "J516S: /opt stays active" "$LEGACY" "$AJ516A"
+# A J516S whose /opt/mesa-m3 gate ends inactive (incomplete prefix) gets the
+# system Mesa instead of software.
+AJ516=$(auto_root j516s pro); rm "$AJ516/opt/mesa-m3/lib/libvulkan_asahi.so"
+expect_auto "J516S, /opt incomplete" "$SYS" "$AJ516"
+grep -q '^detail=system Mesa on /usr admits /dev/dri/renderD128 (t6030, apple,j516s);.*gate said: incomplete-prefix' "$T/auto.out" &&
+	echo "ok    auto J516S: the state names t6030, apple,j516s and the gate's verdict" || { echo "FAIL  auto J516S detail"; fail=1; }
+auto_fresh "$AJ516"
+# Exactly the run id exported: none of /opt/mesa-m3's variables, no fallback.
+exs=$(env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE_LOG="$T/log" XDG_CURRENT_DESKTOP=Hyprland LD_LIBRARY_PATH=/x "$TSH" -c '
+	MESA_M3_SESSION_ENV_NO_RUN=1 . "$1"; unset MESA_M3_SESSION_ENV_NO_RUN
+	env | sort > "$HOME/b7"; mesa_m3_session_env "$2" >/dev/null; env | sort > "$HOME/a7"
+	diff "$HOME/b7" "$HOME/a7" | grep "^[<>]" | grep -v -E "^[<>] (_=|SHLVL=)" | sed "s/^> //"' sh "$ENVFILE" "$AJ516" |
+	sed -E 's/^MESA_M3_HOOK_RUN_ID=[0-9a-f-]{36}$/MESA_M3_HOOK_RUN_ID=<uuid>/')
+[ "$exs" = "MESA_M3_HOOK_RUN_ID=<uuid>" ] && echo "ok    auto J516S: only the run id exported, LD_LIBRARY_PATH untouched" ||
+	{ echo "FAIL  auto J516S exports: $exs"; fail=1; }
+auto_fresh "$AJ516"
+# No login loop: an automatic login whose compositor was not confirmed sends
+# the next login of this boot to the software fallback; a matching success
+# marker lets the system Mesa in again, replacing the older confirmed attempt;
+# another boot's attempt does not count.
+expect_auto "J615 first login" "$SYS" "$AJ615"
+_arun=$(sed -n 's/^run=//p' "$T/auto.out")
+expect_auto "J615 after an unconfirmed login" "inactive experimental software helper=no attempt=unchanged sw=1 legacy=" "$AJ615"
+printf 'schema=aurora.mesa-m3-session-ok/1\nboot_id=boot-a\nsession_id=5\nhook_run_id=%s\n' "$_arun" > "$AJ615$T/home/.local/state/mesa-m3/session-ok"
+expect_auto "J615 replaces an older confirmed attempt" "$SYS" "$AJ615"
+grep -qx "hook_run_id=$_arun" "$AJ615$T/home/.local/state/mesa-m3/attempt" &&
+	{ echo "FAIL  auto J615: the older attempt was kept"; fail=1; } || echo "ok    auto J615: the older confirmed attempt is gone"
+echo boot-b > "$AJ615/proc/sys/kernel/random/boot_id"
+expect_auto "J615 after another boot's unconfirmed login" "$SYS" "$AJ615"
+echo boot-a > "$AJ615/proc/sys/kernel/random/boot_id"; auto_fresh "$AJ615"
+expect_auto "J516S first login" "$SYS" "$AJ516"
+expect_auto "J516S after an unconfirmed login" "inactive incomplete-prefix software helper=no attempt=unchanged sw=1 legacy=" "$AJ516"
+auto_fresh "$AJ516"
+# The attempt comes first: when it cannot be written, the admission is dropped,
+# the gate's software fallback stays and the state says why.
+R=$(auto_root j615-attempt-fails air15); AD="$R$T/home/.local/state/mesa-m3"
+mkdir -p "$AD"; chmod 500 "$AD"
+if [ -w "$AD" ]; then echo "skip  attempt-fails (running as root)"; else
+	expect_auto "J615 attempt not writable" "inactive experimental software helper=yes attempt=none sw=1 legacy=" "$R"
+	grep -q '^detail=the M3 (T8122) GPU is experimental.*; system Mesa admitted, but its attempt not recorded in ' "$T/auto.out" &&
+		echo "ok    auto J615: the state says the attempt was not recorded" || { echo "FAIL  auto J615 attempt-fails detail: $(grep '^detail=' "$T/auto.out")"; fail=1; }
+	check_state "attempt not recorded (J615)" inactive experimental software "$(state "$R" 5)"
+	# An older confirmed attempt in that directory stays as it was.
+	chmod 700 "$AD"
+	printf 'schema=aurora.mesa-m3-attempt/2\nboot_id=boot-a\nsession_id=5\nhook_run_id=old-run\n' > "$AD/attempt"
+	printf 'schema=aurora.mesa-m3-session-ok/1\nboot_id=boot-a\nsession_id=5\nhook_run_id=old-run\n' > "$AD/session-ok"
+	chmod 500 "$AD"
+	expect_auto "J615 attempt not writable over a confirmed one" "inactive experimental software helper=yes attempt=unchanged sw=1 legacy=" "$R"
+fi
+chmod 700 "$AD"
+# Fail closed: each refusal keeps today's decision and fallback exactly.
+GATEX='inactive experimental software helper=no attempt=none sw=1 legacy='
+expect_auto "J615 mesa_m3=off" "inactive opt-out software helper=no attempt=none sw=1 legacy=" "$(R=$(auto_root j615-off air15); echo 'root=UUID=x rw mesa_m3=off quiet' > "$R/proc/cmdline"; echo "$R")"
+expect_auto "J615 nomodeset" "$GATEX" "$(R=$(auto_root j615-nomodeset air15); echo 'root=UUID=x rw nomodeset quiet' > "$R/proc/cmdline"; echo "$R")"
+expect_auto "J516S mesa_m3=off" "inactive opt-out software helper=no attempt=none sw=1 legacy=" "$(R=$(auto_root j516-off pro); echo 'root=UUID=x rw mesa_m3=off quiet' > "$R/proc/cmdline"; echo "$R")"
+R=$(auto_root j615-helper-fails air15); : > "$R/opt/mesa-m3/libexec/system-check.fail"
+expect_auto "J615 helper refuses" "inactive experimental software helper=yes attempt=none sw=1 legacy=" "$R"
+R=$(auto_root j615-helper-stalls air15); : > "$R/opt/mesa-m3/libexec/system-check.sleep"
+expect_auto "J615 helper times out" "inactive experimental software helper=yes attempt=none sw=1 legacy=" "$R"
+R=$(auto_root j615-helper-missing air15); rm "$R/opt/mesa-m3/libexec/mesa-m3-system-check"
+expect_auto "J615 helper missing" "$GATEX" "$R"
+R=$(auto_root j516-helper-fails pro); : > "$R/opt/mesa-m3/libexec/system-check.fail"; rm "$R/opt/mesa-m3/lib/libvulkan_asahi.so"
+expect_auto "J516S helper refuses" "inactive incomplete-prefix software helper=yes attempt=none sw=1 legacy=" "$R"
+# The J615 without its nodes: no render node (GPU not started), no display,
+# another GPU, two nodes.
+expect_auto "J615 without a render node" "inactive experimental none helper=no attempt=none sw= legacy=" \
+	"$(R=$(auto_root j615-nonode air15); rm -r "$R/sys/class/drm/renderD128"; echo "$R")"
+expect_auto "J615 without the display" "$GATEX" "$(R=$(auto_root j615-nodcp air15); rm "$R/sys/class/drm/card2/device"; echo "$R")"
+expect_auto "J615 with the T6030 display" "$GATEX" \
+	"$(R=$(auto_root j615-dcps air15); nul apple,t6030-display-subsystem > "$R/sys/devices/platform/display/of_node/compatible"; echo "$R")"
+expect_auto "J615 with two render nodes" "inactive experimental software helper=no attempt=none sw=1 legacy=" \
+	"$(R=$(auto_root j615-twonodes air15); mkdir "$R/sys/class/drm/renderD129"; echo "$R")"
+expect_auto "J615 with the T6030 GPU" "inactive experimental none helper=no attempt=none sw= legacy=" \
+	"$(R=$(auto_root j615-g15s air15); nul $G15S > "$R/sys/devices/platform/gpu0/of_node/compatible"; echo "$R")"
+# Unknown or ambiguous boards: the gate's decision stands.
+expect_auto "unknown T8122 board (J504)" "$GATEX" "$(R=$(auto_root j504 air15); nul apple,j504 apple,t8122 > "$R/proc/device-tree/compatible"; echo "$R")"
+expect_auto "both Air boards" "$GATEX" "$(R=$(auto_root j613j615 air15); nul apple,j613 apple,j615 apple,t8122 > "$R/proc/device-tree/compatible"; echo "$R")"
+expect_auto "14-inch M3 Pro (J514S): /opt as before" "active active none helper=no attempt=new sw= legacy=/opt/mesa-m3" \
+	"$(R=$(auto_root j514s pro); nul apple,j514s apple,t6030 > "$R/proc/device-tree/compatible"; echo "$R")"
+# The 25G83 native profile keeps its own gate: an explicit selection, or a
+# node handed off for that firmware without one.
+expect_auto "J613 with an explicit t8122-profile" "$GATEX" "$(R=$(auto_root j613-profile air); echo j613-25g83-hal200 > "$R/etc/mesa-m3/t8122-profile"; echo "$R")"
+expect_auto "J615 with the 25G83 GPU handoff" "$GATEX" \
+	"$(R=$(auto_root j615-hal200 air15); printf '\000\000\000\001' > "$R/sys/devices/platform/gpu0/of_node/apple,j613-25g83-gpu-handoff"; echo "$R")"
+# Kernel log, desktop and user setup.
+for journal in noperm error g15g verdict dcp; do
+	expect_auto "J615 journal $journal" "$GATEX" "$(auto_root "j615-journal-$journal" air15)" FAKE_JOURNAL="$journal"
+done
+expect_auto "J615 in a sway session" "$GATEX" "$AJ615" XDG_CURRENT_DESKTOP=sway
+auto_fresh "$AJ615"
+expect_auto "J615 with LIBGL_ALWAYS_SOFTWARE of the user's" "$GATEX" "$AJ615" LIBGL_ALWAYS_SOFTWARE=1
+auto_fresh "$AJ615"
+R=$(auto_root j516-user-mesa pro); P="$T/home/mesa"
+mkdir -p "$R$T/home/.config/uwsm" "$R$P/lib"; : > "$R$P/lib/libgallium-26.1.4.so"
+printf 'export LIBGL_DRIVERS_PATH=%s/lib/dri\n' "$P" > "$R$T/home/.config/uwsm/env-hyprland"
+expect_auto "J516S whose user chose a Mesa" "inactive user-setup none helper=no attempt=none sw= legacy=" "$R"
+R=$(auto_root j615-late-software air15); mkdir -p "$R$T/home/.config/uwsm"
+printf 'export LIBGL_ALWAYS_SOFTWARE+=1\n' > "$R$T/home/.config/uwsm/env"
+expect_auto "J615 with a late append override" "$GATEX" "$R"
+R=$(auto_root j615-no-hook air15); rm "$R/opt/mesa-m3/libexec/mesa-m3-session-env"
+expect_auto "J615 without the installed hook" "$GATEX" "$R"
+# A stalled journal is bounded (20 s, then 2 s to kill) on the automatic path.
+R=$(auto_root j615-stall air15)
+_hstart=$(date +%s)
+expect_auto "J615 stalled journal" "$GATEX" "$R" FAKE_JOURNAL=stall
+_hspent=$(( $(date +%s) - _hstart ))
+if [ "$_hspent" -le 30 ]; then echo "ok    auto J615 stalled journal: refused after ${_hspent}s"
+else echo "FAIL  auto J615 stalled journal: took ${_hspent}s"; fail=1; fi
 
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "SOME FAILED"
 exit "$fail"
