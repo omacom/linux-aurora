@@ -166,12 +166,15 @@ static void isp_test_p010_admission(struct kunit *test)
 	struct apple_isp *isp = isp_test_alloc(test);
 	struct isp_format *fmt = isp_get_current_format(isp);
 	struct isp_preset preset = { .output_dim = {1280, 720}, .p010 = true };
-	struct v4l2_fmtdesc desc = { .index = 1 };
+	struct v4l2_fmtdesc desc = { .index = 0 };
 
 	isp->presets = &preset;
 	isp->num_presets = 1;
 	isp->hw = &isp_test_t6040;
 	fmt->version = 0x958;
+	KUNIT_ASSERT_EQ(test, isp_enum_pixelformat(isp, &desc), 0);
+	KUNIT_EXPECT_EQ(test, desc.pixelformat, V4L2_PIX_FMT_NV12);
+	desc.index = 1;
 	KUNIT_ASSERT_EQ(test, isp_enum_pixelformat(isp, &desc), 0);
 	KUNIT_EXPECT_EQ(test, desc.pixelformat, V4L2_PIX_FMT_P010);
 	desc.index = 2;
@@ -203,8 +206,15 @@ static void isp_test_p010_completion_identity(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, isp_p010_buffer_matches(&fmt, &buf, &desc));
 	desc.iovas[1]--;
 	desc.iovas[0] |= BIT_ULL(40);
+	/* Reject mixed encodings, accept both exact full submitted addresses. */
 	KUNIT_EXPECT_FALSE(test, isp_p010_buffer_matches(&fmt, &buf, &desc));
-	desc.iovas[0] &= ~BIT_ULL(40);
+	desc.iovas[1] |= BIT_ULL(40);
+	KUNIT_EXPECT_TRUE(test, isp_p010_buffer_matches(&fmt, &buf, &desc));
+	desc.iovas[0] |= BIT_ULL(41);
+	desc.iovas[1] |= BIT_ULL(41);
+	KUNIT_EXPECT_FALSE(test, isp_p010_buffer_matches(&fmt, &buf, &desc));
+	desc.iovas[0] = (u32)desc.iovas[0];
+	desc.iovas[1] = (u32)desc.iovas[1];
 	desc.pool_type = CISP_POOL_TYPE_RENDERED;
 	KUNIT_EXPECT_FALSE(test, isp_p010_buffer_matches(&fmt, &buf, &desc));
 	desc.pool_type = CISP_POOL_TYPE_RENDERED_SCL1;

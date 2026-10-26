@@ -59,11 +59,14 @@ static bool isp_p010_buffer_matches(const struct isp_format *fmt,
 				    const struct isp_buffer *buf,
 				    const struct isp_buflist_buffer *desc)
 {
-	/* H17 reports zero-extended low 32 bits, not the submitted high IOVA. */
+	u64 y = buf->surfs[0].iova;
+	u64 uv = y + fmt->plane_size[0];
+	bool full = desc->iovas[0] == y && desc->iovas[1] == uv;
+	bool low = desc->iovas[0] == (u32)y && desc->iovas[1] == (u32)uv;
+
+	/* Accept the submitted pair or the zero-extended pair observed on H17. */
 	return desc->num_planes == 2 &&
-	       desc->pool_type == CISP_POOL_TYPE_RENDERED_SCL1 &&
-	       desc->iovas[0] == (u32)buf->surfs[0].iova &&
-	       desc->iovas[1] == (u32)(buf->surfs[0].iova + fmt->plane_size[0]) &&
+	       desc->pool_type == CISP_POOL_TYPE_RENDERED_SCL1 && (full || low) &&
 	       !desc->iovas[2] && !desc->iovas[3] && desc->tag == buf->tag;
 }
 

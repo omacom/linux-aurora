@@ -81,8 +81,9 @@ Linux passes its actual contiguous extents to the rendered pool instead.
 
 P010 uses the proxy's eight metadata slots (0x8000 bytes each) and two
 rendered slots. The queue limits userspace to two rendered buffers, matching
-the pool capacity. Completion matches both zero-extended low-32-bit plane
-addresses, plane count, pool 9 and a fresh 64-bit submission tag; an old tag
+the pool capacity. Completion matches either both full submitted addresses
+or both zero-extended low-32-bit plane addresses, plus plane count, pool 9
+and a fresh 64-bit submission tag; an old tag
 cannot release a new lease. Buffer completion is published to videobuf2
 only after the firmware report ACK and doorbell have been published.
 NV12 pool sizes and the T8140/Neo formats, presets and command path retain
