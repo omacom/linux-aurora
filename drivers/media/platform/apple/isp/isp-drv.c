@@ -599,6 +599,7 @@ destroy_wq:
 detach_genpd:
 	apple_isp_detach_genpd(isp);
 free_isp:
+	kfree(isp->sensor_configs);
 	/* Nothing else can reach it before the video device is registered. */
 	kfree(isp);
 	return err;

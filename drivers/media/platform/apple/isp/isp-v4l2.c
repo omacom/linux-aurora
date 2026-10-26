@@ -27,10 +27,6 @@
 /* Capture rates offered to userspace, in frames per second */
 static const unsigned int isp_frame_rates[] = { 30, 25, 24, 20, 15 };
 
-static bool multiplanar = false;
-module_param(multiplanar, bool, 0644);
-MODULE_PARM_DESC(multiplanar, "Enable multiplanar API");
-
 struct isp_buflist_buffer {
 	u64 iovas[ISP_MAX_PLANES];
 	u32 flags[ISP_MAX_PLANES];
@@ -362,7 +358,7 @@ static int isp_vb2_queue_setup(struct vb2_queue *vq, unsigned int *nbuffers,
 			  isp_num_rendered(isp) - q_num_bufs);
 
 	if (*num_planes) {
-		if (sizes[0] < fmt->total_size)
+		if (*num_planes != 1 || sizes[0] < fmt->total_size)
 			return -EINVAL;
 
 		return 0;
@@ -693,25 +689,13 @@ static int isp_vidioc_querycap(struct file *file, void *priv,
 
 static int isp_enum_pixelformat(struct apple_isp *isp, struct v4l2_fmtdesc *f)
 {
-	switch (f->index) {
-	case 0:
+	/* Browser/WebRTC compatibility: the shipped first format remains NV12. */
+	if (!f->index)
 		f->pixelformat = V4L2_PIX_FMT_NV12;
-		break;
-	case 1:
-		if (isp->multiplanar) {
-			f->pixelformat = V4L2_PIX_FMT_NV12M;
-			break;
-		}
-		fallthrough;
-	case 2:
-		if (!isp_has_p010(isp) || f->index != (isp->multiplanar ? 2 : 1))
-			return -EINVAL;
+	else if (f->index == 1 && isp_has_p010(isp))
 		f->pixelformat = V4L2_PIX_FMT_P010;
-		break;
-	default:
+	else
 		return -EINVAL;
-	}
-
 	return 0;
 }
 
@@ -729,7 +713,6 @@ static int isp_vidioc_enum_framesizes(struct file *file, void *fh,
 	u32 index = 0;
 
 	if (f->pixel_format != V4L2_PIX_FMT_NV12 &&
-	    f->pixel_format != V4L2_PIX_FMT_NV12M &&
 	    !(f->pixel_format == V4L2_PIX_FMT_P010 && isp_has_p010(isp)))
 		return -EINVAL;
 
@@ -760,7 +743,6 @@ static int isp_vidioc_enum_frameintervals(struct file *file, void *fh,
 		return -EINVAL;
 
 	if (interval->pixel_format != V4L2_PIX_FMT_NV12 &&
-	    interval->pixel_format != V4L2_PIX_FMT_NV12M &&
 	    !(interval->pixel_format == V4L2_PIX_FMT_P010 && isp_has_p010(isp)))
 		return -EINVAL;
 
@@ -827,27 +809,17 @@ static inline void isp_get_mp_pix_format(struct apple_isp *isp,
 {
 	f->fmt.pix_mp.width = fmt->preset->output_dim.x;
 	f->fmt.pix_mp.height = fmt->preset->output_dim.y;
-	f->fmt.pix_mp.num_planes = fmt->num_planes;
-	for (int i = 0; i < fmt->num_planes; i++) {
-		f->fmt.pix_mp.plane_fmt[i].sizeimage = fmt->plane_size[i];
-		f->fmt.pix_mp.plane_fmt[i].bytesperline = fmt->strides[i];
-	}
-
+	/* Both contiguous formats have one memory plane and two ISP components. */
+	f->fmt.pix_mp.num_planes = 1;
+	memset(f->fmt.pix_mp.plane_fmt, 0, sizeof(f->fmt.pix_mp.plane_fmt));
+	f->fmt.pix_mp.plane_fmt[0].sizeimage = fmt->total_size;
+	f->fmt.pix_mp.plane_fmt[0].bytesperline = fmt->strides[0];
 	f->fmt.pix_mp.field = V4L2_FIELD_NONE;
-	f->fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
-	/* P010 is contiguous, including through the multi-planar API. */
-	if (fmt->pixelformat == V4L2_PIX_FMT_P010) {
-		f->fmt.pix_mp.pixelformat = V4L2_PIX_FMT_P010;
-		f->fmt.pix_mp.num_planes = 1;
-		f->fmt.pix_mp.plane_fmt[0].sizeimage = fmt->total_size;
-		memset(&f->fmt.pix_mp.plane_fmt[1], 0,
-		       sizeof(f->fmt.pix_mp.plane_fmt[1]));
-	}
+	f->fmt.pix_mp.pixelformat = fmt->pixelformat;
 	f->fmt.pix_mp.colorspace = V4L2_COLORSPACE_REC709;
 	f->fmt.pix_mp.ycbcr_enc = V4L2_YCBCR_ENC_709;
 	f->fmt.pix_mp.xfer_func = V4L2_XFER_FUNC_709;
-	if (fmt->pixelformat == V4L2_PIX_FMT_P010)
-		f->fmt.pix_mp.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+	f->fmt.pix_mp.quantization = V4L2_QUANTIZATION_LIM_RANGE;
 }
 
 static int isp_vidioc_get_format(struct file *file, void *fh,
@@ -911,7 +883,7 @@ static int isp_vidioc_get_format_mplane(struct file *file, void *fh,
 	struct apple_isp *isp = video_drvdata(file);
 	struct isp_format *fmt = isp_get_current_format(isp);
 
-	if (!isp->multiplanar)
+	if (!isp_supports_p010(isp))
 		return -ENOTTY;
 
 	isp_get_mp_pix_format(isp, f, fmt);
@@ -927,7 +899,7 @@ static int isp_vidioc_set_format_mplane(struct file *file, void *fh,
 	struct isp_preset *preset;
 	int err;
 
-	if (!isp->multiplanar)
+	if (!isp_supports_p010(isp))
 		return -ENOTTY;
 
 	if (vb2_is_busy(&isp->vbq))
@@ -954,7 +926,7 @@ static int isp_vidioc_try_format_mplane(struct file *file, void *fh,
 	struct isp_preset *preset;
 	int err;
 
-	if (!isp->multiplanar)
+	if (!isp_supports_p010(isp))
 		return -ENOTTY;
 
 	preset = isp_select_preset(isp, f->fmt.pix_mp.width, f->fmt.pix_mp.height,
@@ -1001,7 +973,7 @@ static int isp_vidioc_get_param(struct file *file, void *fh,
 	struct apple_isp *isp = video_drvdata(file);
 
 	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
-	    (!isp->multiplanar ||
+	    (!isp_supports_p010(isp) ||
 	     a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE))
 		return -EINVAL;
 
@@ -1019,7 +991,7 @@ static int isp_vidioc_set_param(struct file *file, void *fh,
 	struct v4l2_fract *tpf = &a->parm.capture.timeperframe;
 
 	if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE &&
-	    (!isp->multiplanar ||
+	    (!isp_supports_p010(isp) ||
 	     a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE))
 		return -EINVAL;
 
@@ -1055,6 +1027,9 @@ static int isp_vidioc_log_status(struct file *file, void *fh)
 			  config->output_dim.x, config->output_dim.y,
 			  config->sensor_clk,
 			  config->usable ? "" : " (unverified geometry)");
+		/* This explicit diagnostic ioctl replaces a probe-time parameter. */
+		print_hex_dump(KERN_INFO, "apple-isp config: ", DUMP_PREFIX_OFFSET,
+			       16, 4, config->reply, sizeof(config->reply), false);
 	}
 	return 0;
 }
@@ -1120,6 +1095,7 @@ static void apple_isp_release(struct v4l2_device *v4l2_dev)
 
 	v4l2_ctrl_handler_free(&isp->ctrl_handler);
 	media_device_cleanup(&isp->mdev);
+	kfree(isp->sensor_configs);
 	kfree(isp);
 }
 
@@ -1206,8 +1182,6 @@ int apple_isp_setup_video(struct apple_isp *isp)
 		goto media_cleanup;
 	}
 
-	isp->multiplanar = multiplanar;
-
 	/*
 	 * Auto exposure is always on. By default it holds the frame rate, as
 	 * V4L2 specifies; with exposure priority it may slow down in low light.
@@ -1239,7 +1213,7 @@ int apple_isp_setup_video(struct apple_isp *isp)
 	vdev->fops = &isp_v4l2_fops;
 	vdev->ioctl_ops = &isp_v4l2_ioctl_ops;
 	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
-	if (isp->multiplanar)
+	if (isp_supports_p010(isp))
 		vdev->device_caps |= V4L2_CAP_VIDEO_CAPTURE_MPLANE;
 	vdev->entity.flags = MEDIA_ENT_FL_DEFAULT;
 	vdev->v4l2_dev = &isp->v4l2_dev;

@@ -186,7 +186,13 @@ static int isp_test_config_reply(struct apple_isp *isp, void *args, u32 insize,
 	config->out_height2 = config->out_height;
 	if (config->preset == 2)
 		config->out_height2 = 2160;
+	reply->unknown[sizeof(reply->unknown) - 1] = 0x5a;
 	return 0;
+}
+
+static void isp_test_free_configs(void *ptr)
+{
+	kfree(ptr);
 }
 
 static void isp_test_sensor_config_list(struct kunit *test)
@@ -199,6 +205,7 @@ static void isp_test_sensor_config_list(struct kunit *test)
 		  .output_dim = {1280, 720}, .crop_size = {1280, 720} },
 	};
 	u32 count = 0;
+	int err;
 
 	isp->cmd_virt = kunit_kzalloc(test, 0x120, GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, isp->cmd_virt);
@@ -207,6 +214,10 @@ static void isp_test_sensor_config_list(struct kunit *test)
 	test->priv = &count;
 	kunit_activate_static_stub(test, isp_cmd_send, isp_test_config_reply);
 	KUNIT_ASSERT_EQ(test, isp_ch_cache_sensor_configs(isp, 0, 6), 0);
+	err = kunit_add_action_or_reset(test, isp_test_free_configs, isp->sensor_configs);
+	KUNIT_ASSERT_EQ(test, err, 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(isp->sensor_configs[5].reply + 0xc), 5);
+	KUNIT_EXPECT_EQ(test, isp->sensor_configs[5].reply[ISP_SENSOR_CONFIG_SIZE - 1], 0x5a);
 	KUNIT_EXPECT_EQ(test, count, 6);
 	KUNIT_EXPECT_EQ(test, isp->num_sensor_configs, 6);
 	KUNIT_EXPECT_EQ(test, isp->num_presets, 3);
@@ -221,6 +232,35 @@ static void isp_test_sensor_config_list(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, isp_ch_cache_sensor_configs(isp, 0, 0), -EINVAL);
 	KUNIT_EXPECT_EQ(test, isp_ch_cache_sensor_configs(isp, 0, 65), -EINVAL);
 	KUNIT_EXPECT_EQ(test, count, 6);
+}
+
+static int isp_test_bad_config_reply(struct apple_isp *isp, void *args, u32 insize,
+				     u32 outsize, int timeout)
+{
+	struct cmd_ch_camera_config_h17 *reply = isp->cmd_virt;
+
+	isp_test_config_reply(isp, args, insize, outsize, timeout);
+	reply->config.preset = 65;
+	return 0;
+}
+
+static void isp_test_sensor_config_failure(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_preset preset = {};
+	u32 count = 0;
+
+	isp->cmd_virt = kunit_kzalloc(test, ISP_SENSOR_CONFIG_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, isp->cmd_virt);
+	isp->presets = &preset;
+	isp->num_presets = 1;
+	test->priv = &count;
+	kunit_activate_static_stub(test, isp_cmd_send, isp_test_bad_config_reply);
+	KUNIT_EXPECT_EQ(test, isp_ch_cache_sensor_configs(isp, 0, 6), -EIO);
+	KUNIT_EXPECT_EQ(test, count, 1);
+	KUNIT_EXPECT_EQ(test, isp->num_sensor_configs, 0);
+	KUNIT_EXPECT_PTR_EQ(test, isp->sensor_configs, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, isp->presets, &preset);
 }
 
 struct isp_test_ack_state {
@@ -282,6 +322,7 @@ static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_command_ack_failure_latches),
 	KUNIT_CASE(isp_test_sensor_geometry),
 	KUNIT_CASE(isp_test_sensor_config_list),
+	KUNIT_CASE(isp_test_sensor_config_failure),
 	KUNIT_CASE(isp_test_preview_stream),
 	KUNIT_CASE(isp_test_preview_command_failures),
 	{}

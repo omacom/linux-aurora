@@ -31,6 +31,7 @@
 /* used to limit the user space buffers to the buffer_pool_config */
 #define ISP_MAX_BUFFERS 16
 #define ISP_MAX_SENSOR_CONFIGS 64
+#define ISP_SENSOR_CONFIG_SIZE 0x120
 
 /* capture metadata buffers, for firmware that has that pool */
 #define ISP_CAPMETA_BUFFERS 8
@@ -265,6 +266,7 @@ struct isp_sensor_config {
 	struct coord output_dim;
 	u32 sensor_clk;
 	bool usable;
+	u8 reply[ISP_SENSOR_CONFIG_SIZE];
 };
 
 struct isp_format {
@@ -289,7 +291,7 @@ struct apple_isp {
 	int num_presets;
 	/* Read-only sensor configuration replies, cached before video registration. */
 	unsigned int num_sensor_configs;
-	struct isp_sensor_config sensor_configs[ISP_MAX_SENSOR_CONFIGS];
+	struct isp_sensor_config *sensor_configs;
 
 	int num_channels;
 	struct isp_format fmts[ISP_MAX_CHANNELS];
@@ -303,7 +305,6 @@ struct apple_isp {
 	struct vb2_queue vbq;
 	struct mutex video_lock;
 	unsigned int sequence;
-	bool multiplanar;
 	/* capture rate in frames per second, changes under video_lock */
 	unsigned int frame_rate;
 

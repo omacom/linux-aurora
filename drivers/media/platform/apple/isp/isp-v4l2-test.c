@@ -102,6 +102,12 @@ static void isp_test_create_bufs_limit(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, isp_test_setup(test, ISP_MAX_BUFFERS, &nbuffers,
 					     &num_planes, sizes), -ENOBUFS);
 
+	/* The contiguous API must refuse a second independent memory plane. */
+	nbuffers = 1;
+	num_planes = 2;
+	KUNIT_EXPECT_EQ(test, isp_test_setup(test, 0, &nbuffers, &num_planes,
+					     sizes), -EINVAL);
+
 	/* A plane smaller than a frame is still refused. */
 	nbuffers = 1;
 	num_planes = 1;
@@ -158,6 +164,10 @@ static void isp_test_p010_format(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fmt->total_size, (size_t)1382400);
 	KUNIT_EXPECT_EQ(test, isp_num_rendered(isp), ISP_MAX_BUFFERS);
 	KUNIT_EXPECT_EQ(test, isp_num_meta(isp), ISP_MAX_BUFFERS);
+	isp_get_mp_pix_format(isp, &f, fmt);
+	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.pixelformat, V4L2_PIX_FMT_NV12);
+	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.num_planes, 1);
+	KUNIT_EXPECT_EQ(test, f.fmt.pix_mp.plane_fmt[0].sizeimage, 1382400);
 }
 
 static void isp_test_p010_admission(struct kunit *test)
@@ -179,9 +189,7 @@ static void isp_test_p010_admission(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, desc.pixelformat, V4L2_PIX_FMT_P010);
 	desc.index = 2;
 	KUNIT_EXPECT_EQ(test, isp_enum_pixelformat(isp, &desc), -EINVAL);
-	isp->multiplanar = true;
-	KUNIT_ASSERT_EQ(test, isp_enum_pixelformat(isp, &desc), 0);
-	KUNIT_EXPECT_EQ(test, desc.pixelformat, V4L2_PIX_FMT_P010);
+	desc.index = 1;
 	isp->hw = &neo;
 	KUNIT_EXPECT_EQ(test, isp_enum_pixelformat(isp, &desc), -EINVAL);
 	KUNIT_ASSERT_EQ(test, isp_set_preset(isp, fmt, &preset, V4L2_PIX_FMT_P010), 0);

@@ -46,9 +46,9 @@ Mode and format selection
 
 On T6040/IMX958, probe queries every advertised configuration, bounded at 64,
 using the 0x120-byte H17 ``CH_CAMERA_CONFIG_GET`` exchange. The complete list
-is available through dynamic debug at probe and cached for
-``VIDIOC_LOG_STATUS`` (``v4l2-ctl --log-status``), without sending commands
-during a stream. The log includes
+is available through dynamic debug at probe and cached in full for
+``VIDIOC_LOG_STATUS`` (``v4l2-ctl --log-status``), without sending firmware
+commands. Collect this diagnostic dump before starting a stress run. It includes
 input/output dimensions and the sensor clock word; that word is not FPS.
 
 The board's existing config-5 1920x1080 and 1280x720 presets stay first and
@@ -68,9 +68,9 @@ the runtime input geometry matches the source profile. An unspecified P010
 size selects 1280x720 first. Larger P010 modes require a consistent firmware
 output reply. P010 uses two little-endian 16-bit component planes with ten useful
 MSB-aligned bits, and equal 64-byte-aligned Y/UV strides. UV immediately
-follows Y, as required for contiguous P010. The optional multi-planar V4L2
-API also reports P010 as **one memory plane** containing both component
-planes. The firmware still receives two component addresses.
+follows Y, as required for contiguous P010. The standard multi-planar V4L2
+API on T6040/IMX958 reports both NV12 and P010 as **one memory plane**
+containing both component planes. The firmware still receives two component addresses.
 
 At 1920x1080, stride is 3840, Y is 4147200 bytes, UV is 2073600 bytes and
 ``sizeimage`` is 6220800. At 1280x720, stride is 2560 and ``sizeimage`` is
@@ -86,8 +86,17 @@ or both zero-extended low-32-bit plane addresses, plus plane count, pool 9
 and a fresh 64-bit submission tag; an old tag
 cannot release a new lease. Buffer completion is published to videobuf2
 only after the firmware report ACK and doorbell have been published.
-NV12 pool sizes and the T8140/Neo formats, presets and command path retain
-their existing behavior.
+NV12 pool sizes and the T8140/Neo default formats, presets and command path
+retain their existing behavior.
+
+The inherited ``multiplanar`` module parameter is removed. T6040/IMX958
+supports standard single-planar and multi-planar V4L2 negotiation for these
+contiguous formats without a parameter; the non-contiguous NV12M alias is not
+advertised. Other sensors retain their shipped single-planar API. No driver
+module/kernel parameter, platform flag or per-platform Kconfig option selects
+support. NV12 stays first and is the initial format because browsers/WebRTC
+and many applications do not support P010 or simply choose the first format.
+Applications can select P010 explicitly with ``VIDIOC_S_FMT``.
 
 Endpoints
 ---------

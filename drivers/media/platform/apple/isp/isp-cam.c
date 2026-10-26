@@ -233,6 +233,7 @@ static bool isp_sensor_config_usable(const struct cmd_ch_camera_config *config)
 static int isp_ch_cache_sensor_configs(struct apple_isp *isp, u32 ch, u32 count)
 {
 	struct cmd_ch_camera_config_h17 args;
+	struct isp_sensor_config *configs;
 	struct isp_preset *presets;
 	unsigned int num = isp->num_presets;
 	int err;
@@ -247,19 +248,25 @@ static int isp_ch_cache_sensor_configs(struct apple_isp *isp, u32 ch, u32 count)
 	if (!presets)
 		return -ENOMEM;
 	memcpy(presets, isp->presets, num * sizeof(*presets));
+	configs = kcalloc(count, sizeof(*configs), GFP_KERNEL);
+	if (!configs)
+		return -ENOMEM;
 
 	for (u32 i = 0; i < count; i++) {
 		struct cmd_ch_camera_config *config = &args.config;
-		struct isp_sensor_config *cached = &isp->sensor_configs[i];
+		struct isp_sensor_config *cached = &configs[i];
 		bool duplicate = false;
 
 		err = isp_cmd_ch_camera_config_get(isp, ch, i, &args);
 		if (err)
-			return err;
+			goto free_configs;
 		if (config->opcode != (u64)CISP_CMD_CH_CAMERA_CONFIG_GET << 32 ||
-		    config->chan != ch || config->preset != i)
-			return -EIO;
+		    config->chan != ch || config->preset != i) {
+			err = -EIO;
+			goto free_configs;
+		}
 
+		memcpy(cached->reply, &args, sizeof(args));
 		cached->input_dim = (struct coord){config->in_width, config->in_height};
 		cached->output_dim = (struct coord){config->out_width, config->out_height};
 		cached->sensor_clk = config->sensor_clk;
@@ -313,10 +320,15 @@ static int isp_ch_cache_sensor_configs(struct apple_isp *isp, u32 ch, u32 count)
 			.p010 = true,
 		};
 	}
+	isp->sensor_configs = configs;
 	isp->num_sensor_configs = count;
 	isp->presets = presets;
 	isp->num_presets = num;
 	return 0;
+
+free_configs:
+	kfree(configs);
+	return err;
 }
 
 static int isp_ch_cache_sensor_info(struct apple_isp *isp, u32 ch)
