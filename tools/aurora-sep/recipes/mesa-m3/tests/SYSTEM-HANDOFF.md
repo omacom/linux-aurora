@@ -67,11 +67,13 @@ Recovery after a system-Mesa login that passes admission and then fails:
 - Automatic (`reason=system-mesa`): the unconfirmed attempt sends the next
   login of the same boot to software. To retry the GPU in that boot, remove
   `${XDG_STATE_HOME:-~/.local/state}/mesa-m3/attempt` and log in again; a
-  reboot also clears it. To stay in software, boot with `mesa_m3=off`.
+  reboot makes the previous attempt inapplicable. To stay in software, boot
+  with `mesa_m3=off`.
 - File opt-out (`reason=opt-out`): this path writes no attempt, so the
   success-marker check cannot see the failure and the next login is admitted
-  again. Recover with `mesa_m3=off` on the kernel command line or by removing
-  the opt-out file.
+  again. To force software rendering immediately, boot with `mesa_m3=off`.
+  Removing the opt-out file restores normal selection, which may retry the
+  system Mesa automatically.
 
 Run the host checks from this directory (a writable TMPDIR may be needed):
 
