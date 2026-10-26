@@ -188,7 +188,23 @@ static void isp_test_late_ack_keeps_cursor(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->chan->cursor, 1);
 }
 
+static void isp_test_message_payload_copy(struct kunit *test)
+{
+	struct isp_sm_test *t = isp_sm_test_alloc(test);
+	struct isp_message response = {
+		.arg0 = 0x5000001, .arg1 = 1, .arg2 = 2, .arg3 = 3,
+		.arg4 = 4, .arg5 = 5, .arg6 = 6, .arg7 = 7,
+	};
+	struct isp_message copied = {};
+
+	isp_get_current_format(t->isp)->pixelformat = V4L2_PIX_FMT_P010;
+	t->chan->virt = &response;
+	chan_read_msg_index(t->isp, t->chan, &copied, 0);
+	KUNIT_EXPECT_MEMEQ(test, &copied, &response, sizeof(response));
+}
+
 static struct kunit_case isp_ipc_test_cases[] = {
+	KUNIT_CASE(isp_test_message_payload_copy),
 	KUNIT_CASE(isp_test_late_ack_keeps_cursor),
 	KUNIT_CASE(isp_test_command_ring_wrap),
 	KUNIT_CASE(isp_test_sm_free_releases),

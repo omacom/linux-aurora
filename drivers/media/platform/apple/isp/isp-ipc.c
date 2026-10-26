@@ -72,11 +72,12 @@ static inline void chan_read_msg_index(struct apple_isp *isp,
 {
 	if (isp_is_p010(isp)) {
 		u64 *slot = chan_msg_virt(chan, index);
+		u64 arg0 = READ_ONCE(*slot);
 
 		/* Acquire validity before consuming the firmware-owned payload. */
-		msg->arg0 = READ_ONCE(*slot);
 		dma_rmb();
-		memcpy(&msg->arg1, slot + 1, sizeof(*msg) - sizeof(msg->arg0));
+		memcpy(msg, slot, sizeof(*msg));
+		msg->arg0 = arg0;
 	} else {
 		memcpy(msg, chan_msg_virt(chan, index), sizeof(*msg));
 	}
