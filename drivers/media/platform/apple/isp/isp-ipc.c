@@ -177,6 +177,9 @@ int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan)
 
 static inline bool chan_tx_done(struct apple_isp *isp, struct isp_channel *chan)
 {
+	if (isp_is_p010(isp) && chan->deadline_active &&
+	    time_after_eq(jiffies, chan->deadline))
+		return false;
 	dma_rmb();
 
 	chan_read_msg(isp, chan, &chan->rsp);
@@ -198,6 +201,10 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 #endif
 	if (isp->ipc_failed)
 		return -EIO;
+	if (isp_is_p010(isp) && timeout) {
+		chan->deadline = jiffies + timeout;
+		chan->deadline_active = true;
+	}
 	chan_write_msg(isp, chan, &chan->req);
 	dma_wmb();
 
@@ -217,6 +224,7 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 		return -ETIME;
 	}
 
+	chan->deadline_active = false;
 	isp_dbg(isp, "%s: request success (%ld)\n", chan->name, t);
 
 	return 0;

@@ -117,6 +117,8 @@ struct isp_channel {
 	void *virt;
 	u32 doorbell;
 	u32 cursor;
+	unsigned long deadline;
+	bool deadline_active;
 	struct mutex lock;
 	struct isp_message req;
 	struct isp_message rsp;

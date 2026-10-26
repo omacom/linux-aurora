@@ -170,7 +170,26 @@ static void isp_test_command_ring_wrap(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, chan->cursor, 0);
 }
 
+static void isp_test_late_ack_keeps_cursor(struct kunit *test)
+{
+	struct isp_sm_test *t = isp_sm_test_alloc(test);
+	struct isp_message response = { .arg0 = 0x5000001 };
+
+	isp_get_current_format(t->isp)->pixelformat = V4L2_PIX_FMT_P010;
+	t->chan->virt = &response;
+	t->chan->num = 8;
+	t->chan->req.arg0 = 0x5000000;
+	t->chan->deadline_active = true;
+	t->chan->deadline = jiffies;
+	KUNIT_EXPECT_FALSE(test, chan_tx_done(t->isp, t->chan));
+	KUNIT_EXPECT_EQ(test, t->chan->cursor, 0);
+	t->chan->deadline = jiffies + HZ;
+	KUNIT_EXPECT_TRUE(test, chan_tx_done(t->isp, t->chan));
+	KUNIT_EXPECT_EQ(test, t->chan->cursor, 1);
+}
+
 static struct kunit_case isp_ipc_test_cases[] = {
+	KUNIT_CASE(isp_test_late_ack_keeps_cursor),
 	KUNIT_CASE(isp_test_command_ring_wrap),
 	KUNIT_CASE(isp_test_sm_free_releases),
 	KUNIT_CASE(isp_test_sm_free_alias),
