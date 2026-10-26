@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only OR MIT
+// SPDX-License-Identifier: GPL-2.0-only
 
 //! Initialization data of the 25G83 firmware build (macOS 26.6, `mBoot-18000.161.10`).
 //!
@@ -17,9 +17,9 @@
 //! firmware on the M4 Pro, by evaluating them for this SoC; see the commit that added them.
 
 use super::{
-    fill_words, perf_states, CompletionRingDescriptor, HwDataArgs, Opp, PerfGroup, RegisterMapEntry,
-    Words, COMPLETION_RING_ENTRIES, COMPLETION_RING_ENTRY_SIZE, COMPLETION_RING_INDEX, PERF_STATES,
-    REGISTER_MAP_SLOTS,
+    fill_words, perf_states, CompletionRingDescriptor, HwDataArgs, Opp, PerfGroup,
+    RegisterMapEntry, Words, COMPLETION_RING_ENTRIES, COMPLETION_RING_ENTRY_SIZE,
+    COMPLETION_RING_INDEX, PERF_STATES, REGISTER_MAP_SLOTS,
 };
 use kernel::prelude::*;
 
@@ -379,28 +379,15 @@ impl HwData25G83 {
     }
 }
 
+/// Transitional hardware default, removed with the inert T6040 defaults.
+pub(crate) const MAX_POWER_MW: u32 = 69_116;
+
 /// Power configuration control period, in 24 MHz clocks (8 ms).
 const PERIOD_CLOCKS: u32 = 200_000;
-/// Highest GPU power, in mW.
-pub(crate) const MAX_POWER_MW: u32 = 69_116;
-/// [`MAX_POWER_MW`] as an IEEE-754 single.
-const MAX_POWER_MW_F32: u32 = 0x4786_fe00;
 /// Temperature sensors read by the die and MTR temperature limiters.
 const TEMP_SENSOR_MASK: u32 = 0x2a22_2aa2;
 
-/// Leakage coefficients, IEEE-754 singles: three arrays of sixteen clusters, then four arrays
-/// of two dies. Not found in the ADT; constant for the SoC.
-const LEAKAGE: [u32; 56] = {
-    let mut words = [0; 56];
-    words[0] = 0x44f0_3000; // 1921.5
-    words[1] = 0x44f3_0000; // 1944.0
-    words[32] = 0x4373_0000; // 243.0
-    words[33] = 0x4373_0000; // 243.0
-    words[52] = 0x437b_0000; // 251.0
-    words[54] = 0x43bd_c000; // 379.5
-    words
-};
-/// Offset of [`LEAKAGE`] in the power configuration.
+/// Offset of the per-chip leakage coefficients in the power configuration.
 const LEAKAGE_OFFSET: usize = 0x642c;
 /// Offset in the power configuration of the GPU address of the configuration's status (the
 /// configuration named by the root, `+0x80`).
@@ -433,12 +420,10 @@ const POWER_CONFIG_WORDS: Words = &[
     (0x9c4, 0x3f7f2e9f, 1),
     (0x9cc, 0x3b516154, 1),
     (0x9d4, 0x3ca59586, 1),
-    (0x9e0, MAX_POWER_MW_F32, 1),
     (0x9e4, 0x40a90fdb, 1),
     (0x9ec, 0xbc6d0cfe, 1),
     (0x9f0, 0x64, 1),
     (0x9f4, 0x3e8, 2),
-    (0xa04, MAX_POWER_MW, 1),
     (0xa38, 0x3e8, 1),
     (0xa70, 0x8, 1),
     (0xa7c, 0x3f000000, 1),
@@ -448,7 +433,6 @@ const POWER_CONFIG_WORDS: Words = &[
     (0xa9c, 0x3ecf2e49, 1),
     (0xaa8, 0x64, 1),
     (0xaac, 0x3e8, 1),
-    (0xabc, MAX_POWER_MW, 1),
     (0xac8, 0x10, 1),
     (0xad0, 0x5dc00, 1),
     (0xb28, 0x50, 1),
@@ -508,7 +492,6 @@ const POWER_CONFIG_WORDS: Words = &[
     (0x27b8, 0xc80000, 1),
     (0x2870, 0x3e8, 1),
     (0x28c0, 0x1, 1),
-    (0x28c8, MAX_POWER_MW, 3),
     (0x28e0, 0x3f800000, 1),
     (0x28e4, 0x4, 1),
     (0x28e8, 0x8, 1),
@@ -521,8 +504,6 @@ const POWER_CONFIG_WORDS: Words = &[
     (0x29e8, 0x3f4f2e49, 1),
     (0x29f4, 0x28, 1),
     (0x29f8, 0x3e8, 2),
-    (0x2a04, MAX_POWER_MW_F32, 1),
-    (0x2a08, MAX_POWER_MW, 1),
     (0x2a14, 0xf8, 1),
     (0x2a1c, 0x5ad200, 1),
     (0x2a3c, 0x3e8, 1),
@@ -591,26 +572,33 @@ unsafe impl Zeroable for PowerConfig25G83 {}
 static_assert!(LEAKAGE_OFFSET + size_of::<[u32; 56]>() <= size_of::<PowerConfig25G83>());
 
 impl PowerConfig25G83 {
-    /// Pointer and random words, which [`Self::hash`] leaves out.
-    const RUNTIME: [(usize, usize); 3] =
-        [(CONFIG_STATUS_POINTER, 8), (AON_POINTER, 8), (ENTROPY, 4)];
-
     /// Initializes the power configuration.
-    pub(crate) fn init(&mut self, config_va: u64, aon_va: u64, entropy: u32) {
+    pub(crate) fn init(
+        &mut self,
+        config_va: u64,
+        aon_va: u64,
+        entropy: u32,
+        max_power_mw: u32,
+        leakage: &[u32; 56],
+    ) {
+        self.0.fill(0);
         fill_words(&mut self.0, POWER_CONFIG_WORDS);
-        for (index, word) in LEAKAGE.iter().enumerate() {
+        for (index, word) in leakage.iter().enumerate() {
             let at = LEAKAGE_OFFSET + 4 * index;
             self.0[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        // All copies of the power ceiling must describe the same chip.
+        for offset in [0xa04, 0xabc, 0x28c8, 0x28cc, 0x28d0, 0x2a08] {
+            self.0[offset..offset + 4].copy_from_slice(&max_power_mw.to_le_bytes());
+        }
+        let power = crate::float::F32::from(max_power_mw).to_bits();
+        for offset in [0x9e0, 0x2a04] {
+            self.0[offset..offset + 4].copy_from_slice(&power.to_le_bytes());
         }
         self.0[CONFIG_STATUS_POINTER..CONFIG_STATUS_POINTER + 8]
             .copy_from_slice(&(config_va + 0x80).to_le_bytes());
         self.0[AON_POINTER..AON_POINTER + 8].copy_from_slice(&aon_va.to_le_bytes());
         self.0[ENTROPY..ENTROPY + 4].copy_from_slice(&entropy.to_le_bytes());
-    }
-
-    /// Hash of the contents without the pointers and the random word.
-    pub(crate) fn hash(&self) -> u64 {
-        hash_without(&self.0, &Self::RUNTIME)
     }
 }
 
@@ -632,50 +620,3 @@ pub(crate) const AON_TABLE: [u32; 9] = [
 /// (`+0xc8`, 101.00 °C) and release (`+0xcc`, 96.00 °C) temperatures in 0.01 °C; left at zero
 /// the limit is 0 °C and the GPU stays at its lowest state whenever the PMP runs.
 pub(crate) const POWER_STATE_WORDS: Words = &[(0xc8, 10_100, 1), (0xcc, 9_600, 1)];
-
-impl HwData25G83 {
-    /// What [`Self::hash`] leaves out: the runtime words (completion descriptors, QoS pointer)
-    /// and what comes from the device: the performance tables built from its operating points,
-    /// which are binned per device, and its enabled core count.
-    const UNHASHED: [(usize, usize); 10] = [
-        (COMPLETION_DESCRIPTORS, 0x80),
-        (QOS_POINTER, 8),
-        (core::mem::offset_of!(Self, unk_f88), size_of::<u32>()),
-        (core::mem::offset_of!(Self, unk_fc0), size_of::<u32>()),
-        (core::mem::offset_of!(Self, perf_a), size_of::<PerfGroup>()),
-        (core::mem::offset_of!(Self, perf_b_freq_mhz), size_of::<[u32; PERF_STATES]>()),
-        (core::mem::offset_of!(Self, cs_perf), size_of::<AuxPerfTable>()),
-        (core::mem::offset_of!(Self, afr_perf), size_of::<AuxPerfTable>()),
-        (core::mem::offset_of!(Self, perf_b), size_of::<PerfGroup>()),
-        (core::mem::offset_of!(Self, unk_2570), size_of::<u32>()),
-    ];
-
-    /// Hash of the constant contents (everything but [`Self::UNHASHED`]).
-    pub(crate) fn hash(&self) -> u64 {
-        // SAFETY: `HwData25G83` consists of integers only and has no padding.
-        let bytes = unsafe {
-            core::slice::from_raw_parts((self as *const Self).cast::<u8>(), size_of::<Self>())
-        };
-        hash_without(bytes, &Self::UNHASHED)
-    }
-}
-
-/// FNV-1a 64 of `bytes` with the `(offset, length)` ranges in `skip` left out.
-pub(crate) fn hash_without(bytes: &[u8], skip: &[(usize, usize)]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for (offset, byte) in bytes.iter().enumerate() {
-        if skip.iter().any(|&(at, len)| (at..at + len).contains(&offset)) {
-            continue;
-        }
-        hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
-    }
-    hash
-}
-
-/// Hashes ([`hash_without`]) of the hardware data, power configuration and region C that the
-/// Gravity Linux G16 encoders produce for the J616s, which this build's objects must equal.
-pub(crate) mod expected {
-    pub(crate) const HW_DATA: u64 = 0xfd3b_a26f_570f_57cd;
-    pub(crate) const POWER_CONFIG: u64 = 0xb669_5b84_2ad2_36fe;
-    pub(crate) const REGION_C: u64 = 0xd2db_fa6b_8976_47b4;
-}

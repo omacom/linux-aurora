@@ -44,6 +44,11 @@ struct F32U {
 }
 
 impl F32 {
+    /// Return the IEEE-754 binary32 representation.
+    pub(crate) const fn to_bits(self) -> u32 {
+        self.0
+    }
+
     /// Convert a raw 32-bit representation into an F32
     pub(crate) const fn from_bits(u: u32) -> F32 {
         F32(u)

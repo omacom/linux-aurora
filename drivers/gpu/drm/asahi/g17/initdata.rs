@@ -1328,7 +1328,11 @@ impl InitData {
 
     /// The GPU's operating points: `count` of them, each with one voltage cell for the whole
     /// GPU or one per cluster.
-    fn opps(dev: &AsahiDrmDevice, count: usize, clusters: u32) -> Result<KVec<abi::Opp>> {
+    pub(super) fn opps(
+        dev: &AsahiDrmDevice,
+        count: usize,
+        clusters: u32,
+    ) -> Result<KVec<abi::Opp>> {
         let opps = Self::opp_table(dev, c_str!("operating-points-v2"))?;
         if opps.len() != count {
             return Err(EINVAL);

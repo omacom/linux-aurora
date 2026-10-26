@@ -8,7 +8,7 @@
 //! ([`abi::v25g83`]); free lists, pools, descriptor tables, rings and regions are the A18 Pro's.
 
 use super::{abi, low, BuildEnv, BundleObjects, CpuMap, DescriptorTables, InitData, KernelObject};
-use crate::g17::{Config, Role};
+use crate::g17::{calibration::Calibration, Config, Role};
 use crate::mmu;
 use abi::v25g83 as v;
 use core::sync::atomic::{fence, Ordering};
@@ -74,7 +74,7 @@ impl InitData {
         })
     }
 
-    /// Writes the 25G83 firmware objects, checks them against the expected contents, then
+    /// Writes the 25G83 firmware objects using the chip calibration, then
     /// stages the opening control-ring state.
     fn initialize_25g83(
         &mut self,
@@ -101,12 +101,14 @@ impl InitData {
         let opps = Self::opps(env.dev, cfg.opps, env.clusters)?;
         let cs_opps = Self::opp_table(env.dev, c_str!("apple,cs-opp"))?;
         let afr_opps = Self::opp_table(env.dev, c_str!("apple,afr-opp"))?;
+        let calibration = Calibration::read(env.dev)?;
+        calibration.check_opps(&opps)?;
         let hw_args = abi::HwDataArgs {
             chip_id: cfg.chip_id,
             windows: cfg.windows,
             reserved_slots: cfg.reserved_slots,
             opps: &opps,
-            perf: cfg.perf,
+            perf: &calibration.perf,
             completion_rings: bundle.completion_rings,
             qos_va: self.object(bundle.qos)?.gpu_va(),
         };
@@ -117,41 +119,28 @@ impl InitData {
         };
         // SAFETY: Plain C entropy source.
         let entropy = unsafe { kernel::bindings::get_random_u32() };
-        let mut hashes = [0; 3];
         self.object_mut(self.bundle)?
             .initialize::<v::HwData25G83>(0, |hw| {
                 hw.init(&hw_args, &hw_args_25g83)?;
-                hashes[0] = hw.hash();
                 Ok(())
             })?;
         self.object_mut(self.bundle)?
             .initialize::<v::PowerConfig25G83>(v::POWER_CONFIG, |power| {
-                power.init(config_va, aon_va, entropy);
-                hashes[1] = power.hash();
+                power.init(
+                    config_va,
+                    aon_va,
+                    entropy,
+                    calibration.max_power_mw,
+                    &calibration.leakage,
+                );
                 Ok(())
             })?;
         self.object_mut(self.region_c)?
             .initialize::<abi::RegionC>(0, |region| {
                 region.init(cfg.region_c);
+                region.max_power_mw = calibration.max_power_mw;
                 Ok(())
             })?;
-        hashes[2] = v::hash_without(self.object_mut(self.region_c)?.bytes_mut(), &[]);
-        // The constant contents must equal what the Gravity Linux encoders produce on the proven
-        // setup; the operating points and the core count come from the device and are not hashed.
-        let expected = [
-            v::expected::HW_DATA,
-            v::expected::POWER_CONFIG,
-            v::expected::REGION_C,
-        ];
-        if hashes != expected {
-            dev_err!(
-                env.dev.as_ref(),
-                "25G83 initialization data differs: {:#x?}, expected {:#x?}\n",
-                hashes,
-                expected
-            );
-            return Err(EINVAL);
-        }
         for (index, word) in v::AON_TABLE.iter().enumerate() {
             self.object_mut(objects.aon)?.write(index * 4, *word)?;
         }
@@ -167,7 +156,9 @@ impl InitData {
             v::private::STATUS_B + core::mem::offset_of!(abi::PrimaryStatusB, fwctl_state_va);
         let cluster = self.object(self.cluster)?;
         cluster.dword(fwctl)?.store(fwctl_va, Ordering::Relaxed);
-        cluster.dword(fwctl + 8)?.store(fwctl_va + abi::FWCTL_RING, Ordering::Relaxed);
+        cluster
+            .dword(fwctl + 8)?
+            .store(fwctl_va + abi::FWCTL_RING, Ordering::Relaxed);
 
         // One main configuration carrying both roles.
         let main_offset = abi::bundle::MAIN_CONFIG[Role::Primary as usize];
@@ -218,7 +209,8 @@ impl InitData {
         )?;
         for &(offset, value, repeat) in v::POWER_STATE_WORDS {
             for index in 0..repeat {
-                self.object_mut(objects.power_state)?.write(offset + 4 * index, value)?;
+                self.object_mut(objects.power_state)?
+                    .write(offset + 4 * index, value)?;
             }
         }
 
