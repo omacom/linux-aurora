@@ -775,7 +775,7 @@ for journal in noperm error match bank dcp g15g verdict; do
 	HR=$(system_root "journal-$journal" pro)
 	handoff "$HR" software no FAKE_JOURNAL="$journal"
 done
-for dt in 'apple,j615 apple,t8122' 'apple,j514s apple,t6030' \
+for dt in 'apple,j616 apple,t8122' 'apple,j514s apple,t6030' \
 	'apple,j614s apple,t6030' 'apple,j613 apple,j615 apple,t8122' \
 	'apple,j613 apple,t6030' 'apple,j516s apple,t6030 apple,t8122'; do
 	HR=$(system_root "board-$(printf '%s' "$dt" | tr ' ,' '--')" pro)
@@ -845,5 +845,154 @@ rm "$HOK"
 sed -i 's/boot_id=boot-a/boot_id=old-boot/' "$HATT"
 handoff "$HR" none yes
 
+# Automatic native defaults use a package floor, matching split versions and
+# package-owned /usr roles. These tools/files are fixture-only, never live pacman.
+NATIVE_FLOOR=1:26.3.0_devel.20261025.231095.7c86130d26c-1
+native_root() { # NAME air|pro|j615
+	_nr=$(system_root "native-$1" "$2")
+	rm "$_nr/etc/mesa-m3/disable"
+	if [ "$2" = j615 ]; then
+		nul apple,j615 apple,t8122 apple,arm-platform > "$_nr/proc/device-tree/compatible"
+		nul $G15G > "$_nr/sys/devices/platform/gpu0/of_node/compatible"
+		nul apple,t8122-display-subsystem > "$_nr/sys/devices/platform/display/of_node/compatible"
+	fi
+	mkdir -p "$_nr/usr/bin" "$_nr/usr/lib/dri" "$_nr/usr/share/vulkan/icd.d"
+	for file in usr/lib/libEGL_mesa.so.0 usr/lib/libgbm.so.1 usr/lib/dri/asahi_dri.so \
+		usr/lib/libvulkan_asahi.so usr/share/vulkan/icd.d/asahi_icd.aarch64.json; do
+		: > "$_nr/$file"
+	done
+	printf '%s\n' "$NATIVE_FLOOR" > "$_nr/etc/native-mesa-version"
+	printf '%s\n' "$NATIVE_FLOOR" > "$_nr/etc/native-vulkan-version"
+	cat > "$_nr/usr/bin/pacman" <<'P'
+#!/bin/sh
+[ "$1" = --root ] || exit 2
+root=$2; shift 2
+case "$1" in
+-Q)
+	case "$2" in
+	mesa-aurora) version=$(cat "$root/etc/native-mesa-version") || exit 1 ;;
+	vulkan-aurora) version=$(cat "$root/etc/native-vulkan-version") || exit 1 ;;
+	*) exit 2 ;;
+	esac
+	printf '%s %s\n' "$2" "$version" ;;
+-Qqo)
+	if [ -e "$root/etc/native-owner-fail" ]; then echo wrong-provider; exit 0; fi
+	case "$3" in *libvulkan_asahi.so|*/vulkan/icd.d/*) echo vulkan-aurora ;; *) echo mesa-aurora ;; esac ;;
+*) exit 2 ;;
+esac
+P
+	chmod +x "$_nr/usr/bin/pacman"
+	ln -s /usr/bin/vercmp "$_nr/usr/bin/vercmp"
+	echo "$_nr"
+}
+native_check() { # ROOT ADMIT(yes|no) HELPER(yes|no) [VAR=value ...]
+	_nr=$1 _na=$2 _nh=$3; shift 3
+	rm -f "$_nr/opt/mesa-m3/libexec/system-check.args"
+	env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE_LOG="$T/log" \
+		XDG_CURRENT_DESKTOP=Hyprland "$@" "$TSH" -c '
+		MESA_M3_SESSION_ENV_NO_RUN=1 . "$1"
+		_mm3_init "$2"
+		_mm3_system_admit_bounded "$2" default
+	' sh "$ENVFILE" "$_nr" >/dev/null 2>&1
+	_nrc=$?; _nc=no
+	[ ! -e "$_nr/opt/mesa-m3/libexec/system-check.args" ] || _nc=yes
+	_nactual=no
+	[ "$_nrc" != 0 ] || _nactual=yes
+	if [ "$_nactual" = "$_na" ] && [ "$_nc" = "$_nh" ]; then
+		echo "ok    ${_nr##*/}: native default admit=$_na helper=$_nc"
+	else
+		echo "FAIL  ${_nr##*/}: want admit=$_na/helper=$_nh, got rc=$_nrc/helper=$_nc"; fail=1
+	fi
+}
+native_session() { # ROOT [VAR=value ...]
+	_nr=$1; shift
+	_no=$(env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" FAKE_LOG="$T/log" \
+		XDG_CURRENT_DESKTOP=Hyprland "$@" "$TSH" -c '
+		MESA_M3_SESSION_ENV_NO_RUN=1 . "$1"
+		mesa_m3_session_env "$2"
+		printf "software=%s\nmarker=%s\nlegacy=%s\nexperimental=%s\n" "${LIBGL_ALWAYS_SOFTWARE:-}" "${MESA_M3_FALLBACK:-}" "${MESA_M3_SESSION:-}" "${ASAHI_M3_EXPERIMENTAL:-}"
+		cat "$2/run/user/$(id -u)/mesa-m3-session.state"
+	' sh "$ENVFILE" "$_nr")
+	if printf '%s\n' "$_no" | grep -qx 'reason=native-default' &&
+		printf '%s\n' "$_no" | grep -qx 'decision=inactive' &&
+		printf '%s\n' "$_no" | grep -qx 'fallback=none' &&
+		printf '%s\n' "$_no" | grep -qx 'software=' &&
+		printf '%s\n' "$_no" | grep -qx 'marker=' &&
+		printf '%s\n' "$_no" | grep -qx 'legacy=' &&
+		printf '%s\n' "$_no" | grep -qx 'experimental=' &&
+		[ ! -e "$_nr$T/home/.local/state/mesa-m3/attempt" ]; then
+		echo "ok    ${_nr##*/}: ordinary session selects native /usr without opt-out/legacy flags/attempt"
+	else
+		echo "FAIL  ${_nr##*/}: native session state/exports: $_no"; fail=1
+	fi
+}
+for model in air pro j615; do
+	HR=$(native_root "default-$model" "$model")
+	native_check "$HR" yes yes
+	native_session "$HR"
+done
+HR=$(native_root clear-own-fallback pro)
+native_session "$HR" LIBGL_ALWAYS_SOFTWARE=1 MESA_M3_FALLBACK=software
+# J615 gains exact identity admission in both layers, not a whole-T8122 wildcard.
+HR=$(system_root manual-j615 air)
+nul apple,j615 apple,t8122 apple,arm-platform > "$HR/proc/device-tree/compatible"
+handoff "$HR" none yes
+for mode in missing old mismatch owner escaped absent-role; do
+	HR=$(native_root "package-$mode" pro)
+	case "$mode" in
+	missing) rm "$HR/etc/native-vulkan-version" ;;
+	old) echo 1:26.3.0_devel.20261025.147a62f6190-1 > "$HR/etc/native-mesa-version"; cp "$HR/etc/native-mesa-version" "$HR/etc/native-vulkan-version" ;;
+	mismatch) echo 1:26.3.0_devel.20261025.231095.7c86130d26c-2 > "$HR/etc/native-vulkan-version" ;;
+	owner) : > "$HR/etc/native-owner-fail" ;;
+	escaped) rm "$HR/usr/lib/libEGL_mesa.so.0"; ln -s "$HR/opt/mesa-m3/lib/libEGL_mesa.so.0" "$HR/usr/lib/libEGL_mesa.so.0" ;;
+	absent-role) rm "$HR/usr/lib/libvulkan_asahi.so" ;;
+	esac
+	native_check "$HR" no no
+done
+HR=$(native_root future-matched pro)
+echo 1:26.3.0_devel.20261025.231095.7c86130d26c-2 > "$HR/etc/native-mesa-version"
+cp "$HR/etc/native-mesa-version" "$HR/etc/native-vulkan-version"
+native_check "$HR" yes yes
+for dt in 'apple,j616 apple,t8122' 'apple,j615 apple,t6030' \
+	'apple,j613 apple,j615 apple,t8122' 'apple,j615 apple,j615 apple,t8122'; do
+	HR=$(native_root "identity-$(printf '%s' "$dt" | tr ' ,' '--')" air)
+	nul $dt > "$HR/proc/device-tree/compatible"
+	native_check "$HR" no no
+done
+for flag in mesa_m3=off nomodeset; do
+	HR=$(native_root "recovery-$flag" pro)
+	echo "root=UUID=x rw $flag quiet" > "$HR/proc/cmdline"
+	native_check "$HR" no no
+	# The ordinary hook must also keep the requested software recovery route.
+	handoff "$HR" software no
+done
+HR=$(native_root explicit-profile air)
+echo j613-25g83-hal200 > "$HR/etc/mesa-m3/t8122-profile"
+native_check "$HR" no no
+for variable in LIBGL_ALWAYS_SOFTWARE=1 MESA_M3_SESSION=/opt/mesa-m3 \
+	LD_LIBRARY_PATH=/opt/mesa-m3/lib; do
+	HR=$(native_root "choice-${variable%%=*}" pro)
+	native_check "$HR" no no "$variable"
+done
+for value in 'export LIBGL_ALWAYS_SOFTWARE+=1' 'export LD_LIBRARY_PATH+=/opt/custom/lib'; do
+	HR=$(native_root "append-${value%%=*}" pro)
+	mkdir -p "$HR$T/home/.config/uwsm"
+	printf '%s\n' "$value" > "$HR$T/home/.config/uwsm/env"
+	native_check "$HR" no no
+done
+for journal in error match; do
+	HR=$(native_root "journal-$journal" pro)
+	native_check "$HR" no no FAKE_JOURNAL="$journal"
+done
+HR=$(native_root two-nodes pro)
+mkdir "$HR/sys/class/drm/renderD129"
+native_check "$HR" no no
+HR=$(native_root helper-failure pro)
+: > "$HR/opt/mesa-m3/libexec/system-check.fail"
+native_check "$HR" no yes
+HR=$(native_root unmatched-attempt pro)
+mkdir -p "$HR$T/home/.local/state/mesa-m3"
+printf 'schema=aurora.mesa-m3-attempt/2\nboot_id=boot-a\nsession_id=5\nhook_run_id=old-run\n' > "$HR$T/home/.local/state/mesa-m3/attempt"
+native_check "$HR" no no
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "SOME FAILED"
 exit "$fail"

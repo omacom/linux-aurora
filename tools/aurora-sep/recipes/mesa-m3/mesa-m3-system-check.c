@@ -18,9 +18,8 @@
 static bool
 board_compat_matches(const char *bytes, size_t length, const char *soc)
 {
-   const char *board = !strcmp(soc, "t8122") ? "apple,j613" :
-                       !strcmp(soc, "t6030") ? "apple,j516s" : NULL;
-   if (!board || !length || bytes[length - 1] != '\0')
+   if ((strcmp(soc, "t8122") && strcmp(soc, "t6030")) ||
+       !length || bytes[length - 1] != '\0')
       return false;
    unsigned boards = 0, socs = 0;
    size_t offset = 0;
@@ -31,7 +30,10 @@ board_compat_matches(const char *bytes, size_t length, const char *soc)
          return false;
       const char *value = bytes + offset;
       if (!strncmp(value, "apple,j", 7)) {
-         if (strcmp(value, board))
+         bool matches = !strcmp(soc, "t8122") ?
+            (!strcmp(value, "apple,j613") || !strcmp(value, "apple,j615")) :
+            !strcmp(value, "apple,j516s");
+         if (!matches)
             return false;
          boards++;
       } else if (!strncmp(value, "apple,t", 7)) {

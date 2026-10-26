@@ -68,8 +68,13 @@
 # user-setup it exports nothing: the session's own Mesa setup, which it uses,
 # decides. The state file says which (fallback=software|none).
 #
-# A file opt-out (/etc/mesa-m3/disable or the user's mesa-m3/disable) on a
-# J613 (T8122) or a J516S (T6030) is the exception: when the same node,
+# A matching native mesa-aurora/vulkan-aurora package set at the reviewed
+# version floor selects /usr automatically on J613/J615 (T8122) and J516S
+# (T6030), subject to the same checks below. An explicit legacy profile,
+# user provider/software choice, mesa_m3=off or nomodeset prevents that default.
+# Package identity is not hardware qualification of every listed board.
+# A file opt-out (/etc/mesa-m3/disable or the user's mesa-m3/disable) remains
+# a separate manual route: when the same node,
 # display, kernel-log, user-setup and same-boot attempt checks pass and
 # mesa-m3-system-check admits /usr, the session keeps system Mesa
 # (fallback=none, no new attempt). The whole check runs in its own sh and is
@@ -110,6 +115,7 @@ mesa_m3_gate() {
 	fi
 	case " $(cat "$_mm3_root/proc/cmdline" 2>/dev/null) " in
 	*" mesa_m3=off "*) echo "opt-out mesa_m3=off is on the kernel command line"; return 1 ;;
+	*" nomodeset "*) echo "opt-out nomodeset is on the kernel command line"; return 1 ;;
 	esac
 
 	# The SoC decides which GPU and display compatibles count: never a mix.
@@ -385,20 +391,60 @@ _mm3_legacy_attempt_clear() {
 	return 0
 }
 
-# File opt-out on J613/T8122 or J516S/T6030 may keep the system Mesa. Prints
+# The normal signed-package boundary owns this cohort, not a per-build hash
+# list. The kernel admits firmware/resources, and native Mesa validates its
+# chip/USC/HAL/features contract when the clean-environment helper opens it.
+# Require matching split versions and ownership of the real /usr providers.
+_mm3_native_packages() {
+	_mm3_pm=$1/usr/bin/pacman
+	_mm3_vc=$1/usr/bin/vercmp
+	[ -x "$_mm3_pm" ] && [ -x "$_mm3_vc" ] || return 1
+	_mm3_pkgroot=${1:-/}
+	_mm3_mv=$("$_mm3_pm" --root "$_mm3_pkgroot" -Q mesa-aurora 2>/dev/null) || return 1
+	_mm3_vv=$("$_mm3_pm" --root "$_mm3_pkgroot" -Q vulkan-aurora 2>/dev/null) || return 1
+	case $_mm3_mv in 'mesa-aurora '*) _mm3_mv=${_mm3_mv#mesa-aurora } ;; *) return 1 ;; esac
+	case $_mm3_vv in 'vulkan-aurora '*) _mm3_vv=${_mm3_vv#vulkan-aurora } ;; *) return 1 ;; esac
+	[ "$_mm3_mv" = "$_mm3_vv" ] || return 1
+	printf '%s\n' "$_mm3_mv" | LC_ALL=C grep -Eq '^[0-9][A-Za-z0-9._:+~-]*$' || return 1
+	_mm3_cmp=$("$_mm3_vc" "$_mm3_mv" '1:26.3.0_devel.20261025.231095.7c86130d26c-1') || return 1
+	case $_mm3_cmp in 0|1) ;; *) return 1 ;; esac
+	for _mm3_role in \
+		'mesa-aurora:/usr/lib/libEGL_mesa.so.0' \
+		'mesa-aurora:/usr/lib/libgbm.so.1' \
+		'mesa-aurora:/usr/lib/dri/asahi_dri.so' \
+		'vulkan-aurora:/usr/lib/libvulkan_asahi.so' \
+		'vulkan-aurora:/usr/share/vulkan/icd.d/asahi_icd.aarch64.json'; do
+		_mm3_owned=${_mm3_role%%:*}
+		_mm3_real=$(readlink -f "$1${_mm3_role#*:}" 2>/dev/null) || return 1
+		[ -f "$_mm3_real" ] && [ -r "$_mm3_real" ] || return 1
+		case $_mm3_real in "$1"/usr/lib/*|"$1"/usr/share/vulkan/icd.d/*) ;; *) return 1 ;; esac
+		_mm3_owner=$("$_mm3_pm" --root "$_mm3_pkgroot" -Qqo -- "$_mm3_real" 2>/dev/null) || return 1
+		[ "$_mm3_owner" = "$_mm3_owned" ] || return 1
+	done
+}
+
+# Manual opt-out or the package-gated native default may keep system Mesa. Prints
 # one detail line and returns 0 only when every check below passes. A helper
 # exit of 0 is not enough on its own. Does not write an attempt or touch a
-# marker. mesa_m3=off is not a file opt-out.
+# marker. mesa_m3=off is not a file opt-out. $2 is default or manual.
 _mm3_system_admit() {
 	case ${XDG_CURRENT_DESKTOP:-} in Hyprland|hyprland) ;; *) return 1 ;; esac
 	_mm3_cmdline=$(cat "$1/proc/cmdline" 2>/dev/null) || return 1
 	case " $_mm3_cmdline " in
 	*" mesa_m3=off "*|*" nomodeset "*) return 1 ;;
 	esac
-	if [ ! -e "$1/etc/mesa-m3/disable" ] &&
-		[ ! -e "$1${XDG_CONFIG_HOME:-$HOME/.config}/mesa-m3/disable" ]; then
-		return 1
-	fi
+	case ${2:-manual} in
+	default)
+		# Preserve file opt-outs on the existing manual route, and never
+		# override an explicitly selected legacy/experimental profile.
+		[ ! -e "$1/etc/mesa-m3/disable" ] &&
+			[ ! -e "$1${XDG_CONFIG_HOME:-$HOME/.config}/mesa-m3/disable" ] || return 1
+		[ ! -e "$1/etc/mesa-m3/t8122-profile" ] || return 1 ;;
+	manual)
+		[ -e "$1/etc/mesa-m3/disable" ] ||
+			[ -e "$1${XDG_CONFIG_HOME:-$HOME/.config}/mesa-m3/disable" ] || return 1 ;;
+	*) return 1 ;;
+	esac
 	_mm3_dt=$(tr '\0' '\n' 2>/dev/null < "$1/proc/device-tree/compatible")
 	_mm3_soc=$(_mm3_soc_of "$1")
 	_mm3_chip=
@@ -406,9 +452,13 @@ _mm3_system_admit() {
 	_mm3_socs=$(printf '%s\n' "$_mm3_dt" | grep -E '^apple,t')
 	case "$_mm3_soc:$_mm3_identity:$_mm3_socs" in
 	t8122:apple,j613:apple,t8122) _mm3_chip=t8122 ;;
+	t8122:apple,j615:apple,t8122) _mm3_chip=t8122 ;;
 	t6030:apple,j516s:apple,t6030) _mm3_chip=t6030 ;;
 	*) return 1 ;;
 	esac
+	if [ "${2:-manual}" = default ]; then
+		_mm3_native_packages "$1" || return 1
+	fi
 	# Exactly one render node, and it is this SoC's asahi GPU, and this user
 	# can open it. An any-node match is not enough.
 	_mm3_nodes=0
@@ -457,8 +507,8 @@ _mm3_system_admit() {
 _mm3_system_admit_bounded() {
 	_mm3_self=${1:-}/opt/mesa-m3/libexec/mesa-m3-session-env
 	[ -r "$_mm3_self" ] || return 1
-	timeout -k 2 20 sh -c 'MESA_M3_SESSION_ENV_NO_RUN=1 . "$1" && _mm3_p=$3 && _mm3_system_admit "$2"' \
-		sh "$_mm3_self" "${1:-}" "$_mm3_p"
+	timeout -k 2 20 sh -c 'MESA_M3_SESSION_ENV_NO_RUN=1 . "$1" && _mm3_p=$3 && _mm3_system_admit "$2" "$4"' \
+		sh "$_mm3_self" "${1:-}" "$_mm3_p" "${2:-manual}"
 }
 
 # _mm3_state ROOT DECISION REASON DETAIL FALLBACK: write the state file and the journal
@@ -524,8 +574,14 @@ _mm3_attempt() {
 # root directory for tests ("" in sessions).
 mesa_m3_session_env() {
 	_mm3_init "${1:-}"
-	_mm3_decision=$(mesa_m3_gate "${1:-}")
-	_mm3_on=$?
+	_mm3_sys=$(_mm3_system_admit_bounded "${1:-}" default)
+	if [ "$?" -eq 0 ]; then
+		_mm3_decision="native-default $_mm3_sys"
+		_mm3_on=1
+	else
+		_mm3_decision=$(mesa_m3_gate "${1:-}")
+		_mm3_on=$?
+	fi
 	# One random id per run, in the state file and (except where this is
 	# neither a T6030 nor a T8122) in the session environment: the checker
 	# binds the two.
@@ -561,25 +617,25 @@ mesa_m3_session_env() {
 		_mm3_state "${1:-}" active "${_mm3_decision%% *}" "${_mm3_decision#* }" none
 		_mm3_attempt "${1:-}"
 	else
-		# Never the system Mesa on an M3 render node it can open (Hyprland
-		# would stop at start), except where this session's own setup chose,
-		# or a file opt-out whose system-Mesa handoff passed.
+		# Keep the legacy fallback unless the native default/manual handoff
+		# passed, or this session's own provider setup decides instead.
 		_mm3_fb=none
 		_mm3_detail=${_mm3_decision#* }
 		_mm3_admitted=0
-		if [ "${_mm3_decision%% *}" = opt-out ]; then
+		if [ "${_mm3_decision%% *}" = native-default ]; then
+			_mm3_admitted=1
+		elif [ "${_mm3_decision%% *}" = opt-out ]; then
 			_mm3_sys=$(_mm3_system_admit_bounded "${1:-}")
 			if [ "$?" -eq 0 ]; then
 				_mm3_admitted=1
 				_mm3_detail="$_mm3_detail; $_mm3_sys"
-				# Only the pair this hook itself exports. Anything else in the
-				# environment, including a user's own LIBGL_ALWAYS_SOFTWARE
-				# without this marker, stays.
-				if [ "${LIBGL_ALWAYS_SOFTWARE:-}" = 1 ] && [ "${MESA_M3_FALLBACK:-}" = software ]; then
-					unset LIBGL_ALWAYS_SOFTWARE
-					unset MESA_M3_FALLBACK
-				fi
 			fi
+		fi
+		# Only clear the pair this hook itself exports; preserve a user's
+		# separate software preference and every other provider selector.
+		if [ "$_mm3_admitted" -eq 1 ] && [ "${LIBGL_ALWAYS_SOFTWARE:-}" = 1 ] && [ "${MESA_M3_FALLBACK:-}" = software ]; then
+			unset LIBGL_ALWAYS_SOFTWARE
+			unset MESA_M3_FALLBACK
 		fi
 		if [ "$_mm3_admitted" -eq 0 ] && [ "${_mm3_decision%% *}" != user-setup ] && _mm3_node_open "${1:-}"; then
 			export LIBGL_ALWAYS_SOFTWARE=1
@@ -595,6 +651,7 @@ if [ -z "${MESA_M3_SESSION_ENV_NO_RUN:-}" ]; then
 	unset -f mesa_m3_gate mesa_m3_session_env _mm3_init _mm3_state _mm3_node_open _mm3_attempt \
 		_mm3_soc_of _mm3_25g83_board _mm3_native_display _mm3_kernel_log \
 		_mm3_legacy_attempt_clear _mm3_system_admit _mm3_system_admit_bounded
+	unset -f _mm3_native_packages
 fi
 unset _mm3_root _mm3_p _mm3_nodes _mm3_node _mm3_n _mm3_drv _mm3_dcp _mm3_c _mm3_dev _mm3_f _mm3_v \
 	_mm3_val _mm3_ifs _mm3_d _mm3_out _mm3_rc _mm3_decision _mm3_on \
@@ -602,4 +659,4 @@ unset _mm3_root _mm3_p _mm3_nodes _mm3_node _mm3_n _mm3_drv _mm3_dcp _mm3_c _mm3
 	_mm3_body _mm3_kv _mm3_dir _mm3_tmp _mm3_fb _mm3_run _mm3_att _mm3_ok _mm3_faults _mm3_ign _mm3_igd \
 	_mm3_soc _mm3_name _mm3_dt _mm3_base _mm3_profile _mm3_requested _mm3_files _mm3_gate_ifs _mm3_board _mm3_note \
 	_mm3_klog _mm3_sys _mm3_admitted _mm3_detail _mm3_helper _mm3_chip _mm3_identity _mm3_socs _mm3_cmdline \
-	_mm3_self
+	_mm3_self _mm3_pm _mm3_vc _mm3_pkgroot _mm3_mv _mm3_vv _mm3_cmp _mm3_role _mm3_owned _mm3_real _mm3_owner
