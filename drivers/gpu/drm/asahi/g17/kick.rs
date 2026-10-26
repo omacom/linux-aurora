@@ -314,7 +314,7 @@ mod accounting_tests {
 
     #[test]
     fn dynamic_compute_growth_preserves_render_headroom_above_firmware_floor() {
-        for floor in [0, 4] {
+        for floor in [0, 4, 32] {
             let mut ids = KBox::init(QueueIds::new(floor), GFP_KERNEL).unwrap();
             let queues = 2;
             let mut owner = 1;
@@ -333,7 +333,7 @@ mod accounting_tests {
 
     #[test]
     fn full_logical_queue_budget_keeps_compute_floor_and_excludes_firmware_ids() {
-        for floor in [0, 4] {
+        for floor in [0, 4, 32] {
             let mut ids = KBox::init(QueueIds::new(floor), GFP_KERNEL).unwrap();
             let queues = queue_limit(floor) as usize;
             for owner in 1..=COMPUTE_FLOOR as u64 {
