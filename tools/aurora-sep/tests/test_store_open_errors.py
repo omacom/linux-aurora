@@ -2,9 +2,8 @@
 """The regular-file C/Rust boundary must not turn an I/O error into absence.
 
 Compile the actual C wrapper bodies with a fake open_as_kernel(). No kernel,
-files, enclave, or stored identity is opened. Rust assertions cover the source
-wiring to the same from_err_ptr API already used by open_host(). When rustc is
-available, also compile the unchanged Rust module against a tiny kernel API
+files, enclave, or stored identity is opened. When rustc is available, also
+compile the unchanged Rust module against a tiny kernel API
 facade and those C wrappers; this is a userspace boundary fixture, not a kernel
 build or a real filesystem test.
 """
@@ -110,15 +109,6 @@ static void *collapse(struct file *f)
         result = self.native(negative_control=True)
         self.assertEqual(result.returncode, 1)
         self.assertIn('lost errno', result.stderr)
-
-    def test_rust_propagates_each_regular_open_error(self):
-        source = RUST_SOURCE.read_text()
-        for method, call in zip(('open', 'open_trunc', 'open_readonly'), OPENS):
-            with self.subTest(method=method):
-                body = function(source, 'pub(crate) fn ' + method + '(')
-                self.assertIn('kernel::error::from_err_ptr(' + call + '(path.as_char_ptr()))?', body)
-                self.assertNotIn('is_null()', body)
-                self.assertNotIn('Err(ENOENT)', body)
 
     def test_block_device_open_contract_unchanged(self):
         body = function(C_SOURCE.read_text(), 'void *sep_store_open_block(')

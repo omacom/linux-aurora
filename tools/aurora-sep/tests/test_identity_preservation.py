@@ -172,6 +172,122 @@ fn main(){
 }
 '''
 
+CATACOMB = r'''
+const MAGIC:[u8;8]=*b"SEPCTMB1";const HEADER:usize=16;const MAX_CATACOMB:usize=1<<20;
+const PRIVATE_TYPE_CATACOMB_MASTER:u8=1;const PRIVATE_TYPE_CATACOMB_OWNER:u8=2;const PRIVATE_TYPE_CATACOMB_USER:u8=3;
+thread_local!{static OPEN:Cell<i32>=const{Cell::new(0)};static IMAGE:RefCell<Vec<u8>>=const{RefCell::new(Vec::new())};}
+mod shim{
+ use super::*;pub struct StoreFile;
+ impl StoreFile{
+  pub fn open_readonly(_: &CStr)->Result<Self>{OPEN.with(|e|if e.get()==0{Ok(Self)}else{Err(e.get())})}
+  pub fn size(&self)->Result<u64>{Ok(IMAGE.with(|v|v.borrow().len() as u64))}
+  pub fn read_exact(&self,at:u64,out:&mut[u8])->Result<()>{
+   IMAGE.with(|v|{let v=v.borrow();let Some(s)=v.get(at as usize..at as usize+out.len())else{return Err(EIO)};out.copy_from_slice(s);Ok(())})
+  }
+ }
+}
+@@CRC@@
+PATH
+METHOD
+fn image(blob:&[u8])->Vec<u8>{
+ let mut v=Vec::from(MAGIC);v.extend((blob.len() as u32).to_le_bytes());
+ v.extend(crc16_ccitt_false(blob).to_le_bytes());v.extend([0,0]);v.extend(blob);v
+}
+fn main(){
+ let k=PRIVATE_TYPE_CATACOMB_MASTER;
+ OPEN.with(|e|e.set(ENOENT));assert!(matches!(read(k),Ok(None)),"missing file must be absence");
+ for err in [EIO,13,12,30,40]{OPEN.with(|e|e.set(err));assert!(read(k).is_err(),"open error read as absence");}
+ OPEN.with(|e|e.set(0));
+ let good=image(&[1,2,3]);IMAGE.with(|v|*v.borrow_mut()=good.clone());
+ assert_eq!(read(k).unwrap().unwrap().0,vec![1,2,3]);
+ for len in 0..good.len(){IMAGE.with(|v|*v.borrow_mut()=good[..len].to_vec());assert!(read(k).is_err(),"truncated file read as absence or data");}
+ let mut bad=good.clone();bad[HEADER]^=1;IMAGE.with(|v|*v.borrow_mut()=bad);assert!(read(k).is_err(),"bad checksum admitted");
+ let mut bad=good;bad[0]^=1;IMAGE.with(|v|*v.borrow_mut()=bad);assert!(read(k).is_err(),"bad magic admitted");
+ println!("catacomb cases passed");
+}
+'''
+
+
+CALLERS = r'''
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+macro_rules! dev_info {($($x:tt)*)=>{()};}
+const PRIVATE_TYPE_CATACOMB_MASTER:u8=0xF2;const PRIVATE_TYPE_CATACOMB_OWNER:u8=0xF3;const PRIVATE_TYPE_CATACOMB_USER:u8=0xF4;
+const SBIO_PROBE_USER_ID:i32=1;
+#[derive(Debug,PartialEq)] enum RestoreOutcome{Restored,AlreadyActive,NoStoredFile,Failed,EmptyTolerated}
+enum LoadAnswer{StatusZero,ColdTransition,AlreadyActive}
+// 0 = valid file, ENOENT = missing, anything else = read error.
+thread_local!{
+ static FILE:RefCell<[i32;3]>=const{RefCell::new([0;3])};
+ static HOST:Cell<i32>=const{Cell::new(-1)};
+ static ASKED_ENCLAVE:Cell<bool>=const{Cell::new(false)};
+ static TRANSFERRED:Cell<bool>=const{Cell::new(false)};
+}
+mod catacomb{
+ use super::*;
+ pub fn is_kind(_:u8)->bool{true}
+ pub fn read(kind:u8)->Result<Option<KVec<u8>>>{
+  match FILE.with(|f|f.borrow()[(kind-PRIVATE_TYPE_CATACOMB_MASTER) as usize]){
+   0=>Ok(Some(KVec(vec![1,0,0,0]))),ENOENT=>Ok(None),e=>Err(e)}
+ }
+ @@IS_SAVED@@
+ @@IS_ABSENT@@
+}
+mod store{pub struct Key;impl Key{pub fn root(_:u8)->Self{Key}}}
+struct Store;
+impl Store{fn read(&self,_:&store::Key)->Result<Option<KVec<u8>>>{match HOST.with(|h|h.get()){0=>Ok(Some(KVec(vec![1,0,0,0]))),ENOENT=>Ok(None),e=>Err(e)}}}
+mod module_parameters{pub struct Param;pub static probe_owner_export:Param=Param;impl Param{pub fn value(&self)->&u8{&1}}}
+mod sbio{
+ pub enum ComponentAction{AlreadyActive,Unsupported,Load}
+ pub fn component_action(_:u32)->ComponentAction{ComponentAction::Load}
+ pub const SBIO_SAVED_USER_ID_AT:usize=0;pub const SBIO_STATUS_COLD_TRANSITION:u32=0x8002;pub const SBIO_STATUS_ALREADY_ACTIVE:u32=0x101;
+ pub const COMPONENT_STATE_ACTIVE:u32=1;
+ pub struct SbioLoadCatacomb;
+ impl SbioLoadCatacomb{pub fn new(_:&[u8])->Option<Self>{Some(Self)}pub fn opcode(&self)->u8{0}pub fn name(&self)->u8{0}pub fn payload(&self)->&[u8]{&[]}}
+ pub struct NoExistingCatacomb;impl NoExistingCatacomb{pub fn from_zero_identities(_:usize)->Option<Self>{None}}
+ pub enum ContextScope{SYSTEM}pub fn sbio_select_context(_:ContextScope,_:&NoExistingCatacomb){}
+ pub struct ComponentStates;impl ComponentStates{pub fn new(_:&[u8])->Self{Self}pub fn state_for(&self,_:i32)->Option<u32>{None}}
+ pub struct CatacombUser;impl CatacombUser{pub const OWNER:Self=Self;pub fn value(&self)->i32{0}}
+}
+struct Status;impl Status{fn is_ok(&self)->bool{true}fn answered(&self)->Option<u32>{None}}
+impl std::fmt::Display for Status{fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result{Ok(())}}
+struct Done{status:Status}
+struct Sbio{dev:(),templates_restored:AtomicBool}
+impl Sbio{
+ fn with_host_store<R>(&self,f:impl FnOnce(&Store)->R)->Option<R>{if HOST.with(|h|h.get())<0{None}else{Some(f(&Store))}}
+ fn sbio_transfer_raw(&self,_:u8,_:u8,_:&[u8])->Result<Done>{TRANSFERRED.with(|t|t.set(true));Ok(Done{status:Status})}
+ fn confirm_active(&self,_:i32,_:&CStr,_:LoadAnswer)->RestoreOutcome{RestoreOutcome::Restored}
+ fn log_identity_count(&self,_:&CStr)->Option<usize>{Some(1)}
+ fn enclave_identities_for(&self,_:i32)->Option<Vec<u8>>{ASKED_ENCLAVE.with(|a|a.set(true));None}
+ fn sbio_expect_ok(&self,_:&())->Option<()>{None}
+ fn read_component_states(&self)->Option<Vec<u8>>{None}
+ fn save_catacomb(&self,_:sbio::CatacombUser,_:u8,_:&CStr)->bool{false}
+ @@RESTORE@@
+ @@READ_STORED@@
+ @@PROBE@@
+}
+fn set(files:[i32;3],host:i32){FILE.with(|f|*f.borrow_mut()=files);HOST.with(|h|h.set(host));ASKED_ENCLAVE.with(|a|a.set(false));TRANSFERRED.with(|t|t.set(false));}
+fn main(){
+ let s=Sbio{dev:(),templates_restored:AtomicBool::new(false)};
+ let user=PRIVATE_TYPE_CATACOMB_USER;
+ set([0,0,EIO],-1);
+ assert_eq!(s.restore_catacomb(Some(0),1,user,c"user"),RestoreOutcome::Failed,"unreadable catacomb restored as missing");
+ assert!(!TRANSFERRED.with(|t|t.get()),"unreadable catacomb sent to the enclave");
+ set([0,0,ENOENT],0);
+ assert_eq!(s.restore_catacomb(Some(0),1,user,c"user"),RestoreOutcome::Restored,"host-store copy not used");
+ set([0,0,ENOENT],EIO);
+ assert_eq!(s.restore_catacomb(Some(0),1,user,c"user"),RestoreOutcome::Failed,"unreadable host store restored as missing");
+ set([0,0,ENOENT],-1);
+ assert_eq!(s.restore_catacomb(Some(0),1,user,c"user"),RestoreOutcome::NoStoredFile,"genuine absence not reported");
+ // Owner probe: positive control reaches the enclave; an unreadable owner file must not.
+ set([0,ENOENT,0],-1);s.probe_owner_export();
+ assert!(ASKED_ENCLAVE.with(|a|a.get()),"owner probe never reached its enclave check");
+ for e in [EIO,13]{set([0,e,0],-1);s.probe_owner_export();assert!(!ASKED_ENCLAVE.with(|a|a.get()),"unreadable owner catacomb treated as absent");}
+ set([EIO,ENOENT,0],-1);s.probe_owner_export();
+ assert!(!ASKED_ENCLAVE.with(|a|a.get()),"unreadable master catacomb treated as saved");
+ println!("caller cases passed");
+}
+'''
+
 
 @unittest.skipUnless(shutil.which('rustc'), 'rustc required')
 class Preservation(unittest.TestCase):
@@ -214,6 +330,33 @@ class Preservation(unittest.TestCase):
         old=method[:start]+'    if state == STATE_REFUSED { return Ok(State::Absent(NoStoredKeyBag { slot })); }'+method[stop:]
         self.run_rust(make(old),should_pass=False)
 
+    def test_catacomb_read_error_is_not_absence(self):
+        text=(ROOT/'catacomb.rs').read_text()
+        method=body(text,'pub(crate) fn read(kind: u8)')
+        path=body(text,'fn path_for(kind: u8)').replace('crate::','')
+        crc=body((ROOT/'store.rs').read_text(),'pub(crate) const fn crc16_ccitt_false(')
+        make=lambda m:CATACOMB.replace('METHOD',m).replace('PATH',path).replace('@@CRC@@',crc)
+        self.run_rust(make(method))
+        old=method.replace("Err(e) => return Err(e),","Err(e) => return Ok(None),",1)
+        self.assertNotEqual(old,method)
+        self.run_rust(make(old),should_pass=False)
+
+    def test_callers_refuse_unreadable_catacombs(self):
+        cat=(ROOT/'catacomb.rs').read_text();sb=(ROOT/'sbio.rs').read_text()
+        parts={'IS_SAVED':body(cat,'pub(crate) fn is_saved('),'IS_ABSENT':body(cat,'pub(crate) fn is_absent('),
+               'RESTORE':body(sb,'    fn restore_catacomb('),'READ_STORED':body(sb,'    fn read_stored('),
+               'PROBE':body(sb,'    fn probe_owner_export(')}
+        def make(**over):
+            text=CALLERS
+            for key,value in {**parts,**over}.items():
+                text=text.replace('@@'+key+'@@',value.replace('crate::',''))
+            return text
+        self.run_rust(make())
+        restore=parts['RESTORE'].replace('Err(_) => return RestoreOutcome::Failed,','Err(_) => return RestoreOutcome::NoStoredFile,',1)
+        absent=parts['IS_ABSENT'].replace('matches!(read(kind), Ok(None))','!matches!(read(kind), Ok(Some(_)))',1)
+        for name,old in (('RESTORE',restore),('IS_ABSENT',absent)):
+            self.assertNotEqual(old,parts[name])
+            self.run_rust(make(**{name:old}),should_pass=False)
 
 if __name__=='__main__':
     unittest.main()
