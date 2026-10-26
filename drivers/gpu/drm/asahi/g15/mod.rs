@@ -539,7 +539,21 @@ impl Firmware {
                 vms,
             },
         );
-        if let Err(e) = firmware.init_graphs() {
+        let result = firmware.init_graphs().and_then(|_| {
+            if cfg.platform != hw::Platform::AdtWithPmp {
+                return Ok(());
+            }
+            // A report before firmware startup is ACKed without enabling bandwidth scaling.
+            // Reassert it after setup, including the backend's final device control.
+            // SAFETY: This session retains its acknowledged T6030 AGX power vote.
+            let ret = unsafe { boot::glue::asahi_g15_pmp_ready() };
+            if ret == 0 {
+                Ok(())
+            } else {
+                Err(Error::from_errno(ret))
+            }
+        });
+        if let Err(e) = result {
             let Firmware {
                 session,
                 init,

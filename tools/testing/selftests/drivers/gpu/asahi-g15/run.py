@@ -300,6 +300,19 @@ def main():
                         str(Path(__file__).with_name("pmp-bridge.c")), "-o", str(output)], check=True)
         subprocess.run([str(output)], check=True)
 
+        owner = (ROOT / "drivers/soc/apple/pmp-export.c").read_text()
+        start = owner.index("int apple_pmp_set_device_power(")
+        end = owner.index("\n}", start) + 2
+        vote = owner[start:end]
+        start = owner.index("int apple_pmp_t6030_gpu_ready(")
+        end = owner.index("\n}", start) + 2
+        (temp / "pmp-vote-production.h").write_text(vote + "\n" + owner[start:end])
+        output = temp / "pmp-vote"
+        subprocess.run([os.environ.get("HOSTCC", "cc"), "-std=c11", "-Wall", "-Wextra",
+                        "-Werror", "-I", str(temp),
+                        str(Path(__file__).with_name("pmp-vote.c")), "-o", str(output)], check=True)
+        subprocess.run([str(output)], check=True)
+
         # Native wire layout is a private per-backend facade. Its independent host test
         # checks that canonical normal/G17 UAPI remains unchanged; there is no global
         # Rust bindgen header selector in this integration.

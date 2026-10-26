@@ -35,6 +35,7 @@ void __iomem *asahi_g15_ioremap_wc(u64 start, size_t size);
 bool asahi_g15_dma_coherent(struct device *dev);
 int asahi_g15_pmp_prepare(struct device *dev);
 int asahi_g15_pmp_get(struct device *dev);
+int asahi_g15_pmp_ready(void);
 void asahi_g15_pmp_put(struct device *dev);
 bool asahi_g15_reserved_uat(u32 index, u64 start, u64 size);
 
@@ -148,6 +149,11 @@ int asahi_g15_pmp_get(struct device *dev)
 		return -ENODEV;
 	return apple_pmp_set_device_power(0x0f, 5, 1);
 
+}
+
+int asahi_g15_pmp_ready(void)
+{
+	return apple_pmp_t6030_gpu_ready();
 }
 
 /*

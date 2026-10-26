@@ -1292,6 +1292,62 @@ static int apple_pmp_report_set_state(struct apple_pmp_report *rep, u32 id,
 		50000);
 }
 
+/* Find and check the report before taking the GPU vote; optionally update it. */
+static int apple_pmp_report_t6030_gfx(struct device *supplier, const bool *enable)
+{
+	struct apple_pmp_report *rep, *found = NULL;
+	struct device_node *pmp;
+	const u8 *table;
+	int len = 0, ret = -ENODEV;
+
+	if (!IS_ENABLED(CONFIG_APPLE_T6030_GPU_PMP_LINK) ||
+	    !of_machine_is_compatible("apple,t6030") ||
+	    !of_device_is_compatible(supplier->of_node, "apple,t6030-pmp-v2"))
+		return -ENODEV;
+
+	/* T6030's ordered soc-device ID 5 is the acknowledged AGX request. */
+	table = of_get_property(supplier->of_node, "apple,tunable-soc-device", &len);
+	if (!apple_pmp_devices_valid(table, len, BIT_ULL(4), BIT_ULL(4), true) ||
+	    memcmp(table + 4 * PMP_SOC_DEVICE_SIZE + 116, "AGX\0\0\0\0\0", 8))
+		return -EINVAL;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(rep, &apple_pmp_reports, list) {
+		if (rep->offsets != &apple_pmp_offsets_t6030)
+			continue;
+		pmp = of_parse_phandle(rep->dev->of_node, "apple,pmp", 0);
+		if (pmp == supplier->of_node) {
+			of_node_put(pmp);
+			if (found)
+				goto out;
+			found = rep;
+		} else {
+			of_node_put(pmp);
+		}
+	}
+	if (found) {
+		if (readq(found->base + found->offsets->status) != PMP_REPORT_READY)
+			ret = -EAGAIN;
+		else
+			ret = enable ? apple_pmp_report_set_state(found, 4, *enable, false) : 0;
+	}
+out:
+	rcu_read_unlock();
+	return ret;
+}
+int apple_pmp_report_check_t6030_gfx(struct device *supplier)
+{
+	return apple_pmp_report_t6030_gfx(supplier, NULL);
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_check_t6030_gfx);
+
+/* The RTKit AGX vote alone does not enable PMP's GPU bandwidth controllers. */
+int apple_pmp_report_set_t6030_gfx(struct device *supplier, bool enable)
+{
+	return apple_pmp_report_t6030_gfx(supplier, &enable);
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_set_t6030_gfx);
+
 static int apple_pmp_report_entry_set_state(struct generic_pm_domain *genpd, bool enable)
 {
 	struct apple_pmp_report_entry *ent = genpd_to_apple_pmp_report_entry(genpd);

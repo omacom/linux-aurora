@@ -73,6 +73,7 @@ pub(crate) mod glue {
         fn asahi_g15_dma_coherent(dev: *mut core::ffi::c_void) -> bool;
         pub(crate) fn asahi_g15_pmp_prepare(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_get(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
+        pub(crate) fn asahi_g15_pmp_ready() -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_put(dev: *mut core::ffi::c_void);
         fn asahi_g15_reserved_uat(index: u32, start: u64, size: u64) -> bool;
     }
