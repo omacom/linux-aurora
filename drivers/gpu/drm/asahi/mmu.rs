@@ -358,6 +358,20 @@ fn lock_vm(
     Ok(VmExecGuard(unsafe { gpuvm.exec_lock(obj, interruptible)? }))
 }
 
+#[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+pub(crate) struct VmReadGuard(VmExecGuard);
+
+#[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+impl VmReadGuard {
+    pub(crate) fn covers_range(&mut self, address: u64, size: u64, read: bool, write: bool) -> bool {
+        Vm::covers_range_locked(&mut self.0, address, size, read, write)
+    }
+
+    pub(crate) fn read_user(&mut self, va: u64, buf: &mut [u8]) -> Result {
+        Vm::read_user_locked(&mut self.0, va, buf)
+    }
+}
+
 /// Slot binding-related inner data for a Vm instance.
 struct VmBinding {
     active_users: usize,
@@ -1804,7 +1818,16 @@ impl Vm {
     /// mappings cannot change during the copy (GPUVM exec lock).
     #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
     pub(crate) fn read_user(&self, va: u64, buf: &mut [u8]) -> Result {
-        let mut inner = lock_vm(&self.gpuvm, None, false)?;
+        self.read_lock()?.read_user(va, buf)
+    }
+
+    #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+    pub(crate) fn read_lock(&self) -> Result<VmReadGuard> {
+        Ok(VmReadGuard(lock_vm(&self.gpuvm, None, false)?))
+    }
+
+    #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
+    fn read_user_locked(inner: &mut VmInner, va: u64, buf: &mut [u8]) -> Result {
         let mut done = 0usize;
         while done < buf.len() {
             let address = va.checked_add(done as u64).ok_or(EFAULT)?;
