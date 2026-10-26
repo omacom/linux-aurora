@@ -64,10 +64,9 @@ pub(crate) struct Variant {
     pub(crate) programs: super::render::RegisterPrograms,
 }
 
-/// A firmware build a SoC supports, selected by the macOS release it ships with and proven by
-/// its loaded TEXT.
+/// A firmware build a SoC supports, identified by its loaded TEXT.
 pub(crate) struct Build {
-    /// macOS version (major, minor, patch).
+    /// macOS version (major, minor, patch), used to order image candidates.
     pub(crate) os_version: [u32; 3],
     /// Name, for the log.
     pub(crate) name: &'static str,
@@ -81,9 +80,8 @@ pub(crate) struct Build {
 pub(crate) enum Firmware {
     /// The SoC runs a single build, which is not identified (A18 Pro).
     Fixed(&'static Variant),
-    /// One of these builds, selected by the macOS version that the boot loader reports in
-    /// `apple,firmware-version` (the release whose boot firmware loaded the GPU firmware) and
-    /// then proven by the loaded TEXT. Any other version or image is refused.
+    /// One of these exact loaded images. The loader's `apple,firmware-version` is only
+    /// a candidate-ordering hint because multiple OS releases can share an iBoot string.
     Identified(&'static [Build]),
 }
 

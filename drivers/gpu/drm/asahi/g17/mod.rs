@@ -1237,24 +1237,26 @@ impl Gpu {
             fw::variant::Firmware::Identified(builds) => builds,
         };
         let version = Self::os_firmware_version(dev);
-        if let Some(build) = builds.iter().find(|build| Some(build.os_version) == version) {
-            dev_info!(dev.as_ref(), "GPU firmware: {}\n", build.name);
-            Self::identify_image(dev, build).map_err(|_| ENODEV)?;
-            return Ok(build.variant);
+        // iBoot strings can be shared by OS releases. Prefer the reported release's
+        // candidate, but admit only an exact loaded image, regardless of that hint.
+        let preferred = builds.iter().filter(|build| Some(build.os_version) == version);
+        let others = builds.iter().filter(|build| Some(build.os_version) != version);
+        for build in Iterator::chain(preferred, others) {
+            if Self::identify_image(dev, build).is_ok() {
+                dev_info!(dev.as_ref(), "GPU firmware: {}\n", build.name);
+                return Ok(build.variant);
+            }
         }
         dev_err!(
             dev.as_ref(),
-            "Unsupported GPU firmware: macOS version {:?} (apple,firmware-version)\n",
+            "Unsupported GPU firmware image (reported macOS version {:?})\n",
             version
         );
-        for build in builds.iter() {
-            dev_err!(dev.as_ref(), "Supported GPU firmware: {}\n", build.name);
-        }
         Err(ENODEV)
     }
 
     /// Checks that the loaded TEXT (the `fw-text` region) is one of `build`'s images, with the DATA size
-    /// of the `fw-data` region. The version property only says which build to expect.
+    /// of the `fw-data` region. The version property is only a selection hint.
     fn identify_image(dev: &AsahiDrmDevice, build: &'static fw::variant::Build) -> Result {
         let node = dev.as_ref().as_ref().of_node().ok_or(EINVAL)?;
         let text = node.reserved_mem_region_to_resource_byname(c_str!("fw-text"))?;
