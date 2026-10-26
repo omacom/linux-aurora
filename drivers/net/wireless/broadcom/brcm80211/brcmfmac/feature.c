@@ -5,6 +5,7 @@
 
 #include <linux/netdevice.h>
 #include <linux/module.h>
+#include <linux/ctype.h>
 
 #include <brcm_hw_ids.h>
 #include <brcmu_wifi.h>
@@ -241,20 +242,49 @@ static void brcmf_feat_iovar_data_set(struct brcmf_if *ifp,
 }
 
 #define MAX_CAPS_BUFFER_SIZE	768
+
+/* In particular, "extowe" must not imply complete "owe" offload. */
+static bool brcmf_feat_cap_token(const char *caps, size_t size,
+				 const char *token)
+{
+	size_t len = strnlen(caps, size);
+	size_t token_len = strlen(token);
+	size_t pos = 0, start;
+
+	/* Do not infer capabilities from a possibly truncated response. */
+	if (len == size)
+		return false;
+
+	while (pos < len) {
+		while (pos < len && isspace((unsigned char)caps[pos]))
+			pos++;
+		start = pos;
+		while (pos < len && !isspace((unsigned char)caps[pos]))
+			pos++;
+		if (pos - start == token_len &&
+		    !memcmp(caps + start, token, token_len))
+			return true;
+	}
+	return false;
+}
+
 static void brcmf_feat_firmware_capabilities(struct brcmf_if *ifp)
 {
 	struct brcmf_pub *drvr = ifp->drvr;
-	char caps[MAX_CAPS_BUFFER_SIZE];
+	char caps[MAX_CAPS_BUFFER_SIZE + 1] = { };
 	enum brcmf_feat_id id;
 	int i, err;
 
-	err = brcmf_fil_iovar_data_get(ifp, "cap", caps, sizeof(caps));
+	err = brcmf_fil_iovar_data_get(ifp, "cap", caps,
+				       MAX_CAPS_BUFFER_SIZE);
 	if (err) {
 		bphy_err(drvr, "could not get firmware cap (%d)\n", err);
 		return;
 	}
 
 	brcmf_dbg(INFO, "[ %s]\n", caps);
+	if (brcmf_feat_cap_token(caps, MAX_CAPS_BUFFER_SIZE, "owe"))
+		drvr->feat_flags |= BIT(BRCMF_FEAT_OWE);
 
 	for (i = 0; i < ARRAY_SIZE(brcmf_fwcap_map); i++) {
 		if (strnstr(caps, brcmf_fwcap_map[i].fwcap_id, sizeof(caps))) {
