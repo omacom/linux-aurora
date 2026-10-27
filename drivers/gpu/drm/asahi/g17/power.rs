@@ -12,9 +12,21 @@ pub(super) const IDLE_HOLD_NS: u64 = 16_000_000;
 /// the last job. Not measured on other firmware; at or below it the hold stays off.
 pub(crate) const FIRMWARE_IDLE_OFF_MS: u32 = 2;
 
-/// The `idle_off_delay_ms` sysfs knob. Above [`FIRMWARE_IDLE_OFF_MS`] the driver keeps the GPU
-/// cores powered until the GPU has been idle this long ([`Hold`]).
+/// Idle policy initialized from the existing DT `apple,idle-off-delay-ms` property.
+/// The existing `idle_off_delay_ms` sysfs attribute may override it. Above
+/// [`FIRMWARE_IDLE_OFF_MS`] the driver keeps the GPU cores powered until it has been idle
+/// this long ([`Hold`]).
 pub(crate) static IDLE_HOLD_MS: AtomicU32 = AtomicU32::new(FIRMWARE_IDLE_OFF_MS);
+
+/// Use the same bounds as the existing idle-delay attribute. Missing DT policy
+/// preserves the native delay; malformed or out-of-range values fail probe.
+pub(super) fn idle_delay(requested: Option<u32>) -> kernel::error::Result<u32> {
+    let delay = requested.unwrap_or(FIRMWARE_IDLE_OFF_MS);
+    if !(FIRMWARE_IDLE_OFF_MS..=1000).contains(&delay) {
+        return Err(kernel::error::code::EINVAL);
+    }
+    Ok(delay)
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum IdleAction {
@@ -236,6 +248,34 @@ pub(super) fn release<C: Control>(control: &mut C) -> kernel::error::Result {
 #[cfg_attr(not(test), kernel::macros::kunit_tests(asahi_g17_idle_hold))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dt_idle_delay_is_bounded_and_absence_preserves_native_policy() {
+        assert_eq!(idle_delay(None), Ok(FIRMWARE_IDLE_OFF_MS));
+        for delay in [2, 16, 1000] {
+            assert_eq!(idle_delay(Some(delay)), Ok(delay));
+        }
+        for delay in [0, 1, 1001, u32::MAX] {
+            assert!(idle_delay(Some(delay)).is_err());
+        }
+    }
+
+    #[test]
+    fn frame_hold_survives_depth_one_gaps_but_releases_at_idle() {
+        let mut hold = Hold::new();
+        assert_eq!(hold.step(0, true, 1, 16), HoldAction::Assert);
+        hold.asserted();
+        for submission in 1..=8 {
+            // A completed depth-one dispatch followed by another short gap.
+            let now = submission * 3_000_000;
+            assert_eq!(hold.step(now, false, submission, 16), HoldAction::Recheck(16_000_000));
+            assert!(hold.active());
+        }
+        assert_eq!(hold.step(39_999_999, false, 8, 16), HoldAction::Recheck(1));
+        assert_eq!(hold.step(40_000_000, false, 8, 16), HoldAction::Release);
+        hold.released();
+        assert!(!hold.active());
+    }
 
     #[test]
     fn holds_until_idle_for_the_delay_then_releases() {

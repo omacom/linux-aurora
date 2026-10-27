@@ -1156,6 +1156,12 @@ impl Gpu {
             oas: cfg.uat_oas,
         };
         let max_frequency_khz = Self::max_frequency_khz(dev)?;
+        let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
+        let idle_delay = power::idle_delay(
+            node.get_opt_property(c_str!("apple,idle-off-delay-ms"))?,
+        )?;
+        power::IDLE_HOLD_MS.store(idle_delay, Ordering::Relaxed);
+        dev_info!(dev.as_ref(), "GPU idle power-off delay: {} ms\n", idle_delay);
         let channels = availability::Availability::new()?;
         let progress = availability::Availability::new()?;
         let queues = availability::Availability::new()?;

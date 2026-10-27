@@ -64,6 +64,16 @@ properties:
       - const: hw-cal-b
       - const: globals
 
+  apple,idle-off-delay-ms:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 2
+    maximum: 1000
+    default: 2
+    description:
+      Continuous idle time before GPU power-off, in milliseconds. The G17
+      backend extends the firmware's native delay with its host idle-hold
+      control; an absent property preserves the native policy.
+
   operating-points-v2: true
 
   apple,firmware-abi:
