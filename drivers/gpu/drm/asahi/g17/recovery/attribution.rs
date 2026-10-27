@@ -30,6 +30,23 @@ pub(super) enum Attribution {
 }
 
 impl Sources {
+    /// Bounded evidence from the existing halted-firmware snapshot. No guessed
+    /// MMIO/key addresses or additional firmware reads are used for diagnostics.
+    pub(super) fn report(&self, generation: u64, stampless_total: u64) {
+        kernel::pr_warn!(
+            "G17: recovery snapshot gen {} reason {:?} slot_mask {:#x} sampled {} known_keys {}; stampless lifetime total {} before restart\n",
+            generation, self.reason, self.mask, self.count,
+            self.records[..self.count].iter().filter(|source| source.qid.is_some()).count(),
+            stampless_total
+        );
+        for source in &self.records[..self.count] {
+            kernel::pr_warn!(
+                "G17: recovery slot {} queue {:?} kick {:#x} monitor {:#x}\n",
+                source.slot, source.qid, source.stamp, source.monitor
+            );
+        }
+    }
+
     /// Firmware is halted for every selected key and progress-record read.
     /// Failed reads stay unknown; incomplete evidence cannot override firmware blame.
     pub(crate) fn sample(mask: u32, mut read: impl FnMut(usize) -> Option<(u64, u32)>) -> Self {
@@ -101,5 +118,46 @@ impl Sources {
         } else {
             Attribution::Queues(guilty)
         }
+    }
+}
+
+#[kernel::macros::kunit_tests(asahi_g17_recovery_sources)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_without_keys_preserves_firmware_blame() {
+        let mut reads = 0;
+        let mut sources = Sources::sample(0b101, |slot| {
+            reads += 1;
+            Some((0, (slot + 1) as u32))
+        });
+        sources.reason = Some(2);
+        assert_eq!(reads, 2);
+        assert_eq!(sources.count, 2);
+        assert_eq!(sources.records[1].slot, 2);
+        assert_eq!(sources.records[1].monitor, 3);
+        assert!(sources.records[..sources.count].iter().all(|source| source.qid.is_none()));
+        assert_eq!(sources.attribute(Some(38), |_, _| panic!("unknown key")),
+            Attribution::Firmware);
+    }
+
+    #[test]
+    fn incomplete_progress_cannot_clear_firmware_blame() {
+        let mut sources = Sources::sample(0b11, |slot| {
+            (slot == 0).then_some(((38 << 40) | 1, 0))
+        });
+        sources.reason = Some(2);
+        assert_eq!(sources.attribute(Some(38), |_, _| Some(false)), Attribution::Firmware);
+    }
+
+    #[test]
+    fn page_fault_keeps_firmware_blame_with_complete_keys() {
+        let mut sources = Sources::sample(0b11, |slot| {
+            Some(((((38 + slot) as u64) << 40) | 1, 0))
+        });
+        sources.reason = Some(PAGE_FAULT);
+        assert_eq!(sources.attribute(Some(38), |qid, _| Some(qid == 39)),
+            Attribution::Firmware);
     }
 }

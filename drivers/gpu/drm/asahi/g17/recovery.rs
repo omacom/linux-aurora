@@ -241,6 +241,7 @@ pub(super) fn service<H: Host>(
         host.clear_timestamps()?;
     }
     let mut sources = host.fault_sources()?;
+    sources.report(request.generation, super::queue::compute::retirement::stampless_total());
     let target_error = host.publish_recovery_targets();
     host.transition(1, 2)?;
     let mut recovered = false;

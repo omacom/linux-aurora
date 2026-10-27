@@ -94,13 +94,17 @@ pub(crate) fn record_aged(observed_at: Option<u64>, now: u64) -> bool {
 
 static STAMPLESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
+pub(crate) fn stampless_total() -> u64 {
+    STAMPLESS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Counts a command that retired on its record because its completion stamp never arrived;
 /// logs the first and every 64th.
 pub(crate) fn note_stampless(qid: u8, kick: u64) {
     let count = STAMPLESS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     if count == 1 || count % 64 == 0 {
         pr_info!(
-            "G17: {} compute commands retired on their completion record after {} ms without a completion stamp (latest: queue {} kick {:#x})\n",
+            "G17: lifetime total {} compute commands retired on their completion record after {} ms without a completion stamp (latest: queue {} kick {:#x})\n",
             count,
             STAMP_FALLBACK_NS / 1_000_000,
             qid,
