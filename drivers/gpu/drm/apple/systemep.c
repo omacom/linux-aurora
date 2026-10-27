@@ -74,6 +74,7 @@ static int powerlog_report(struct apple_epic_service *service, enum epic_subtype
 	struct dcp_parse_ctx parse_ctx;
 	struct apple_dcp *dcp = service->ep->dcp;
 	int ret;
+	u32 nits;
 
 	/* Keep the existing filtering on active non-desktop backends. */
 	if (dcp_backlight_active(dcp))
@@ -124,7 +125,11 @@ have_mnits:
 		return 0;
 	}
 
-	dcp->brightness.nits = mnits.millinits / 1000;
+	nits = mnits.millinits / 1000;
+	/* Firmware can report the old 420-nit scale above the cap. */
+	if (dcp->brightness.maximum && nits > dcp->brightness.maximum)
+		nits = dcp->brightness.maximum;
+	dcp->brightness.nits = nits;
 	/* H17G publishes no NITS property; its first report registers the device. */
 	if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17G &&
 	    dcp_has_panel(dcp) && !dcp->brightness.bl_dev && dcp->brightness.maximum > 0)
