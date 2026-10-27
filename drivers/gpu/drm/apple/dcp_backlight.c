@@ -269,6 +269,11 @@ static int dcp_get_brightness(struct backlight_device *bd)
 		return actual;
 	}
 
+	if (dcp->brightness.nits < 0)
+		return 0;
+	if (bd->props.max_brightness > 0 &&
+	    dcp->brightness.nits > bd->props.max_brightness)
+		return bd->props.max_brightness;
 	return dcp->brightness.nits;
 }
 
