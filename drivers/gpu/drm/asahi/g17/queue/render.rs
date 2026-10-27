@@ -596,7 +596,7 @@ impl Pair {
         let leads = match self.variant.lead_commands {
             true => {
                 let init_manager = !self.memory.manager.initialized();
-                self.memory.write_leads(ordinal, kicks[0], init_manager)?
+                self.memory.write_leads(ordinal, init_manager)?
             }
             false => [false; 2],
         };

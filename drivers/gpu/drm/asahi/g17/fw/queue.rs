@@ -96,8 +96,6 @@ pub(crate) enum CommandTag {
     QueueConfig = 0x0f,
     /// [`KickPredecessor`].
     KickPredecessor = 0x10,
-    /// [`FragmentBarrier`] (25G83 firmware).
-    FragmentBarrier = 4,
     /// [`InitBufferManager`] (25G83 firmware).
     InitBufferManager = 5,
 }
@@ -566,63 +564,6 @@ impl QueueConfig {
             fragment_qid,
             unk_86: [0; 0x3a],
         })
-    }
-}
-
-/// The 25G83 firmware's barrier before every fragment descriptor (tag 4): the fragment work
-/// waits for the paired tiling stamp, in addition to the kick-entry dependency.
-#[repr(C, packed)]
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct FragmentBarrier {
-    /// [`CommandTag::FragmentBarrier`].
-    pub(crate) tag: u32,
-    /// GPU address of the tiling queue's completion stamp word.
-    pub(crate) stamp_va: u64,
-    /// Timestamp of the tiling kick.
-    pub(crate) tiling_kick: u64,
-    /// QID of the tiling queue.
-    pub(crate) tiling_qid: u32,
-    /// Tiling stamp value waited for.
-    pub(crate) wait: u32,
-    pub(crate) unk_1c: [u8; 8],
-    /// Event of the wait: the tiling QID.
-    pub(crate) event: u32,
-    /// Fragment stamp value.
-    pub(crate) stamp_self: u32,
-    /// Current object ID of the fragment stage.
-    pub(crate) fragment_id: u64,
-    pub(crate) unk_34: u32,
-    pub(crate) unk_38: [u8; 0x10],
-}
-
-static_assert!(size_of::<FragmentBarrier>() == 0x48);
-static_assert!(core::mem::offset_of!(FragmentBarrier, wait) == 0x18);
-static_assert!(core::mem::offset_of!(FragmentBarrier, event) == 0x24);
-static_assert!(core::mem::offset_of!(FragmentBarrier, fragment_id) == 0x2c);
-
-impl FragmentBarrier {
-    /// The barrier of a pass whose tiling stage, kicked at `tiling_kick` on `tiling_qid`,
-    /// signals `stamp_value` at `stamp_va`.
-    pub(crate) fn new(
-        stamp_va: u64,
-        tiling_kick: KickTimestamp,
-        tiling_qid: u32,
-        stamp_value: u32,
-        fragment_id: u64,
-    ) -> Self {
-        Self {
-            tag: CommandTag::FragmentBarrier as u32,
-            stamp_va,
-            tiling_kick: tiling_kick.get(),
-            tiling_qid,
-            wait: stamp_value,
-            unk_1c: [0; 8],
-            event: tiling_qid,
-            stamp_self: stamp_value,
-            fragment_id,
-            unk_34: 1,
-            unk_38: [0; 0x10],
-        }
     }
 }
 

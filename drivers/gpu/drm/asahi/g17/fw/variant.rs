@@ -61,7 +61,7 @@ pub(crate) struct Variant {
     /// outstanding (`fragment_busy`).
     pub(crate) fragment_busy: bool,
     /// Render item rings carry lead commands: InitBufferManager before the first tiling pass
-    /// of a buffer manager, and FragmentBarrier before every fragment descriptor.
+    /// of a buffer manager.
     pub(crate) lead_commands: bool,
     /// Register programs of the render descriptors.
     pub(crate) programs: super::render::RegisterPrograms,
