@@ -363,10 +363,17 @@ impl<B: Backend> sched::JobImpl for Job<B> {
     }
 
     fn prepare(job: &mut Self) -> Option<Fence> {
-        job.backend.prepare(&job.packet)
+        super::trace::schedule(&job.packet, 5, 0);
+        let wait = job.backend.prepare(&job.packet);
+        super::trace::schedule(&job.packet, 6, i32::from(wait.is_some()));
+        wait
     }
     fn run(job: &mut Self) -> Result<Option<Fence>> {
-        job.backend.publish(job.packet.clone()).map(Some)
+        super::trace::schedule(&job.packet, 3, 0);
+        let result = job.backend.publish(job.packet.clone()).map(Some);
+        super::trace::schedule(&job.packet, 4,
+            result.as_ref().err().map_or(0, |error| error.to_errno()));
+        result
     }
     fn timed_out(job: &mut Timeout<B>, finished: bool) -> sched::Status {
         // The scheduler retains the detached job throughout this callback. Keep
@@ -430,6 +437,7 @@ impl<B: Backend> Scheduler<B> {
         early: bool,
         publication: Option<super::completion::PreparedPublication>,
     ) -> Result<Fences> {
+        super::trace::schedule(&packet, 0, dependencies.len() as i32);
         let completed = packet.completion.fence();
         let host_timestamps = packet.completion.has_timestamps();
         // Only commands which actually write timestamps become host-prefix
@@ -462,7 +470,9 @@ impl<B: Backend> Scheduler<B> {
         };
         // All fallible scheduler setup precedes early hardware publication. The
         // scheduler still owns watchdog, credits and cancellation after push.
-        if !(early && self.backend.try_early(&packet)) {
+        let inline = early && self.backend.try_early(&packet);
+        super::trace::schedule(&packet, if inline { 1 } else { 2 }, 0);
+        if !inline {
             if packet.completion.needs_source_ready() {
                 packet.completion.set_source_ready(ready.clone());
             }

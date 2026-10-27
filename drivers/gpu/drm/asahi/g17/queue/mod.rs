@@ -212,6 +212,9 @@ impl<B: Backend> Queue<B> {
         }
         // Only convert inputs when no independent host-prefix wait could keep
         // the retained source bookkeeping queued behind an external signal.
+        if engine == Engine::Compute {
+            super::trace::inputs(self.context.id(), order.sequence, 0, inputs.len(), None);
+        }
         let sources = if engine == Engine::Compute && !inputs.is_empty()
             && !destinations.has_outputs()
             && self.frontiers[0].iter().all(|(sequence, fences)|
@@ -225,6 +228,9 @@ impl<B: Backend> Queue<B> {
                 failure.as_ref().is_none_or(|(sequence, _)|
                     !Order::contains(order.wait_through[index], *sequence)))
         { self.backend.input_sources(inputs) } else { None };
+        if engine == Engine::Compute {
+            super::trace::inputs(self.context.id(), order.sequence, 1, inputs.len(), sources.as_deref());
+        }
 
         // Only earlier render ordinals covered by the explicit logical prefix
         // can delay host publication. These links never become GPU dependencies.

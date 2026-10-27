@@ -70,3 +70,18 @@ void asahi_g17_trace_report(u8 role, u8 ring, const u32 *words)
 {
 	trace_asahi_g17_report(role, ring, words, __arch_counter_get_cntvct());
 }
+
+void asahi_g17_trace_inputs(u32 ctx, u64 seq, u8 phase, u32 inputs, u32 sources,
+			    u32 waits, bool converted)
+{
+    if (trace_asahi_g17_inputs_enabled())
+	trace_asahi_g17_inputs(ctx, seq, phase, inputs, sources, waits,
+			      converted, __arch_counter_get_cntvct());
+}
+
+void asahi_g17_trace_schedule(u8 engine, u32 ctx, u64 seq, u8 phase, s32 detail)
+{
+    if (trace_asahi_g17_schedule_enabled())
+	trace_asahi_g17_schedule(engine, ctx, seq, phase, detail,
+				__arch_counter_get_cntvct());
+}
