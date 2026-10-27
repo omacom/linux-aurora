@@ -247,6 +247,11 @@ pub(super) fn service<H: Host>(
     if let Some(qid) = request.blamed {
         host.report_blamed_render(qid);
     }
+    // The keys, monitor and pass-start evidence must describe the same halted
+    // instant. Firmware may update pass timestamps as soon as state 3 is
+    // acknowledged; sampling them during classification can blame a bystander.
+    let attribution = sources.attribute(request.blamed,
+        |qid, stamp| host.render_pass_started(qid, stamp));
     let target_error = host.publish_recovery_targets();
     host.transition(1, 2)?;
     let mut recovered = false;
@@ -277,7 +282,7 @@ pub(super) fn service<H: Host>(
     host.recovery_mut().pending = None;
 
     let (listed, exact, fallback) = (entries.listed, entries.exact, entries.fallback);
-    let (cancelled, blame) = classify(host, entries, request.blamed, &mut sources);
+    let (cancelled, blame) = classify(host, entries, request.blamed, attribution);
     if listed != 0 {
         pr_warn!(
             "G17: GPU recovery: {} commands were in flight ({} matched by stamp, {} by queue); they fail instead of completing\n",
@@ -331,10 +336,9 @@ fn read_entries<H: Host>(host: &mut H) -> Entries {
 /// Also returns whether the firmware's blamed QID is still guilty after attribution: a blamed
 /// render that had not started while others had (or with no culprit at all) is innocent, and its
 /// work is spared like that of every other innocent VM instead of failing with EIO.
-fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, sources: &mut Sources) -> (u128, bool) {
+fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, attribution: Attribution) -> (u128, bool) {
     let mut guilty_qids = entries.guilty | blamed.map_or(0, |qid| 1u128 << qid);
     let cancelled = entries.cancelled;
-    let attribution = sources.attribute(blamed, |qid, stamp| queues.render_pass_started(qid, stamp));
     match attribution {
         Attribution::Firmware => {}
         Attribution::Queues(qids) => guilty_qids = qids,
@@ -393,4 +397,103 @@ fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, sou
             .unwrap_or(Class::Spared)
     });
     (cancelled & !(guilty_qids & !collateral) & spared, blame)
+}
+
+
+#[kernel::macros::kunit_tests(asahi_g17_recovery_snapshot)]
+mod tests {
+    use super::*;
+    use core::cell::Cell;
+
+    struct Halted {
+        recovery: State,
+        state: Cell<u32>,
+        reads: Cell<usize>,
+        known_keys: bool,
+        blamed: bool,
+    }
+
+    impl Halted {
+        fn new(known_keys: bool) -> Self {
+            let mut recovery = State::new();
+            assert!(recovery.request(0, 38).unwrap());
+            Self { recovery, state: Cell::new(1), reads: Cell::new(0),
+                known_keys, blamed: false }
+        }
+    }
+
+    impl Memory for Halted {
+        fn recovery_state(&self) -> Result<u32> { Ok(self.state.get()) }
+        fn host_recovery(&self) -> Result<u32> { Ok(0) }
+        fn fault_sources(&self) -> Result<Sources> {
+            assert_eq!(self.state.get(), 1);
+            let mut sources = Sources::sample(3, |slot| {
+                Some((if self.known_keys { ((38 + slot as u64) << 40) | 1 } else { 0 }, 0))
+            });
+            sources.reason = Some(2);
+            Ok(sources)
+        }
+        fn transition(&self, expected: u32, next: u32) -> Result {
+            assert_eq!(self.state.get(), expected);
+            self.state.set(next);
+            Ok(())
+        }
+        fn clear_timestamps(&self) -> Result { panic!("active render scheduler") }
+        fn entry(&self, _index: usize) -> Result<(u32, u32)> {
+            assert_eq!(self.state.get(), 3);
+            Ok((0, 0))
+        }
+        fn wait_tick(&self) {
+            assert_eq!(self.state.get(), 2);
+            self.state.set(3);
+        }
+    }
+
+    impl Queues for Halted {
+        fn render_scheduler_active(&self) -> bool { true }
+        fn render_pass_started(&self, qid: u8, _stamp: u64) -> Option<bool> {
+            // This is the regression oracle: state 0/2/3 is too late. A
+            // resumed peer may have started after the fault we are attributing.
+            assert_eq!(self.state.get(), 1);
+            self.reads.set(self.reads.get() + 1);
+            Some(qid == 39)
+        }
+        fn publish_recovery_targets(&self) -> Option<Error> { None }
+        fn oldest_spared(&self, _qid: u8) -> Option<bool> { None }
+        fn visit_owners(&self, _qid: u8, _visit: &mut dyn FnMut(&Arc<VmStatus>)) {}
+        fn classify_work(&mut self, _class: &dyn Fn(&Arc<VmStatus>) -> Class) -> u128 { 0 }
+        fn note_interrupted(&mut self, _qid: u8, _stamp: u32) -> Interrupted { Interrupted::None }
+        fn settle_blamed_render(&mut self, qid: u8, _error: Error) {
+            assert_eq!(qid, 38);
+            self.blamed = true;
+        }
+        fn settle_cancelled_renders(&mut self, _qids: u128) {}
+        fn rescan_compute(&mut self) -> Result { Ok(()) }
+        fn release_retired_compute(&mut self) {}
+        fn announce_withheld(&mut self) {}
+    }
+
+    impl Host for Halted {
+        fn recovery(&self) -> &State { &self.recovery }
+        fn recovery_mut(&mut self) -> &mut State { &mut self.recovery }
+    }
+
+    #[test]
+    fn pass_evidence_is_frozen_before_the_first_acknowledgement() {
+        let mut host = Halted::new(true);
+        service(&mut host, || false).unwrap();
+        assert_eq!(host.reads.get(), 2);
+        assert_eq!(host.state.get(), 0);
+        assert_eq!(host.recovery.generation(), 1);
+        assert!(!host.blamed);
+    }
+
+    #[test]
+    fn unknown_25g83_keys_still_preserve_firmware_blame() {
+        let mut host = Halted::new(false);
+        service(&mut host, || false).unwrap();
+        assert_eq!(host.reads.get(), 0);
+        assert!(host.blamed);
+        assert_eq!(host.state.get(), 0);
+    }
 }
