@@ -273,6 +273,11 @@ static int dcp_get_brightness(struct backlight_device *bd)
 	actual = dcp_bl_presented_actual(&dcp->brightness.presented,
 					 READ_ONCE(dcp->brightness.nits));
 	spin_unlock_irqrestore(&dcp->backlight.lock, flags);
+	if (actual < 0)
+		return 0;
+	if (bd->props.max_brightness > 0 &&
+	    actual > bd->props.max_brightness)
+		return bd->props.max_brightness;
 	return actual;
 }
 
