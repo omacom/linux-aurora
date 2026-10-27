@@ -20,6 +20,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 typedef uint32_t u32;
+typedef uint16_t u16;
 #define EBADE 52
 #endif
 
@@ -47,6 +48,53 @@ static inline bool brcmf_is_bcm4378(u32 chip)
 static inline bool brcmf_flowring_wait_txstatus(u32 chip)
 {
 	return !brcmf_is_bcm4378(chip);
+}
+
+/*
+ * BCM4378 drops in-flight frames without a txstatus, so the host reclaims
+ * those pktids itself. Closing the host ring is not enough: firmware can
+ * still DMA the buffers until the bus is down or FLOW_RING_DELETE has
+ * completed. Other chips wait for txstatus and do not use this reclaim.
+ */
+static inline bool
+brcmf_flowring_reclaim_pktids(u32 chip, bool bus_up, bool delete_completed)
+{
+	if (brcmf_flowring_wait_txstatus(chip))
+		return false;
+	return !bus_up || delete_completed;
+}
+
+/* TX request_id is the cookie firmware copies into txstatus. The high 16
+ * bits are a nonzero generation; the low 16 are the pktid index plus one.
+ * NR_TX_PKTIDS is 2048, so the index fits. Generation 0 is reserved so a
+ * zero or truncated id cannot match a live slot. RX and ioctl ids are a
+ * separate pool and do not use this encoding.
+ */
+static inline u16 brcmf_tx_pktid_next_gen(u16 gen)
+{
+	gen++;
+	if (!gen)
+		gen = 1;
+	return gen;
+}
+
+static inline u32 brcmf_tx_request_id(u32 idx, u16 gen)
+{
+	return ((u32)gen << 16) | ((idx + 1) & 0xffff);
+}
+
+static inline bool
+brcmf_tx_request_id_decode(u32 request_id, u32 *idx, u16 *gen)
+{
+	u32 slot = request_id & 0xffff;
+
+	if (!slot)
+		return false;
+	*gen = request_id >> 16;
+	if (!*gen)
+		return false;
+	*idx = slot - 1;
+	return true;
 }
 
 /*
