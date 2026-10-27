@@ -7,6 +7,8 @@ use kernel::prelude::*;
 
 impl Registry {
     pub(in crate::g17::runtime) fn report_render_recovery(&self, qid: u8, port: &crate::g17::port::Port) {
+        pr_warn!("G17: recovery grow pending={} active={:?} reply={:?}\n",
+            self.render.grow.requests.len(), self.render.grow.active, self.render.grow.reply);
         for entry in self.render.entries.iter().flatten().filter(|entry| {
             entry.reservation.ids.iter().any(|id| id.qid() == qid)
         }) {

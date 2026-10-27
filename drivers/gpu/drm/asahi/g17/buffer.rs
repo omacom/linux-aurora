@@ -677,6 +677,22 @@ impl Manager {
     pub(crate) fn blocks(&self) -> usize {
         self.tvb.blocks()
     }
+    /// Read-only diagnostic while firmware is halted. In particular this
+    /// does not reset the high-water counter as automatic_target() does.
+    pub(crate) fn report_recovery(&self) {
+        let read = |offset| -> Result<u32> {
+            Ok(self.graph.word(offset)?.load(Ordering::Relaxed))
+        };
+        pr_warn!("G17: recovery tvb id={} blocks={} cursors={:?} pages={:?} capacity={:?} producer={:?} consumer={:?} max_pages={:?} reset={:?} initialized={}\n",
+            self.buffer_id, self.blocks(), self.cursors(),
+            read(core::mem::offset_of!(fw::State, pages)),
+            read(core::mem::offset_of!(fw::State, block_capacity)),
+            read(core::mem::offset_of!(fw::State, producer)),
+            read(core::mem::offset_of!(fw::State, consumer)),
+            read(fw::CONTROL + core::mem::offset_of!(fw::Control, max_pages)),
+            read(fw::CONTROL + core::mem::offset_of!(fw::Control, reset)),
+            self.initialized);
+    }
     pub(crate) fn state_va(&self) -> u64 {
         self.graph.gpu_va()
     }

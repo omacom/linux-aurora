@@ -14,8 +14,8 @@ use kernel::prelude::*;
 const RETRY_LIMIT: u16 = 1000;
 
 pub(super) struct Grow {
-    requests: KVec<TvbGrowRequest>,
-    active: Option<TvbGrowRequest>,
+    pub(super) requests: KVec<TvbGrowRequest>,
+    pub(super) active: Option<TvbGrowRequest>,
     pub(super) reply: Option<(TvbGrowRequest, bool, u16)>,
     release_attempts: u16,
 }
