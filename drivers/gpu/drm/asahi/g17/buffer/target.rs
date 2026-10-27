@@ -139,6 +139,16 @@ impl Layout {
         })
     }
     pub(crate) fn tpc_capacity(&self) -> Result<usize> {
+        // TPC_MAX bounds the tail-pointer cache itself. On 25G83 this object
+        // also contains GTP sub-buffers, notably 64 times the tile map. Applying
+        // the cache limit to their combined extent rejects valid large targets.
+        // Keep the original cache and tile-record limits; they also bound the
+        // derived auxiliary extent before any backing allocation or replacement.
+        if aligned(self.tpc_size, mmu::UAT_PGSZ)?.max(cfg::TPC_MIN) > cfg::TPC_MAX
+            || self.record_stride()? > cfg::TARGET_RECORD_MAX
+        {
+            return Err(ERANGE);
+        }
         Ok(aligned(self.tpc_end, mmu::UAT_PGSZ)?.max(cfg::TPC_MIN))
     }
     pub(crate) fn record_stride(&self) -> Result<usize> {
@@ -188,7 +198,7 @@ impl Target {
     pub(crate) fn new(dev: &AsahiDrmDevice, vm: &mmu::Vm, layout: &Layout) -> Result<KBox<Self>> {
         let tpc = layout.tpc_capacity()?;
         let stride = layout.record_stride()?;
-        if tpc > cfg::TPC_MAX || stride > cfg::TARGET_RECORD_MAX {
+        if stride > cfg::TARGET_RECORD_MAX {
             return Err(ERANGE);
         }
         let records = Object::new(dev, vm, stride * DEPTH)?;
@@ -272,9 +282,6 @@ impl Target {
         let stride = layout.record_stride()?;
         let mut grew = false;
         if tpc > self.tpc.backing.size() {
-            if tpc > cfg::TPC_MAX {
-                return Err(ERANGE);
-            }
             Self::replace(&mut self.retired, &mut self.tpc, dev, vm, tpc, owners)?;
             grew = true;
         }
@@ -348,5 +355,61 @@ impl Target {
         if *slot == Some(ordinal) {
             *slot = None;
         }
+    }
+}
+
+
+#[kernel::macros::kunit_tests(asahi_g17_target_capacity)]
+mod tests {
+    use super::*;
+
+    fn pass(size: u32, utile: u8) -> RenderPass {
+        // SAFETY: RenderPass and its nested surfaces/programs contain only
+        // integers and bools, for which the all-zero representation is valid.
+        let mut pass: RenderPass = unsafe { core::mem::zeroed() };
+        pass.width = size;
+        pass.height = size;
+        pass.layers = 1;
+        pass.utile_width = utile;
+        pass.utile_height = utile;
+        pass
+    }
+
+    #[test]
+    fn t6040_auxiliary_tiler_storage_is_not_tail_pointer_cache() {
+        // CTS point_size_10000 renders to 10240 squared. Its GTP sub-buffer
+        // is required by the existing 25G83 program, not a larger cache.
+        for utile in [16, 32] {
+            let layout = Layout::new(&pass(10240, utile), 2, RegisterPrograms::V25G83).unwrap();
+            assert!(layout.tpc_size < cfg::TPC_MAX);
+            assert!(layout.record_stride().unwrap() < cfg::TARGET_RECORD_MAX);
+            assert!(layout.tpc_end > cfg::TPC_MAX);
+            assert!(layout.tpc_capacity().unwrap() >= layout.tpc_end);
+            assert_eq!(layout.gtp[0], Some(0));
+            assert!(layout.gtp[1].unwrap() >= layout.tpc_size);
+        }
+    }
+
+    #[test]
+    fn core_and_tile_record_limits_still_reject_oversized_targets() {
+        let mut layout = Layout::new(&pass(10240, 32), 2, RegisterPrograms::V25G83).unwrap();
+        layout.tpc_size = cfg::TPC_MAX + 1;
+        assert_eq!(layout.tpc_capacity(), Err(ERANGE));
+        let mut layered = pass(16384, 16);
+        layered.layers = 2;
+        let layout = Layout::new(&layered, 2, RegisterPrograms::V25G83).unwrap();
+        assert!(layout.record_stride().unwrap() > cfg::TARGET_RECORD_MAX);
+        assert_eq!(layout.tpc_capacity(), Err(ERANGE));
+    }
+
+    #[test]
+    fn neo_keeps_the_same_cache_extent_and_limit() {
+        let mut layout = Layout::new(&pass(10240, 32), 1, RegisterPrograms::G17P).unwrap();
+        assert!(layout.gtp.iter().all(Option::is_none));
+        assert_eq!(layout.tpc_capacity().unwrap(),
+            aligned(layout.tpc_size, mmu::UAT_PGSZ).unwrap().max(cfg::TPC_MIN));
+        layout.tpc_size = cfg::TPC_MAX + 1;
+        layout.tpc_end = layout.tpc_size;
+        assert_eq!(layout.tpc_capacity(), Err(ERANGE));
     }
 }
