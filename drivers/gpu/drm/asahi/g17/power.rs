@@ -302,7 +302,7 @@ mod tests {
 }
 
 unsafe extern "C" {
-    fn asahi_clpc_gpu_get(dev: *mut kernel::bindings::device, out: *mut *mut core::ffi::c_void) -> core::ffi::c_int;
+    fn asahi_clpc_gpu_get(dev: *mut core::ffi::c_void, out: *mut *mut core::ffi::c_void) -> core::ffi::c_int;
     fn asahi_clpc_gpu_set_active(gpu: *mut core::ffi::c_void, active: bool);
     fn asahi_clpc_gpu_put(gpu: *mut core::ffi::c_void);
 }
@@ -320,7 +320,7 @@ impl Demand {
     pub(super) fn new(dev: *mut kernel::bindings::device) -> kernel::error::Result<Self> {
         let mut out = core::ptr::null_mut();
         // SAFETY: live platform device and writable result; C returns an owned reference.
-        let ret = unsafe { asahi_clpc_gpu_get(dev, &mut out) };
+        let ret = unsafe { asahi_clpc_gpu_get(dev.cast(), &mut out) };
         if ret < 0 {
             Err(kernel::error::Error::from_errno(ret))
         } else {

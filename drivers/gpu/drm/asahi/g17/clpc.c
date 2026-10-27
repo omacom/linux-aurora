@@ -2,7 +2,7 @@
 #include <linux/soc/apple/clpc.h>
 #include "clpc.h"
 
-int asahi_clpc_gpu_get(struct device *dev, struct apple_clpc_gpu **out)
+int asahi_clpc_gpu_get(void *dev, struct apple_clpc_gpu **out)
 {
 	return apple_clpc_gpu_get(dev, out);
 }
