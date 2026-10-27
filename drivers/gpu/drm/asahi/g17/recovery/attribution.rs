@@ -81,7 +81,10 @@ impl Sources {
         blamed: Option<u8>,
         mut started: impl FnMut(u8, u64) -> Option<bool>,
     ) -> Attribution {
-        if self.reason.is_none() || self.count as u32 != self.mask.count_ones() {
+        if self.reason.is_none()
+            || self.count as u32 != self.mask.count_ones()
+            || self.records[..self.count].iter().any(|source| source.qid.is_none())
+        {
             return Attribution::Firmware;
         }
         for source in &mut self.records[..self.count] {
@@ -148,6 +151,16 @@ mod tests {
             (slot == 0).then_some(((38 << 40) | 1, 0))
         });
         sources.reason = Some(2);
+        assert_eq!(sources.attribute(Some(38), |_, _| Some(false)), Attribution::Firmware);
+    }
+
+    #[test]
+    fn a_missing_peer_key_cannot_clear_a_known_queues_blame() {
+        let mut sources = Sources::sample(0b11, |slot| {
+            Some((if slot == 0 { (38 << 40) | 1 } else { 0 }, 0))
+        });
+        sources.reason = Some(2);
+        assert_eq!(sources.count, 2);
         assert_eq!(sources.attribute(Some(38), |_, _| Some(false)), Attribution::Firmware);
     }
 
