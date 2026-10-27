@@ -645,6 +645,7 @@ struct Firmware {
 
 impl Drop for Firmware {
     fn drop(&mut self) {
+        self.port.set_effort_full(false);
         if let Some(secondary) = self.secondary.as_mut() {
             secondary.stop();
         }
@@ -695,6 +696,7 @@ impl Firmware {
 
     /// Called at actual submission publication, not while a queued job is merely being built.
     fn note_submission(&mut self) -> Result {
+        self.port.note_gpu_activity();
         self.effort.submit();
         self.apply_effort(power::FULL_EFFORT)
     }
@@ -1378,7 +1380,7 @@ impl Gpu {
                 secondary,
                 primary,
                 bridge,
-                port: port::Port::new()?,
+                port: port::Port::new(power::Demand::new(pdev.as_ref().as_raw())?)?,
                 seen_submissions: 0,
                 rings: channel::Rings::new()?,
                 recovery: recovery::State::new(),

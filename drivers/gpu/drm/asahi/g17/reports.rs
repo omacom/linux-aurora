@@ -57,6 +57,11 @@ impl kernel::debugfs::Writer for View {
         let state = self.0.state.lock();
         let Some(firmware) = state.as_deref() else { return writeln!(f, "online=0"); };
         writeln!(f, "online=1 graph={:?} sampled_ns={}", self.0.variant.graph, super::now_ns())?;
+        let core_power = firmware.bridge.regs.g17_core_power();
+        writeln!(f, "power_management=firmware core_power={:#x} cores_powered={} idle_hold_ms={}",
+            core_power, core_power & 0xf != 0,
+            super::power::IDLE_HOLD_MS.load(core::sync::atomic::Ordering::Relaxed))?;
+        firmware.port.write_power(f)?;
         firmware.rings.write_reports(f)
     }
 }

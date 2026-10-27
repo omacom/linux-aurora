@@ -300,3 +300,43 @@ mod tests {
         assert_eq!(hold.step(1, false, 2, FIRMWARE_IDLE_OFF_MS), HoldAction::Release);
     }
 }
+
+unsafe extern "C" {
+    fn asahi_clpc_gpu_get(dev: *mut kernel::bindings::device, out: *mut *mut core::ffi::c_void) -> core::ffi::c_int;
+    fn asahi_clpc_gpu_set_active(gpu: *mut core::ffi::c_void, active: bool);
+    fn asahi_clpc_gpu_put(gpu: *mut core::ffi::c_void);
+}
+
+/// DT-selected memory-demand provider. Its independent allocation outlives a
+/// detached provider; a device link orders supplier removal and suspend.
+pub(super) struct Demand(*mut core::ffi::c_void);
+
+// SAFETY: the provider's leaf spinlock serializes all access; no GPU callback.
+unsafe impl Send for Demand {}
+// SAFETY: shared access only changes that locked request, never its lifetime.
+unsafe impl Sync for Demand {}
+
+impl Demand {
+    pub(super) fn new(dev: *mut kernel::bindings::device) -> kernel::error::Result<Self> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: live platform device and writable result; C returns an owned reference.
+        let ret = unsafe { asahi_clpc_gpu_get(dev, &mut out) };
+        if ret < 0 {
+            Err(kernel::error::Error::from_errno(ret))
+        } else {
+            Ok(Self(out))
+        }
+    }
+
+    pub(super) fn set_active(&self, active: bool) {
+        // SAFETY: the retained reference is live; NULL denotes no DT provider.
+        unsafe { asahi_clpc_gpu_set_active(self.0, active) };
+    }
+}
+
+impl Drop for Demand {
+    fn drop(&mut self) {
+        // SAFETY: releases exactly the reference returned by get, clearing demand first.
+        unsafe { asahi_clpc_gpu_put(self.0) };
+    }
+}
