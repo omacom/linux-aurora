@@ -135,7 +135,7 @@ impl Vm {
                 PreparedUserBindOp::Map(map) => {
                     // SAFETY: See `lock_vm()`. As in `Vm::bind_object()`, the object itself is
                     // not locked: the map step may still populate its pages.
-                    let mut inner = unsafe { self.gpuvm.exec_lock(None, true)? };
+                    let mut inner = unsafe { self.gpuvm.exec_lock_vm(None, true)? };
                     match self.mapping_commit() {
                         Ok(commit) => {
                             let (flags, repeat) = if map.single_page {
@@ -185,7 +185,7 @@ impl Vm {
                 }
                 PreparedUserBindOp::Unmap(unmap) => {
                     // SAFETY: See `lock_vm()`.
-                    let mut inner = unsafe { self.gpuvm.exec_lock(None, true)? };
+                    let mut inner = unsafe { self.gpuvm.exec_lock_vm(None, true)? };
                     match self.mapping_commit() {
                         Ok(commit) => {
                             let mut ctx =
