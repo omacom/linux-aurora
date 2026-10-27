@@ -112,7 +112,9 @@ pub(crate) fn note_stampless(qid: u8, kick: u64) {
 /// A zero-duration record fails before visibility polling. It proves execution did not occur;
 /// ownership still requires a separate retirement witness before mappings can be released.
 /// The command is complete when its stamp covers it, or when its exact completion record has
-/// been present for [`STAMP_FALLBACK_NS`] without one (`record_aged`); in both cases its items
+/// been present for [`STAMP_FALLBACK_NS`] without one (`record_aged`) in the same recovery
+/// generation. Recovery may consume items without completing their writes, so an old record
+/// and consumed items cannot replace the stamp across a restart. In both cases its items
 /// must be consumed.
 #[expect(
     clippy::too_many_arguments,
@@ -131,7 +133,9 @@ pub(crate) fn poll(
     if observed.is_some_and(|record| record.timestamps[0] == record.timestamps[1]) {
         return Err(ENODATA);
     }
-    let completed = stamp_covers(stamp, ticket.kick) || (observed.is_some() && record_aged);
+    let same_generation = !matches!(recordless, Recordless::CrossedRecovery);
+    let completed = stamp_covers(stamp, ticket.kick)
+        || (same_generation && observed.is_some() && record_aged);
     if !completed || !cursors.consumed(ticket.item_producer, ticket.item_count)? {
         return Ok(None);
     }
@@ -540,6 +544,30 @@ mod tests {
         };
         let result = poll(&ticket(), record, busy, 0, Recordless::Allowed, 0, None, true);
         assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn recovery_cannot_turn_an_aged_record_into_a_release_witness() {
+        let record = Some(Observation { timestamps: [10, 20] });
+        // Recovery can advance the consumer without completing cache maintenance.
+        // Even a record observed before the restart and aged past the fallback
+        // must retain its command's mappings until a real stamp covers it.
+        for stamp in [0, own(KICK - 1)] {
+            assert_eq!(poll(&ticket(), record, consumed(), stamp,
+                Recordless::CrossedRecovery, 0, None, true), Ok(None));
+        }
+        // A real stamp restores the release witness; completion's interrupted
+        // classification independently prevents false successful fences.
+        for stamp in [own(KICK), own(KICK + 1)] {
+            assert_eq!(poll(&ticket(), record, consumed(), stamp,
+                Recordless::CrossedRecovery, 0, None, true), Ok(Some([10, 20])));
+        }
+        let busy = Cursors { producer: 4, consumer: 2, count: 64 };
+        assert_eq!(poll(&ticket(), record, busy, own(KICK),
+            Recordless::CrossedRecovery, 0, None, true), Ok(None));
+        // The existing same-generation fallback remains available.
+        assert_eq!(poll(&ticket(), record, consumed(), own(KICK - 1),
+            Recordless::Allowed, 0, None, true), Ok(Some([10, 20])));
     }
 
     #[test]
