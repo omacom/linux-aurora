@@ -57,6 +57,9 @@ pub(crate) struct Variant {
     pub(crate) few_primitives: bool,
     /// The firmware runs ray-traversal work (ray queries and intersection programs).
     pub(crate) ray_traversal: bool,
+    /// Tiling descriptors report whether the fragment queue still had earlier kicks
+    /// outstanding (`fragment_busy`).
+    pub(crate) fragment_busy: bool,
     /// Render item rings carry lead commands: InitBufferManager before the first tiling pass
     /// of a buffer manager, and FragmentBarrier before every fragment descriptor.
     pub(crate) lead_commands: bool,
@@ -99,6 +102,7 @@ pub(crate) const V26A428: Variant = Variant {
     mcache: true,
     few_primitives: true,
     ray_traversal: true,
+    fragment_busy: true,
     lead_commands: false,
     programs: super::render::RegisterPrograms::G17P,
 };
@@ -124,6 +128,9 @@ pub(crate) const V25G83: Variant = Variant {
     few_primitives: false,
     // A stalled ray traversal wedges the GPU without a firmware recovery.
     ray_traversal: false,
+    // When a tiling pass runs out of memory with this set, the firmware resumes it without
+    // adding memory and the tiler stops silently; macOS always writes 0.
+    fragment_busy: false,
     lead_commands: true,
     programs: super::render::RegisterPrograms::V25G83,
 };
