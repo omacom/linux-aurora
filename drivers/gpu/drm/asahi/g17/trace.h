@@ -158,6 +158,27 @@ TRACE_EVENT(asahi_g17_event,
 	TP_printk("phase=%u counter=%llu", __entry->phase, __entry->counter)
 );
 
+/* Raw 18-word records: trace=0, statistics=1, event=2. No unit inference. */
+TRACE_EVENT(asahi_g17_report,
+	TP_PROTO(u8 role, u8 ring, const u32 *words, u64 counter),
+	TP_ARGS(role, ring, words, counter),
+	TP_STRUCT__entry(
+		__field(u8, role)
+		__field(u8, ring)
+		__array(u32, words, 18)
+		__field(u64, counter)
+	),
+	TP_fast_assign(
+		__entry->role = role;
+		__entry->ring = ring;
+		memcpy(__entry->words, words, sizeof(__entry->words));
+		__entry->counter = counter;
+	),
+	TP_printk("role=%u ring=%u words=%s counter=%llu", __entry->role,
+		  __entry->ring, __print_array(__entry->words, 18, sizeof(u32)),
+		  __entry->counter)
+);
+
 #endif
 
 #undef TRACE_INCLUDE_PATH

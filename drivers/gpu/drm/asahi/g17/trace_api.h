@@ -22,4 +22,7 @@ void asahi_g17_trace_message(u8 kind, u64 value);
 void asahi_g17_trace_event(u8 phase);
 void asahi_g17_trace_teardown(u8 kind, u64 a, u64 b, u64 c);
 
+bool asahi_g17_trace_report_enabled(void);
+void asahi_g17_trace_report(u8 role, u8 ring, const u32 *words);
+
 #endif /* _ASAHI_G17_TRACE_API_H */

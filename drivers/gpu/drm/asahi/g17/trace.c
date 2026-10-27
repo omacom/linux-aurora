@@ -60,3 +60,13 @@ void asahi_g17_trace_teardown(u8 kind, u64 a, u64 b, u64 c)
 	if (trace_asahi_g17_teardown_enabled())
 		trace_asahi_g17_teardown(kind, a, b, c);
 }
+
+bool asahi_g17_trace_report_enabled(void)
+{
+	return trace_asahi_g17_report_enabled();
+}
+
+void asahi_g17_trace_report(u8 role, u8 ring, const u32 *words)
+{
+	trace_asahi_g17_report(role, ring, words, __arch_counter_get_cntvct());
+}

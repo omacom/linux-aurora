@@ -43,16 +43,21 @@ impl ReportRing {
 
 /// Host-side receive-ring state. A quarantined ring stays stopped until the
 /// device is destroyed; firmware restart does not clear it.
-#[derive(Debug)]
 pub(crate) struct Rings {
     quarantined: [[bool; 2]; 2],
+    reports: super::reports::Reports,
 }
 
 impl Rings {
-    pub(crate) const fn new() -> Self {
-        Self {
+    pub(crate) fn new() -> Result<Self> {
+        Ok(Self {
             quarantined: [[false; 2]; 2],
-        }
+            reports: super::reports::Reports::new()?,
+        })
+    }
+
+    pub(super) fn write_reports(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        self.reports.write(f)
     }
 
     pub(crate) fn drain_trace(&mut self, dev: &Device, init: &InitData, role: Role) {
@@ -68,7 +73,7 @@ impl Rings {
         if *quarantined {
             return;
         }
-        if let Err(error) = Self::consume_report(init, role, ring) {
+        if let Err(error) = Self::consume_report(init, role, ring, &mut self.reports) {
             *quarantined = true;
             dev_err!(
                 dev.as_ref(),
@@ -80,7 +85,7 @@ impl Rings {
         }
     }
 
-    fn consume_report(init: &InitData, role: Role, ring: ReportRing) -> Result {
+    fn consume_report(init: &InitData, role: Role, ring: ReportRing, reports: &mut super::reports::Reports) -> Result {
         let (state, entries, capacity, allowed_types) = ring.geometry();
         let consumer_word = init.status_word(role, state)?;
         let producer_word = init.status_word(role, state + RX_PRODUCER_OFFSET)?;
@@ -94,13 +99,16 @@ impl Rings {
         }
         while consumer != producer {
             let offset = entries + consumer as usize * EVENT_RECORD_SIZE;
-            let tag = match ring {
-                // Copy the entire trace entry before returning its slot.
-                ReportRing::Trace => init.status_read_words::<EVENT_WORDS>(role, offset)?[0],
-                ReportRing::Statistics => init.status_read_words::<1>(role, offset)?[0],
-            };
+            // Copy all words before returning the slot. Interpretation is a
+            // separate firmware qualification step, never a scheduling input.
+            let words = init.status_read_words::<EVENT_WORDS>(role, offset)?;
+            super::trace::report(role as u8, ring as u8, &words);
+            let tag = words[0];
             if tag >= u32::BITS || allowed_types & (1 << tag) == 0 {
                 return Err(EIO);
+            }
+            if matches!(ring, ReportRing::Statistics) {
+                reports.record(role, words, super::now_ns());
             }
             consumer = (consumer + 1) & (capacity - 1);
             fence(Ordering::SeqCst);
@@ -147,6 +155,7 @@ impl Rings {
 /// the caller can service the copied event using the complete device owner.
 pub(crate) struct Events {
     role: Role,
+    graph: super::fw::variant::InitGraph,
     remaining: u32,
     unknown_reported: bool,
 }
@@ -167,9 +176,10 @@ impl Events {
         Ok(consumer != producer)
     }
 
-    pub(crate) fn new(role: Role) -> Self {
+    pub(crate) fn new(role: Role, graph: super::fw::variant::InitGraph) -> Self {
         Self {
             role,
+            graph,
             remaining: EVENT_SLOTS,
             unknown_reported: false,
         }
@@ -195,8 +205,10 @@ impl Events {
             // Observe the producer before reading the record it publishes.
             fence(Ordering::Acquire);
             let offset = status::EVENT_RING as usize + consumer as usize * EVENT_RECORD_SIZE;
-            let record = EventRecord::from_words(init.status_read_words(role, offset)?);
-            let event = record.decode();
+            let words = init.status_read_words(role, offset)?;
+            super::trace::report(role as u8, 2, &words);
+            let record = EventRecord::from_words(words);
+            let event = record.decode_for(self.graph);
             fence(Ordering::SeqCst);
             consumer_word.store((consumer + 1) & (EVENT_SLOTS - 1), Ordering::Relaxed);
             fence(Ordering::SeqCst);

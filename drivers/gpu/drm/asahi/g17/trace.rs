@@ -90,3 +90,19 @@ pub(super) fn event(phase: u8) {
     // SAFETY: Plain values only.
     unsafe { asahi_g17_trace_event(phase) };
 }
+
+unsafe extern "C" {
+    fn asahi_g17_trace_report_enabled() -> bool;
+    fn asahi_g17_trace_report(role: u8, ring: u8, words: *const u32);
+}
+
+/// Copies a complete firmware record while the host still owns its slot.
+/// Static-key gated; no MMIO reads or firmware requests are issued.
+pub(super) fn report(role: u8, ring: u8, words: &[u32; super::fw::channels::EVENT_WORDS]) {
+    // SAFETY: Pure static-key query.
+    if !unsafe { asahi_g17_trace_report_enabled() } {
+        return;
+    }
+    // SAFETY: C synchronously copies the complete initialized 18-word array.
+    unsafe { asahi_g17_trace_report(role, ring, words.as_ptr()) };
+}
