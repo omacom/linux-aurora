@@ -1118,6 +1118,7 @@ pub(crate) struct Gpu {
     shared: Arc<Shared>,
     _capacity: Pin<KBox<kernel::debugfs::File<capacity::View>>>,
     _reports: Pin<KBox<kernel::debugfs::File<reports::View>>>,
+    _power: Pin<KBox<kernel::debugfs::File<reports::PowerView>>>,
 }
 
 impl Gpu {
@@ -1231,6 +1232,10 @@ impl Gpu {
             directory.read_only_file(c"firmware_reports", reports::View(shared.clone())),
             GFP_KERNEL,
         )?;
+        let power = KBox::pin_init(
+            directory.read_only_file(c"power", reports::PowerView(shared.clone())),
+            GFP_KERNEL,
+        )?;
         let gpu = Arc::new(
             Gpu {
                 cfg,
@@ -1241,6 +1246,7 @@ impl Gpu {
                 shared,
                 _capacity: capacity,
                 _reports: reports,
+                _power: power,
             },
             GFP_KERNEL,
         )?;
