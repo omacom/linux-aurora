@@ -645,11 +645,11 @@ struct Firmware {
 
 impl Drop for Firmware {
     fn drop(&mut self) {
-        self.port.set_effort_full(false);
         if let Some(secondary) = self.secondary.as_mut() {
             secondary.stop();
         }
         self.primary.stop();
+        self.port.set_effort_full(false);
         self.pool.stop_after_firmware();
         // RTKit destruction releases the mailbox power references. Clear the bridge while
         // those references still keep the register block powered.
