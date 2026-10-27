@@ -103,6 +103,8 @@ pub(super) trait Queues {
     /// partly executed, so it must never report success; see
     /// `Completion::note_interrupted`.
     fn note_interrupted(&mut self, qid: u8, stamp: u32) -> Interrupted;
+    /// Optional diagnostics only; absence cannot alter attribution or release.
+    fn report_blamed_render(&self, _qid: u8) {}
     fn settle_blamed_render(&mut self, qid: u8, error: Error);
     fn settle_cancelled_renders(&mut self, qids: u128);
     fn rescan_compute(&mut self) -> Result;
@@ -242,6 +244,9 @@ pub(super) fn service<H: Host>(
     }
     let mut sources = host.fault_sources()?;
     sources.report(request.generation, super::queue::compute::retirement::stampless_total());
+    if let Some(qid) = request.blamed {
+        host.report_blamed_render(qid);
+    }
     let target_error = host.publish_recovery_targets();
     host.transition(1, 2)?;
     let mut recovered = false;

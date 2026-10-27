@@ -1033,6 +1033,19 @@ impl Pair {
             },
         ]
     }
+    /// Bounded first-fault evidence while the recovery owner has firmware
+    /// halted, before it acknowledges state 1. Never changes retirement.
+    pub(crate) fn report_recovery(&self, stamps: Result<[u32; 2]>) {
+        pr_warn!("G17: recovery render slot={} qids={:?} active={} prepared={} quarantined={} stamps={:?} freelist={:?}\n",
+            self.slot, self.qids(), self.active.len(), self.prepared.is_some(),
+            self.quarantined, stamps, self.free_list.counters());
+        for active in self.active.iter().take(4) {
+            pr_warn!("G17: recovery render ordinal={} published={} ctx={} seq={} snapshot={:?}\n",
+                active.ticket.ordinal, active.outer_published, active.packet.context.id(),
+                active.packet.order.sequence, observation::snapshot(&self.memory, active.ticket.ordinal));
+        }
+    }
+
     fn selected(&self, masks: Option<[u64; 2]>) -> bool {
         masks.is_none_or(|masks| completion_noted(self.qids(), masks))
     }

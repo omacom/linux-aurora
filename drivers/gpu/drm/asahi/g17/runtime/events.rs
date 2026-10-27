@@ -231,6 +231,9 @@ impl recovery::Queues for Service<'_> {
                 queue.note_interrupted(stamp)
             })
     }
+    fn report_blamed_render(&self, qid: u8) {
+        self.firmware.queues.report_render_recovery(qid, &self.firmware.port);
+    }
     fn settle_blamed_render(&mut self, qid: u8, error: Error) {
         let result = self
             .firmware
