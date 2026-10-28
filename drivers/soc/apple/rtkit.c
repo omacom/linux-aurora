@@ -994,6 +994,12 @@ void apple_rtkit_resume_rx(struct apple_rtkit *rtk)
 }
 EXPORT_SYMBOL_GPL(apple_rtkit_resume_rx);
 
+int apple_rtkit_set_rx_util_min(struct apple_rtkit *rtk, int util_min)
+{
+	return apple_mbox_set_rx_util_min(rtk->mbox, util_min);
+}
+EXPORT_SYMBOL_GPL(apple_rtkit_set_rx_util_min);
+
 void apple_rtkit_flush_rx(struct apple_rtkit *rtk)
 {
 	flush_workqueue(rtk->wq);

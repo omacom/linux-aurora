@@ -29,9 +29,11 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/sched.h>
 #include <linux/soc/apple/mailbox.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <uapi/linux/sched/types.h>
 
 #define APPLE_ASC_MBOX_CONTROL_FULL BIT(16)
 #define APPLE_ASC_MBOX_CONTROL_EMPTY BIT(17)
@@ -439,11 +441,48 @@ static int apple_mbox_poll_locked(struct apple_mbox *mbox)
 	return ret;
 }
 
+/*
+ * Threaded receive handler only: apply the consumer's minimum utilization to
+ * this thread. As an RT thread it otherwise runs with the RT default, which
+ * makes schedutil raise its CPU cluster to the top frequency on every message.
+ */
+static void apple_mbox_apply_rx_util_min(struct apple_mbox *mbox)
+{
+	int util_min = READ_ONCE(mbox->rx_util_min);
+	struct sched_attr attr = {
+		.sched_policy = current->policy,
+		.sched_priority = current->rt_priority,
+		.sched_flags = SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP_MIN,
+	};
+
+	if (util_min == mbox->rx_util_min_applied)
+		return;
+	/* -1 resets the clamp to the default, which follows the RT sysctl. */
+	attr.sched_util_min = util_min;
+	if (!sched_setattr_nocheck(current, &attr))
+		mbox->rx_util_min_applied = util_min;
+}
+
+int apple_mbox_set_rx_util_min(struct apple_mbox *mbox, int util_min)
+{
+	if (!IS_ENABLED(CONFIG_UCLAMP_TASK) || !apple_mbox_is_g17(mbox))
+		return -EOPNOTSUPP;
+	if (util_min < -1 || util_min > SCHED_CAPACITY_SCALE)
+		return -EINVAL;
+	WRITE_ONCE(mbox->rx_util_min, util_min);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_mbox_set_rx_util_min);
+
 static irqreturn_t apple_mbox_recv_irq(int irq, void *data)
 {
 	struct apple_mbox *mbox = data;
 	unsigned long flags;
 	int consumed = 0;
+
+	/* Only the G17 receive handler is threaded (see apple_mbox_probe()). */
+	if (apple_mbox_is_g17(mbox))
+		apple_mbox_apply_rx_util_min(mbox);
 
 	spin_lock_irqsave(&mbox->rx_lock, flags);
 	if (likely(!READ_ONCE(mbox->removing)))
@@ -772,6 +811,8 @@ static int apple_mbox_probe(struct platform_device *pdev)
 	if (mbox->irq_send_empty < 0 && mbox->irq_send_empty != -ENXIO)
 		return mbox->irq_send_empty;
 
+	mbox->rx_util_min = -1;
+	mbox->rx_util_min_applied = -1;
 	spin_lock_init(&mbox->rx_lock);
 	spin_lock_init(&mbox->tx_lock);
 	mutex_init(&mbox->lifecycle_lock);

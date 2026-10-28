@@ -54,9 +54,49 @@ static void apple_g17_tx_stall_bounded_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, apple_mbox_send(&mbox, msg, false), -ENODEV);
 }
 
+/* The receive thread's minimum utilization: request validation, and applying
+ * it to an RT thread (the test thread stands in) without losing its policy.
+ */
+static void apple_g17_rx_util_min_test(struct kunit *test)
+{
+	struct apple_mbox mbox = {
+		.rx_util_min = -1, .rx_util_min_applied = -1,
+	};
+
+	KUNIT_EXPECT_EQ(test, apple_mbox_set_rx_util_min(&mbox, 0), -EOPNOTSUPP);
+	mbox.ascwrap_v6.role = APPLE_MBOX_ASCWRAP_V6_ROLE_GFX;
+	if (!IS_ENABLED(CONFIG_UCLAMP_TASK)) {
+		KUNIT_EXPECT_EQ(test, apple_mbox_set_rx_util_min(&mbox, 0), -EOPNOTSUPP);
+		kunit_skip(test, "needs CONFIG_UCLAMP_TASK");
+	}
+	KUNIT_EXPECT_EQ(test, apple_mbox_set_rx_util_min(&mbox, -2), -EINVAL);
+	KUNIT_EXPECT_EQ(test, apple_mbox_set_rx_util_min(&mbox, SCHED_CAPACITY_SCALE + 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, mbox.rx_util_min, -1);
+#ifdef CONFIG_UCLAMP_TASK
+	sched_set_fifo(current);
+	KUNIT_ASSERT_EQ(test, apple_mbox_set_rx_util_min(&mbox, 256), 0);
+	apple_mbox_apply_rx_util_min(&mbox);
+	KUNIT_EXPECT_EQ(test, mbox.rx_util_min_applied, 256);
+	KUNIT_EXPECT_EQ(test, current->policy, SCHED_FIFO);
+	KUNIT_EXPECT_EQ(test, current->rt_priority, MAX_RT_PRIO / 2);
+	KUNIT_EXPECT_EQ(test, (unsigned int)current->uclamp_req[UCLAMP_MIN].value, 256U);
+	KUNIT_EXPECT_TRUE(test, current->uclamp_req[UCLAMP_MIN].user_defined);
+
+	/* -1 hands the clamp back to the scheduler's RT default. */
+	KUNIT_ASSERT_EQ(test, apple_mbox_set_rx_util_min(&mbox, -1), 0);
+	apple_mbox_apply_rx_util_min(&mbox);
+	KUNIT_EXPECT_EQ(test, mbox.rx_util_min_applied, -1);
+	KUNIT_EXPECT_EQ(test, current->policy, SCHED_FIFO);
+	KUNIT_EXPECT_EQ(test, current->rt_priority, MAX_RT_PRIO / 2);
+	KUNIT_EXPECT_FALSE(test, current->uclamp_req[UCLAMP_MIN].user_defined);
+	sched_set_normal(current, 0);
+#endif
+}
+
 static struct kunit_case apple_g17_stall_cases[] = {
 	KUNIT_CASE(apple_g17_rx_flood_bounded_test),
 	KUNIT_CASE(apple_g17_tx_stall_bounded_test),
+	KUNIT_CASE(apple_g17_rx_util_min_test),
 	{ }
 };
 static struct kunit_suite apple_g17_stall_suite = {

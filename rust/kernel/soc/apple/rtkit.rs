@@ -334,6 +334,57 @@ impl<T: Operations> RtKit<T> {
     pub fn has_endpoint(self: Pin<&mut Self>, endpoint: u8) -> bool {
         unsafe { bindings::apple_rtkit_has_endpoint(self.rtk, endpoint) }
     }
+
+    /// Sets the minimum utilization (0..=1024) the coprocessor's receive thread runs with, or
+    /// restores the scheduler's default with `None`.
+    ///
+    /// The receive thread applies it to itself when it next runs. Returns `EOPNOTSUPP` for a
+    /// mailbox without a threaded receive handler.
+    pub fn set_rx_util_min(&self, util_min: Option<u32>) -> Result {
+        // INVARIANT: `rtk` is valid per the type invariant.
+        RxUtilMin { rtk: self.rtk }.set(util_min)
+    }
+
+    /// Returns a handle that sets the receive thread's minimum utilization (see
+    /// [`RtKit::set_rx_util_min`]) without borrowing this [`RtKit`], from any context.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not use the handle after this [`RtKit`] is dropped.
+    pub unsafe fn rx_util_min_handle(&self) -> RxUtilMin {
+        // INVARIANT: The caller keeps this `RtKit`, and so `rtk`, alive while using the handle.
+        RxUtilMin { rtk: self.rtk }
+    }
+}
+
+/// Sets the minimum utilization of an RTKit coprocessor's receive thread.
+///
+/// The request is a single store that the receive thread applies to itself when it next runs,
+/// so it may be made from any context.
+///
+/// # Invariants
+///
+/// `rtk` is valid while the handle is used.
+#[derive(Clone, Copy)]
+pub struct RxUtilMin {
+    rtk: *mut bindings::apple_rtkit,
+}
+
+// SAFETY: The request is one store into the mailbox, valid from any thread.
+unsafe impl Send for RxUtilMin {}
+// SAFETY: As above; the handle has no state of its own.
+unsafe impl Sync for RxUtilMin {}
+
+impl RxUtilMin {
+    /// See [`RtKit::set_rx_util_min`].
+    pub fn set(&self, util_min: Option<u32>) -> Result {
+        let util_min = match util_min {
+            Some(v) => i32::try_from(v).map_err(|_| EINVAL)?,
+            None => -1,
+        };
+        // SAFETY: `rtk` is valid per the type invariant; the call only stores the request.
+        to_result(unsafe { bindings::apple_rtkit_set_rx_util_min(self.rtk, util_min) })
+    }
 }
 
 // SAFETY: `RtKit` operations require a mutable reference
