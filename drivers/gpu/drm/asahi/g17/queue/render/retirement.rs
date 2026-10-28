@@ -155,6 +155,49 @@ pub(crate) fn observe(ticket: &Ticket, snapshot: Snapshot) -> Result<Observation
     })
 }
 
+/// How long a front group the firmware executed, and whose ring entries it consumed, waits for
+/// its completion stamp before it retires on its pass record.
+///
+/// The firmware stores both queues' stamps after the cache maintenance that follows a pass, so
+/// the stamps, not the pass record, normally prove completion. Occasionally the stamps of a pair
+/// stop one kick short while the pass record shows the group (and later groups) executed, and
+/// no later event moves them. Without a bound the client waits for the scheduler watchdog and
+/// its renewals, then loses its device. Compute applies the same bound to its records.
+pub(crate) const STAMP_FALLBACK_NS: u64 = 50_000_000;
+const _: () = assert!(STAMP_FALLBACK_NS * 4 <= crate::g17::job::TIMEOUT_MS as u64 * 1_000_000);
+
+static STAMPLESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Counts a render group that retired on its pass record because its completion stamps never
+/// covered it; logs the first and every 64th.
+pub(crate) fn note_stampless(slot: u16, ordinal: u64) {
+    let count = STAMPLESS.fetch_add(1, Ordering::Relaxed) + 1;
+    if count == 1 || count % 64 == 0 {
+        pr_info!(
+            "G17: lifetime total {} render groups retired on their pass record after {} ms without completion stamps (latest: slot {} ordinal {})\n",
+            count,
+            STAMP_FALLBACK_NS / 1_000_000,
+            slot,
+            ordinal
+        );
+    }
+}
+
+/// Retire an executed, consumed front group without its stamps, once [`STAMP_FALLBACK_NS`]
+/// has passed. The caller decides that bound; this re-checks execution and consumption.
+pub(crate) fn poll_stampless(ticket: &mut Ticket, memory: &mut impl Memory) -> Result<Poll> {
+    fence(Ordering::Acquire);
+    let snapshot = memory.snapshot(ticket.ordinal)?;
+    let Ok(observation) = observe(ticket, snapshot) else {
+        return Ok(Poll::Retry);
+    };
+    if !observation.complete {
+        return Ok(Poll::Pending);
+    }
+    let [start, end] = memory.pass(ticket.ordinal)?;
+    Ok(Poll::Complete([start, start, start, end]))
+}
+
 /// Outstanding publications span less than half the 24-bit stamp sequence.
 /// A zero stamp is valid when that sequence wraps.
 pub(crate) const fn stamp_covers(stamp: u32, published: u64) -> bool {
@@ -381,5 +424,58 @@ mod executed_tests {
         assert!(!snapshot(3, 3, [1, 0]).executed_and_consumed());
         assert!(!snapshot(3, 3, [0, 2]).executed_and_consumed());
         assert!(!snapshot(2, 3, [1, 2]).executed_and_consumed());
+    }
+
+    /// The firmware state of a stalled pair as read on hardware: the front group executed and
+    /// its two ring entries per queue were consumed, but both stamps hold the previous kick.
+    struct Stalled {
+        snapshot: Snapshot,
+        stamps: [u32; 2],
+    }
+    impl Memory for Stalled {
+        fn snapshot(&mut self, _ordinal: u64) -> Result<Snapshot> {
+            Ok(self.snapshot)
+        }
+        fn stamps(&mut self) -> Result<[u32; 2]> {
+            Ok(self.stamps)
+        }
+        fn pass(&mut self, _ordinal: u64) -> Result<[u64; 2]> {
+            Ok(self.snapshot.pass)
+        }
+    }
+
+    fn stalled_ticket() -> Ticket {
+        let window = Window::new(1097, 2, 1280).unwrap();
+        let previous = Cursors { done: 1097, read: 1097, write: 1097 };
+        Ticket { ordinal: 406, windows: [window; 2], previous: [previous; 2] }
+    }
+
+    fn stalled(pass: [u64; 2]) -> Stalled {
+        let cursors = Cursors { done: 1099, read: 1099, write: 1099 };
+        Stalled {
+            snapshot: Snapshot { cursors: [cursors; 2], job_list_empty: false, pass },
+            stamps: [406 << 8; 2],
+        }
+    }
+
+    #[test]
+    fn lagging_stamps_keep_an_executed_group_pending() {
+        let mut ticket = stalled_ticket();
+        let mut memory = stalled([10, 20]);
+        assert!(matches!(poll(&mut ticket, &mut memory), Ok(Poll::Pending)));
+    }
+
+    #[test]
+    fn stampless_poll_retires_an_executed_consumed_group() {
+        let mut ticket = stalled_ticket();
+        let mut memory = stalled([10, 20]);
+        assert!(matches!(poll_stampless(&mut ticket, &mut memory), Ok(Poll::Complete([10, 10, 10, 20]))));
+    }
+
+    #[test]
+    fn stampless_poll_waits_for_the_fragment_end() {
+        let mut ticket = stalled_ticket();
+        let mut memory = stalled([10, 0]);
+        assert!(matches!(poll_stampless(&mut ticket, &mut memory), Ok(Poll::Pending)));
     }
 }

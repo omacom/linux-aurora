@@ -79,6 +79,20 @@ impl crate::g17::Firmware {
             }
             let generation = self.recovery.generation();
             let state = crate::g17::recovery::Memory::recovery_state(&self.init)?;
+            if error == ETIMEDOUT {
+                let qids = pair.qids();
+                let stamps = [
+                    self.init.stamp(qids[0])?.load(core::sync::atomic::Ordering::Relaxed),
+                    self.init.stamp(qids[1])?.load(core::sync::atomic::Ordering::Relaxed),
+                ];
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                if let Some(pair) = self.queues.render.entries[slot]
+                    .as_mut()
+                    .and_then(|entry| entry.pair.as_mut())
+                {
+                    pair.expire_stamp_wait(packet, stamps, state)?;
+                }
+            }
             let progressed = self.with_render(slot, |pair, host| {
                 pair.retire(None, generation, state, host, &mut |event| {
                     deferred.push(event)
