@@ -440,6 +440,16 @@ impl Mailbox {
     fn send(&self, endpoint: u8, message: u64) -> Result {
         self.with(|rtkit| rtkit.send_message(endpoint, message))
     }
+
+    /// A handle on the receive thread's minimum utilization, usable from any context.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not use the handle after this mailbox is dropped.
+    unsafe fn rx_util_min_handle(&self) -> rtkit::RxUtilMin {
+        // SAFETY: The caller's obligation is the handle's.
+        self.with(|rtkit| unsafe { rtkit.rx_util_min_handle() })
+    }
 }
 
 /// A running firmware coprocessor.
@@ -1386,7 +1396,10 @@ impl Gpu {
                 secondary,
                 primary,
                 bridge,
-                port: port::Port::new(power::Demand::new(pdev.as_ref().as_raw())?)?,
+                port: port::Port::new(
+                    power::Demand::new(pdev.as_ref().as_raw())?,
+                    shared.feed.clone(),
+                )?,
                 seen_submissions: 0,
                 rings: channel::Rings::new()?,
                 recovery: recovery::State::new(),

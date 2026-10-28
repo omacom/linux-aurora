@@ -44,6 +44,8 @@ struct Detector {
     busy: AtomicU64,
     streak: AtomicU32,
     until: AtomicU64,
+    /// Until when the GPU counts as the bottleneck (see `Feed::gpu_bound`).
+    bound_until: AtomicU64,
     active: AtomicBool,
     pending: AtomicBool,
     stopping: AtomicBool,
@@ -57,6 +59,7 @@ impl Detector {
             busy: AtomicU64::new(0),
             streak: AtomicU32::new(0),
             until: AtomicU64::new(0),
+            bound_until: AtomicU64::new(0),
             active: AtomicBool::new(false),
             pending: AtomicBool::new(false),
             stopping: AtomicBool::new(false),
@@ -108,16 +111,25 @@ impl Detector {
                 Err(_) => 0,
             }
         };
-        if streak >= STREAK_ON && idle_sum.saturating_mul(4) >= busy_sum {
+        if streak < STREAK_ON {
+            return;
+        }
+        if idle_sum.saturating_mul(4) >= busy_sum {
             self.until.store(now + LINGER_NS, Ordering::Release);
             if !self.active.swap(true, Ordering::AcqRel) {
                 self.pending.store(true, Ordering::Release);
             }
+        } else {
+            self.bound_until.store(now + LINGER_NS, Ordering::Release);
         }
     }
 
     fn wanted(&self, now: u64) -> bool {
         !self.stopping.load(Ordering::Acquire) && now < self.until.load(Ordering::Acquire)
+    }
+
+    fn bound(&self, now: u64) -> bool {
+        !self.stopping.load(Ordering::Acquire) && now < self.bound_until.load(Ordering::Acquire)
     }
 }
 
@@ -416,6 +428,17 @@ impl Feed {
         }
     }
 
+    /// Whether the GPU itself is the bottleneck: passes follow each other with refill gaps
+    /// under a quarter of their busy time, and the feed does not see host-refill-bound work.
+    /// Lingers like streaming, so a pause of more than a few milliseconds ends it.
+    pub(crate) fn gpu_bound(&self) -> bool {
+        if !cfg!(CONFIG_CPU_FREQ) {
+            return false;
+        }
+        let now = Self::now();
+        self.detector.bound(now) && !self.detector.wanted(now)
+    }
+
     /// Called after a firmware event pass, before queuing the single feed work item.
     pub(crate) fn take_pending(&self) -> bool {
         self.detector.pending.swap(false, Ordering::AcqRel)
@@ -496,5 +519,53 @@ impl Feed {
 impl PinnedDrop for Feed {
     fn drop(self: Pin<&mut Self>) {
         self.shutdown();
+    }
+}
+
+#[kernel::macros::kunit_tests(asahi_g17_feed_detector)]
+mod detector_tests {
+    use super::*;
+
+    /// Notes `passes` passes of `busy` ticks, each `gap` ticks after the previous, 1 ms apart.
+    fn run(detector: &Detector, passes: u64, busy: u64, gap: u64) -> u64 {
+        let mut start = 1000;
+        let mut now = 1_000_000;
+        for _ in 0..passes {
+            detector.note(start, start + busy, now);
+            start += busy + gap;
+            now += 1_000_000;
+        }
+        now
+    }
+
+    #[test]
+    fn back_to_back_long_passes_are_gpu_bound() {
+        let detector = Detector::new();
+        // 2 ms passes with 40 us refill gaps, as a deep heavy queue or a heavy row at depth 1.
+        let now = run(&detector, 16, CLOCK_HZ / 500, CLOCK_HZ / 25_000);
+        assert!(detector.bound(now));
+        assert!(!detector.wanted(now));
+        assert!(!detector.bound(now + LINGER_NS));
+    }
+
+    #[test]
+    fn refill_gaps_stream_instead() {
+        let detector = Detector::new();
+        // 20 us passes with 60 us refill gaps: bound by host refills.
+        let now = run(&detector, 16, CLOCK_HZ / 50_000, CLOCK_HZ / 16_667);
+        assert!(detector.wanted(now));
+        assert!(!detector.bound(now));
+    }
+
+    #[test]
+    fn paced_or_short_runs_are_neither() {
+        let detector = Detector::new();
+        // Each pass starts after a pause of at least the refill limit.
+        let now = run(&detector, 16, CLOCK_HZ / 500, MAX_REFILL_TICKS);
+        assert!(!detector.bound(now) && !detector.wanted(now));
+        // Fewer back-to-back passes than the streak needs.
+        let detector = Detector::new();
+        let now = run(&detector, u64::from(STREAK_ON) - 1, CLOCK_HZ / 500, 0);
+        assert!(!detector.bound(now) && !detector.wanted(now));
     }
 }
