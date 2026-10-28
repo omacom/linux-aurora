@@ -401,6 +401,13 @@ pub(crate) struct Fences {
     pub(crate) ready: Fence,
     pub(crate) completed: Fence,
     pub(crate) publication: Option<Arc<super::completion::Publication>>,
+    pub(crate) owner: Arc<Completion>,
+}
+
+impl super::dependency::Retention for Fences {
+    fn retained(&self) -> bool {
+        self.owner.retains_vm()
+    }
 }
 
 impl Fences {
@@ -479,6 +486,6 @@ impl<B: Backend> Scheduler<B> {
             self.backend.count_backlog(&packet);
         }
         job.push();
-        Ok(Fences { ready, completed, publication: host_publication })
+        Ok(Fences { ready, completed, publication: host_publication, owner: packet.completion.clone() })
     }
 }

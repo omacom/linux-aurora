@@ -631,6 +631,11 @@ impl Completion {
         drop(lease);
     }
 
+    /// Whether the command still holds its VM pin: firmware may still own or replay it.
+    pub(crate) fn retains_vm(&self) -> bool {
+        self.vm_job.lock().is_some()
+    }
+
     fn release_healthy(&self) {
         if let Some(sources) = &self.sources {
             sources.release();
