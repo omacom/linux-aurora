@@ -142,6 +142,8 @@ struct Active {
     drained_result: Option<Result<[u64; 4]>>,
     /// First observation of this group retired and unlinked without execution.
     abandoned_since: Option<u64>,
+    /// First observation of this group executed and consumed while its stamps lagged.
+    stamp_wait_since: Option<u64>,
 }
 
 /// A firmware-retired, unexecuted group must hold on two observations this far
@@ -816,6 +818,7 @@ impl Pair {
                 failed: false,
                 drained_result: None,
                 abandoned_since: None,
+                stamp_wait_since: None,
             })
             .map_err(|_| EBUSY)?;
         self.prepared = None;
@@ -1056,6 +1059,56 @@ impl Pair {
         }
     }
 
+    /// Latches when the front group executed and the firmware consumed its ring entries while
+    /// `stamps` still lag it, and reports whether that has held for
+    /// [`retirement::STAMP_FALLBACK_NS`] (`now`, host ns). The observation scan then retires it
+    /// on its pass record instead of waiting for stamps no later event will move.
+    pub(crate) fn note_stamp_wait(&mut self, stamps: [u32; 2], state: u32, now: u64) -> Result<bool> {
+        if self.quarantined || self.prepared.is_some() || state != 0 {
+            return Ok(false);
+        }
+        let Some(front) = self.active.front_mut() else {
+            return Ok(false);
+        };
+        if !front.outer_published {
+            return Ok(false);
+        }
+        let published = front.ticket.ordinal.checked_add(1).ok_or(EOVERFLOW)?;
+        if stamps.into_iter().all(|stamp| retirement::stamp_covers(stamp, published)) {
+            front.stamp_wait_since = None;
+            return Ok(false);
+        }
+        let snapshot = observation::snapshot(&self.memory, front.ticket.ordinal)?;
+        if !retirement::observe(&front.ticket, snapshot).is_ok_and(|seen| seen.complete) {
+            front.stamp_wait_since = None;
+            return Ok(false);
+        }
+        let since = *front.stamp_wait_since.get_or_insert(now);
+        Ok(now.saturating_sub(since) >= retirement::STAMP_FALLBACK_NS)
+    }
+
+    /// Whether the front group's stamp wait is latched: the observation scan rechecks the pair
+    /// without a completion notification, which may never come for such a group.
+    pub(crate) fn stamp_waiting(&self) -> bool {
+        self.active.front().is_some_and(|front| front.stamp_wait_since.is_some())
+    }
+
+    /// The watchdog of `packet` expired while it is this pair's front: if the firmware executed
+    /// it and consumed its ring entries while the stamps lag, it retires on its pass record now
+    /// instead of failing. Failing would give up on the stamps as well.
+    pub(crate) fn expire_stamp_wait(&mut self, packet: &Arc<Packet>, stamps: [u32; 2], state: u32) -> Result<bool> {
+        if !self.active.front().is_some_and(|front| Arc::ptr_eq(&front.packet, packet)) {
+            return Ok(false);
+        }
+        if !self.note_stamp_wait(stamps, state, crate::g17::now_ns())? && !self.stamp_waiting() {
+            return Ok(false);
+        }
+        if let Some(front) = self.active.front_mut() {
+            front.stamp_wait_since = Some(0);
+        }
+        Ok(true)
+    }
+
     fn selected(&self, masks: Option<[u64; 2]>) -> bool {
         masks.is_none_or(|masks| completion_noted(self.qids(), masks))
     }
@@ -1269,6 +1322,9 @@ impl Pair {
         {
             return Err(EIO);
         }
+        let stampless = front.stamp_wait_since.is_some_and(|since| {
+            crate::g17::now_ns().saturating_sub(since) >= retirement::STAMP_FALLBACK_NS
+        });
         let mut observer = Observer {
             memory: &self.memory,
             qids,
@@ -1278,7 +1334,13 @@ impl Pair {
             if observed.ticket != front.ticket {
                 return Err(EIO);
             }
-            retirement::poll_observed(&mut front.ticket, &mut observer, observed.snapshot)
+            if stampless {
+                retirement::poll_stampless(&mut front.ticket, &mut observer)
+            } else {
+                retirement::poll_observed(&mut front.ticket, &mut observer, observed.snapshot)
+            }
+        } else if stampless {
+            retirement::poll_stampless(&mut front.ticket, &mut observer)
         } else {
             retirement::poll(&mut front.ticket, &mut observer)
         };
@@ -1293,6 +1355,9 @@ impl Pair {
         };
         let ordinal = front.ticket.ordinal;
         let context_update = front.context_update;
+        if stampless {
+            retirement::note_stampless(u16::from(self.slot), ordinal);
+        }
         self.note_retirement(ordinal, context_update);
         let front = self.active.front_mut().ok_or(EIO)?;
         if !front.flist_completed {
