@@ -96,7 +96,9 @@ impl Publication {
         if let Err(error) = result {
             // Inherited failure is visible to the client without inventing a
             // permanent admission failure in this command's VM.
-            self.status.report_failure(error);
+            if error != ECANCELED {
+                self.status.report_failure(error);
+            }
         }
         self.output.publish(result);
         let result = result.map(|_| ());

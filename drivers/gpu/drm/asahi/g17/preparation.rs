@@ -6,6 +6,7 @@
 //! the device mutex, then drops that mutex before waiting for builders. A builder's lease is
 //! stored after its tentative mappings so those mappings are destroyed before the join completes.
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicU64, Ordering};
 use kernel::{
     new_condvar, new_mutex,
@@ -24,25 +25,37 @@ const EPOCH: u64 = CLOSED << 3;
 /// packet cancellation, logical close, VM status and device loss even when no
 /// capacity/recovery event arrives. Wakes and nested constructors never renew it.
 pub(super) struct Admission<'a> {
-    deadline: u64,
+    deadline: Cell<u64>,
+    started: u64,
     check: &'a dyn Fn() -> Result,
 }
 
 impl<'a> Admission<'a> {
     pub(super) fn new(deadline: u64, check: &'a dyn Fn() -> Result) -> Self {
-        Self { deadline, check }
+        Self { deadline: Cell::new(deadline), started: super::now_ns(), check }
+    }
+
+    /// A recovery is pending or this owner's spared work drains: wait as long as the
+    /// watchdog may take to settle it (RECOVERY_WAIT_MS from the start) instead of failing.
+    pub(super) fn extend_for_recovery(&self) {
+        let limit = self
+            .started
+            .saturating_add(u64::from(super::timeout::RECOVERY_WAIT_MS) * 1_000_000);
+        if self.deadline.get() < limit {
+            self.deadline.set(limit);
+        }
     }
 
     pub(super) fn check(&self) -> Result {
         (self.check)()?;
-        if super::now_ns() >= self.deadline { return Err(EBUSY); }
+        if super::now_ns() >= self.deadline.get() { return Err(EBUSY); }
         Ok(())
     }
 
     /// Ignore condvar remaining-time reports: only the monotonic deadline counts.
     pub(super) fn slice_ms(&self) -> Result<u32> {
         self.check()?;
-        let remaining = self.deadline.saturating_sub(super::now_ns());
+        let remaining = self.deadline.get().saturating_sub(super::now_ns());
         if remaining == 0 { return Err(EBUSY); }
         Ok(remaining.div_ceil(1_000_000).min(10) as u32)
     }
@@ -137,19 +150,20 @@ impl Gate {
         }
     }
 
-    /// Packet admission may wait for recovery only within its original budget.
+    /// Only a recovery closes the gate: packet admission waits for it up to
+    /// RECOVERY_WAIT_MS from the admission's start (Admission::extend_for_recovery).
     /// Called with no device mutex or existing preparation lease.
     pub(super) fn enter_until(self: &Arc<Self>, admission: &Admission<'_>) -> Result<Lease> {
         admission.check()?;
         match self.try_enter() {
-            Err(error) if error == EAGAIN => {}
+            Err(error) if error == EAGAIN => admission.extend_for_recovery(),
             result => return result,
         }
         let mut wait = self.wait.lock();
         loop {
             admission.check()?;
             match self.try_enter() {
-                Err(error) if error == EAGAIN => {}
+                Err(error) if error == EAGAIN => admission.extend_for_recovery(),
                 result => return result,
             }
             let _ = self.changed.wait_timeout(
@@ -323,6 +337,20 @@ mod compute_deadline_tests {
     use super::*;
 
     #[test]
+    fn a_recovery_extends_the_deadline_once_from_the_start() {
+        let check = || Ok(());
+        let admission = Admission::new(super::super::now_ns(), &check);
+        assert_eq!(admission.check(), Err(EBUSY));
+        admission.extend_for_recovery();
+        assert_eq!(admission.check(), Ok(()));
+        let limit = admission.started
+            + u64::from(super::super::timeout::RECOVERY_WAIT_MS) * 1_000_000;
+        assert_eq!(admission.deadline.get(), limit);
+        admission.extend_for_recovery();
+        assert_eq!(admission.deadline.get(), limit);
+    }
+
+    #[test]
     fn spent_budget_refuses_even_an_open_gate() {
         let gate = Gate::new().unwrap();
         let check = || Ok(());
@@ -332,13 +360,16 @@ mod compute_deadline_tests {
     }
 
     #[test]
-    fn closed_gate_expires_without_any_recovery_wake() {
+    fn closed_gate_waits_past_the_budget_for_recovery() {
         let gate = Gate::new().unwrap();
         gate.close();
         let start = super::super::now_ns();
-        let check = || Ok(());
+        // Cancel well after the 20 ms budget: only the recovery extension keeps it waiting.
+        let check = || {
+            if super::super::now_ns() - start >= 60_000_000 { Err(ECANCELED) } else { Ok(()) }
+        };
         let admission = Admission::new(start + 20_000_000, &check);
-        assert!(matches!(gate.enter_until(&admission), Err(error) if error == EBUSY));
+        assert!(matches!(gate.enter_until(&admission), Err(error) if error == ECANCELED));
         assert!(super::super::now_ns() - start < 500_000_000);
         gate.wait_drained();
         assert!(gate.reopen());

@@ -18,6 +18,13 @@ pub(crate) fn transaction_grace(renewals: u8) -> bool { renewals < MAX_RENEWALS 
 pub(crate) const POLL_MS: u32 = 2000;
 const EXECUTION_RENEWALS: u8 = 4;
 
+/// How long an innocent client's publication waits for a recovery to settle and its
+/// spared work to drain, instead of failing with EBUSY: the watchdog defers work behind
+/// another VM at most this long before it settles it (`classify`; ray work gets the
+/// execution renewals on top).
+pub(crate) const RECOVERY_WAIT_MS: u32 =
+    POLL_MS * (1 + EXECUTION_RENEWALS as u32 + MAX_RENEWALS as u32);
+
 /// A background control/replay poll has no scheduler fence to expire it.
 /// Its timestamp belongs to the exact transaction and is never renewed by work.
 pub(crate) fn background_stalled(since: Option<u64>, now: u64) -> bool {

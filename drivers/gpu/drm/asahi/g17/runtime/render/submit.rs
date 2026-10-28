@@ -54,13 +54,22 @@ impl Backend {
     ) -> Result<(RenderLease, bool)> {
         let pool = &self.admission;
         let started = super::super::now_ns();
-        let deadline_ns = started.saturating_add(u64::from(crate::g17::job::TIMEOUT_MS) * 1_000_000);
+        let mut deadline_ns =
+            started.saturating_add(u64::from(crate::g17::job::TIMEOUT_MS) * 1_000_000);
+        let recovery_deadline_ns = started.saturating_add(recovery_wait_ns());
         // A capacity refusal samples the render domain and retries once; only
         // a refusal after that sample waits, so no release can be missed.
         let mut observed = None;
+        let mut capacity = WaitClock::default();
         loop {
             self.admission_open()?;
-            if super::super::now_ns() >= deadline_ns { return Err(EBUSY); }
+            if super::super::now_ns() >= deadline_ns {
+                if deadline_ns < recovery_deadline_ns && self.waiting_for_recovery()? {
+                    deadline_ns = recovery_deadline_ns;
+                } else {
+                    return Err(EBUSY);
+                }
+            }
             if packet.cancel_requested() {
                 return Err(ECANCELED);
             }
@@ -95,11 +104,13 @@ impl Backend {
                                 .reclaim_unused_render_spare(Some(self.owner), false)?
                         };
                         if reclaimed.is_none() {
-                            self.wait_render_capacity(&mut observed, started, sleep)?;
+                            self.wait_render_capacity(&mut observed, &mut capacity, sleep)?;
                         }
                         drop(reclaimed);
                         continue;
                     }
+                    // The deadline check above decides whether a recovery extends the wait.
+                    Err(error) if error == EBUSY => continue,
                     Err(error) => return Err(error),
                 }
             };
@@ -133,7 +144,7 @@ impl Backend {
                     drop(state);
                     // A full queue table makes admission reuse a free killed pair instead.
                     if reclaimed.is_none() && !ready && !pool.killed_pair_free() {
-                        self.wait_render_capacity(&mut observed, started, sleep)?;
+                        self.wait_render_capacity(&mut observed, &mut capacity, sleep)?;
                     }
                     drop(reclaimed);
                 }
@@ -221,13 +232,29 @@ impl Backend {
         domain.block(observed, remaining.div_ceil(1_000_000).min(10) as u32, false)
     }
 
+    /// A recovery is pending, or this owner's pair is spared and draining after one: an
+    /// innocent publication waits up to RECOVERY_WAIT_MS for it instead of failing.
+    fn waiting_for_recovery(&self) -> Result<bool> {
+        let state = self.shared.state.lock();
+        let firmware = (*state).as_deref().ok_or(ENODEV)?;
+        Ok(firmware.recovery.pending()
+            || crate::g17::recovery::Memory::recovery_state(&firmware.init)? != 0
+            || firmware.queues.admission.spared_quarantined(self.owner))
+    }
+
+    /// The deadline of the wait `clock` measures (WaitClock::deadline).
+    fn wait_deadline(&self, clock: &mut WaitClock, bound_ns: u64) -> Result<u64> {
+        let recovering = self.waiting_for_recovery()?;
+        Ok(clock.deadline(super::super::now_ns(), recovering, bound_ns))
+    }
+
     /// A pair is borrowed, still settling, waiting for firmware room or for the
     /// release of the scheduler it last ran for. Every pair return, retirement
     /// and teardown step signals the render domain, and each event pass does
     /// while a publisher waits; the deadline is only the failure bound.
     fn wait_render_busy(
         &self,
-        since: &mut Option<u64>,
+        clock: &mut WaitClock,
         observed: &mut Option<u64>,
         sleep: bool,
         packet: &Packet,
@@ -235,8 +262,7 @@ impl Backend {
         if !sleep {
             return Err(FALLBACK);
         }
-        let now = super::super::now_ns();
-        let deadline = since.get_or_insert(now).saturating_add(super::super::WORK_RING_WAIT_NS);
+        let deadline = self.wait_deadline(clock, super::super::WORK_RING_WAIT_NS)?;
         // Sample, then retry once: only a refusal after the sample waits.
         let Some(sample) = observed.take() else {
             *observed = Some(self.shared.renders.observe());
@@ -249,7 +275,12 @@ impl Backend {
     /// Render capacity is short: return what idle owners hold, then block until
     /// a pair, lease or owner returns. No packet is firmware-visible here, and
     /// neither the device mutex nor a preparation lease is held while waiting.
-    fn wait_render_capacity(&self, observed: &mut Option<u64>, started: u64, sleep: bool) -> Result {
+    fn wait_render_capacity(
+        &self,
+        observed: &mut Option<u64>,
+        clock: &mut WaitClock,
+        sleep: bool,
+    ) -> Result {
         if !sleep {
             return Err(FALLBACK);
         }
@@ -263,8 +294,8 @@ impl Backend {
         };
         self.shared.queue_events();
         self.admission_open()?;
-        let remaining = started
-            .saturating_add(super::super::WORK_RING_WAIT_NS)
+        let remaining = self
+            .wait_deadline(clock, super::super::WORK_RING_WAIT_NS)?
             .saturating_sub(super::super::now_ns());
         if remaining == 0 {
             return Err(EBUSY);
@@ -367,9 +398,10 @@ impl Backend {
                 return result;
             }
         }
-        let mut busy_since = None;
-        let capacity_started = super::super::now_ns();
-        let deadline_ns = capacity_started.saturating_add(super::super::WORK_RING_WAIT_NS);
+        let mut busy = WaitClock::default();
+        let mut capacity = WaitClock::default();
+        let mut state_clock = WaitClock::default();
+        let mut recovery_since = None;
         let mut seen = None;
         let mut states = None;
         loop {
@@ -407,8 +439,11 @@ impl Backend {
                     let work = packet.completion.work_state()?;
                     match states.take() {
                         None => states = Some(work.returns().observe()),
+                        // Work states free as earlier, possibly spared, work retires.
                         Some(sample) => {
-                            self.wait_domain(work.returns(), sample, deadline_ns, packet)?
+                            let deadline = self
+                                .wait_deadline(&mut state_clock, super::super::WORK_RING_WAIT_NS)?;
+                            self.wait_domain(work.returns(), sample, deadline, packet)?
                         }
                     }
                     continue;
@@ -426,19 +461,19 @@ impl Backend {
             };
             match ensured {
                 Err(error) if error == ENOSPC => {
-                    self.wait_render_capacity(&mut seen, capacity_started, sleep)?;
+                    self.wait_render_capacity(&mut seen, &mut capacity, sleep)?;
                     continue;
                 }
                 Err(error) if error == EAGAIN => continue,
                 Err(error) if error == EBUSY => {
-                    self.wait_render_busy(&mut busy_since, &mut seen, sleep, packet)?;
+                    self.wait_render_busy(&mut busy, &mut seen, sleep, packet)?;
                     continue;
                 }
                 result => result?,
             }
             match self.prepare_render(slot, packet, deferred, sleep) {
                 Err(error) if !packet.is_published() && error == ENOSPC => {
-                    self.wait_render_capacity(&mut seen, capacity_started, sleep)?;
+                    self.wait_render_capacity(&mut seen, &mut capacity, sleep)?;
                     continue;
                 }
                 Err(error) if !packet.is_published() && [EAGAIN, EBUSY].contains(&error) => {
@@ -458,10 +493,13 @@ impl Backend {
                         // Recovery closes the preparation gate before touching
                         // any queue; the next pass blocks in enter() until it
                         // reopens. The worker raises the closure.
+                        let since = *recovery_since.get_or_insert(super::super::now_ns());
                         self.shared.queue_events();
-                        self.shared.preparations.wait_closure(gate, deadline_ns)?;
+                        self.shared
+                            .preparations
+                            .wait_closure(gate, since.saturating_add(recovery_wait_ns()))?;
                     } else if error == EBUSY {
-                        self.wait_render_busy(&mut busy_since, &mut seen, sleep, packet)?;
+                        self.wait_render_busy(&mut busy, &mut seen, sleep, packet)?;
                     } else if !sleep {
                         return Err(FALLBACK);
                     }
@@ -697,5 +735,59 @@ impl crate::g17::Firmware {
                 .discard_prepared(packet)?;
         }
         result
+    }
+}
+
+fn recovery_wait_ns() -> u64 {
+    u64::from(crate::g17::timeout::RECOVERY_WAIT_MS) * 1_000_000
+}
+
+/// One bounded wait (Backend::wait_deadline).
+#[derive(Default)]
+struct WaitClock {
+    first: Option<u64>,
+    calm: u64,
+}
+
+impl WaitClock {
+    /// `bound_ns` after the later of the first call and the last call that saw a recovery
+    /// pending or this owner's spared pair draining (so the usual bound applies afresh once a
+    /// recovery ends), and at most RECOVERY_WAIT_MS after the first call.
+    fn deadline(&mut self, now: u64, recovering: bool, bound_ns: u64) -> u64 {
+        let first = *self.first.get_or_insert(now);
+        self.calm = if recovering { now } else { self.calm.max(first) };
+        first
+            .saturating_add(recovery_wait_ns())
+            .min(self.calm.saturating_add(bound_ns))
+    }
+}
+
+#[kunit_tests(asahi_g17_wait_clock)]
+mod tests {
+    use super::*;
+
+    const BOUND: u64 = 2_000_000_000;
+
+    #[test]
+    fn a_calm_wait_keeps_its_first_deadline() {
+        let mut clock = WaitClock::default();
+        assert_eq!(clock.deadline(100, false, BOUND), 100 + BOUND);
+        assert_eq!(clock.deadline(500, false, BOUND), 100 + BOUND);
+    }
+
+    #[test]
+    fn the_bound_starts_afresh_once_a_recovery_ends() {
+        let mut clock = WaitClock::default();
+        clock.deadline(100, false, BOUND);
+        assert_eq!(clock.deadline(1_000, true, BOUND), 1_000 + BOUND);
+        assert_eq!(clock.deadline(2_000, false, BOUND), 1_000 + BOUND);
+    }
+
+    #[test]
+    fn a_recovery_cannot_extend_past_the_recovery_wait() {
+        let mut clock = WaitClock::default();
+        clock.deadline(100, true, BOUND);
+        let limit = 100 + recovery_wait_ns();
+        assert_eq!(clock.deadline(limit - 1, true, BOUND), limit);
     }
 }

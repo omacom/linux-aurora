@@ -1756,8 +1756,10 @@ impl Backend {
                 }
             }
             // Other owners continue submitting while this owner waits for its
-            // queue-local drain witness. No new command has been accepted: the
-            // spared queue and its retained work stay intact past the deadline.
+            // queue-local drain witness. No new command has been accepted; if the
+            // admission deadline passes, the spared queue and its retained work stay
+            // intact until a later admission observes its witness.
+            admission.extend_for_recovery();
             self.shared.queue_events();
             self.wait_release(&self.shared.progress, observed, admission)?;
         }
@@ -2090,6 +2092,13 @@ impl Backend {
             admission.check()?;
             let observed = progress.observe();
             if !self.sources_published(packet)? {
+                let recovering = self.shared.state.lock().as_deref().is_some_and(|firmware| {
+                    firmware.recovery.pending()
+                        || super::recovery::Memory::recovery_state(&firmware.init).unwrap_or(0) != 0
+                });
+                if recovering {
+                    admission.extend_for_recovery();
+                }
                 self.shared.queue_events();
                 self.wait_release(progress, observed, &admission)?;
                 continue;
@@ -2131,6 +2140,7 @@ impl Backend {
             }
             let recovery_state = super::recovery::Memory::recovery_state(&firmware.init)?;
             if firmware.recovery.pending() || recovery_state != 0 {
+                admission.extend_for_recovery();
                 drop(state);
                 drop(lease);
                 self.shared.queue_events();
@@ -2162,6 +2172,11 @@ impl Backend {
             {
                 // Recovery or backpressure: nothing is firmware-visible. Other
                 // queues keep submitting and the event worker retires meanwhile.
+                if firmware.recovery.pending()
+                    || super::recovery::Memory::recovery_state(&firmware.init)? != 0
+                {
+                    admission.extend_for_recovery();
+                }
                 drop(state);
                 drop(lease);
                 self.shared.queue_events();

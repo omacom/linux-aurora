@@ -195,4 +195,15 @@ mod tests {
         record.note(5, 1, &Probe::new(true));
         assert_eq!(earliest(&mut record), None);
     }
+
+    #[test]
+    fn failed_predecessor_cannot_be_bypassed() {
+        let mut frontier = Frontier::new();
+        for error in [ECANCELED, EIO, ETIMEDOUT] {
+            assert_eq!(frontier.include(Some(5), 5, error.to_errno(), 0), Err(ECANCELED));
+        }
+        assert_eq!(frontier.include(Some(5), 5, 1, 0), Ok(()));
+        assert_eq!(frontier.include(Some(5), 6, EIO.to_errno(), 0), Ok(()));
+        assert_eq!(frontier.count, 0);
+    }
 }

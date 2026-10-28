@@ -694,7 +694,9 @@ impl Completion {
             return;
         }
         self.status.record_if_device_loss(error);
-        if self.accepted.load(Ordering::Acquire) {
+        // As in complete(): a cancellation is not this client's device loss. A guilty VM
+        // already carries its own sticky error.
+        if self.accepted.load(Ordering::Acquire) && error != ECANCELED {
             self.status.report_failure(error);
         }
         self.release_healthy();
@@ -713,7 +715,9 @@ impl Completion {
             guard.quarantine();
         }
         if self.spared() {
-            self.status.report_failure(error);
+            if error != ECANCELED || self.interrupted() {
+                self.status.report_failure(error);
+            }
         } else {
             self.report(error);
         }
