@@ -566,6 +566,21 @@ impl Firmware {
             } = KBox::into_inner(firmware);
             return Err(orphan(session, objects, channels, init, events, e));
         }
+        if cfg.platform == hw::Platform::DeviceTree {
+            // T6031: nothing else sets the PMP's AGX request, and without it memory stays at its
+            // idle floor. Set it after setup, as T6030 does; a failure keeps the GPU as before.
+            // SAFETY: The session is retained until reboot, and the request with it.
+            let ret = unsafe { boot::glue::asahi_g15_pmp_report_t6031(true) };
+            if ret == 0 {
+                dev_info!(dev.as_ref(), "G15: PMP AGX request set (memory bandwidth scaling)\n");
+            } else if ret != ENODEV.to_errno() {
+                dev_warn!(
+                    dev.as_ref(),
+                    "G15: PMP AGX request failed ({}); memory stays at its idle floor\n",
+                    ret
+                );
+            }
+        }
         Ok(firmware)
     }
 }

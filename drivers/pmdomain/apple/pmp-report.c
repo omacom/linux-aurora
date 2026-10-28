@@ -1348,6 +1348,58 @@ int apple_pmp_report_set_t6030_gfx(struct device *supplier, bool enable)
 }
 EXPORT_SYMBOL_GPL(apple_pmp_report_set_t6030_gfx);
 
+/*
+ * T6031 (M3 Max): the GPU is powered by its PMGR domain alone, with no RTKit
+ * vote, and nothing sets its PTD request, so PMP ignores the GPU's bandwidth
+ * demand and memory stays at its idle floor. AGX is the acknowledged
+ * soc-device ID 14 (record 13) of the J516C table. As on T6030, a request
+ * made before the firmware runs is acknowledged without enabling bandwidth
+ * scaling: enabling clears and sets it again. On a failed enable the request
+ * is cleared, which is how the GPU ran before.
+ */
+int apple_pmp_report_t6031_gfx(bool enable)
+{
+	struct apple_pmp_report *rep, *found = NULL;
+	struct device_node *pmp = NULL;
+	const u8 *table = NULL;
+	int len = 0, ret = -ENODEV;
+
+	if (!IS_ENABLED(CONFIG_APPLE_T6031_GPU_PMP_REPORT) ||
+	    !of_machine_is_compatible("apple,t6031"))
+		return -ENODEV;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(rep, &apple_pmp_reports, list) {
+		if (rep->offsets != &apple_pmp_offsets_t6031)
+			continue;
+		if (found)
+			goto out;
+		found = rep;
+	}
+	if (!found)
+		goto out;
+	pmp = of_parse_phandle(found->dev->of_node, "apple,pmp", 0);
+	if (pmp && of_device_is_compatible(pmp, "apple,t6031-pmp-v2"))
+		table = of_get_property(pmp, "apple,tunable-soc-device", &len);
+	if (!apple_pmp_devices_valid(table, len > 0 ? len : 0, BIT_ULL(13), BIT_ULL(13), true) ||
+	    memcmp(table + 13 * PMP_SOC_DEVICE_SIZE + 116, "AGX\0\0\0\0\0", 8)) {
+		ret = -EINVAL;
+	} else if (readq(found->base + found->offsets->status) != PMP_REPORT_READY) {
+		ret = -EAGAIN;
+	} else {
+		ret = apple_pmp_report_set_state(found, 13, false, false);
+		if (!ret && enable)
+			ret = apple_pmp_report_set_state(found, 13, true, false);
+		if (ret && enable)
+			apple_pmp_report_set_state(found, 13, false, false);
+	}
+	of_node_put(pmp);
+out:
+	rcu_read_unlock();
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_t6031_gfx);
+
 static int apple_pmp_report_entry_set_state(struct generic_pm_domain *genpd, bool enable)
 {
 	struct apple_pmp_report_entry *ent = genpd_to_apple_pmp_report_entry(genpd);
