@@ -651,10 +651,12 @@ static int apple_isp_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
-	err = apple_isp_detect_camera(isp);
-	if (err) {
-		dev_err(dev, "failed to detect camera: %d\n", err);
-		goto free_surface;
+	if (!isp->hw->resident_fw_deferred) {
+		err = apple_isp_detect_camera(isp);
+		if (err) {
+			dev_err(dev, "failed to detect camera: %d\n", err);
+			goto free_surface;
+		}
 	}
 
 	err = apple_isp_setup_video(isp);
@@ -1030,8 +1032,8 @@ static __maybe_unused int apple_isp_freeze(struct device *dev)
 	/*
 	 * Hibernation hands the system from one kernel to another, and
 	 * firmware left running would go on using the memory of the kernel
-	 * that started it. Stop it cleanly instead; the camera is then
-	 * unavailable until the next system boot.
+	 * that started it. Stop it cleanly instead; if it ran, the camera is
+	 * then unavailable until the next system boot.
 	 */
 	if (isp->hw->resident_fw) {
 		mutex_lock(&isp->video_lock);

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * KUnit tests for the DART address filter windows of the Apple ISP driver,
- * built into isp-drv.c. They need no hardware.
+ * KUnit tests for the per-SoC data of the Apple ISP driver, built into
+ * isp-drv.c: the DART address filter windows and the firmware start. They
+ * need no hardware.
  */
 
 #include <kunit/device.h>
@@ -97,3 +98,29 @@ static struct kunit_suite isp_dapf_test_suite = {
 };
 
 kunit_test_suite(isp_dapf_test_suite);
+
+/* Only resident firmware may defer its start: it is detected once. */
+static void isp_test_deferred_is_resident(struct kunit *test)
+{
+	const struct of_device_id *match;
+
+	for (match = apple_isp_of_match; match->compatible[0]; match++) {
+		const struct apple_isp_hw *hw = match->data;
+
+		if (hw->resident_fw_deferred)
+			KUNIT_EXPECT_TRUE_MSG(test, hw->resident_fw, "%s",
+					      match->compatible);
+	}
+}
+
+static struct kunit_case isp_hw_test_cases[] = {
+	KUNIT_CASE(isp_test_deferred_is_resident),
+	{}
+};
+
+static struct kunit_suite isp_hw_test_suite = {
+	.name = "apple-isp-hw",
+	.test_cases = isp_hw_test_cases,
+};
+
+kunit_test_suite(isp_hw_test_suite);

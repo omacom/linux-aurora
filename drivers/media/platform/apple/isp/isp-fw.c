@@ -1045,7 +1045,8 @@ static void isp_firmware_shutdown(struct apple_isp *isp)
  * Resident firmware (hw->resident_fw) is loaded by the bootloader and
  * does not start again once it has been stopped: after CISP_CMD_SUSPEND,
  * a coprocessor reset and a power cycle of its domains it never completes
- * the first handshake. It is booted once, at probe, and runs until the
+ * the first handshake. It is booted once, at probe or with
+ * resident_fw_deferred at the first stream, and runs until the
  * driver is unbound, probe fails or the system hibernates, also across
  * suspend; after it has stopped the device stays unusable until the next
  * system boot.
@@ -1091,7 +1092,7 @@ int apple_isp_firmware_boot(struct apple_isp *isp)
 	return 0;
 }
 
-/* The end of a stream or of the camera detection at probe */
+/* The end of a stream or of the camera detection */
 void apple_isp_firmware_shutdown(struct apple_isp *isp)
 {
 	if (!isp->hw->resident_fw) {
