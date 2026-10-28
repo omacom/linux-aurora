@@ -862,7 +862,7 @@ impl InitData {
             clusters,
         };
         if variant.graph == super::fw::variant::InitGraph::V25G83 {
-            return self.build_25g83(&env, cfg, metrics, active_cores);
+            return self.build_25g83(&env, cfg, metrics, active_cores, variant);
         }
         self.map_register_windows(&env, cfg.windows)?;
         let tables = self.build_descriptor_tables(&env, abi::private::SIZE)?;

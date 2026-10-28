@@ -91,8 +91,8 @@ unsafe impl Sync for Views {}
 #[pin_data]
 pub(super) struct Port {
     views: SetOnce<Views>,
-    /// Register access for tracing the core power state at the doorbell.
     regs: SetOnce<crate::regs::G17Resources>,
+    registration: SetOnce<super::fw::variant::QueueRegistration>,
     /// Compute work-ring slots reserved by publishers that have not exposed them yet.
     #[pin]
     rings: SpinLock<[u32; PRIORITIES]>,
@@ -163,6 +163,7 @@ impl Port {
             pin_init!(Self {
                 views: SetOnce::new(),
                 regs: SetOnce::new(),
+                registration: SetOnce::new(),
                 rings <- new_spinlock!([0; PRIORITIES], "g17::Port::rings"),
                 qos <- new_spinlock!(qos::Accounting::new(), "g17::Port::qos"),
                 rx: SetOnce::new(),
@@ -182,15 +183,35 @@ impl Port {
     }
 
     /// Called once while the session is built, before any publisher can see the port.
-    pub(super) fn attach(&self, views: Views, regs: crate::regs::G17Resources) -> Result {
-        // SAFETY: The session's primary coprocessor owns the mailbox and outlives the port, and
-        // with it every use of the handle.
+    pub(super) fn attach(
+        &self,
+        views: Views,
+        regs: crate::regs::G17Resources,
+        registration: super::fw::variant::QueueRegistration,
+    ) -> Result {
+        // SAFETY: The session owns the mailbox and outlives every port user.
         let rx = unsafe { (*views.mailbox).rx_util_min_handle() };
-        if self.views.populate(views) && self.regs.populate(regs) && self.rx.populate(rx) {
+        if self.views.populate(views)
+            && self.regs.populate(regs)
+            && self.registration.populate(registration)
+            && self.rx.populate(rx)
+        {
             Ok(())
         } else {
             Err(EBUSY)
         }
+    }
+
+    pub(super) fn register_queues(&self, queues: &[super::fw::kick::KsmQueue]) -> Result {
+        use super::fw::variant::QueueRegistration;
+        if self.registration.as_ref() != Some(&QueueRegistration::Mailbox) {
+            return Ok(());
+        }
+        let regs = self.regs.as_ref().ok_or(ENODEV)?;
+        for queue in queues {
+            regs.register_ksm_queue(queue.qid, queue.descriptor)?;
+        }
+        Ok(())
     }
 
     fn views(&self) -> Result<&Views> {

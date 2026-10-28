@@ -26,6 +26,16 @@ pub(crate) const COMPUTE_KICK_EVENT_MASK: [u64; 4] = [0, 0, 4, 0];
 const COMPUTE_REGISTERS: usize = 41;
 const COMPUTE_REGISTERS_MAX: usize = COMPUTE_REGISTERS + 1;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ComputeProgram {
+    G17P,
+    V25F84,
+}
+
+const V25F84_REGISTERS: usize = 36;
+const V25F84_CHECKPOINTS: [u16; 4] = [34, 35, 35, V25F84_REGISTERS as u16];
+const V25F84_UNK_0A599_FIRST: u64 = 0x0000_0132_0040_0020;
+
 /// Validated per-command shader-context scratch request.
 ///
 /// The layout word is Apple's packed SCS layout: depth (bits 0:15), levels
@@ -133,8 +143,11 @@ impl ScratchRequest {
         self.tail
     }
 
-    fn checkpoints(self) -> [u16; 4] {
-        CHECKPOINTS.map(|count| count + u16::from(self.enabled()))
+    fn checkpoints(self, program: ComputeProgram) -> [u16; 4] {
+        match program {
+            ComputeProgram::G17P => CHECKPOINTS.map(|count| count + u16::from(self.enabled())),
+            ComputeProgram::V25F84 => V25F84_CHECKPOINTS,
+        }
     }
 }
 const ALT_REGISTERS: usize = 4;
@@ -186,6 +199,15 @@ impl OperandState {
         r0a5c1: 0x0005,
         r0a5c9: 0x1e000,
         size: 0x44000,
+    };
+    pub(crate) const FOUR_BY_TEN: OperandState = OperandState {
+        r10229: 0x78800,
+        r140a8: 0x7a800,
+        r10099: 0x3c405,
+        r10091: 0x78400,
+        r0a5c1: 0x0005,
+        r0a5c9: 0x3c000,
+        size: 0x80000,
     };
 }
 
@@ -279,6 +301,7 @@ impl IntersectionTables {
 
 /// Inputs of one compute descriptor.
 pub(crate) struct ComputeArgs {
+    pub(crate) program: ComputeProgram,
     pub(crate) intersection: IntersectionTables,
     /// Scratch request validated with the userspace command.
     pub(crate) scratch: ScratchRequest,
@@ -373,6 +396,61 @@ fn compute_registers(args: &ComputeArgs) -> Result<[RegisterWrite; COMPUTE_REGIS
         RegisterWrite::new(0x1a141, args.scratch.driver_word()),
         RegisterWrite::new(0x107a1, args.scratch.window_word()),
         RegisterWrite::new(0x0a599, UNK_0A599),
+        RegisterWrite::new(0x0d411, UNK_0D411),
+        RegisterWrite::new(0x1a540, ids),
+        RegisterWrite::new(0x014a9, ids),
+        RegisterWrite::new(0x0a351, ids),
+        RegisterWrite::new(0x10201, key),
+        RegisterWrite::new(0x10428, key),
+        RegisterWrite::new(0x14028, u64::from(args.free_list_slot)),
+        RegisterWrite::new(0x14070, args.usage_va | 1),
+        RegisterWrite::new(0x10229, offset_va(operand, state.r10229)?),
+        RegisterWrite::new(0x140a8, offset_va(operand, state.r140a8)?),
+        RegisterWrite::new(0x10099, offset_va(operand, state.r10099)?),
+        RegisterWrite::new(0x10091, offset_va(operand, state.r10091)?),
+        RegisterWrite::new(0x0a5c1, offset_va(operand, state.r0a5c1)?),
+        RegisterWrite::new(0x0a5c9, offset_va(operand, state.r0a5c9)?),
+        RegisterWrite::new(0x1a440, UNK_1A440_FINAL),
+        RegisterWrite::new(0x0a599, UNK_0A599),
+    ])
+}
+
+fn compute_registers_25f84(args: &ComputeArgs) -> Result<[RegisterWrite; V25F84_REGISTERS]> {
+    let preempt = args.preempt_va;
+    let operand = args.operand_state_va;
+    let state = args.operand;
+    let key = work_key(args.context_id, args.work_state);
+    let ids = OBJECT_IDS.word();
+    let intersection = args.intersection.words();
+
+    Ok([
+        RegisterWrite::new(0x1a510, preempt),
+        RegisterWrite::new(0x1a420, args.cdm_va),
+        RegisterWrite::new(0x1a4d0, offset_va(preempt, PREEMPT_STATE[0])?),
+        RegisterWrite::new(0x1a4d8, offset_va(preempt, PREEMPT_STATE[1])?),
+        RegisterWrite::new(0x1a4e0, offset_va(preempt, PREEMPT_STATE[2])?),
+        RegisterWrite::new(0x1a4e8, offset_va(preempt, PREEMPT_STATE[3])?),
+        RegisterWrite::new(0x1a440, UNK_1A440),
+        RegisterWrite::new(0x1a458, UNK_1A458),
+        RegisterWrite::new(0x101d9, UNK_101D9),
+        RegisterWrite::new(0x1a089, intersection[0]),
+        RegisterWrite::new(0x1a091, intersection[1]),
+        RegisterWrite::new(0x1a059, intersection[2]),
+        RegisterWrite::new(0x1a061, intersection[3]),
+        RegisterWrite::new(0x1a0b9, intersection[4]),
+        RegisterWrite::new(0x1a0c1, intersection[5]),
+        RegisterWrite::new(0x101d1, args.scratch.size_word()),
+        RegisterWrite::new(
+            0x0d479,
+            if args.intersection.auxiliary == 0 {
+                args.scratch.tail_word()
+            } else {
+                u64::from(args.intersection.auxiliary)
+            },
+        ),
+        RegisterWrite::new(0x1a0e9, args.scratch.stack_word()),
+        RegisterWrite::new(0x107a1, args.scratch.window_word()),
+        RegisterWrite::new(0x0a599, V25F84_UNK_0A599_FIRST),
         RegisterWrite::new(0x0d411, UNK_0D411),
         RegisterWrite::new(0x1a540, ids),
         RegisterWrite::new(0x014a9, ids),
@@ -506,6 +584,8 @@ impl ComputeDescriptor {
     const UNK_FB0: u16 = 0x1a;
     const UNK_FBA: u32 = 0xe0a0_0001;
     const UNK_FC5: u8 = 0x9f;
+    const UNK_FBA_25F84: u32 = 0x6c00_0001;
+    const UNK_FC5_25F84: u8 = 0x5f;
 
     /// Fills a descriptor cleared by `Object::initialize`. The unused firmware
     /// fields and padding retain that zero initialization.
@@ -516,7 +596,6 @@ impl ComputeDescriptor {
         {
             return Err(EINVAL);
         }
-        let registers = compute_registers(args)?;
         let alt_registers = alt_registers(args)?;
         let registers_va = offset_va(args.descriptor_va, Self::REGISTERS_OFFSET)?;
         let alt_registers_va = offset_va(args.descriptor_va, Self::ALT_REGISTERS_OFFSET)?;
@@ -526,11 +605,18 @@ impl ComputeDescriptor {
         self.tag = CommandTag::Compute as u32;
         self.context_id = args.context_id.into();
         self.work_state_va = args.work_state_va;
-        self.checkpoints = args.scratch.checkpoints();
-        // The enabled program prepends one register; disabled descriptors keep
-        // the same forty writes, trailer count and resume checkpoints.
-        let first = usize::from(!args.scratch.enabled());
-        self.registers.set(registers_va, &registers[first..])?;
+        self.checkpoints = args.scratch.checkpoints(args.program);
+        match args.program {
+            ComputeProgram::G17P => {
+                let registers = compute_registers(args)?;
+                let first = usize::from(!args.scratch.enabled());
+                self.registers.set(registers_va, &registers[first..])?;
+            }
+            ComputeProgram::V25F84 => {
+                self.registers
+                    .set(registers_va, &compute_registers_25f84(args)?)?;
+            }
+        }
         self.alt_registers.set(alt_registers_va, &alt_registers)?;
         self.preempt_va = args.preempt_va;
         self.cdm_end_va = args.cdm_end_va;
@@ -552,8 +638,18 @@ impl ComputeDescriptor {
         self.timestamp_end_va = timestamp_end_va;
         self.unk_fb0 = Self::UNK_FB0;
         self.free_list_control_va = args.free_list_control_va;
-        self.unk_fba = Self::UNK_FBA;
-        self.unk_fc5 = Self::UNK_FC5;
+        match args.program {
+            ComputeProgram::G17P => {
+                self.unk_fba = Self::UNK_FBA;
+                self.unk_fc5 = Self::UNK_FC5;
+            }
+            ComputeProgram::V25F84 => {
+                self.unk_fba = Self::UNK_FBA_25F84;
+                self.unk_fbe[0] = 0x06;
+                self.unk_fc5 = Self::UNK_FC5_25F84;
+                self.unk_fc6[0] = 0x04;
+            }
+        }
         self.usage_va = args.usage_fw_va;
         self.context_generation = args.context_generation;
         Ok(())
@@ -564,10 +660,11 @@ impl ComputeDescriptor {
     pub(crate) fn register_bindings(
         descriptor_va: u64,
         scratch: ScratchRequest,
+        program: ComputeProgram,
     ) -> Result<[Option<RegisterArrayBinding>; 4]> {
         let registers = RegisterArrayBinding::new(
             offset_va(descriptor_va, Self::REGISTERS_OFFSET)?,
-            scratch.checkpoints()[0] as u8,
+            scratch.checkpoints(program)[0] as u8,
         )?;
         let alt_registers = RegisterArrayBinding::new(
             offset_va(descriptor_va, Self::ALT_REGISTERS_OFFSET)?,

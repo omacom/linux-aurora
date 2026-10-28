@@ -44,6 +44,16 @@ const FAULT_INFO: usize = 0x17030;
 const G17_HOST_IRQ_SUMMARY: usize = 0xe01000;
 const G17_HOST_POWERED: u32 = 0xf;
 
+const KSM_MAILBOX_TAG: usize = 0x4090;
+const KSM_MAILBOX_DATA: usize = 0x4098;
+const KSM_MAILBOX_FLAGS: u64 = (1 << 42) | (1 << 53);
+const KSM_SLOT_DESCRIPTOR: u64 = 0x21008;
+const KSM_SLOT_TIMESTAMP: u64 = 0x21020;
+const KSM_SELECT: usize = 0x103a8;
+const KSM_RUN_SET: usize = 0x21068;
+const KSM_RUN_CLEAR: usize = 0x21078;
+const KSM_RUNNING: [usize; 2] = [0x21038, 0x21040];
+
 const ID_VERSION: usize = 0xd04000;
 const ID_UNK08: usize = 0xd04008;
 const ID_COUNTS_1: usize = 0xd04010;
@@ -598,6 +608,52 @@ impl G17Resources {
             sgx.try_write64(value, offset)?;
         }
         Ok(true)
+    }
+
+    /// Registers a queue KSM slot through the firmware mailbox.
+    pub(crate) fn register_ksm_queue(&self, qid: u8, descriptor: u64) -> Result {
+        if qid > 127 {
+            return Err(EINVAL);
+        }
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        let tag = |reg: u64| reg | KSM_MAILBOX_FLAGS | (u64::from(qid) << 43);
+        let bit = 1u64 << (qid & 63);
+        let (low, high) = if qid < 64 { (bit, 0) } else { (0, bit) };
+        let running = KSM_RUNNING[usize::from(qid >= 64)];
+        if sgx.try_read64(running)? & bit != 0 {
+            sgx.try_write64(high, KSM_RUN_CLEAR + 8)?;
+            sgx.try_write64(low, KSM_RUN_CLEAR)?;
+        }
+        sgx.try_write64(tag(KSM_SLOT_DESCRIPTOR), KSM_MAILBOX_TAG)?;
+        sgx.try_write64(descriptor, KSM_MAILBOX_DATA)?;
+        sgx.try_write64(tag(KSM_SLOT_TIMESTAMP), KSM_MAILBOX_TAG)?;
+        sgx.try_read64(KSM_MAILBOX_DATA)?;
+        sgx.try_write64(tag(KSM_SLOT_DESCRIPTOR), KSM_MAILBOX_TAG)?;
+        let mut readback = sgx.try_read64(KSM_MAILBOX_DATA)?;
+        let direct = readback != descriptor;
+        if direct {
+            sgx.try_write64(u64::from(qid), KSM_SELECT)?;
+            sgx.try_write64(descriptor, KSM_SLOT_DESCRIPTOR as usize)?;
+            readback = sgx.try_read64(KSM_SLOT_DESCRIPTOR as usize)?;
+        }
+        if readback != descriptor {
+            dev_err!(
+                self.dev.as_ref(),
+                "KSM queue {} slot descriptor {:#x} did not take (reads {:#x})\n",
+                qid,
+                descriptor,
+                readback
+            );
+            return Err(EIO);
+        }
+        if sgx.try_read64(running)? & bit == 0 {
+            sgx.try_write64(high, KSM_RUN_SET + 8)?;
+            sgx.try_write64(low, KSM_RUN_SET)?;
+        }
+        sgx.try_write64(tag(KSM_SLOT_TIMESTAMP), KSM_MAILBOX_TAG)?;
+        sgx.try_read64(KSM_MAILBOX_DATA)?;
+        Ok(())
     }
 
     fn sgx_read32<const OFF: usize>(&self) -> u32 {

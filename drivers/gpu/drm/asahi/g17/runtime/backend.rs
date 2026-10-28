@@ -177,7 +177,7 @@ impl job::Backend for Backend {
         // A reverse timeline chain must be submitted before the host signal.
         // Validate here, but do not consume physical capacity behind unsignalled
         // DRM dependencies. compute_packet admits it when the job can run.
-        crate::g17::fw::compute_pool::required_blocks(self.shared.active_cores, scs_pages)
+        crate::g17::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scs_pages)
             .map(|_| ())
     }
 

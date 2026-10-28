@@ -18,6 +18,7 @@ use kernel::{c_str, prelude::*};
 struct Objects {
     views: [usize; 5],
     firmware_area: usize,
+    firmware_area_2: Option<usize>,
     power_state: usize,
     aon: usize,
 }
@@ -30,6 +31,7 @@ impl InitData {
         cfg: &Config,
         metrics: &KernelObject,
         active_cores: u32,
+        variant: &crate::g17::fw::Variant,
     ) -> Result {
         self.status_a = v::private::STATUS_A;
         self.status_b = v::private::STATUS_B;
@@ -39,9 +41,9 @@ impl InitData {
         let first_block = self.build_render_pool(env)?;
         self.build_compute_pools(env, first_block)?;
         let bundle = self.build_bundle(env, cfg, metrics)?;
-        let objects = self.build_25g83_objects(env)?;
+        let objects = self.build_25g83_objects(env, variant.split_firmware_area)?;
         self.views = Some(objects.views);
-        self.initialize_25g83(env, cfg, active_cores, &tables, &bundle, &objects)?;
+        self.initialize_25g83(env, cfg, active_cores, &tables, &bundle, &objects, variant)?;
         if cfg.uat_quirks.clean_tables {
             // Write back every host-built byte before the firmware may read it.
             for object in self.objects.iter_mut() {
@@ -53,8 +55,7 @@ impl InitData {
         Ok(())
     }
 
-    /// The views, the firmware area, the power-state object and the AON table.
-    fn build_25g83_objects(&mut self, env: &BuildEnv<'_>) -> Result<Objects> {
+    fn build_25g83_objects(&mut self, env: &BuildEnv<'_>, split: bool) -> Result<Objects> {
         use mmu::{PROT_FW_PRIV_RW as FP, PROT_FW_SHARED_RW as FS};
         use CpuMap::WriteCombined as WC;
         let mut views = [0; 5];
@@ -63,12 +64,17 @@ impl InitData {
         }
         let firmware_area =
             self.add(env.fixed(v::kernel_window::FIRMWARE_AREA, mmu::UAT_PGSZ, FP, WC)?)?;
+        let firmware_area_2 = match split {
+            true => Some(self.add(env.dynamic(mmu::UAT_PGSZ, mmu::UAT_PGSZ as u64, FP, WC)?)?),
+            false => None,
+        };
         let power_state =
             self.add(env.fixed(v::kernel_window::POWER_STATE, mmu::UAT_PGSZ, FS, WC)?)?;
         let aon = self.add(env.fixed(v::kernel_window::AON_TABLE, mmu::UAT_PGSZ, FP, WC)?)?;
         Ok(Objects {
             views,
             firmware_area,
+            firmware_area_2,
             power_state,
             aon,
         })
@@ -84,15 +90,25 @@ impl InitData {
         tables: &DescriptorTables,
         bundle: &BundleObjects,
         objects: &Objects,
+        variant: &crate::g17::fw::Variant,
     ) -> Result {
         let bundle_va = self.object(self.bundle)?.gpu_va();
         let cluster_va = self.object(self.cluster)?.gpu_va();
         let config_va = cluster_va + v::private::CONFIG as u64;
         let status_a_va = cluster_va + v::private::STATUS_A as u64;
         let status_b_va = cluster_va + v::private::STATUS_B as u64;
-        let aon_va = self.object(objects.aon)?.gpu_va();
+        let chip = cfg.chip;
+        let aon_table = chip.map_or(v::AON_TABLE.as_slice(), |chip| chip.aon_table);
+        let aon_va = match aon_table.is_empty() {
+            true => 0,
+            false => self.object(objects.aon)?.gpu_va(),
+        };
         let power_state_va = self.object(objects.power_state)?.gpu_va();
         let firmware_area_va = self.object(objects.firmware_area)?.gpu_va();
+        let firmware_area_2_va = match objects.firmware_area_2 {
+            Some(index) => self.object(index)?.gpu_va(),
+            None => firmware_area_va,
+        };
         let mut view_va = [0; 5];
         for (va, index) in view_va.iter_mut().zip(objects.views) {
             *va = self.object(index)?.gpu_va();
@@ -101,14 +117,28 @@ impl InitData {
         let opps = Self::opps(env.dev, cfg.opps, env.clusters)?;
         let cs_opps = Self::opp_table(env.dev, c_str!("apple,cs-opp"))?;
         let afr_opps = Self::opp_table(env.dev, c_str!("apple,afr-opp"))?;
-        let calibration = Calibration::read(env.dev)?;
-        calibration.check_opps(&opps)?;
+        let calibration = if chip.is_none() {
+            let calibration = Calibration::read(env.dev)?;
+            calibration.check_opps(&opps)?;
+            Some(calibration)
+        } else {
+            None
+        };
+        let (perf, max_power_mw, leakage) = match (calibration.as_ref(), chip) {
+            (Some(calibration), None) => (
+                &calibration.perf,
+                calibration.max_power_mw,
+                &calibration.leakage,
+            ),
+            (None, Some(chip)) => (cfg.perf, chip.max_power_mw, &chip.leakage),
+            _ => return Err(EINVAL),
+        };
         let hw_args = abi::HwDataArgs {
             chip_id: cfg.chip_id,
             windows: cfg.windows,
             reserved_slots: cfg.reserved_slots,
             opps: &opps,
-            perf: &calibration.perf,
+            perf,
             completion_rings: bundle.completion_rings,
             qos_va: self.object(bundle.qos)?.gpu_va(),
         };
@@ -116,6 +146,7 @@ impl InitData {
             active_cores,
             cs_opps: &cs_opps,
             afr_opps: &afr_opps,
+            chip,
         };
         // SAFETY: Plain C entropy source.
         let entropy = unsafe { kernel::bindings::get_random_u32() };
@@ -126,22 +157,19 @@ impl InitData {
             })?;
         self.object_mut(self.bundle)?
             .initialize::<v::PowerConfig25G83>(v::POWER_CONFIG, |power| {
-                power.init(
-                    config_va,
-                    aon_va,
-                    entropy,
-                    calibration.max_power_mw,
-                    &calibration.leakage,
-                );
+                power.init(config_va, aon_va, entropy, max_power_mw, leakage);
+                if let Some(chip) = chip {
+                    power.apply_chip(chip)?;
+                }
                 Ok(())
             })?;
         self.object_mut(self.region_c)?
             .initialize::<abi::RegionC>(0, |region| {
                 region.init(cfg.region_c);
-                region.max_power_mw = calibration.max_power_mw;
+                region.max_power_mw = max_power_mw;
                 Ok(())
             })?;
-        for (index, word) in v::AON_TABLE.iter().enumerate() {
+        for (index, word) in aon_table.iter().enumerate() {
             self.object_mut(objects.aon)?.write(index * 4, *word)?;
         }
 
@@ -180,7 +208,7 @@ impl InitData {
             .initialize::<abi::MainConfig>(main_offset, |main| {
                 main.init_primary(&args, &views);
                 main.view_va = view_va;
-                main.firmware_area_va = [firmware_area_va; 2];
+                main.firmware_area_va = [firmware_area_va, firmware_area_2_va];
                 main.unk_18 = (cluster_va + v::private::MAIN_HEADER as u64).to_le_bytes();
                 // The secondary role's words, on the single instance.
                 main.unk_300 = 4;
@@ -189,10 +217,12 @@ impl InitData {
                 main.unk_344 = 0;
                 Ok(())
             })?;
-        self.object_mut(self.bundle)?.write(
-            main_offset + abi::MainConfig::CONTROL_RING,
-            abi::OpeningRecord::new(abi::Role::Primary),
-        )?;
+        if variant.opening_record {
+            self.object_mut(self.bundle)?.write(
+                main_offset + abi::MainConfig::CONTROL_RING,
+                abi::OpeningRecord::new(abi::Role::Primary),
+            )?;
+        }
 
         // The merged root.
         let root = abi::RootArgs {
@@ -214,12 +244,11 @@ impl InitData {
             }
         }
 
-        // The opening control record is staged in slot 0.
-        for (offset, value) in [
-            (0, 0),
-            (0x10, 0),
-            (abi::ChannelState::PRODUCER, abi::OPENING_PRODUCER),
-        ] {
+        let producer = match variant.opening_record {
+            true => abi::OPENING_PRODUCER,
+            false => 0,
+        };
+        for (offset, value) in [(0, 0), (0x10, 0), (abi::ChannelState::PRODUCER, producer)] {
             self.object(self.cluster)?
                 .word(self.state_offset(Role::Primary) + abi::CONTROL_STATE_OFFSET + offset)?
                 .store(value, Ordering::Relaxed);

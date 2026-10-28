@@ -507,10 +507,46 @@ impl KickEntry {
     }
 }
 
+pub(crate) fn ksm_slot_descriptor(
+    ring_va: u64,
+    data_master: super::queue::DataMaster,
+    priority: u8,
+) -> Result<u64> {
+    if ring_va & !RenderRegistration::ADDRESS_MASK != 0 || priority >= Policy::PRIORITIES {
+        return Err(EINVAL);
+    }
+    let term = (3 * (4 - u64::from(priority)) + 0x3fe).wrapping_shl(54);
+    Ok(((data_master as u64 + 1) << 60) | ring_va | term)
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct KsmQueue {
+    pub(crate) qid: u8,
+    pub(crate) descriptor: u64,
+}
+
+impl KsmQueue {
+    pub(crate) fn new(
+        qid: u8,
+        ring_va: u64,
+        data_master: super::queue::DataMaster,
+        priority: u8,
+    ) -> Result<Self> {
+        if qid > QID_MAX {
+            return Err(EINVAL);
+        }
+        Ok(Self {
+            qid,
+            descriptor: ksm_slot_descriptor(ring_va, data_master, priority)?,
+        })
+    }
+}
+
 /// The complete write-only installation of a fragment/tiling queue pair.
 /// Firmware must see both queues configured before either outer command.
 pub(crate) struct RenderRegistration {
     writes: [(usize, u64); 8],
+    queues: [KsmQueue; 2],
 }
 
 impl RenderRegistration {
@@ -540,8 +576,7 @@ impl RenderRegistration {
             if qid > QID_MAX || va & !Self::ADDRESS_MASK != 0 {
                 return Err(EINVAL);
             }
-            let completion = (3 * (4 - u64::from(priority)) + 0x3fe).wrapping_shl(54);
-            let payload = ((engine as u64 + 1) << 60) | va | completion;
+            let payload = ksm_slot_descriptor(va, engine, priority)?;
             let (low, high) = if qid < 64 {
                 (1u64 << qid, 0)
             } else {
@@ -554,10 +589,30 @@ impl RenderRegistration {
                 (Self::VALID_LOW, low),
             ]);
         }
-        Ok(Self { writes })
+        Ok(Self {
+            writes,
+            queues: [
+                KsmQueue::new(
+                    fragment.0,
+                    fragment.1,
+                    super::queue::DataMaster::Fragment,
+                    priority,
+                )?,
+                KsmQueue::new(
+                    tiling.0,
+                    tiling.1,
+                    super::queue::DataMaster::Tiling,
+                    priority,
+                )?,
+            ],
+        })
     }
 
     pub(crate) fn writes(&self) -> &[(usize, u64); 8] {
         &self.writes
+    }
+
+    pub(crate) fn queues(&self) -> &[KsmQueue; 2] {
+        &self.queues
     }
 }

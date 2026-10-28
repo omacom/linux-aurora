@@ -70,6 +70,10 @@ impl Deflake {
         sub: [0xa0, 0x820],
         viewport: false,
     };
+    pub(crate) const FOUR_CLUSTERS: Deflake = Deflake {
+        sub: [0x120, 0xda0],
+        viewport: false,
+    };
 }
 
 /// The register programs of a firmware build's render descriptors.

@@ -51,6 +51,7 @@ pub(crate) const CONFIG: Config = Config {
     opps: OPPS,
     uat_quirks: crate::mmu::UatQuirks::DEFAULT,
     region_c: &crate::g17::fw::initdata::REGION_C_26A428,
+    chip: None,
     adopt_root_entries: true,
     fabric_bridge: true,
     firmware: crate::g17::fw::variant::Firmware::Fixed(&crate::g17::fw::variant::V26A428),
@@ -60,6 +61,7 @@ pub(crate) const CONFIG: Config = Config {
         alternate_core_masks: None,
         operand_state: crate::g17::fw::compute::OperandState::ONE_BY_SIX,
         deflake: crate::g17::fw::render::Deflake::ONE_CLUSTER,
+        compute_blocks: crate::g17::fw::freelist::COMPUTE_BLOCKS,
     },
 };
 
