@@ -137,6 +137,15 @@ struct isp_mmio_window {
 	u64 size;
 };
 
+/*
+ * A DART address filter window. Both bounds are inclusive and word
+ * granular, as the hardware takes them.
+ */
+struct isp_dapf_window {
+	u64 start;
+	u64 end;
+};
+
 struct isp_preset {
 	u32 index;
 	struct coord input_dim;
@@ -191,6 +200,14 @@ struct apple_isp_hw {
 	/* windows mapped 1:1 for the firmware */
 	const struct isp_mmio_window *fw_mmio;
 	unsigned int num_fw_mmio;
+
+	/*
+	 * The windows the ADT gives the first DART's address filter, inside
+	 * the fw_mmio windows. The filter loses them with ISP_SYS, so they
+	 * are programmed after every power-up.
+	 */
+	const struct isp_dapf_window *dapf;
+	unsigned int num_dapf;
 
 	/* ISP_GPIO_6 boot mode */
 	u32 boot_mode;
@@ -330,6 +347,7 @@ struct apple_isp {
 	void __iomem *gpio;
 	void __iomem *mbox2;
 	void __iomem *wdt;
+	void __iomem *dapf;
 	struct hrtimer wdt_timer;
 	bool wdt_running;
 
@@ -423,6 +441,8 @@ enum {
 	ISP_STATE_LOGGING,
 	ISP_STATE_SLEEPING,
 };
+
+int apple_isp_program_dapf(struct apple_isp *isp);
 
 #define isp_dbg(isp, fmt, ...) \
 	dev_dbg((isp)->dev, "[%s] " fmt, __func__, ##__VA_ARGS__)

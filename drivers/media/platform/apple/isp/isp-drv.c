@@ -175,6 +175,78 @@ static int isp_of_region_iova(struct device *dev, const char *name,
 	return 0;
 }
 
+/*
+ * The firmware reaches its fixed MMIO windows through the first DART, whose
+ * address filter the ADT describes for them. Its registers are on that DART.
+ */
+static int apple_isp_map_dapf(struct apple_isp *isp)
+{
+	struct device *dev = isp->dev;
+	/* The first iommus entry, whatever its #iommu-cells */
+	struct device_node *dart __free(device_node) =
+		of_parse_phandle(dev->of_node, "iommus", 0);
+	struct resource res;
+	int idx, err;
+
+	if (!dart)
+		return dev_err_probe(dev, -ENODEV, "no ISP DART\n");
+
+	/* DAPF_* describe the T8110 DART's address filter */
+	if (!of_device_is_compatible(dart, "apple,t8110-dart"))
+		return dev_err_probe(dev, -ENODEV,
+				     "%pOF has no known address filter\n", dart);
+
+	idx = of_property_match_string(dart, "reg-names", "dapf");
+	if (idx < 0)
+		return dev_err_probe(dev, idx,
+				     "%pOF has no address filter registers\n", dart);
+
+	err = of_address_to_resource(dart, idx, &res);
+	if (err)
+		return dev_err_probe(dev, err, "%pOF: bad address filter registers\n",
+				     dart);
+
+	if (resource_size(&res) < isp->hw->num_dapf * DAPF_WINDOW_STRIDE)
+		return dev_err_probe(dev, -EINVAL, "%pOF: address filter too small\n",
+				     dart);
+
+	isp->dapf = devm_ioremap_resource(dev, &res);
+	return PTR_ERR_OR_ZERO(isp->dapf);
+}
+
+/* Program the address filter windows, then check that they took. */
+int apple_isp_program_dapf(struct apple_isp *isp)
+{
+	const struct apple_isp_hw *hw = isp->hw;
+	void __iomem *w;
+	unsigned int i;
+
+	for (i = 0; i < hw->num_dapf; i++) {
+		w = isp->dapf + i * DAPF_WINDOW_STRIDE;
+		writel(0, w + DAPF_CTRL1);
+		writeq(hw->dapf[i].start, w + DAPF_START);
+		writeq(hw->dapf[i].end, w + DAPF_END);
+		writel(DAPF_CTRL0_ISP, w + DAPF_CTRL0);
+		writel(DAPF_CTRL2_ISP, w + DAPF_CTRL2);
+	}
+
+	/* Only bits 7:0 of CTRL0 and bits 63:2 of END read back. */
+	for (i = 0; i < hw->num_dapf; i++) {
+		w = isp->dapf + i * DAPF_WINDOW_STRIDE;
+		if (readl(w + DAPF_CTRL1) ||
+		    readq(w + DAPF_START) != hw->dapf[i].start ||
+		    (readq(w + DAPF_END) | 3) != (hw->dapf[i].end | 3) ||
+		    (readl(w + DAPF_CTRL0) & 0xff) != DAPF_CTRL0_ISP ||
+		    readl(w + DAPF_CTRL2) != DAPF_CTRL2_ISP) {
+			dev_err(isp->dev, "DAPF window %u (0x%llx-0x%llx) failed readback\n",
+				i, hw->dapf[i].start, hw->dapf[i].end);
+			return -EIO;
+		}
+	}
+
+	return 0;
+}
+
 static int apple_isp_init_iommu(struct apple_isp *isp)
 {
 	struct device *dev = isp->dev;
@@ -520,6 +592,12 @@ static int apple_isp_probe(struct platform_device *pdev)
 			err = PTR_ERR(isp->mbox2);
 			goto detach_genpd;
 		}
+	}
+
+	if (isp->hw->num_dapf) {
+		err = apple_isp_map_dapf(isp);
+		if (err)
+			goto detach_genpd;
 	}
 
 	/* Capture watchdog, where the ISP gates its frames on one */
@@ -999,3 +1077,7 @@ module_platform_driver(apple_isp_driver);
 MODULE_AUTHOR("Eileen Yoon <eyn@gmx.com>");
 MODULE_DESCRIPTION("Apple ISP driver");
 MODULE_LICENSE("GPL v2");
+
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+#include "isp-drv-test.c"
+#endif

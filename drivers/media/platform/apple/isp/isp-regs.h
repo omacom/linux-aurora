@@ -40,6 +40,20 @@
 #define ISP_COPROC_RESET_ACK_0_T8140 0x1600818
 #define ISP_COPROC_RESET_ACK_1_T8140 0x160081c
 
+/*
+ * Address filter (DAPF) registers of a T8110-type DART: an array of windows,
+ * each with its inclusive start and end and three control words. Every ISP
+ * window takes the control values its ADT dapf-instance entry gives.
+ */
+#define DAPF_WINDOW_STRIDE        0x40
+#define DAPF_CTRL0                0x00
+#define DAPF_CTRL0_ISP            0x31
+#define DAPF_CTRL1                0x04
+#define DAPF_START                0x08
+#define DAPF_END                  0x10
+#define DAPF_CTRL2                0x20
+#define DAPF_CTRL2_ISP            0x1
+
 #define ISP_MBOX_IRQ_INTERRUPT    0x00
 #define ISP_MBOX_IRQ_ENABLE       0x04
 #define ISP_MBOX_IRQ_ENABLE_T6031 0x08

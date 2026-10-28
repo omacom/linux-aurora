@@ -407,6 +407,12 @@ static int isp_firmware_boot_stage1(struct apple_isp *isp)
 	if (err < 0)
 		return err;
 
+	if (isp->dapf) {
+		err = apple_isp_program_dapf(isp);
+		if (err)
+			goto shutdown;
+	}
+
 	/* ISP17a and T6040 have no clock enable word */
 	if (isp->hw->gen != ISP_GEN_T8140 && isp->hw->gen != ISP_GEN_T6040)
 		isp_gpio_write32(isp, ISP_GPIO_CLOCK_EN, 0x1);
