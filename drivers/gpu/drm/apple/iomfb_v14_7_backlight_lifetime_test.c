@@ -31,6 +31,9 @@ struct v14_bl_rpc {
 	u64 iova[5], nits[5];
 	bool nits_present[5];
 	struct drm_framebuffer *owner[5];
+	/* A472 hardware power states, in order. */
+	u64 power[4];
+	unsigned int power_calls, power_refusals;
 	bool block_first, refuse;
 };
 
@@ -47,6 +50,23 @@ static int v14_bl_rpc_call(struct apple_dcp_v14 *v14, u32 tag, const void *in, u
 	memset(out, 0, out_size);
 	if (tag == A(406)) {
 		put_unaligned_le32(1, out);
+		return 0;
+	}
+	/* The panel's display controller: the hardware selector, a null output. */
+	if (tag == A(472)) {
+		KUNIT_EXPECT_EQ(c->test, in_size, 12U);
+		KUNIT_EXPECT_EQ(c->test, out_size, 8U);
+		KUNIT_EXPECT_EQ(c->test, ((const u8 *)in)[8], 1);
+		KUNIT_EXPECT_EQ(c->test, ((const u8 *)in)[11], 1);
+		/* Off only once the blank has retired the frame. */
+		KUNIT_EXPECT_PTR_EQ(c->test, v14->active_fb, NULL);
+		if (c->power_calls < ARRAY_SIZE(c->power))
+			c->power[c->power_calls] = get_unaligned_le64(in);
+		c->power_calls++;
+		if (c->power_refusals) {
+			c->power_refusals--;
+			put_unaligned_le32(1, (u8 *)out + 4);
+		}
 		return 0;
 	}
 	KUNIT_EXPECT_EQ(c->test, tag, A(407));
@@ -285,8 +305,15 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 2);
 	KUNIT_EXPECT_FALSE(test, c->nits_present[1]);
 	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, NULL);
+	/* The blank, then the display controller off. */
+	KUNIT_EXPECT_EQ(test, c->power_calls, 1U);
+	KUNIT_EXPECT_EQ(test, c->power[0], 0ULL);
+	KUNIT_EXPECT_TRUE(test, c->f.v14->panel_off);
 	/* Even the advertised default must be an explicit first request. */
 	dcp_poweron(pdev);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 2U);
+	KUNIT_EXPECT_EQ(test, c->power[1], 1ULL);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
 	v14_bl_request(test, c->f.dcp, DCP_V14_NITS_DEFAULT);
 	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
 	KUNIT_EXPECT_TRUE(test, c->nits_present[2]);
@@ -296,7 +323,10 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, c->nits_present[3]);
 	KUNIT_EXPECT_EQ(test, c->nits[3], 0ULL);
 	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, NULL);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 3U);
 	dcp_poweron(pdev);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 4U);
+	KUNIT_EXPECT_EQ(test, c->power[3], 1ULL);
 	KUNIT_EXPECT_TRUE(test, dcp_backlight_pending(c->f.dcp));
 	KUNIT_EXPECT_FALSE(test, c->f.dcp->backlight.state.dpms_off);
 	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
@@ -304,6 +334,85 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, c->nits_present[4]);
 	KUNIT_EXPECT_EQ(test, c->nits[4], dcp_v14_nits_binary64(DCP_V14_NITS_DEFAULT));
 	KUNIT_EXPECT_FALSE(test, dcp_backlight_pending(c->f.dcp));
+}
+
+/* appledrm.panel_hw_off=0: DPMS off only blanks the panel. */
+static void v14_bl_dpms_blank_only(struct kunit *test)
+{
+	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
+	struct platform_device *pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+	bool saved = panel_hw_off;
+
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	platform_set_drvdata(pdev, c->f.dcp);
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	panel_hw_off = false;
+	dcp_poweroff(pdev);
+	dcp_poweron(pdev);
+	panel_hw_off = saved;
+	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 2);
+	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, NULL);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+}
+
+static bool v14_bl_in_system_sleep(void)
+{
+	return true;
+}
+
+/* System sleep only blanks the panel; s2idle cuts the controller's power. */
+static void v14_bl_sleep_blank_only(struct kunit *test)
+{
+	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
+	struct platform_device *pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	platform_set_drvdata(pdev, c->f.dcp);
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	kunit_activate_static_stub(test, dcp_v14_system_sleep, v14_bl_in_system_sleep);
+	dcp_poweroff(pdev);
+	dcp_poweron(pdev);
+	kunit_deactivate_static_stub(test, dcp_v14_system_sleep);
+	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 2);
+	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, NULL);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+}
+
+/*
+ * A refused power on is tried once more; a controller that stays off keeps
+ * the backlight off, and the next power on tries again.
+ */
+static void v14_bl_power_on_refused(struct kunit *test)
+{
+	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
+	struct platform_device *pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	platform_set_drvdata(pdev, c->f.dcp);
+	v14_bl_request(test, c->f.dcp, DCP_V14_NITS_DEFAULT);
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	dcp_poweroff(pdev);
+	KUNIT_ASSERT_TRUE(test, c->f.v14->panel_off);
+	/* Refused once: the second try powers it on. */
+	c->power_refusals = 1;
+	dcp_poweron(pdev);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 3U);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+	KUNIT_EXPECT_FALSE(test, c->f.dcp->backlight.state.dpms_off);
+	dcp_poweroff(pdev);
+	/* Refused twice: dark, with the backlight still off. */
+	c->power_refusals = 2;
+	dcp_poweron(pdev);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 6U);
+	KUNIT_EXPECT_TRUE(test, c->f.v14->panel_off);
+	KUNIT_EXPECT_TRUE(test, c->f.dcp->backlight.state.dpms_off);
+	/* The next power on tries again and restores the backlight. */
+	dcp_poweron(pdev);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 7U);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+	KUNIT_EXPECT_FALSE(test, c->f.dcp->backlight.state.dpms_off);
 }
 
 /* An actual failed submit must leave the loader's level unknown. */
@@ -406,6 +515,9 @@ static struct kunit_case v14_bl_lifetime_cases[] = {
 	KUNIT_CASE(v14_bl_present_publication_serialized),
 	KUNIT_CASE(v14_bl_running_work_suspend),
 	KUNIT_CASE(v14_bl_dpms_dispatch),
+	KUNIT_CASE(v14_bl_dpms_blank_only),
+	KUNIT_CASE(v14_bl_sleep_blank_only),
+	KUNIT_CASE(v14_bl_power_on_refused),
 	KUNIT_CASE(v14_bl_failed_submit_unknown),
 	KUNIT_CASE(v14_bl_registration_unbind_race),
 	KUNIT_CASE(v14_bl_class_unregistered),
