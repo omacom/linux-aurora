@@ -982,6 +982,69 @@ static const struct apple_isp_hw apple_isp_hw_t6040 = {
 	.meta_exposure = true,
 };
 
+/* T8132: the firmware's MMIO windows, from the J713 ADT's DART address filter */
+static const struct isp_mmio_window apple_isp_fw_mmio_t8132[] = {
+	{ 0x220004000, 0x1d4000 },	/* DSID broadcast-clear windows */
+	{ 0x222004000, 0x1d4000 },
+	{ 0x3803c0000, 0x28000 },	/* PMGR, with the PMP clock scratch */
+	{ 0x380704000, 0x4000 },	/* PMGR, ISP power states */
+	{ 0x380730000, 0x4000 },
+	{ 0x380e3c000, 0x4000 },
+	{ 0x382824000, 0x4000 },	/* PMP bandwidth scratch */
+	{ 0x39062c000, 0x20000 },
+	{ 0x501660000, 0x4000 },
+};
+
+/* The ADT's DART address filter windows, in its order and with its ends */
+static const struct isp_dapf_window apple_isp_dapf_t8132[] = {
+	{ 0x380704000, 0x380704063 },	/* PMGR, ISP power states */
+	{ 0x380730000, 0x380733fff },
+	{ 0x380e3c000, 0x380e3c003 },
+	{ 0x39062c000, 0x390648003 },
+	{ 0x501660000, 0x501660003 },
+	{ 0x220004000, 0x2200162fc },	/* DSID broadcast-clear windows */
+	{ 0x220044000, 0x2200562fc },
+	{ 0x2201c4000, 0x2201d62fc },
+	{ 0x222004000, 0x2220162fc },
+	{ 0x222044000, 0x2220562fc },
+	{ 0x2221c4000, 0x2221d62fc },
+	{ 0x3803c0000, 0x3803e4000 },	/* PMGR, with the PMP clock scratch */
+	{ 0x382824000, 0x382824004 },	/* PMP bandwidth scratch */
+};
+
+/*
+ * T8132 runs T6040's coprocessor and firmware interface, booted the same
+ * way. Its two AMCCs (ADT mcc amcc_aperture_count) give two broadcast-clear
+ * windows, passed one per AMCC without padding slots. No PMP_CTRL_SET is
+ * sent: T8132's PMP scratch offsets are not established.
+ */
+static const struct apple_isp_hw apple_isp_hw_t8132 = {
+	.gen = ISP_GEN_T6040,
+	.fw_abi = ISP_FW_ABI_H17,
+	.pmu_base = 0x0,
+
+	.dsid_count = 2,
+	.dsid_clr_base0 = 0x2201d4000,
+	.dsid_clr_base1 = 0x2221d4000,
+	.dsid_clr_range0 = 0x2fc,
+
+	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
+
+	.scl1 = true,
+	.lpdp = false,
+	.meta_size = ISP_META_SIZE_T8140,
+	.fw_mmio = apple_isp_fw_mmio_t8132,
+	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t8132),
+	.dapf = apple_isp_dapf_t8132,
+	.num_dapf = ARRAY_SIZE(apple_isp_dapf_t8132),
+
+	.coproc_control = ISP_COPROC_CONTROL_T8140,
+	.boot_mode = 1,
+	.shared_size = 0xdec00000,
+	.resident_fw = true,
+	.resident_fw_deferred = true,
+};
+
 static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t8103-isp", .data = &apple_isp_hw_t8103 },
 	{ .compatible = "apple,t8112-isp", .data = &apple_isp_hw_t8112 },
@@ -992,6 +1055,7 @@ static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t6031-isp", .data = &apple_isp_hw_t6031 },
 	{ .compatible = "apple,t8140-isp", .data = &apple_isp_hw_t8140 },
 	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6040 },
+	{ .compatible = "apple,t8132-isp", .data = &apple_isp_hw_t8132 },
 	{},
 };
 MODULE_DEVICE_TABLE(of, apple_isp_of_match);
