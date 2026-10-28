@@ -9,6 +9,7 @@ use super::{
 use kernel::prelude::*;
 
 /// A failed producer does not establish a fault in its consumer's VM.
+#[cfg(CONFIG_DRM_ASAHI_G15)]
 pub(crate) fn inherited_error(error: Error) -> Error {
     if error == EIO || error == ENODEV || error == ETIMEDOUT {
         ECANCELED
@@ -17,11 +18,16 @@ pub(crate) fn inherited_error(error: Error) -> Error {
     }
 }
 
+/// What a G17 consumer of a failed producer fails with, whatever the producer failed with: its
+/// client does not see a cancellation as a lost device. A producer a recovery dropped fails with
+/// ENODATA, and passing that on made every consumer of the producer's buffers lose its device too.
+pub(crate) const PRODUCER_FAILED: Error = ECANCELED;
+
 /// A replay's original host inputs must still be signalled. Treat an unmet
 /// input as a failed replay, never as a wait under the device mutex.
 pub(crate) fn replay_status(status: i32) -> Result {
     if status == 0 { Err(EBUSY) }
-    else if status < 0 { Err(inherited_error(Error::from_errno(status))) }
+    else if status < 0 { Err(PRODUCER_FAILED) }
     else { Ok(()) }
 }
 

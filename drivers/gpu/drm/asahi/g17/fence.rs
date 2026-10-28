@@ -180,7 +180,7 @@ impl Submission {
             self.remaining.load(Ordering::Acquire) == 0 || self.retired.load(Ordering::Acquire);
         let error = self.error.load(Ordering::Acquire);
         if error != 0 {
-            return Err(super::dependency::inherited_error(Error::from_errno(error)));
+            return Err(super::dependency::PRODUCER_FAILED);
         }
         Ok(complete)
     }

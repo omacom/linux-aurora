@@ -126,5 +126,6 @@ mod tests {
         assert_eq!(replay_status(1), Ok(()));
         assert_eq!(replay_status(EIO.to_errno()), Err(ECANCELED));
         assert_eq!(replay_status(ETIMEDOUT.to_errno()), Err(ECANCELED));
+        assert_eq!(replay_status(ENODATA.to_errno()), Err(ECANCELED));
     }
 }

@@ -2056,9 +2056,7 @@ impl Queue {
         let ticket = active.ticket.ok_or(EIO)?;
         let state = crate::g17::job::fence_status(&active.packet.completion.fence());
         if state < 0 {
-            return Err(crate::g17::dependency::inherited_error(Error::from_errno(
-                state,
-            )));
+            return Err(crate::g17::dependency::PRODUCER_FAILED);
         }
         if state > 0 {
             return Ok(None);
