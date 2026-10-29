@@ -1025,6 +1025,7 @@ impl Queue {
         self.retire_pending = false;
         let mut oldest = true;
         while let Some(front) = self.active.front() {
+            let mut restart = None;
             let result = (|| {
                 let ticket = front.ticket.ok_or(EIO)?;
                 self.valid_ticket(front, &ticket)?;
@@ -1044,7 +1045,18 @@ impl Queue {
                     .skip(1)
                     .find_map(|a| a.observed.map(|o| o.timestamps[1]));
                 let stamp = self.graph.stamp()?;
-                let record_aged = retirement::record_aged(front.observed_at, now_ns());
+                let record_aged = !retirement::stamp_covers(stamp, ticket.kick)
+                    && match retirement::stamp_wait(front.observed_at, now_ns(), || {
+                        // A node that cannot be read keeps the bound from the record.
+                        front.work.drained().unwrap_or(true)
+                    }) {
+                        retirement::StampWait::Waiting => false,
+                        retirement::StampWait::Restart(now) => {
+                            restart = Some(now);
+                            false
+                        }
+                        retirement::StampWait::Aged => true,
+                    };
                 let timestamps = retirement::poll(
                     &ticket,
                     front.observed,
@@ -1100,6 +1112,9 @@ impl Queue {
                     }
                 }
                 Ok(None) | Err(EAGAIN) => {
+                    if restart.is_some() {
+                        self.active.iter_mut().next().ok_or(EIO)?.observed_at = restart;
+                    }
                     self.retire_pending = self.front_finished();
                     break;
                 }
