@@ -421,6 +421,7 @@ pub(crate) struct VmReadGuard(VmExecGuard);
 
 #[cfg(CONFIG_DRM_ASAHI_UAT_ADOPTION)]
 impl VmReadGuard {
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
     pub(crate) fn covers_range(&mut self, address: u64, size: u64, read: bool, write: bool) -> bool {
         Vm::covers_range_locked(&mut self.0, address, size, read, write)
     }
@@ -3287,6 +3288,7 @@ impl Uat {
     }
 
     /// Binds a VM without waiting for another slot owner to retire.
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
     pub(crate) fn try_bind(&self, vm: &Vm) -> Result<VmBind> {
         self.bind_inner(vm, false)
     }

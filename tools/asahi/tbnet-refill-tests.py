@@ -56,6 +56,18 @@ static void *stop_thread(void *p){struct tbnet *n=p;tbnet_stop(n->dev);return NU
 static void *setup_thread(void *p){pthread_mutex_lock(&gate);setup_active=true;pthread_mutex_unlock(&gate);connect(p);pthread_mutex_lock(&gate);setup_active=false;pthread_cond_broadcast(&cv);pthread_mutex_unlock(&gate);return NULL;}
 static void *tear_thread(void *p){tbnet_tear_down(p,false);return NULL;}
 static void wait_paused(void){pthread_mutex_lock(&gate);while(!paused)pthread_cond_wait(&cv,&gate);pthread_mutex_unlock(&gate);}
+static void wait_cancel(void)
+{
+	struct timespec deadline;
+
+	assert(!clock_gettime(CLOCK_REALTIME, &deadline));
+	deadline.tv_sec += 2;
+	pthread_mutex_lock(&gate);
+	while (!cancel_waiting)
+		assert(!pthread_cond_timedwait(&cv, &gate, &deadline));
+	assert(ring_stops == 0 && pool_destroy_calls == 0);
+	pthread_mutex_unlock(&gate);
+}
 static void release_poll(void){pthread_mutex_lock(&gate);resume_poll=1;pthread_cond_broadcast(&cv);pthread_mutex_unlock(&gate);}
 int main(int argc,char **argv){assert(argc==2);char *c=argv[1];struct tbnet n;struct net_device d;struct tb tb={0};struct tb_xdomain x={&tb};struct tb_service s={0};struct device dev={&s};
  if(!strcmp(c,"pool-create-failure")){pool_error=1;memset(&n,0,sizeof(n));memset(&d,0,sizeof(d));d.priv=&n;n.dev=&d;n.xd=&x;n.svc=&s;pthread_mutex_init(&n.connection_lock,NULL);assert(tbnet_open(&d)==-ENOMEM);assert(!n.rx_ring.pool&&!n.rx_ring.ring&&!n.tx_ring.ring&&ring_frees==2&&enable_calls==0);return 0;}
@@ -80,7 +92,7 @@ int main(int argc,char **argv){assert(argc==2);char *c=argv[1];struct tbnet n;st
  if(!strcmp(c,"retry-stop")||!strcmp(c,"retry-disconnect")||!strcmp(c,"retry-suspend")||!strcmp(c,"retry-shutdown")){exhaust(&n);int a=alloc_calls;if(!strcmp(c,"retry-stop"))tbnet_stop(&d);else if(!strcmp(c,"retry-suspend"))tbnet_suspend(&dev);else if(!strcmp(c,"retry-shutdown"))tbnet_shutdown(&s);else tbnet_tear_down(&n,false);assert(!n.rx_refill_work.pending&&!n.napi.enabled&&alloc_calls==a);assert(!n.rx_ring.ring||!n.rx_ring.ring->running);return 0;}
  if(!strcmp(c,"retry-reconnect")){exhaust(&n);tbnet_tear_down(&n,false);assert(!n.rx_refill_work.pending);alloc_limit=-1;n.login_sent=n.login_received=true;n.remote_transmit_path=12;connect(&n);assert(n.napi.enabled&&n.rx_ring.prod==256&&!n.rx_refill_work.pending);tbnet_stop(&d);return 0;}
  if(!strcmp(c,"retry-completion-tail")){alloc_limit=0;complete_frames(&n,1,2);pause_at=2;pthread_t a,b;assert(!pthread_create(&a,NULL,poll_thread,&n));wait_paused();assert(n.rx_refill_work.pending);assert(!pthread_create(&b,NULL,stop_thread,&n));usleep(30000);assert(ring_stops==0&&n.rx_refill_work.pending);release_poll();assert(!pthread_join(a,NULL)&&!pthread_join(b,NULL));assert(!n.rx_refill_work.pending&&ring_stops==2);return 0;}
- if(!strcmp(c,"retry-running-teardown")){exhaust(&n);pause_at=6;pthread_t a,b;assert(!pthread_create(&a,NULL,retry_thread,&n));wait_paused();assert(!pthread_create(&b,NULL,stop_thread,&n));usleep(30000);assert(ring_stops==0&&pool_destroy_calls==0&&cancel_waiting);release_poll();assert(!pthread_join(a,NULL)&&!pthread_join(b,NULL));assert(!n.rx_refill_work.pending&&!n.rx_refill_work.running&&!n.napi.owner&&ring_stops==2&&pool_destroy_calls==1);return 0;}
+ if(!strcmp(c,"retry-running-teardown")){exhaust(&n);pause_at=6;pthread_t a,b;assert(!pthread_create(&a,NULL,retry_thread,&n));wait_paused();assert(!pthread_create(&b,NULL,stop_thread,&n));wait_cancel();release_poll();assert(!pthread_join(a,NULL)&&!pthread_join(b,NULL));assert(!n.rx_refill_work.pending&&!n.rx_refill_work.running&&!n.napi.owner&&ring_stops==2&&pool_destroy_calls==1);return 0;}
  if(!strcmp(c,"retry-already-polling")){exhaust(&n);tbnet_start_poll(&n);fire_retry(&n.rx_refill_work);int rearm=rearm_calls;assert(n.napi.missed&&tbnet_poll(&n.napi,64)==0&&n.napi.owner&&n.rx_refill_work.pending&&rearm_calls==rearm);alloc_limit=-1;assert(tbnet_poll(&n.napi,64)==0&&!n.napi.owner&&n.rx_ring.prod-n.rx_ring.cons==256);return 0;}
  if(!strcmp(c,"retry-disabled-worker")){exhaust(&n);napi_disable(&n.napi);int a=alloc_calls,sch=schedule_calls;fire_retry(&n.rx_refill_work);assert(!n.napi.owner&&schedule_calls==sch&&alloc_calls==a);return 0;}
  if(!strcmp(c,"retry-counter-wrap")){n.rx_ring.cons=0xffffff00;n.rx_ring.prod=0;exhaust(&n);alloc_limit=-1;retry_poll(&n);assert(n.rx_ring.cons==0&&n.rx_ring.prod==256&&!n.rx_refill_work.pending);return 0;}
