@@ -154,6 +154,15 @@ static const char *gate_t6031_board __initdata = "apple,j516c";
 /* The resolved request, set by gate_run() on a T6031. */
 static bool gate_t6031_requested __initdata;
 
+/* apple_t6030_display.dcpext: T6030's external processors, on unless 0. */
+static bool gate_dcpext_requested __initdata = true;
+
+/*
+ * apple_t6031_display.dcpext: T6031's external processors, off unless 1.
+ * Their addresses come from one J516C ADT and nothing has driven them yet.
+ */
+static bool gate_t6031_dcpext_requested __initdata;
+
 /* Whether the T6031 native display is requested: an explicit 0 or 1 wins. */
 static bool __init gate_t6031_wanted(int sw, bool default_board)
 {
@@ -197,6 +206,14 @@ struct gate_soc {
 	const char *fw_uuids;		/* /chosen strings naming each firmware image */
 	bool quiet_without_nodes;	/* no display nodes in the device tree is normal */
 	bool dcpext;			/* the external display processors and their DARTs */
+	const char *dcpext_compat;	/* their compatible */
+	bool *dcpext_requested;		/* their command line switch */
+	/*
+	 * Their own power state is dispextN_fe, the child of dispextN_cpu
+	 * (T6031), rather than dispextN_cpu, the child of dispextN_fe (T6030).
+	 */
+	bool dcpext_fe_first;
+	const char *dcpext_opt_in;	/* set: off unless this is on the command line */
 };
 
 static const struct gate_soc gate_t6030 __initconst = {
@@ -220,6 +237,8 @@ static const struct gate_soc gate_t6030 __initconst = {
 	.requested = &gate_requested,
 	.ps_chain = { PMP_PS_DISP_CPU, PMP_PS_DISP_FE, PMP_PS_DISP_SYS },
 	.dcpext = true,
+	.dcpext_compat = "apple,t6030-dcpext",
+	.dcpext_requested = &gate_dcpext_requested,
 };
 
 /*
@@ -282,6 +301,15 @@ static const struct gate_soc gate_t6031 __initconst = {
 	.pmp_ps_any_pmgr = true,
 	.describe = true,
 	.fw_uuids = "asahi,t6031-fw-uuids",
+	/*
+	 * dcpext0..3 as on T6030, handed over by the boot loader with the T6030
+	 * markers, each on its own dispextN_fe power state.
+	 */
+	.dcpext = true,
+	.dcpext_compat = "apple,t6031-dcpext",
+	.dcpext_requested = &gate_t6031_dcpext_requested,
+	.dcpext_fe_first = true,
+	.dcpext_opt_in = "apple_t6031_display.dcpext=1",
 };
 
 static const struct gate_soc *const gate_socs[] __initconst = {
@@ -1047,13 +1075,17 @@ static int __init gate_pmp_apply(struct device_node *dcp, struct device_node **p
  * apple_t6030_display.scanout=0 refuses the display DART, which the native
  * path needs.
  */
-static bool gate_dcpext_requested __initdata = true;
-
 static int __init gate_dcpext_setup(char *arg)
 {
 	return kstrtobool(arg, &gate_dcpext_requested);
 }
 early_param("apple_t6030_display.dcpext", gate_dcpext_setup);
+
+static int __init gate_t6031_dcpext_setup(char *arg)
+{
+	return kstrtobool(arg, &gate_t6031_dcpext_requested);
+}
+early_param("apple_t6031_display.dcpext", gate_t6031_dcpext_setup);
 
 static bool gate_scanout_requested __initdata = true;
 
@@ -1077,6 +1109,7 @@ early_param("apple_t6030_display.dcpext_manual", gate_dcpext_manual_setup);
 struct gate_ext {
 	struct device_node *dcp, *dart, *mbox;
 	struct device_node *cpu, *fe, *sys;
+	struct device_node *own;	/* cpu or fe: the processor's own power state, not counted */
 	struct device_node *entry;	/* its PMP request, pmp-dispextN */
 	struct device_node *scanout;	/* the boot loader's scanout child */
 	struct device_node *disp_dart;	/* the display DART that child names */
@@ -1223,9 +1256,9 @@ static int __init gate_dispext_check(struct gate_ext *ext)
 	    state[0] != 0 || state[3] != 4 ||
 	    of_address_to_resource(dart, 0, &regs) || resource_size(&regs) != SZ_16K)
 		goto out;
-	/* The DART belongs to this processor's pipe: it shares its CPU domain. */
+	/* The DART belongs to this processor's pipe: it shares its power state. */
 	region = gate_ps_parent(dart);
-	if (region != ext->cpu)
+	if (region != ext->own)
 		goto out;
 	of_node_put(region);
 	region = NULL;
@@ -1296,19 +1329,31 @@ static int __init gate_ext_resolve(struct gate_ext *ext)
 		return -EINVAL;
 
 	/* Do not enable a CPU whose power ownership is not fully described. */
-	ext->cpu = gate_ps_parent(ext->dcp);
-	if (!gate_ps_dispext(ext->cpu, "cpu", &ext->index))
-		return -EINVAL;
-	ext->fe = gate_ps_parent(ext->cpu);
-	if (!gate_ps_dispext(ext->fe, "fe", &ext->index))
-		return -EINVAL;
-	ext->sys = gate_ps_parent(ext->fe);
+	if (gate_soc->dcpext_fe_first) {
+		ext->fe = gate_ps_parent(ext->dcp);
+		if (!gate_ps_dispext(ext->fe, "fe", &ext->index))
+			return -EINVAL;
+		ext->cpu = gate_ps_parent(ext->fe);
+		if (!gate_ps_dispext(ext->cpu, "cpu", &ext->index))
+			return -EINVAL;
+		ext->sys = gate_ps_parent(ext->cpu);
+		ext->own = ext->fe;
+	} else {
+		ext->cpu = gate_ps_parent(ext->dcp);
+		if (!gate_ps_dispext(ext->cpu, "cpu", &ext->index))
+			return -EINVAL;
+		ext->fe = gate_ps_parent(ext->cpu);
+		if (!gate_ps_dispext(ext->fe, "fe", &ext->index))
+			return -EINVAL;
+		ext->sys = gate_ps_parent(ext->fe);
+		ext->own = ext->cpu;
+	}
 	if (!gate_ps_dispext(ext->sys, "sys", &ext->index))
 		return -EINVAL;
 	for (i = 0; i < 2; i++) {
 		domain = gate_ps_parent(i ? ext->mbox : ext->dart);
 		of_node_put(domain);
-		if (domain != ext->cpu)
+		if (domain != ext->own)
 			return -EINVAL;
 	}
 
@@ -1456,8 +1501,11 @@ static int __init gate_ext_apply(struct gate_ext *ext, bool native)
 
 	if (!cs)
 		return -ENOMEM;
-	/* PMGR applies the floor at probe, before the PMP can manage this CPU. */
-	ret = gate_set_u32(cs, ext->cpu, "apple,min-state", PMGR_PS_ACTIVE);
+	/*
+	 * PMGR applies the floor at probe, before the PMP can manage this CPU.
+	 * On the processor's own power state, which keeps its parents on.
+	 */
+	ret = gate_set_u32(cs, ext->own, "apple,min-state", PMGR_PS_ACTIVE);
 	/* The driver must wait for this request's acknowledgement before RUN. */
 	if (!ret)
 		ret = gate_set_u32(cs, ext->dcp, "apple,pmp-report", ext->entry->phandle);
@@ -1583,9 +1631,10 @@ static void __init gate_dcpext(const char *refuse)
 {
 	struct device_node *np;
 
-	if (!refuse && !gate_dcpext_requested)
-		refuse = "disabled on the command line";
-	for_each_compatible_node(np, NULL, "apple,t6030-dcpext")
+	if (!refuse && !*gate_soc->dcpext_requested)
+		refuse = gate_soc->dcpext_opt_in ?
+			 "not requested on the command line" : "disabled on the command line";
+	for_each_compatible_node(np, NULL, gate_soc->dcpext_compat)
 		gate_dcpext_one(np, refuse);
 }
 
