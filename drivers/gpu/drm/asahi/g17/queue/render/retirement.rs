@@ -156,13 +156,17 @@ pub(crate) fn observe(ticket: &Ticket, snapshot: Snapshot) -> Result<Observation
 }
 
 /// How long a front group the firmware executed, and whose ring entries it consumed, waits for
-/// its completion stamp before it retires on its pass record.
+/// its completion stamp before it retires on its pass record, counted from when its ioctl's
+/// work-state node drained.
 ///
 /// The firmware stores both queues' stamps after the cache maintenance that follows a pass, so
-/// the stamps, not the pass record, normally prove completion. Occasionally the stamps of a pair
-/// stop one kick short while the pass record shows the group (and later groups) executed, and
-/// no later event moves them. Without a bound the client waits for the scheduler watchdog and
-/// its renewals, then loses its device. Compute applies the same bound to its records.
+/// the stamps, not the pass record, normally prove completion. It stores the stamps of an
+/// ioctl's commands only once every kick counted on the ioctl's work-state node completed: while
+/// other commands of the same ioctl still run, the stamps are not late ([`stamp_wait`]).
+/// Occasionally the stamps of a pair stop one kick short while the pass record shows the group
+/// (and later groups) executed, and no later event moves them. Without a bound the client waits
+/// for the scheduler watchdog and its renewals, then loses its device. Compute applies the same
+/// bound to its records.
 ///
 /// Nothing here proves that the maintenance finished: whether the firmware completes it before
 /// it advances the done cursors is not known. A group retired this way relies on this bound for
@@ -170,6 +174,32 @@ pub(crate) fn observe(ticket: &Ticket, snapshot: Snapshot) -> Result<Observation
 /// writes (`completion::Output::publish()`).
 pub(crate) const STAMP_FALLBACK_NS: u64 = 50_000_000;
 const _: () = assert!(STAMP_FALLBACK_NS * 4 <= crate::g17::job::TIMEOUT_MS as u64 * 1_000_000);
+
+/// Where a front group's wait for its stamps stands; see [`stamp_wait`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StampWait {
+    /// Within [`STAMP_FALLBACK_NS`] of the latch.
+    Waiting,
+    /// The bound passed while the group's ioctl node still runs kicks: the stamps are not late,
+    /// and the wait counts again from the given host time.
+    Restart(u64),
+    /// The node drained and the stamps still lag after the bound, or the watchdog expired the
+    /// wait (`since` 0): retire on the pass record.
+    Expired,
+}
+
+/// The stamp wait latched at `since` (host ns) at `now`. `drained` reports whether every kick
+/// counted on the group's work-state node completed; it is asked only once the bound has passed
+/// and never for a wait the watchdog expired.
+pub(crate) fn stamp_wait(since: u64, now: u64, drained: impl FnOnce() -> bool) -> StampWait {
+    if now.saturating_sub(since) < STAMP_FALLBACK_NS {
+        StampWait::Waiting
+    } else if since == 0 || drained() {
+        StampWait::Expired
+    } else {
+        StampWait::Restart(now)
+    }
+}
 
 static STAMPLESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -483,5 +513,21 @@ mod executed_tests {
         let mut ticket = stalled_ticket();
         let mut memory = stalled([10, 0]);
         assert!(matches!(poll_stampless(&mut ticket, &mut memory), Ok(Poll::Pending)));
+    }
+
+    #[test]
+    fn stamps_wait_for_the_rest_of_the_ioctl() {
+        let since = 1_000_000;
+        let late = since + STAMP_FALLBACK_NS;
+        // The node is asked only once the bound passed.
+        assert_eq!(stamp_wait(since, late - 1, || panic!("node read early")), StampWait::Waiting);
+        // Other kicks of the group's ioctl still run: the bound restarts.
+        assert_eq!(stamp_wait(since, late, || false), StampWait::Restart(late));
+        assert_eq!(stamp_wait(late, late + STAMP_FALLBACK_NS - 1, || true), StampWait::Waiting);
+        // A drained node with lagging stamps is the stall the bound exists for.
+        assert_eq!(stamp_wait(since, late, || true), StampWait::Expired);
+        // The watchdog's last resort does not wait for the node.
+        assert_eq!(stamp_wait(0, STAMP_FALLBACK_NS, || panic!("node read for an expired wait")),
+            StampWait::Expired);
     }
 }
