@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * The USB-C connectors' display endpoints on the M3 Max MacBook Pros (J514C,
+ * J516C): each Type-C port can be fed by any of dcpext0..3, as on the
+ * J514S/J516S (t603x-j514s-j516s-usb4.dtsi). The routes they point at stay
+ * disabled until the display gate enables their processor.
+ */
+
+&typec0 {
+	ports {
+		port@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec0_dcpext0: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext0_typec0>;
+			};
+
+			typec0_dcpext1: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext1_typec0>;
+			};
+
+			typec0_dcpext2: endpoint@2 {
+				reg = <2>;
+				remote-endpoint = <&dcpext2_typec0>;
+			};
+
+			typec0_dcpext3: endpoint@3 {
+				reg = <3>;
+				remote-endpoint = <&dcpext3_typec0>;
+			};
+		};
+	};
+};
+&typec1 {
+	ports {
+		port@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec1_dcpext0: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext0_typec1>;
+			};
+
+			typec1_dcpext1: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext1_typec1>;
+			};
+
+			typec1_dcpext2: endpoint@2 {
+				reg = <2>;
+				remote-endpoint = <&dcpext2_typec1>;
+			};
+
+			typec1_dcpext3: endpoint@3 {
+				reg = <3>;
+				remote-endpoint = <&dcpext3_typec1>;
+			};
+		};
+	};
+};
+&typec2 {
+	ports {
+		port@3 {
+			reg = <3>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec2_dcpext0: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext0_typec2>;
+			};
+
+			typec2_dcpext1: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext1_typec2>;
+			};
+
+			typec2_dcpext2: endpoint@2 {
+				reg = <2>;
+				remote-endpoint = <&dcpext2_typec2>;
+			};
+
+			typec2_dcpext3: endpoint@3 {
+				reg = <3>;
+				remote-endpoint = <&dcpext3_typec2>;
+			};
+		};
+	};
+};

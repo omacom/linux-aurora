@@ -12,6 +12,7 @@
 #include "t6031.dtsi"
 #include "t6031-dcp.dtsi"
 #include "t603x-j514-j516.dtsi"
+#include "t603x-j514c-j516c-dcpext.dtsi"
 
 / {
 	compatible = "apple,j516c", "apple,t6031", "apple,arm-platform";
