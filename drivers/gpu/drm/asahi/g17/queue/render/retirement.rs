@@ -163,6 +163,11 @@ pub(crate) fn observe(ticket: &Ticket, snapshot: Snapshot) -> Result<Observation
 /// stop one kick short while the pass record shows the group (and later groups) executed, and
 /// no later event moves them. Without a bound the client waits for the scheduler watchdog and
 /// its renewals, then loses its device. Compute applies the same bound to its records.
+///
+/// Nothing here proves that the maintenance finished: whether the firmware completes it before
+/// it advances the done cursors is not known. A group retired this way relies on this bound for
+/// its counts and stores to be visible, both for the fence and for the timestamps the host then
+/// writes (`completion::Output::publish()`).
 pub(crate) const STAMP_FALLBACK_NS: u64 = 50_000_000;
 const _: () = assert!(STAMP_FALLBACK_NS * 4 <= crate::g17::job::TIMEOUT_MS as u64 * 1_000_000);
 
@@ -184,7 +189,8 @@ pub(crate) fn note_stampless(slot: u16, ordinal: u64) {
 }
 
 /// Retire an executed, consumed front group without its stamps, once [`STAMP_FALLBACK_NS`]
-/// has passed. The caller decides that bound; this re-checks execution and consumption.
+/// has passed. The caller decides that bound; this re-checks execution and consumption. Unlike
+/// the stamped path, it has no post-maintenance evidence; see [`STAMP_FALLBACK_NS`].
 pub(crate) fn poll_stampless(ticket: &mut Ticket, memory: &mut impl Memory) -> Result<Poll> {
     fence(Ordering::Acquire);
     let snapshot = memory.snapshot(ticket.ordinal)?;
