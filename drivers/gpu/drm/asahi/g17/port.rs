@@ -105,6 +105,8 @@ pub(super) struct Port {
     compute_announced: [AtomicU64; PRIORITIES],
     /// Full firmware effort is applied; cleared before an idle clear rechecks `submissions`.
     effort_full: AtomicBool,
+    /// The CLPC's GPU activity input: told of every submission and effort change.
+    demand: super::power::Demand,
     submissions: AtomicU64,
 }
 
@@ -142,7 +144,7 @@ impl Drop for OuterClaim<'_> {
 }
 
 impl Port {
-    pub(super) fn new() -> Result<Arc<Self>> {
+    pub(super) fn new(demand: super::power::Demand) -> Result<Arc<Self>> {
         Arc::pin_init(
             pin_init!(Self {
                 views: SetOnce::new(),
@@ -155,6 +157,7 @@ impl Port {
                 compute_written: [const { AtomicU64::new(0) }; PRIORITIES],
                 compute_announced: [const { AtomicU64::new(0) }; PRIORITIES],
                 effort_full: AtomicBool::new(false),
+                demand,
                 submissions: AtomicU64::new(0),
             }),
             GFP_KERNEL,
@@ -453,6 +456,7 @@ impl Port {
     /// clear sees this submission or this submission sees the flag withdrawn.
     pub(super) fn note_submission(&self) -> bool {
         self.submissions.fetch_add(1, Ordering::SeqCst);
+        self.note_gpu_activity();
         self.effort_full.load(Ordering::SeqCst)
     }
 
@@ -462,5 +466,11 @@ impl Port {
 
     pub(super) fn set_effort_full(&self, full: bool) {
         self.effort_full.store(full, Ordering::SeqCst);
+        self.demand.set_active(full);
+    }
+
+    /// Reports a submission, published with or without the device mutex, to the CLPC.
+    pub(super) fn note_gpu_activity(&self) {
+        self.demand.set_active(true);
     }
 }

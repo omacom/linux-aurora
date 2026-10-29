@@ -233,6 +233,51 @@ pub(super) fn release<C: Control>(control: &mut C) -> kernel::error::Result {
     result
 }
 
+unsafe extern "C" {
+    fn asahi_clpc_gpu_get(
+        dev: *mut core::ffi::c_void,
+        out: *mut *mut core::ffi::c_void,
+    ) -> core::ffi::c_int;
+    fn asahi_clpc_gpu_set_active(gpu: *mut core::ffi::c_void, active: bool);
+    fn asahi_clpc_gpu_put(gpu: *mut core::ffi::c_void);
+}
+
+/// The GPU activity input of the CLPC that the device tree links the GPU to, if any (see
+/// `apple_clpc_gpu_get()`). The input has a lifetime of its own, so it may outlive the CLPC; a
+/// device link orders the CLPC before the GPU.
+pub(super) struct Demand(*mut core::ffi::c_void);
+
+// SAFETY: the input's own spinlock serializes every access to it; it calls back into nothing.
+unsafe impl Send for Demand {}
+// SAFETY: shared access only reports activity under that lock, never changes the lifetime.
+unsafe impl Sync for Demand {}
+
+impl Demand {
+    pub(super) fn new(dev: *mut kernel::bindings::device) -> kernel::error::Result<Self> {
+        let mut out = core::ptr::null_mut();
+        // SAFETY: `dev` is the live platform device and `out` is writable; on success the C
+        // side returns an owned reference, or NULL when the device tree names no CLPC.
+        let ret = unsafe { asahi_clpc_gpu_get(dev.cast(), &mut out) };
+        if ret < 0 {
+            Err(kernel::error::Error::from_errno(ret))
+        } else {
+            Ok(Self(out))
+        }
+    }
+
+    pub(super) fn set_active(&self, active: bool) {
+        // SAFETY: the reference taken in `new` is live; NULL is accepted and ignored.
+        unsafe { asahi_clpc_gpu_set_active(self.0, active) };
+    }
+}
+
+impl Drop for Demand {
+    fn drop(&mut self) {
+        // SAFETY: releases exactly the reference taken in `new`, clearing the input first.
+        unsafe { asahi_clpc_gpu_put(self.0) };
+    }
+}
+
 #[cfg_attr(not(test), kernel::macros::kunit_tests(asahi_g17_idle_hold))]
 mod tests {
     use super::*;
