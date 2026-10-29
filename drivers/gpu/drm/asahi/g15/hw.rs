@@ -51,6 +51,7 @@ pub(crate) enum Board {
     /// ([`super::board::record`], [`super::board::device_tree`]), with the SoC's reference
     /// words for what neither carries ([`super::board::record::Reference`]). A value the
     /// builder refuses stops admission, before any firmware is touched.
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
     DeviceTree(&'static super::board::record::Reference),
     /// No board data: admission refuses the SoC before anything firmware-visible.
     None,

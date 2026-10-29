@@ -326,6 +326,14 @@ struct apple_dart {
 	 * rather than the DART's.
 	 */
 	u64 locked_window[DART_MAX_STREAMS];
+	/*
+	 * First error of a TLB invalidate that failed while retiring a locked
+	 * root, per stream. The hardware may still cache translations through
+	 * the retired page tables, so apple_dart_domain_free() keeps the page
+	 * tables of every domain on such a stream. It is never cleared: only
+	 * the hardware could show that the TLB no longer holds those entries.
+	 */
+	int locked_retire_err[DART_MAX_STREAMS];
 };
 
 /*
@@ -669,6 +677,24 @@ static bool apple_dart_fw_mapping_matches(phys_addr_t phys, int prot,
 }
 
 /*
+ * Whether the firmware leaf behind root @slot of a three-level stream already
+ * translates the page at @addr to @paddr with the protection Linux asks for.
+ */
+static bool apple_dart_fw_page_matches(const struct apple_dart *dart,
+				       const struct apple_dart_fw_root *fw,
+				       u64 slot, u64 addr, phys_addr_t paddr,
+				       int prot)
+{
+	u64 leaf = (addr / dart->pgsize) % (dart->pgsize / sizeof(u64));
+	phys_addr_t phys;
+	int fw_prot;
+
+	return apple_dart_fw_leaf_decode(READ_ONCE(fw->leaf[slot][leaf]), addr,
+					 &phys, &fw_prot) &&
+	       apple_dart_fw_mapping_matches(phys, fw_prot, paddr, prot);
+}
+
+/*
  * A root slot firmware already uses can still back Linux mappings when the
  * firmware's leaf table translates every page Linux mapped there to the same
  * physical address. That is the case for the boot loader's handoff, which
@@ -912,28 +938,39 @@ apple_dart_hw_map_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx)
 	return 0;
 }
 
+/*
+ * Retire the locked roots @idx of @stream_map's streams. Returns the first
+ * error of the TLB invalidate that retiring needs, which is also remembered
+ * per stream for apple_dart_domain_free(): a consumer release or an attach
+ * rollback can retire the root before the domain is freed.
+ */
 static int
 apple_dart_hw_unmap_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx)
 {
 	struct apple_dart *dart = stream_map->dart;
-	int sid;
+	int sid, ret = 0;
 
 	for_each_set_bit(sid, stream_map->sidmap, dart->num_streams) {
 		u64 *live = dart->locked_ttbr[sid][idx];
 		u64 *owned = dart->locked_owned[sid][idx];
 		struct apple_dart_fw_root *fw;
 		unsigned long flags;
+		int err = 0;
 
 		if (!live)
 			continue;
 		apple_dart_retire_root(live, owned, dart->pgsize / sizeof(*live));
-		if (dart->fw_mirror && dart->version >= 0x0202 && !idx) {
+		if ((dart->fw_mirror || dart->fw_handoff) &&
+		    dart->version >= 0x0202 && !idx) {
 			struct apple_dart_stream_map stream = { .dart = dart };
 
 			__set_bit(sid, stream.sidmap);
-			(void)apple_dart_fw_invalidate(&stream, 0, U64_MAX);
+			err = apple_dart_fw_invalidate(&stream, 0, U64_MAX);
+			ret = ret ?: err;
 		}
 		spin_lock_irqsave(&dart->lock, flags);
+		if (err && !dart->locked_retire_err[sid])
+			dart->locked_retire_err[sid] = err;
 		fw = dart->locked_fw[sid][idx];
 		dart->locked_fw[sid][idx] = NULL;
 		dart->locked_ttbr[sid][idx] = NULL;
@@ -943,7 +980,24 @@ apple_dart_hw_unmap_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx
 		devm_kfree(dart->dev, owned);
 		dart->locked_owned[sid][idx] = NULL;
 	}
-	return 0;
+	return ret;
+}
+
+/* The remembered retire-time invalidate error of @stream_map's streams, or 0. */
+static int apple_dart_retire_error(struct apple_dart_stream_map *stream_map)
+{
+	struct apple_dart *dart = stream_map->dart;
+	unsigned long flags;
+	int sid, ret = 0;
+
+	spin_lock_irqsave(&dart->lock, flags);
+	for_each_set_bit(sid, stream_map->sidmap, dart->num_streams) {
+		ret = dart->locked_retire_err[sid];
+		if (ret)
+			break;
+	}
+	spin_unlock_irqrestore(&dart->lock, flags);
+	return ret;
 }
 
 static int
@@ -1240,7 +1294,9 @@ apple_dart_t8020_hw_invalidate_tlb(struct apple_dart_stream_map *stream_map)
 static int
 apple_dart_t8110_hw_invalidate_tlb(struct apple_dart_stream_map *stream_map)
 {
-	if (stream_map->dart->fw_mirror && stream_map->dart->version >= 0x0202)
+	/* Keep out of firmware-held slots; see apple_dart_fw_invalidate(). */
+	if ((stream_map->dart->fw_mirror || stream_map->dart->fw_handoff) &&
+	    stream_map->dart->version >= 0x0202)
 		return apple_dart_fw_invalidate(stream_map, 0, U64_MAX);
 	return apple_dart_t8110_hw_tlb_command_range(
 		stream_map, DART_T8110_TLB_CMD_OP_FLUSH_SID, false, 0, 0);
@@ -1535,6 +1591,15 @@ static bool apple_dart_domain_uses_fw(struct apple_dart_domain *domain, int i,
 /*
  * Hardware continues to use every firmware-owned slot. Its entire IOVA
  * span is excluded from Linux allocation, including currently unmapped holes.
+ *
+ * Linux may still repeat a page the firmware leaf already translates, with
+ * the same physical address and protection. That happens when one domain
+ * spans several DARTs and only some of them inherited a reserved region:
+ * the J700 display subsystem uses disp0 and dispext0, and only disp0 scans
+ * out the boot framebuffer. apple_dart_inherited_phys() cannot report the
+ * region as mapped for the whole domain, so the core maps it, and the copy
+ * must be accepted on disp0 while dispext0 gets it in a vacant slot.
+ * apple_dart_publish_root() never writes the firmware slot itself.
  */
 static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 				   phys_addr_t paddr, size_t size, int prot)
@@ -1556,6 +1621,7 @@ static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 			u64 addr = dva + off;
 
 			for (sid = 0; sid < dart->num_streams; sid++) {
+				const struct apple_dart_fw_root *fw;
 				bool four;
 				u64 idx, slot;
 				const u64 *live, *owned;
@@ -1563,12 +1629,6 @@ static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 				if (!apple_dart_domain_uses_fw(domain, i, map, sid))
 					continue;
 				if (!dart->fw_handoff) {
-					const struct apple_dart_fw_root *fw;
-					phys_addr_t phys;
-					u64 pte;
-					int fw_prot;
-					u64 leaf = (addr >> pgshift) & (entries - 1);
-
 					slot = (addr >> (pgshift + bits)) & (entries - 1);
 					idx = addr >> (pgshift + 2 * bits);
 					if (idx >= DART_MAX_TTBR)
@@ -1577,10 +1637,8 @@ static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 					live = dart->locked_ttbr[sid][idx];
 					if (!live || !apple_dart_fw_slot_owned(fw, live, slot))
 						continue;
-					pte = READ_ONCE(fw->leaf[slot][leaf]);
-					if (!apple_dart_fw_leaf_decode(pte, addr, &phys, &fw_prot) ||
-					    !apple_dart_fw_mapping_matches(phys, fw_prot,
-									   paddr + off, prot)) {
+					if (!apple_dart_fw_page_matches(dart, fw, slot, addr,
+									paddr + off, prot)) {
 						ret = -EBUSY;
 						goto unlock;
 					}
@@ -1595,8 +1653,17 @@ static int apple_dart_check_fw_map(struct apple_dart_domain *domain, u64 dva,
 					continue;
 				live = dart->locked_ttbr[sid][idx];
 				owned = dart->locked_owned[sid][idx];
-				/* All pages of an inherited slot remain firmware's. */
-				if (live && apple_dart_fw_slot_foreign(live, owned, slot)) {
+				if (!live || !apple_dart_fw_slot_foreign(live, owned, slot))
+					continue;
+				/*
+				 * All pages of an inherited slot remain firmware's;
+				 * only a page its firmware leaf already maps the
+				 * same way may be repeated.
+				 */
+				fw = dart->locked_fw[sid][idx];
+				if (four || !apple_dart_fw_slot_owned(fw, live, slot) ||
+				    !apple_dart_fw_page_matches(dart, fw, slot, addr,
+								paddr + off, prot)) {
 					ret = -EBUSY;
 					goto unlock;
 				}
@@ -2131,7 +2198,7 @@ static void apple_dart_domain_free(struct iommu_domain *domain)
 	struct apple_dart_domain *dart_domain = to_dart_domain(domain);
 	struct apple_dart_atomic_stream_map *map;
 	struct apple_dart_stream_map stream;
-	int i, j, idx;
+	int i, j, idx, ret;
 
 	for_each_stream_map(i, dart_domain, map) {
 		if (!map->dart->locked)
@@ -2147,14 +2214,22 @@ static void apple_dart_domain_free(struct iommu_domain *domain)
 				"retaining page tables after power failure: %d\n", j);
 			return;
 		}
-		for (idx = 0; idx < stream.dart->hw->ttbr_count; idx++)
-			apple_dart_hw_unmap_locked_ttbr(&stream, idx);
+		ret = 0;
+		for (idx = 0; idx < stream.dart->hw->ttbr_count; idx++) {
+			j = apple_dart_hw_unmap_locked_ttbr(&stream, idx);
+			ret = ret ?: j;
+		}
 		j = stream.dart->hw->invalidate_tlb(&stream);
+		ret = ret ?: j;
 		pm_runtime_put(stream.dart->dev);
-		/* Do not free page tables that hardware may still cache. */
-		if (j) {
+		/*
+		 * Do not free page tables that hardware may still cache, also
+		 * when a consumer release or an attach rollback retired the root.
+		 */
+		ret = ret ?: apple_dart_retire_error(&stream);
+		if (ret) {
 			dev_err_ratelimited(stream.dart->dev,
-				"retaining page tables after TLB invalidation failure: %d\n", j);
+				"retaining page tables after TLB invalidation failure: %d\n", ret);
 			return;
 		}
 	}

@@ -130,6 +130,11 @@ static bool apple_dart_fw_leaf_decode(u64 pte, dma_addr_t iova,
 static bool apple_dart_fw_mapping_matches(phys_addr_t phys, int prot,
                                           phys_addr_t expected, int required)
 { abort(); }
+static bool apple_dart_fw_page_matches(const struct apple_dart *dart,
+                                       const struct apple_dart_fw_root *fw,
+                                       u64 slot, u64 addr, phys_addr_t paddr,
+                                       int prot)
+{ abort(); }
 static bool apple_dart_fw_handoff_page_busy(struct apple_dart *dart,
                                             struct apple_dart_domain *domain, int i,
                                             struct apple_dart_atomic_stream_map *map,
