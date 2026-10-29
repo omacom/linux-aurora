@@ -2107,8 +2107,8 @@ bool iomfb_v14_7_external_ready(struct apple_dcp *dcp)
 
 /*
  * What this processor's firmware holds that system sleep would not hand
- * back, or NULL: a start in progress, or a display link or a powered
- * display. The caller also refuses sleep while a display is attached.
+ * back, or NULL: a start in progress, or a powered display. Suspend
+ * releases a dark display's link itself.
  */
 const char *iomfb_v14_7_external_busy(struct apple_dcp *dcp)
 {
@@ -2119,10 +2119,8 @@ const char *iomfb_v14_7_external_busy(struct apple_dcp *dcp)
 		/* A stopped session drives nothing, whatever it held last. */
 		if (dcp->v14 && READ_ONCE(dcp->v14->failed))
 			return NULL;
-		if (READ_ONCE(dcp->dptxport[0].connected) ||
-		    READ_ONCE(dcp->external_link_ready) ||
-		    (dcp->v14 && READ_ONCE(dcp->v14->powered)))
-			return "a display link is up";
+		if (dcp->v14 && READ_ONCE(dcp->v14->powered))
+			return "a display is lit";
 		return NULL;
 	default:
 		return NULL;
