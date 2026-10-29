@@ -81,6 +81,19 @@ impl WorkStorage {
         fence(Ordering::Release);
         Ok(())
     }
+    /// Whether the firmware completed every kick counted so far on node `word`.
+    fn drained(&self, word: u32) -> Result<bool> {
+        let slot = (word & 63) as usize;
+        if self.words.get(slot) != Some(&Some(word)) {
+            return Err(EINVAL);
+        }
+        let completed = self
+            .object
+            .word(slot * NODE_STRIDE + core::mem::offset_of!(fw::WorkNode, completed))?
+            .load(Ordering::Relaxed);
+        fence(Ordering::Acquire);
+        Ok(completed >= self.counts[slot])
+    }
     fn change_count(&mut self, word: u32, kicks: u32, add: bool) -> Result<u32> {
         let slot = (word & 63) as usize;
         if self.words.get(slot) != Some(&Some(word)) {
@@ -447,6 +460,16 @@ impl WorkStateLease {
             return Err(EINVAL);
         }
         Ok(self.context.work_base + u64::from(word & 63) * NODE_STRIDE as u64)
+    }
+    /// Whether the firmware completed every kick counted so far on this ioctl's node. It stores
+    /// the completion stamps of the node's commands only then, so a command whose record is
+    /// present still waits for its stamp while other commands of its ioctl run.
+    pub(crate) fn drained(&self) -> Result<bool> {
+        let word = self.word();
+        if word == FREE {
+            return Err(EINVAL);
+        }
+        self.context.work.lock().drained(word)
     }
     pub(crate) fn add_submitted_kicks(&self, kicks: u32) -> Result<u32> {
         self.context

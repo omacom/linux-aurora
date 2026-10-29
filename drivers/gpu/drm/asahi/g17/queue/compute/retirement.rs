@@ -72,15 +72,16 @@ pub(crate) enum Recordless {
 }
 
 /// How long a command whose exact completion record is present waits for its completion stamp
-/// before it retires on the record alone.
+/// before it retires on the record alone, counted from when its ioctl's work-state node drained.
 ///
 /// The firmware stores the stamp after the cache maintenance that follows the record, so the
 /// stamp, not the record, proves that the command's writes are complete and that its mappings
-/// may be released. While other commands of the same submit ioctl are still running, the stamp
-/// routinely lands several milliseconds after the record (on J700 under games, up to about 3 ms
-/// after the 1 ms this used to wait). Only a stamp still missing well past that is treated as
-/// never stored. The bound stays far below the scheduler timeout, so such a command cannot fail
-/// its VM.
+/// may be released. It stores the stamps of an ioctl's commands only once every kick counted on
+/// the ioctl's work-state node has completed: while other commands of the same submit ioctl
+/// still run, the stamp is not late, however long they run (a command buffer of a dozen render
+/// passes, or a render waiting on another queue). [`stamp_wait`] restarts the bound until the
+/// node drains. Only a stamp still missing well past that is treated as never stored. The bound
+/// stays far below the scheduler timeout, so such a command cannot fail its VM.
 pub(crate) const STAMP_FALLBACK_NS: u64 = 50_000_000;
 
 // A command that waits out the fallback must still retire well inside the scheduler timeout.
@@ -90,6 +91,33 @@ const _: () = assert!(STAMP_FALLBACK_NS * 4 <= crate::g17::job::TIMEOUT_MS as u6
 /// [`STAMP_FALLBACK_NS`] by `now`.
 pub(crate) fn record_aged(observed_at: Option<u64>, now: u64) -> bool {
     observed_at.is_some_and(|at| now.saturating_sub(at) >= STAMP_FALLBACK_NS)
+}
+
+/// Where a command's wait for its completion stamp stands; see [`stamp_wait`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StampWait {
+    /// Within [`STAMP_FALLBACK_NS`] of the record, or no record yet.
+    Waiting,
+    /// The bound passed while the ioctl's work-state node still runs kicks: the stamp is not
+    /// late, and the wait counts again from the given host time.
+    Restart(u64),
+    /// The node drained and the stamp is still missing after the bound: retire on the record.
+    Aged,
+}
+
+/// The stamp wait of a command whose exact record was latched at `observed_at` (host ns) and
+/// whose stamp is still missing, at `now`. `drained` reports whether every kick counted on the
+/// command's work-state node completed; it is asked only once the bound has passed.
+pub(crate) fn stamp_wait(observed_at: Option<u64>, now: u64, drained: impl FnOnce() -> bool)
+    -> StampWait
+{
+    if !record_aged(observed_at, now) {
+        StampWait::Waiting
+    } else if drained() {
+        StampWait::Aged
+    } else {
+        StampWait::Restart(now)
+    }
 }
 
 static STAMPLESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -528,6 +556,22 @@ mod tests {
         );
         // The record's own timestamps are published, never synthesized ones.
         assert_eq!(result, Ok(Some([0x1111, 0x2222])));
+    }
+
+    #[test]
+    fn a_stamp_waits_for_the_rest_of_its_ioctl() {
+        let at = 1_000_000;
+        let late = at + STAMP_FALLBACK_NS;
+        // The node is asked only once the bound passed.
+        assert_eq!(stamp_wait(Some(at), late - 1, || panic!("node read early")), StampWait::Waiting);
+        assert_eq!(stamp_wait(None, u64::MAX, || panic!("node read without a record")),
+            StampWait::Waiting);
+        // Other kicks of the ioctl still run: the stamp is not late, the bound restarts.
+        assert_eq!(stamp_wait(Some(at), late, || false), StampWait::Restart(late));
+        assert_eq!(stamp_wait(Some(late), late + STAMP_FALLBACK_NS - 1, || true), StampWait::Waiting);
+        // The node drained and the stamp is still missing after the bound.
+        assert_eq!(stamp_wait(Some(late), late + STAMP_FALLBACK_NS, || true), StampWait::Aged);
+        assert_eq!(stamp_wait(Some(at), late, || true), StampWait::Aged);
     }
 
     #[test]

@@ -1062,7 +1062,30 @@ impl Pair {
             return Ok(false);
         }
         let since = *front.stamp_wait_since.get_or_insert(now);
-        Ok(now.saturating_sub(since) >= retirement::STAMP_FALLBACK_NS)
+        Ok(Self::stamp_wait_expired(front, since, now))
+    }
+
+    /// Whether the front's stamp wait latched at `since` has run out by `now`. While other kicks
+    /// of the group's ioctl still run, its stamps are not late: the wait restarts and the pair
+    /// stays latched for the rescan.
+    fn stamp_wait_expired(front: &mut Active, since: u64, now: u64) -> bool {
+        let drained = || {
+            // A node that cannot be read keeps the bound from the latch.
+            front
+                .packet
+                .completion
+                .work_state()
+                .and_then(|work| work.drained())
+                .unwrap_or(true)
+        };
+        match retirement::stamp_wait(since, now, drained) {
+            retirement::StampWait::Waiting => false,
+            retirement::StampWait::Restart(now) => {
+                front.stamp_wait_since = Some(now);
+                false
+            }
+            retirement::StampWait::Expired => true,
+        }
     }
 
     /// Whether the front group's stamp wait is latched: the observation scan rechecks the pair
@@ -1300,9 +1323,9 @@ impl Pair {
         {
             return Err(EIO);
         }
-        let stampless = front.stamp_wait_since.is_some_and(|since| {
-            crate::g17::now_ns().saturating_sub(since) >= retirement::STAMP_FALLBACK_NS
-        });
+        let stampless = front
+            .stamp_wait_since
+            .is_some_and(|since| Self::stamp_wait_expired(front, since, crate::g17::now_ns()));
         let mut observer = Observer {
             memory: &self.memory,
             qids,
