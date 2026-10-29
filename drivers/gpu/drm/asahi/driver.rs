@@ -91,6 +91,10 @@ const INFO: drm::driver::DriverInfo = drm::driver::DriverInfo {
     desc: c"Apple AGX Graphics",
 };
 
+// Open DRM files and exported DMA buffers take their callbacks' module from `MODULE`. With
+// `None`, a modular build could be unloaded while they still point into it.
+const _: () = assert!(<AsahiDrmDriver as drm::driver::Driver>::MODULE.is_some());
+
 /// DRM Driver implementation for `AsahiDriver`.
 #[vtable]
 impl drm::driver::Driver for AsahiDrmDriver {
@@ -103,6 +107,7 @@ impl drm::driver::Driver for AsahiDrmDriver {
     type ParentDevice<Ctx: DeviceContext> = platform::Device<Ctx>;
 
     const INFO: drm::driver::DriverInfo = INFO;
+    const MODULE: Option<&'static kernel::ThisModule> = Some(&crate::THIS_MODULE);
     const FEAT_RENDER: bool = true;
     const FEAT_SYNCOBJ: bool = true;
     const FEAT_SYNCOBJ_TIMELINE: bool = true;
