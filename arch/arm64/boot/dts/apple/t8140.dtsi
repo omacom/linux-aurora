@@ -1143,6 +1143,7 @@
 					<&uat_handoff>;
 			memory-region-names = "ttbs", "pagetables", "handoff";
 			operating-points-v2 = <&gpu_opp>;
+			apple,clpc = <&clpc>;
 			status = "disabled";
 		};
 
