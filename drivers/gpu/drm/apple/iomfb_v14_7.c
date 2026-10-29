@@ -2021,9 +2021,14 @@ int iomfb_v14_7_external_prepare(struct apple_dcp *dcp)
 		dcp->coproc_reg = NULL;
 		goto refuse;
 	}
-	/* The callbacks here are those of one firmware image. */
+	/*
+	 * The callbacks here are those of one firmware image: T6030's, or on a
+	 * T6031 external processor the J516C image its internal DCP runs.
+	 */
 	if (of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid) ||
-	    strcmp(uuid, DCP_V14_FIRMWARE_UUID)) {
+	    (strcmp(uuid, DCP_V14_FIRMWARE_UUID) &&
+	     (!of_device_is_compatible(dev->of_node, "apple,t6031-dcpext") ||
+	      strcmp(uuid, DCP_V14_J516C_FIRMWARE_UUID)))) {
 		dev_err(dev, "external display processor firmware %s is not supported\n",
 			uuid ?: "(unknown)");
 		ret = -ENODEV;

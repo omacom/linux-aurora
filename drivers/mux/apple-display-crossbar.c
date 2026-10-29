@@ -1003,7 +1003,9 @@ static int apple_dpxbar_probe(struct platform_device *pdev)
 	spin_lock_init(&dpxbar->lock);
 
 	dpxbar->dev = dev;
-	dpxbar->t6030_dpin = of_machine_is_compatible("apple,t6030");
+	/* T6031 (M3 Max) has T6030's dispext pipes and the same crossbar. */
+	dpxbar->t6030_dpin = of_machine_is_compatible("apple,t6030") ||
+			     of_machine_is_compatible("apple,t6031");
 	dpxbar->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dpxbar->regs))
 		return PTR_ERR(dpxbar->regs);
