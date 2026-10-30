@@ -41,6 +41,10 @@ pub(super) struct Lane<'a> {
     pub(super) window: Window,
 }
 impl<'a> Lane<'a> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The publication lane describes independent fields of the firmware wire record."
+    )]
     pub(super) fn new(
         graph: &'a memory::Graph,
         stage: usize,
@@ -94,7 +98,9 @@ impl<'a> Lane<'a> {
         push(announce_va);
         Ok(Self {
             items,
-            producer: graph.queues.word(memory::POINTERS[stage] + graph.pointers.producer)?,
+            producer: graph
+                .queues
+                .word(memory::POINTERS[stage] + graph.pointers.producer)?,
             values,
             config,
             config_destination,

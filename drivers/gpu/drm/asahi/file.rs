@@ -215,15 +215,15 @@ impl SyncItem {
         let mut vec = KVec::with_capacity(count as usize, GFP_KERNEL)?;
         let mut anchor = None;
 
-        // SAFETY: We only read this once, so there are no TOCTOU issues.
-        let mut reader = UserSlice::new(UserPtr::from_addr(ptr as _), size).reader();
+        // Read each record once so validation and use see the same retained bytes.
+        let mut reader = UserSlice::new(UserPtr::from_addr(ptr as usize), size).reader();
 
         for i in 0..count {
             let mut sync: MaybeUninit<uapi::drm_asahi_sync> = MaybeUninit::uninit();
 
             // SAFETY: The size of `sync` is STRIDE
             reader.read_raw(unsafe {
-                core::slice::from_raw_parts_mut(sync.as_mut_ptr() as *mut MaybeUninit<u8>, STRIDE)
+                core::slice::from_raw_parts_mut(sync.as_mut_ptr().cast::<MaybeUninit<u8>>(), STRIDE)
             })?;
 
             // SAFETY: All bit patterns in the struct are valid
@@ -345,6 +345,9 @@ impl File {
         mem: Arc<memacct::Client>,
         usage: Arc<crate::usage::Client>,
     ) -> impl PinInit<Self, Error> {
+        // SAFETY: The initializer supplies aligned, pinned storage for Self.
+        // XArray::new is infallible; each pinned array is initialized in place,
+        // then every remaining field is written before returning success.
         unsafe {
             pin_init::pin_init_from_closure(move |slot: *mut Self| {
                 let raw_vms = addr_of_mut!((*slot).vms);
@@ -466,13 +469,13 @@ impl File {
 
         let size = core::mem::size_of::<uapi::drm_asahi_params_global>().min(data.size.try_into()?);
 
-        // SAFETY: We only write to this userptr once, so there are no TOCTOU issues.
+        // Write the retained result to this user slice once.
         let mut params_writer =
             UserSlice::new(UserPtr::from_addr(data.pointer as usize), size).writer();
 
         // SAFETY: `size` is at most the sizeof of `params`
         params_writer.write_slice(unsafe {
-            core::slice::from_raw_parts(&params as *const _ as *const u8, size)
+            core::slice::from_raw_parts(core::ptr::from_ref(&params).cast::<u8>(), size)
         })?;
 
         file.inner()
@@ -1343,9 +1346,9 @@ impl File {
             );
             return Err(EINVAL);
         }
-        // SAFETY: capable() only reads the calling task's credentials (ioctl process context).
         if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
-            && !unsafe { bindings::capable(bindings::CAP_SYS_NICE as _) }
+            // SAFETY: capable() reads the current ioctl task's credentials.
+            && !unsafe { bindings::capable(bindings::CAP_SYS_NICE as i32) }
             && !file.is_current_master()
         {
             cls_pr_debug!(

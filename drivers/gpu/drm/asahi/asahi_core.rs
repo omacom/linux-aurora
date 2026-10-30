@@ -4,6 +4,7 @@
 //! Driver for the Apple AGX GPUs found in Apple Silicon SoCs.
 
 mod alloc;
+mod binding;
 mod buffer;
 mod channel;
 mod cleanup;
@@ -66,6 +67,8 @@ struct DriverModule {
 
 impl kernel::InPlaceModule for DriverModule {
     fn init(module: &'static kernel::ThisModule) -> impl PinInit<Self, Error> {
+        // SAFETY: Module init runs once, before either adapter is registered below.
+        unsafe { binding::init() };
         try_pin_init!(Self {
             // Initialize the queue first, before registration can invoke probe.
             _cleanup: cleanup::QueueOwner::new()?,

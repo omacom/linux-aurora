@@ -46,18 +46,59 @@ impl ReportRing {
 pub(crate) struct Rings {
     quarantined: [[bool; 2]; 2],
     reports: super::reports::Reports,
+    telemetry: super::telemetry::Telemetry,
+    max_age_ns: u64,
+    suspended: bool,
+    discard_statistics: [bool; 2],
+    statistics_epoch: u64,
 }
 
 impl Rings {
-    pub(crate) fn new() -> Result<Self> {
+    pub(crate) fn new(graph: super::fw::variant::InitGraph) -> Result<Self> {
         Ok(Self {
             quarantined: [[false; 2]; 2],
             reports: super::reports::Reports::new()?,
+            telemetry: super::telemetry::Telemetry::default(),
+            max_age_ns: super::stats::max_age_ns(graph),
+            suspended: false,
+            discard_statistics: [false; 2],
+            statistics_epoch: 0,
         })
     }
 
+    pub(super) fn invalidate_statistics(&mut self) {
+        self.telemetry.invalidate();
+        // The packets have no epoch marker. Discard each role's already
+        // queued records before accepting a new baseline after the boundary.
+        self.discard_statistics = [true; 2];
+    }
+
+    pub(super) fn suspend_statistics(&mut self, suspended: bool) {
+        self.suspended = suspended;
+        self.invalidate_statistics();
+    }
+
+    pub(super) fn statistics_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    pub(super) fn observe_statistics_power(&mut self, powered: bool, epoch: u64) {
+        if !powered || epoch != self.statistics_epoch {
+            self.invalidate_statistics();
+        }
+        self.statistics_epoch = epoch;
+    }
+
+    pub(super) fn read_statistics(&self, now_ns: u64) -> super::telemetry::Readout {
+        self.telemetry.read(now_ns, self.max_age_ns)
+    }
+
     pub(super) fn write_reports(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
-        self.reports.write(f)
+        self.reports.write(f)?;
+        let view = self.read_statistics(super::now_ns());
+        writeln!(f, "qualified max_age_ns={} util_status={} util_host_ns={} util_samples={} pstate_status={} pstate_host_ns={} pstate_timestamp={} delta_ticks={:?}",
+            self.max_age_ns, view.util_status, view.util_host_ns, view.util_samples,
+            view.pstate_status, view.pstate_host_ns, view.pstate_timestamp, self.telemetry.delta_ticks)
     }
 
     pub(crate) fn drain_trace(&mut self, dev: &Device, init: &InitData, role: Role) {
@@ -69,12 +110,29 @@ impl Rings {
     }
 
     fn drain_report(&mut self, dev: &Device, init: &InitData, role: Role, ring: ReportRing) {
-        let quarantined = &mut self.quarantined[role as usize][ring as usize];
-        if *quarantined {
+        if self.quarantined[role as usize][ring as usize] {
             return;
         }
-        if let Err(error) = Self::consume_report(init, role, ring, &mut self.reports) {
-            *quarantined = true;
+        let statistics = matches!(ring, ReportRing::Statistics);
+        let accept = !self.suspended
+            && !self.discard_statistics[role as usize]
+            && !self
+                .quarantined
+                .iter()
+                .any(|rings| rings[ReportRing::Statistics as usize]);
+        if let Err(error) = Self::consume_report(
+            init,
+            role,
+            ring,
+            &mut self.reports,
+            &mut self.telemetry,
+            self.max_age_ns,
+            accept,
+        ) {
+            self.quarantined[role as usize][ring as usize] = true;
+            if statistics {
+                self.invalidate_statistics();
+            }
             dev_err!(
                 dev.as_ref(),
                 "G17 {:?} {:?} ring stopped: {:?}\n",
@@ -82,6 +140,8 @@ impl Rings {
                 ring,
                 error
             );
+        } else if statistics && !self.suspended {
+            self.discard_statistics[role as usize] = false;
         }
     }
 
@@ -90,6 +150,9 @@ impl Rings {
         role: Role,
         ring: ReportRing,
         reports: &mut super::reports::Reports,
+        telemetry: &mut super::telemetry::Telemetry,
+        max_age_ns: u64,
+        accept_statistics: bool,
     ) -> Result {
         let (state, entries, capacity, allowed_types) = ring.geometry();
         let consumer_word = init.status_word(role, state)?;
@@ -104,8 +167,8 @@ impl Rings {
         }
         while consumer != producer {
             let offset = entries + consumer as usize * EVENT_RECORD_SIZE;
-            // Copy all words before returning the slot. Interpretation is a
-            // separate firmware qualification step, never a scheduling input.
+            // Decode only the complete copy, before returning the slot.
+            // Statistics never affect scheduling or power control.
             let words = init.status_read_words::<EVENT_WORDS>(role, offset)?;
             super::trace::report(role as u8, ring as u8, &words);
             let tag = words[0];
@@ -113,7 +176,11 @@ impl Rings {
                 return Err(EIO);
             }
             if matches!(ring, ReportRing::Statistics) {
-                reports.record(role, words, super::now_ns());
+                let host_ns = super::now_ns();
+                reports.record(role, words, host_ns);
+                if accept_statistics {
+                    telemetry.record(&words, host_ns, max_age_ns);
+                }
             }
             consumer = (consumer + 1) & (capacity - 1);
             fence(Ordering::SeqCst);

@@ -68,7 +68,9 @@ static EXPORT_OPS: AtomicUsize = AtomicUsize::new(0);
 
 #[vtable]
 impl FenceOps for ExportFence {
-    fn get_driver_name<'a>(self: &'a FenceObject<Self>) -> &'a CStr { c_str!("asahi") }
+    fn get_driver_name<'a>(self: &'a FenceObject<Self>) -> &'a CStr {
+        c_str!("asahi")
+    }
     fn get_timeline_name<'a>(self: &'a FenceObject<Self>) -> &'a CStr {
         c_str!("g17-aggregate")
     }
@@ -76,7 +78,13 @@ impl FenceOps for ExportFence {
 
 #[inline(never)]
 fn export_fallback(contexts: &FenceContexts) -> Result<UniqueFence<ExportFence>> {
-    let fence = contexts.new_fence(0, ExportFence { source: None, scoped: false })?;
+    let fence = contexts.new_fence(
+        0,
+        ExportFence {
+            source: None,
+            scoped: false,
+        },
+    )?;
     // SAFETY: Unique, initialized and still private. Only this constructor
     // publishes ExportFence objects; its payload is immutable after sharing.
     let ops = unsafe {
@@ -86,8 +94,8 @@ fn export_fallback(contexts: &FenceContexts) -> Result<UniqueFence<ExportFence>>
     let previous = EXPORT_OPS.load(Ordering::Acquire);
     if previous == 0 {
         match EXPORT_OPS.compare_exchange(0, ops, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => {},
-            Err(previous) if previous == ops => {},
+            Ok(_) => {}
+            Err(previous) if previous == ops => {}
             Err(_) => return Err(EIO),
         }
     } else if previous != ops {
@@ -96,21 +104,32 @@ fn export_fallback(contexts: &FenceContexts) -> Result<UniqueFence<ExportFence>>
     Ok(fence)
 }
 
-/// Caller retains the leaf fence throughout lookup. Exact registered operations
-/// identify the repr(C) FenceObject payload, not a driver or timeline name.
-pub(super) unsafe fn exported_source_raw(raw: *mut bindings::dma_fence)
-    -> Option<Arc<Submission>>
-{
+/// Find the submission behind a leaf fence with the exact registered operations.
+/// Those operations identify the repr(C) FenceObject payload, not its name.
+///
+/// # Safety
+///
+/// `raw` must be non-null and point to an initialized dma_fence. The caller
+/// must retain a fence reference throughout this lookup.
+pub(super) unsafe fn exported_source_raw(raw: *mut bindings::dma_fence) -> Option<Arc<Submission>> {
     let expected = EXPORT_OPS.load(Ordering::Acquire);
-    if expected == 0 { return None; }
+    if expected == 0 {
+        return None;
+    }
     // SAFETY: The caller owns a live fence reference. ExportFence has a unique
     // timeline callback and nontrivial payload drop. No cast precedes the exact
     // registered vtable check. FenceObject begins with its dma_fence.
     let object = unsafe {
-        if (*raw).ops as usize != expected { return None; }
+        if (*raw).ops as usize != expected {
+            return None;
+        }
         &*(raw as *const FenceObject<ExportFence>)
     };
-    object.source.as_ref().filter(|source| source.firmware_source).cloned()
+    object
+        .source
+        .as_ref()
+        .filter(|source| source.firmware_source)
+        .cloned()
 }
 
 struct State {
@@ -144,33 +163,50 @@ impl Submission {
         Self::with_work(Some(work), firmware_source)
     }
     fn with_work(work: Option<Arc<WorkStateLease>>, firmware_source: bool) -> Result<Arc<Self>> {
-        Arc::pin_init(pin_init!(Self {
-            state <- new_mutex!(State { work, ready: None }, "G17 submission work state"),
-            remaining: AtomicU8::new(1),
-            error: AtomicI32::new(0),
-            owners: AtomicU8::new(1),
-            firmware_source,
-            retired: AtomicBool::new(false),
-        }), GFP_KERNEL)
+        Arc::pin_init(
+            pin_init!(Self {
+                state <- new_mutex!(State { work, ready: None }, "G17 submission work state"),
+                remaining: AtomicU8::new(1),
+                error: AtomicI32::new(0),
+                owners: AtomicU8::new(1),
+                firmware_source,
+                retired: AtomicBool::new(false),
+            }),
+            GFP_KERNEL,
+        )
     }
     pub(super) fn source_status(&self) -> Result<bool> {
-        let complete = self.remaining.load(Ordering::Acquire) == 0
-            || self.retired.load(Ordering::Acquire);
+        let complete =
+            self.remaining.load(Ordering::Acquire) == 0 || self.retired.load(Ordering::Acquire);
         let error = self.error.load(Ordering::Acquire);
-        if error != 0 { return Err(super::dependency::inherited_error(Error::from_errno(error))); }
+        if error != 0 {
+            return Err(super::dependency::inherited_error(Error::from_errno(error)));
+        }
         Ok(complete)
     }
     pub(super) fn same_vm(&self, status: &Arc<super::status::VmStatus>) -> bool {
-        self.state.lock().work.as_ref().is_some_and(|work| Arc::ptr_eq(work.status(), status))
+        self.state
+            .lock()
+            .work
+            .as_ref()
+            .is_some_and(|work| Arc::ptr_eq(work.status(), status))
     }
-    pub(super) fn ready(&self) -> Option<Fence> { self.state.lock().ready.clone() }
+    pub(super) fn ready(&self) -> Option<Fence> {
+        self.state.lock().ready.clone()
+    }
     fn set_ready(&self, ready: Fence) {
-        if !self.firmware_source { return; }
+        if !self.firmware_source {
+            return;
+        }
         let mut state = self.state.lock();
-        if state.work.is_some() && state.ready.is_none() { state.ready = Some(ready); }
+        if state.work.is_some() && state.ready.is_none() {
+            state.ready = Some(ready);
+        }
     }
     fn note_error(&self, error: Error) -> bool {
-        self.error.compare_exchange(0, error.to_errno(), Ordering::AcqRel, Ordering::Acquire).is_ok()
+        self.error
+            .compare_exchange(0, error.to_errno(), Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
     fn release_state(&self) {
         let old = {
@@ -182,15 +218,26 @@ impl Submission {
     fn owner_done(&self) {
         // Every hardware owner retains its Completion/Member through exact
         // retirement or stop. Exported fence FDs must not retain failed pins.
-        if self.owners.fetch_sub(1, Ordering::AcqRel) == 1 { self.release_state(); }
+        if self.owners.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.release_state();
+        }
     }
     fn member_done(&self, fence: &UserFence<ExportFence>, result: Result) {
-        if let Err(error) = result { self.note_error(error); }
+        if let Err(error) = result {
+            self.note_error(error);
+        }
         if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
             let error = self.error.load(Ordering::Acquire);
-            if error != 0 { fence.set_error(Error::from_errno(error)); }
-            else { self.release_state(); }
-            if fence.scoped { signal_exported(fence); } else { fence.signal(); }
+            if error != 0 {
+                fence.set_error(Error::from_errno(error));
+            } else {
+                self.release_state();
+            }
+            if fence.scoped {
+                signal_exported(fence);
+            } else {
+                fence.signal();
+            }
         }
     }
 }
@@ -200,16 +247,28 @@ pub(crate) struct Aggregate(UserFence<ExportFence>);
 impl Aggregate {
     fn source(&self) -> &Arc<Submission> {
         // Only Outputs::publish constructs Aggregate, after setting the payload.
-        self.0.source.as_ref().expect("published aggregate has submission state")
+        self.0
+            .source
+            .as_ref()
+            .expect("published aggregate has submission state")
     }
-    fn fence(&self) -> Fence { Fence::from_fence(&self.0) }
+    fn fence(&self) -> Fence {
+        Fence::from_fence(&self.0)
+    }
     pub(crate) fn member(&self) -> Member {
         self.source().remaining.fetch_add(1, Ordering::Relaxed);
         self.source().owners.fetch_add(1, Ordering::Relaxed);
-        Member { aggregate: self.clone(), complete: AtomicBool::new(false) }
+        Member {
+            aggregate: self.clone(),
+            complete: AtomicBool::new(false),
+        }
     }
     fn finish_enqueue(&self, result: Result) {
-        if let Err(error) = result { self.source().error.store(error.to_errno(), Ordering::Release); }
+        if let Err(error) = result {
+            self.source()
+                .error
+                .store(error.to_errno(), Ordering::Release);
+        }
         self.source().member_done(&self.0, result);
         self.source().owner_done();
     }
@@ -220,22 +279,38 @@ pub(crate) struct Member {
     complete: AtomicBool,
 }
 impl Member {
-    pub(super) fn needs_source_ready(&self) -> bool { self.aggregate.source().firmware_source }
+    pub(super) fn needs_source_ready(&self) -> bool {
+        self.aggregate.source().firmware_source
+    }
     pub(crate) fn work_state(&self) -> Result<Arc<WorkStateLease>> {
-        self.aggregate.source().state.lock().work.clone().ok_or(ECANCELED)
+        self.aggregate
+            .source()
+            .state
+            .lock()
+            .work
+            .clone()
+            .ok_or(ECANCELED)
     }
     pub(super) fn is_source(&self, source: &Arc<Submission>) -> bool {
         self.aggregate.source().firmware_source && Arc::ptr_eq(self.aggregate.source(), source)
     }
-    pub(super) fn set_source_ready(&self, ready: Fence) { self.aggregate.source().set_ready(ready); }
-    pub(super) fn note_error(&self, error: Error) -> bool { self.aggregate.source().note_error(error) }
+    pub(super) fn set_source_ready(&self, ready: Fence) {
+        self.aggregate.source().set_ready(ready);
+    }
+    pub(super) fn note_error(&self, error: Error) -> bool {
+        self.aggregate.source().note_error(error)
+    }
     pub(super) fn note_retired(&self) {
         let source = self.aggregate.source();
-        if source.firmware_source { source.retired.store(true, Ordering::Release); }
+        if source.firmware_source {
+            source.retired.store(true, Ordering::Release);
+        }
     }
     pub(crate) fn complete(&self, result: Result) {
         if !self.complete.swap(true, Ordering::AcqRel) {
-            self.aggregate.source().member_done(&self.aggregate.0, result);
+            self.aggregate
+                .source()
+                .member_done(&self.aggregate.0, result);
         }
     }
 }
@@ -278,7 +353,10 @@ mod tests {
         let member = aggregate.member();
         aggregate.finish_enqueue(Ok(()));
         member.complete(Err(EIO));
-        assert_eq!(super::super::job::fence_status(&aggregate.fence()), EIO.to_errno());
+        assert_eq!(
+            super::super::job::fence_status(&aggregate.fence()),
+            EIO.to_errno()
+        );
         assert!(source.state.lock().ready.is_some());
         drop(member);
         // Keep both the exported fence and source state alive, as userspace can.
@@ -291,7 +369,10 @@ mod tests {
         let aggregate = aggregate(&contexts());
         drop(aggregate.member());
         aggregate.finish_enqueue(Err(ENOMEM));
-        assert_eq!(super::super::job::fence_status(&aggregate.fence()), ENOMEM.to_errno());
+        assert_eq!(
+            super::super::job::fence_status(&aggregate.fence()),
+            ENOMEM.to_errno()
+        );
     }
 
     #[test]
@@ -318,7 +399,9 @@ mod tests {
         }
         assert!(super::super::job::fence_status(&aggregate.fence()) > 0);
         assert_eq!(source.remaining.load(Ordering::Acquire), 0);
-        for member in &mut members { drop(member.take()); }
+        for member in &mut members {
+            drop(member.take());
+        }
         assert_eq!(source.owners.load(Ordering::Acquire), 0);
     }
 }
@@ -333,7 +416,9 @@ fn install(outputs: impl Iterator<Item = SyncItem>, fence: &Fence) {
     for mut sync in outputs {
         if let Some(chain) = sync.chain_fence.take() {
             sync.syncobj.add_point(chain, fence, sync.timeline_value);
-        } else { sync.syncobj.replace_fence(Some(fence)); }
+        } else {
+            sync.syncobj.replace_fence(Some(fence));
+        }
     }
 }
 
@@ -346,10 +431,15 @@ pub(crate) struct Outputs {
     cumulative: Option<super::sync_output::SignalBundle>,
 }
 impl Outputs {
-    pub(crate) fn new(contexts: &FenceContexts, mut syncs: KVec<SyncItem>,
-        input_count: usize, allocation_failure: &Fence) -> Result<Self>
-    {
-        if input_count > syncs.len() { return Err(EINVAL); }
+    pub(crate) fn new(
+        contexts: &FenceContexts,
+        mut syncs: KVec<SyncItem>,
+        input_count: usize,
+        allocation_failure: &Fence,
+    ) -> Result<Self> {
+        if input_count > syncs.len() {
+            return Err(EINVAL);
+        }
         let mut cumulative = syncs.iter_mut().find_map(|sync| sync.cumulative.take());
         let fallback = match export_fallback(contexts) {
             Ok(fence) => fence,
@@ -362,11 +452,23 @@ impl Outputs {
                 return Err(error);
             }
         };
-        Ok(Self { fallback: Some(fallback), syncs, input_count,
-            submission: None, result: Err(ECANCELED), cumulative })
+        Ok(Self {
+            fallback: Some(fallback),
+            syncs,
+            input_count,
+            submission: None,
+            result: Err(ECANCELED),
+            cumulative,
+        })
     }
-    pub(crate) fn inputs(&self) -> &[SyncItem] { &self.syncs[..self.input_count] }
-    pub(crate) fn publish(&mut self, context: Arc<Context>, firmware_source: bool) -> Result<Aggregate> {
+    pub(crate) fn inputs(&self) -> &[SyncItem] {
+        &self.syncs[..self.input_count]
+    }
+    pub(crate) fn publish(
+        &mut self,
+        context: Arc<Context>,
+        firmware_source: bool,
+    ) -> Result<Aggregate> {
         let source = Submission::new(context, firmware_source)?;
         let mut fence = self.fallback.take().ok_or(EINVAL)?;
         fence.source = Some(source);
@@ -381,7 +483,10 @@ impl Outputs {
         }
         Ok(submission)
     }
-    pub(crate) fn finish(mut self, result: Result) -> Result { self.result = result; result }
+    pub(crate) fn finish(mut self, result: Result) -> Result {
+        self.result = result;
+        result
+    }
 }
 impl Drop for Outputs {
     fn drop(&mut self) {
@@ -393,11 +498,16 @@ impl Drop for Outputs {
             return;
         }
         if let Some(fallback) = self.fallback.take() {
-            if let Err(error) = self.result { fallback.set_error(error); }
+            if let Err(error) = self.result {
+                fallback.set_error(error);
+            }
             if let Some(bundle) = &mut self.cumulative {
                 bundle.fail(&Fence::from_fence(&fallback));
             } else {
-                install(self.syncs.drain(self.input_count..), &Fence::from_fence(&fallback));
+                install(
+                    self.syncs.drain(self.input_count..),
+                    &Fence::from_fence(&fallback),
+                );
             }
             fallback.signal();
         }

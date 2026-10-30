@@ -162,14 +162,14 @@ impl<T, U: RawAllocation> Drop for GenericAlloc<T, U> {
                 // the invariant, and greater than debug_len as checked above.
                 unsafe {
                     let p = p.as_ptr().add(self.debug_offset - debug_len);
-                    (p as *mut u32).write(STATE_DEAD);
+                    p.cast::<u32>().write(STATE_DEAD);
                 }
             }
         }
         if debug_enabled(DebugFlags::FillAllocations) {
             if let Some(p) = self.ptr() {
                 // SAFETY: Writing to our inner base pointer with our known inner size is safe.
-                unsafe { (p.as_ptr() as *mut u8).write_bytes(0xde, self.size()) };
+                unsafe { p.as_ptr().cast::<u8>().write_bytes(0xde, self.size()) };
             }
         }
         if self.padding != 0 {
@@ -178,7 +178,7 @@ impl<T, U: RawAllocation> Drop for GenericAlloc<T, U> {
                 // the inner base pointer, after `size()` bytes.
                 let guard = unsafe {
                     core::slice::from_raw_parts(
-                        (p.as_ptr() as *mut u8 as *const u8).add(self.size()),
+                        p.as_ptr().cast::<u8>().cast_const().add(self.size()),
                         self.padding,
                     )
                 };
@@ -313,8 +313,8 @@ pub(crate) trait Allocator {
                     unsafe {
                         let p = p.as_ptr();
                         p.write_bytes(0x42, debug_offset - 2 * debug_len);
-                        let cur = p.add(debug_offset - debug_len) as *mut AllocDebugData;
-                        let prev = p.add(debug_offset - 2 * debug_len) as *mut AllocDebugData;
+                        let cur = p.add(debug_offset - debug_len).cast::<AllocDebugData>();
+                        let prev = p.add(debug_offset - 2 * debug_len).cast::<AllocDebugData>();
                         prev.copy_from(cur, 1);
                         cur.copy_from(&debug, 1);
                     };
@@ -344,7 +344,7 @@ pub(crate) trait Allocator {
         if debug_enabled(DebugFlags::FillAllocations) {
             if let Some(p) = ret.ptr() {
                 // SAFETY: Writing to our inner base pointer with our known inner size is safe.
-                unsafe { (p.as_ptr() as *mut u8).write_bytes(0xaa, ret.size()) };
+                unsafe { p.as_ptr().cast::<u8>().write_bytes(0xaa, ret.size()) };
             }
         }
 
@@ -354,7 +354,7 @@ pub(crate) trait Allocator {
                 // the inner base pointer, after `size()` bytes.
                 let guard = unsafe {
                     core::slice::from_raw_parts_mut(
-                        (p.as_ptr() as *mut u8).add(ret.size()),
+                        p.as_ptr().cast::<u8>().add(ret.size()),
                         padding,
                     )
                 };
@@ -536,7 +536,7 @@ impl Allocator for SimpleAllocator {
         );
 
         let mut obj = crate::gem::new_kernel_object(&self.dev, size_aligned)?;
-        let p = obj.vmap()?.addr as *mut u8;
+        let p = obj.vmap()?.addr.cast::<u8>();
         if debug_enabled(DebugFlags::FillAllocations) {
             let obj_size = obj.size();
             if let Ok(vmap) = obj.vmap() {
@@ -990,7 +990,7 @@ impl HeapAllocator {
             let (obj_start, obj_size, p) = self.mm.with_inner(|inner| -> Result<_> {
                 let idx = idx.unwrap_or(inner.backing_objects.len() - 1);
                 let obj = &mut inner.backing_objects[idx];
-                let p = obj.0.vmap()?.addr as *mut u8;
+                let p = obj.0.vmap()?.addr.cast::<u8>();
                 Ok((obj.2, obj.0.size(), p))
             })?;
             assert!(obj_start <= start);

@@ -96,6 +96,13 @@ pub(crate) fn gcd(in_n: u64, in_m: u64) -> u64 {
     m
 }
 
+/// A value that can be populated from an untrusted byte record.
+///
+/// # Safety
+///
+/// Every bit pattern must be valid for Self. Its byte representation must
+/// contain no uninitialized bytes (including padding) when produced by Default,
+/// since Reader temporarily views that storage as a byte slice.
 pub(crate) unsafe trait AnyBitPattern: Default + Sized + Copy + 'static {}
 
 pub(crate) struct Reader<'a> {
@@ -117,7 +124,9 @@ impl<'a> Reader<'a> {
 
         // SAFETY: The output pointer is valid, and the size does not exceed
         // the type size, and all bit patterns are valid.
-        let dst = unsafe { core::slice::from_raw_parts_mut(&mut obj as *mut _ as *mut u8, size) };
+        let dst = unsafe {
+            core::slice::from_raw_parts_mut(core::ptr::from_mut(&mut obj).cast::<u8>(), size)
+        };
 
         dst.copy_from_slice(&src[..size]);
         self.offset = end;

@@ -4,7 +4,10 @@
 //! treating another firmware's pstate report as an achieved GPU frequency.
 //! Writers and readers hold the device mutex; reads never power the GPU up.
 
-use super::{fw::channels::{EVENT_WORDS, STATISTICS_TYPES}, Role};
+use super::{
+    fw::channels::{EVENT_WORDS, STATISTICS_TYPES},
+    Role,
+};
 use kernel::prelude::*;
 
 #[derive(Clone, Copy, Default)]
@@ -40,10 +43,25 @@ impl Reports {
     }
 
     pub(super) fn write(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
-        writeln!(f, "format=1 units=raw host_time=monotonic_ns achieved_frequency=unqualified")?;
-        for (index, sample) in self.samples.iter().enumerate().filter(|(_, s)| s.count != 0) {
-            writeln!(f, "role={} tag={:#x} count={} host_ns={} words={:08x?}",
-                index / 32, index % 32, sample.count, sample.host_ns, sample.words)?;
+        writeln!(
+            f,
+            "format=1 units=raw host_time=monotonic_ns achieved_frequency=unqualified"
+        )?;
+        for (index, sample) in self
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.count != 0)
+        {
+            writeln!(
+                f,
+                "role={} tag={:#x} count={} host_ns={} words={:08x?}",
+                index / 32,
+                index % 32,
+                sample.count,
+                sample.host_ns,
+                sample.words
+            )?;
         }
         Ok(())
     }
@@ -54,15 +72,29 @@ pub(super) struct View(pub(super) kernel::sync::Arc<super::Shared>);
 
 impl kernel::debugfs::Writer for View {
     fn write(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
-        let state = self.0.state.lock();
-        let Some(firmware) = state.as_deref() else { return writeln!(f, "online=0"); };
-        writeln!(f, "online=1 graph={:?} sampled_ns={}", self.0.variant.graph, super::now_ns())?;
+        let mut state = self.0.state.lock();
+        let Some(firmware) = state.as_deref_mut() else {
+            return writeln!(f, "online=0");
+        };
+        firmware.observe_statistics_power();
+        writeln!(
+            f,
+            "online=1 graph={:?} sampled_ns={}",
+            self.0.variant.graph,
+            super::now_ns()
+        )?;
         write_power(firmware, f)?;
         firmware.rings.write_reports(f)
     }
 }
 
-fn write_power(firmware: &super::Firmware, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+fn write_power(
+    firmware: &super::Firmware,
+    f: &mut kernel::fmt::Formatter<'_>,
+) -> kernel::fmt::Result {
+    if firmware.rings.statistics_suspended() {
+        return writeln!(f, "power_management=firmware suspended=1");
+    }
     let core_power = firmware.bridge.regs.g17_core_power();
     writeln!(f, "power_management=firmware sampled_ns={} core_power={:#x} cores_powered={} host_hold={} idle_hold_ms={}",
         super::now_ns(), core_power, core_power & 0xf != 0, firmware.hold.active(),
@@ -76,7 +108,9 @@ pub(super) struct PowerView(pub(super) kernel::sync::Arc<super::Shared>);
 impl kernel::debugfs::Writer for PowerView {
     fn write(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
         let state = self.0.state.lock();
-        let Some(firmware) = state.as_deref() else { return writeln!(f, "online=0"); };
+        let Some(firmware) = state.as_deref() else {
+            return writeln!(f, "online=0");
+        };
         write_power(firmware, f)
     }
 }

@@ -153,9 +153,8 @@ impl ReservedTables {
     pub(crate) unsafe fn add(&mut self, res: kernel::io::resource::Resource) -> Result {
         let start = res.start();
         // SAFETY: The caller guarantees the region; write-back matches how the firmware maps it.
-        let map = unsafe {
-            kernel::io::mem::Mem::try_new(res, kernel::io::mem::MemFlag::WB.into())?
-        };
+        let map =
+            unsafe { kernel::io::mem::Mem::try_new(res, kernel::io::mem::MemFlag::WB.into())? };
         self.starts.push(start, GFP_KERNEL)?;
         self.regions.push(map, GFP_KERNEL)?;
         Ok(())
@@ -671,7 +670,7 @@ impl UatPageTable {
                     let driver_tables = &mut self.driver_tables;
                     let oas_mask = self.oas_mask;
                     let entry = |p: *mut u8| -> Result<Option<PhysicalAddr>> {
-                        let uptep = p as *const _ as *const Pte;
+                        let uptep = p.cast_const().cast::<Pte>();
                         // SAFETY: with_table() ensures the pointer is valid, and our index is
                         // aligned so it is safe to deref as an AtomicU64.
                         let upte = unsafe { &*uptep };
@@ -679,7 +678,10 @@ impl UatPageTable {
                         // Allocate if requested
                         if upte_val == 0 && alloc {
                             let pt_page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
-                            mod_pr_debug!("UATPageTable::with_pages: alloc PT at {:#x}\n", pt_page.phys());
+                            mod_pr_debug!(
+                                "UATPageTable::with_pages: alloc PT at {:#x}\n",
+                                pt_page.phys()
+                            );
                             if clean {
                                 // A non-snooping walker must never follow a parent to a
                                 // table whose zeroes are still in the CPU caches.
@@ -755,7 +757,7 @@ impl UatPageTable {
                 iova
             );
             let leaves = |p: *mut u8| -> Result {
-                let ptep = p as *const _ as *const Pte;
+                let ptep = p.cast_const().cast::<Pte>();
                 // SAFETY: We know this is a valid pointer to PTEs and the range is valid and
                 // checked by with_table().
                 let ptes = unsafe { core::slice::from_raw_parts(ptep, count) };
@@ -769,7 +771,13 @@ impl UatPageTable {
             // SAFETY: Page table addresses are either allocated by us, or
             // firmware-managed tables in RAM or in a reserved region.
             unsafe {
-                with_table(reserved.as_deref(), phys, idx * PTE_SIZE, count * PTE_SIZE, leaves)
+                with_table(
+                    reserved.as_deref(),
+                    phys,
+                    idx * PTE_SIZE,
+                    count * PTE_SIZE,
+                    leaves,
+                )
             }?;
 
             let block = 1 << (UAT_PGBIT + UAT_LVBIT);
@@ -806,7 +814,10 @@ impl UatPageTable {
         }
         if let Some((parent_phys, parent_index)) = parent {
             let oas_mask = self.oas_mask;
-            let in_reserved = self.reserved.as_ref().is_some_and(|r| r.contains(parent_phys));
+            let in_reserved = self
+                .reserved
+                .as_ref()
+                .is_some_and(|r| r.contains(parent_phys));
             // SAFETY: Only looks the page up; nothing is accessed through it.
             if !in_reserved && unsafe { Page::borrow_phys(&parent_phys) }.is_none() {
                 return Err(EIO);
@@ -832,7 +843,15 @@ impl UatPageTable {
             // its child descriptor is detached. A changed descriptor indicates
             // an ownership violation; fail closed instead of freeing a table
             // that may still be reachable.
-            unsafe { with_table(reserved, parent_phys, parent_index * PTE_SIZE, PTE_SIZE, detach) }?;
+            unsafe {
+                with_table(
+                    reserved,
+                    parent_phys,
+                    parent_index * PTE_SIZE,
+                    PTE_SIZE,
+                    detach,
+                )
+            }?;
         }
         if let Some(tables) = self.driver_tables.as_mut() {
             let index = tables.iter().position(|&table| table == phys).ok_or(EIO)?;

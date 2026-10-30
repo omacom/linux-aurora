@@ -38,9 +38,11 @@ impl event::Transport for Service<'_> {
     }
     fn statistics(&mut self, role: Role) {
         let firmware = &mut *self.firmware;
+        firmware.observe_statistics_power();
         firmware
             .rings
             .drain_statistics(&firmware.primary.state.shared.dev, &firmware.init, role);
+        firmware.observe_statistics_power();
     }
     fn drain(
         &mut self,
@@ -298,6 +300,7 @@ impl Firmware {
 
     /// Preparation admission is already closed and all builders have joined.
     pub(super) fn service_runtime_recovery(&mut self, deferred: &mut DeferredBatch) -> Result {
+        self.rings.invalidate_statistics();
         if self.recovery.restart_limit(super::now_ns()) {
             pr_warn!("G17: restart storm limit reached\n");
             return Err(ETIMEDOUT);
@@ -318,6 +321,7 @@ impl Firmware {
             .firmware
             .port
             .set_generation(service.firmware.recovery.generation());
+        service.firmware.rings.invalidate_statistics();
         let result = result?;
         if let Some(error) = result.target_error {
             dev_warn!(

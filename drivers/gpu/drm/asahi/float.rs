@@ -145,12 +145,12 @@ macro_rules! from_ints {
     ($u:ty, $i:ty) => {
         impl From<$i> for F32 {
             fn from(v: $i) -> F32 {
-                F32U::from_i64(v as i64).pack()
+                F32U::from_i64(i64::from(v)).pack()
             }
         }
         impl From<$u> for F32 {
             fn from(v: $u) -> F32 {
-                F32U::from_u64(v as u64).pack()
+                F32U::from_u64(u64::from(v)).pack()
             }
         }
     };

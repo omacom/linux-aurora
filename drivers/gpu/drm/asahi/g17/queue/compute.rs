@@ -35,7 +35,8 @@ const NATIVE_WAIT_STRIDE: usize = 0x60;
 // A submission can name every physical compute channel. Keep the complete
 // wait list inside its own cached slot, including the last retained slot.
 const CACHED_RECORD_STRIDE: usize = (NATIVE_WAIT_OFFSET
-    + crate::g17::kick::COMPUTE_CHANNELS * NATIVE_WAIT_STRIDE).next_power_of_two();
+    + crate::g17::kick::COMPUTE_CHANNELS * NATIVE_WAIT_STRIDE)
+    .next_power_of_two();
 const CONFIG: usize = 0;
 const ANNOUNCE: usize = 0x800;
 const PREDECESSOR: usize = 0x400;
@@ -280,7 +281,10 @@ impl Graph {
 
     fn cursors(&self) -> Result<Cursors> {
         Ok(Cursors {
-            producer: self.graph.word(CURSORS + self.pointers.producer)?.load(Ordering::Relaxed),
+            producer: self
+                .graph
+                .word(CURSORS + self.pointers.producer)?
+                .load(Ordering::Relaxed),
             consumer: self.graph.word(CURSORS)?.load(Ordering::Relaxed),
             count: self.graph.word(CURSORS + 0x60)?.load(Ordering::Relaxed),
         })
@@ -332,7 +336,9 @@ impl Graph {
             return Err(EIO);
         }
         for index in 0..ITEM_RING_ENTRIES as usize {
-            self.graph.dword(ITEMS + index * 8)?.store(0, Ordering::Relaxed);
+            self.graph
+                .dword(ITEMS + index * 8)?
+                .store(0, Ordering::Relaxed);
         }
         fence(Ordering::SeqCst);
         self.graph
@@ -685,7 +691,10 @@ impl Queue {
     /// never runs, or the failed command itself, whose ring entry it does not consume (a ray
     /// traversal's, on Neo). Only a kill of the queue's context gives them back.
     pub(crate) fn fault_pending(&self) -> bool {
-        self.fault_stamp.is_some() && self.quarantined && self.awaiting_witness && self.exit.is_none()
+        self.fault_stamp.is_some()
+            && self.quarantined
+            && self.awaiting_witness
+            && self.exit.is_none()
     }
 
     /// The stamp that proves retirement: the stored one, or a newer reported fault's.
@@ -724,7 +733,9 @@ impl Queue {
     }
     /// Quarantined commands still retain the scheduler until their retirement witness.
     pub(crate) fn idle_for_context(&self, context: &Arc<Context>) -> bool {
-        !self.context().is_some_and(|bound| Arc::ptr_eq(bound, context))
+        !self
+            .context()
+            .is_some_and(|bound| Arc::ptr_eq(bound, context))
             || (self.active.len == 0 && self.replays.len == 0)
     }
     pub(crate) fn in_flight(&self) -> bool {
@@ -801,7 +812,10 @@ impl Queue {
             qid: self.qid(),
             // Accounting completes only for bound owners; a detached queue has no
             // pending work and never reaches this.
-            qos: self.binding.as_ref().map_or(0, |binding| binding.context.qos_id()),
+            qos: self
+                .binding
+                .as_ref()
+                .map_or(0, |binding| binding.context.qos_id()),
             data_master: DataMaster::Compute as u8,
         }
     }
@@ -818,7 +832,8 @@ impl Queue {
     }
 
     pub(crate) fn pool_release_stalled(&self, now: u64) -> bool {
-        self.pool_release_pending() && crate::g17::timeout::background_stalled(self.release_sent_ns, now)
+        self.pool_release_pending()
+            && crate::g17::timeout::background_stalled(self.release_sent_ns, now)
     }
 
     /// A closed owner can still retain its last commands or their completion
@@ -827,7 +842,12 @@ impl Queue {
     pub(crate) fn release_settling(&self) -> bool {
         // release_owner keeps the old owner while its last commands retire.
         // Waiting only once owner is None misses precisely that interval.
-        release_pending(self.released, self.quarantined, self.active.len, self.retire_pending)
+        release_pending(
+            self.released,
+            self.quarantined,
+            self.active.len,
+            self.retire_pending,
+        )
     }
 
     fn selected(&self, masks: Option<[u64; 2]>) -> bool {
@@ -1029,8 +1049,13 @@ impl Queue {
                     let front = self.active.front().ok_or(EIO)?;
                     if let Some(ticket) = front.ticket {
                         crate::g17::recovery::note_retired();
-                        crate::g17::trace::complete(crate::g17::trace::COMPUTE, ticket.qid,
-                            ticket.ordinal, &front.packet, [timestamps[0], timestamps[1]]);
+                        crate::g17::trace::complete(
+                            crate::g17::trace::COMPUTE,
+                            ticket.qid,
+                            ticket.ordinal,
+                            &front.packet,
+                            [timestamps[0], timestamps[1]],
+                        );
                     }
                     self.retire_pending = true;
                     defer(Deferred::Retired(
@@ -1251,7 +1276,9 @@ impl Queue {
 /// Validate the complete unpublished item budget before changing descriptors,
 /// work counts or queue producers. Leave one item empty across ring wrap.
 fn item_capacity(cursors: Cursors, entry_signal: bool) -> Result {
-    if cursors.count != ITEM_RING_ENTRIES { return Err(EIO); }
+    if cursors.count != ITEM_RING_ENTRIES {
+        return Err(EIO);
+    }
     if cursors.producer >= cursors.count || cursors.consumer >= cursors.count {
         return Err(ERANGE);
     }
@@ -1260,14 +1287,18 @@ fn item_capacity(cursors: Cursors, entry_signal: bool) -> Result {
         let _ = crate::g17::capacity::refused(crate::g17::capacity::Site::ComputeItems);
         return Err(EAGAIN);
     }
-   Ok(())
+    Ok(())
 }
 
 /// Retained commands are capacity, not a failed VM. Nothing has been written
 /// when this check runs, so the outer publisher can wait for retirement under
 /// its original admission deadline, just as it does for a full firmware ring.
 fn retained_capacity(
-    quarantined: bool, released: bool, active: usize, replays: usize, replay_front: bool,
+    quarantined: bool,
+    released: bool,
+    active: usize,
+    replays: usize,
+    replay_front: bool,
 ) -> Result {
     if quarantined || released {
         return Err(EBUSY);
@@ -1293,8 +1324,13 @@ mod admission_tests {
         let waits = crate::g17::kick::COMPUTE_CHANNELS;
         for slot in 0..RECORD_SLOTS {
             for index in 0..waits {
-                let start = record_start(slot, NATIVE_WAIT_OFFSET + index * NATIVE_WAIT_STRIDE,
-                    NATIVE_WAIT_STRIDE, CACHED_RECORD_STRIDE).unwrap();
+                let start = record_start(
+                    slot,
+                    NATIVE_WAIT_OFFSET + index * NATIVE_WAIT_STRIDE,
+                    NATIVE_WAIT_STRIDE,
+                    CACHED_RECORD_STRIDE,
+                )
+                .unwrap();
                 assert!(start >= slot * CACHED_RECORD_STRIDE);
                 assert!(start + NATIVE_WAIT_STRIDE <= (slot + 1) * CACHED_RECORD_STRIDE);
             }
@@ -1305,13 +1341,27 @@ mod admission_tests {
     fn record_window_cannot_overwrite_the_next_slot() {
         // The nineteenth wait used to cross the old slot boundary silently.
         let offset = NATIVE_WAIT_OFFSET + 18 * NATIVE_WAIT_STRIDE;
-        assert_eq!(record_start(0, offset, NATIVE_WAIT_STRIDE, RECORD_STRIDE), Err(EINVAL));
+        assert_eq!(
+            record_start(0, offset, NATIVE_WAIT_STRIDE, RECORD_STRIDE),
+            Err(EINVAL)
+        );
         assert!(record_start(0, offset, NATIVE_WAIT_STRIDE, CACHED_RECORD_STRIDE).is_ok());
-        assert_eq!(record_start(RECORD_SLOTS, 0, 1, CACHED_RECORD_STRIDE), Err(EINVAL));
-        assert_eq!(record_start(0, usize::MAX, 1, CACHED_RECORD_STRIDE), Err(EINVAL));
-        assert_eq!(record_start(0, CACHED_RECORD_STRIDE, 1, CACHED_RECORD_STRIDE), Err(EINVAL));
-        assert_eq!(record_start(0, CACHED_RECORD_STRIDE - 1, 1, CACHED_RECORD_STRIDE),
-            Ok(CACHED_RECORD_STRIDE - 1));
+        assert_eq!(
+            record_start(RECORD_SLOTS, 0, 1, CACHED_RECORD_STRIDE),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            record_start(0, usize::MAX, 1, CACHED_RECORD_STRIDE),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            record_start(0, CACHED_RECORD_STRIDE, 1, CACHED_RECORD_STRIDE),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            record_start(0, CACHED_RECORD_STRIDE - 1, 1, CACHED_RECORD_STRIDE),
+            Ok(CACHED_RECORD_STRIDE - 1)
+        );
     }
 
     #[test]
@@ -1320,11 +1370,17 @@ mod admission_tests {
         for sequence in 0..IN_FLIGHT {
             active.push(sequence).unwrap();
         }
-        assert_eq!(retained_capacity(false, false, active.len, 0, false), Err(EAGAIN));
+        assert_eq!(
+            retained_capacity(false, false, active.len, 0, false),
+            Err(EAGAIN)
+        );
         assert_eq!(active.front(), Some(&0));
         assert_eq!(active.len, IN_FLIGHT);
         assert_eq!(active.pop(), Some(0));
-        assert_eq!(retained_capacity(false, false, active.len, 0, false), Ok(()));
+        assert_eq!(
+            retained_capacity(false, false, active.len, 0, false),
+            Ok(())
+        );
         assert_eq!(active.front(), Some(&1));
     }
 
@@ -1332,28 +1388,114 @@ mod admission_tests {
     fn replay_front_and_terminal_ownership_remain_distinct() {
         assert_eq!(retained_capacity(false, false, 0, 1, false), Err(EAGAIN));
         assert_eq!(retained_capacity(false, false, 0, 1, true), Ok(()));
-        assert_eq!(retained_capacity(false, false, IN_FLIGHT, 1, true), Err(EAGAIN));
+        assert_eq!(
+            retained_capacity(false, false, IN_FLIGHT, 1, true),
+            Err(EAGAIN)
+        );
         for (quarantined, released) in [(true, false), (false, true), (true, true)] {
-            assert_eq!(retained_capacity(quarantined, released, 0, 1, true), Err(EBUSY));
+            assert_eq!(
+                retained_capacity(quarantined, released, 0, 1, true),
+                Err(EBUSY)
+            );
         }
     }
 
     #[test]
     fn item_refusal_is_retryable_and_preserves_the_empty_slot() {
         let n = ITEM_RING_ENTRIES;
-        assert_eq!(item_capacity(Cursors { producer: 0, consumer: 4, count: n }, false), Ok(()));
-        assert_eq!(item_capacity(Cursors { producer: 0, consumer: 4, count: n }, true), Err(EAGAIN));
-        assert_eq!(item_capacity(Cursors { producer: n - 2, consumer: 2, count: n }, false), Ok(()));
-        assert_eq!(item_capacity(Cursors { producer: n - 2, consumer: 2, count: n }, true), Err(EAGAIN));
-        assert_eq!(item_capacity(Cursors { producer: 10, consumer: 10, count: n }, true), Ok(()));
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: 0,
+                    consumer: 4,
+                    count: n
+                },
+                false
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: 0,
+                    consumer: 4,
+                    count: n
+                },
+                true
+            ),
+            Err(EAGAIN)
+        );
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: n - 2,
+                    consumer: 2,
+                    count: n
+                },
+                false
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: n - 2,
+                    consumer: 2,
+                    count: n
+                },
+                true
+            ),
+            Err(EAGAIN)
+        );
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: 10,
+                    consumer: 10,
+                    count: n
+                },
+                true
+            ),
+            Ok(())
+        );
     }
 
     #[test]
     fn bad_item_cursors_are_not_backpressure() {
         let n = ITEM_RING_ENTRIES;
-        assert_eq!(item_capacity(Cursors { producer: 0, consumer: 0, count: 0 }, false), Err(EIO));
-        assert_eq!(item_capacity(Cursors { producer: n, consumer: 0, count: n }, false), Err(ERANGE));
-        assert_eq!(item_capacity(Cursors { producer: 0, consumer: n, count: n }, true), Err(ERANGE));
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: 0,
+                    consumer: 0,
+                    count: 0
+                },
+                false
+            ),
+            Err(EIO)
+        );
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: n,
+                    consumer: 0,
+                    count: n
+                },
+                false
+            ),
+            Err(ERANGE)
+        );
+        assert_eq!(
+            item_capacity(
+                Cursors {
+                    producer: 0,
+                    consumer: n,
+                    count: n
+                },
+                true
+            ),
+            Err(ERANGE)
+        );
     }
 
     #[test]
@@ -1389,7 +1531,9 @@ impl Queue {
         Ok(true)
     }
     pub(crate) fn reusable(&self) -> bool {
-        if self.growing { return false; }
+        if self.growing {
+            return false;
+        }
         self.installed
             // A pool release in flight must be witnessed before any successor.
             && !matches!(self.pool_phase, PoolPhase::ReleaseSent(_))
@@ -1454,8 +1598,12 @@ impl Queue {
         }
         context.mark_published();
         context.note_compute_binding(true);
-        crate::g17::trace::bind(crate::g17::trace::COMPUTE, self.qid(), context.id(),
-            if same_vm { 2 } else { 1 });
+        crate::g17::trace::bind(
+            crate::g17::trace::COMPUTE,
+            self.qid(),
+            context.id(),
+            if same_vm { 2 } else { 1 },
+        );
         self.owner = Some(owner);
         self.unpublished_binding = true;
         self.released = false;
@@ -1523,7 +1671,8 @@ impl Queue {
     }
     /// An idle retained queue whose USC backing may be given back.
     pub(crate) fn vacate_candidate(&self) -> bool {
-        self.pool_phase == PoolPhase::Populated && self.pool.populated()
+        self.pool_phase == PoolPhase::Populated
+            && self.pool.populated()
             && (self.reusable() || self.recycled_pending())
             && !self.source_hint.has_readers(&self.source_readers)
     }
@@ -1619,9 +1768,8 @@ impl Queue {
         if !self.vacate_candidate() {
             return Err(EBUSY);
         }
-        let record = ControlRecord::FreeListRelease(
-            self.pool.release_record(self.free_list_generation),
-        );
+        let record =
+            ControlRecord::FreeListRelease(self.pool.release_record(self.free_list_generation));
         let cursor = Rings::publish_control(init, &record)?;
         self.pool_phase = PoolPhase::ReleaseSent(cursor);
         self.release_sent_ns = Some(crate::g17::now_ns());
@@ -1636,7 +1784,9 @@ impl Queue {
         consumer: u32,
         producer: u32,
     ) -> Result<Option<Vacated>> {
-        if self.growing { return Ok(None); }
+        if self.growing {
+            return Ok(None);
+        }
         let PoolPhase::ReleaseSent(cursor) = self.pool_phase else {
             return Ok(None);
         };
@@ -1645,11 +1795,18 @@ impl Queue {
         }
         // The retained owner binding's client alias pins the backing: detach it
         // first (the owner has exited; `reusable()` proved no previous binding).
-        let alias = self.binding.as_mut().and_then(|binding| binding.pool_alias.take());
+        let alias = self
+            .binding
+            .as_mut()
+            .and_then(|binding| binding.pool_alias.take());
         let pages = self.pool.take_pages();
-        let descriptors = self.binding.as_mut().and_then(|binding| binding.descriptors.take());
+        let descriptors = self
+            .binding
+            .as_mut()
+            .and_then(|binding| binding.descriptors.take());
         let ring = self.graph.vacate_ring();
-        self.pool_phase = PoolPhase::Vacant; self.release_sent_ns = None;
+        self.pool_phase = PoolPhase::Vacant;
+        self.release_sent_ns = None;
         Ok(Some(Vacated {
             _alias: alias,
             _pages: pages,
@@ -1664,7 +1821,9 @@ impl Queue {
         pages: crate::g17::freelist::Pages,
         ring: DescriptorRing,
     ) -> Result<(u16, u64)> {
-        if !self.can_rearm() { return Err(EAGAIN); }
+        if !self.can_rearm() {
+            return Err(EAGAIN);
+        }
         self.graph.rearm_ring(ring)?;
         self.pool.rearm(pages)?;
         self.pool_phase = PoolPhase::Populated;
@@ -1678,27 +1837,50 @@ impl Queue {
 
     /// Only a capacity increase waits for this queue's previously published work.
     /// Other queues and ordinary submissions keep their existing concurrency.
-    pub(crate) fn begin_growth(&mut self, init: &crate::g17::initdata::InitData, blocks: usize) -> Result<bool> {
-        if self.growing { return Err(EAGAIN); }
-        if self.quarantined || self.released || self.exit.is_some()
-            || self.active.len != 0 || self.replays.len != 0 || self.previous.is_some()
+    pub(crate) fn begin_growth(
+        &mut self,
+        init: &crate::g17::initdata::InitData,
+        blocks: usize,
+    ) -> Result<bool> {
+        if self.growing {
+            return Err(EAGAIN);
+        }
+        if self.quarantined
+            || self.released
+            || self.exit.is_some()
+            || self.active.len != 0
+            || self.replays.len != 0
+            || self.previous.is_some()
             || (self.installed && !self.retirement_ready)
-            || self.pool_phase != PoolPhase::Populated { return Err(EAGAIN); }
+            || self.pool_phase != PoolPhase::Populated
+        {
+            return Err(EAGAIN);
+        }
         if self.installed {
-            let record = ControlRecord::FreeListRelease(self.pool.release_record(self.free_list_generation));
+            let record =
+                ControlRecord::FreeListRelease(self.pool.release_record(self.free_list_generation));
             let cursor = Rings::publish_control(init, &record)?;
             self.pool_phase = PoolPhase::ReleaseSent(cursor);
-        self.release_sent_ns = Some(crate::g17::now_ns());
-        } else { self.pool_phase = PoolPhase::Vacant; self.release_sent_ns = None; }
+            self.release_sent_ns = Some(crate::g17::now_ns());
+        } else {
+            self.pool_phase = PoolPhase::Vacant;
+            self.release_sent_ns = None;
+        }
         self.growing = true;
         self.growth_blocks = blocks;
         Ok(self.installed)
     }
 
-    pub(crate) fn finish_growth(&mut self, init: &crate::g17::initdata::InitData,
+    pub(crate) fn finish_growth(
+        &mut self,
+        init: &crate::g17::initdata::InitData,
         pages: &mut Option<crate::g17::freelist::Pages>,
-        alias: &mut Option<mmu::KernelMapping>, blocks: usize) -> Result<Vacated> {
-        if !self.growing || blocks < self.growth_blocks { return Err(EAGAIN); }
+        alias: &mut Option<mmu::KernelMapping>,
+        blocks: usize,
+    ) -> Result<Vacated> {
+        if !self.growing || blocks < self.growth_blocks {
+            return Err(EAGAIN);
+        }
         if let PoolPhase::ReleaseSent(cursor) = self.pool_phase {
             let consumer = init.control_consumer()?.load(Ordering::Acquire);
             let producer = init.control_producer()?.load(Ordering::Acquire);
@@ -1706,7 +1888,9 @@ impl Queue {
                 return Err(EAGAIN);
             }
         }
-        if alias.is_none() { return Err(EINVAL); }
+        if alias.is_none() {
+            return Err(EINVAL);
+        }
         let fresh = pages.as_ref().ok_or(EINVAL)?;
         let binding = self.binding.as_mut().ok_or(EFAULT)?;
         // No ownership moves before every fallible descriptor/header operation.
@@ -1718,11 +1902,19 @@ impl Queue {
         self.release_sent_ns = None;
         self.growing = false;
         self.growth_blocks = 0;
-        Ok(Vacated { _alias: old_alias, _pages: pages.take(), _descriptors: None, _ring: None })
+        Ok(Vacated {
+            _alias: old_alias,
+            _pages: pages.take(),
+            _descriptors: None,
+            _ring: None,
+        })
     }
 
     pub(crate) fn growth_token(&self) -> Option<Growth> {
-        self.growing.then_some(Growth { qid: self.qid(), phase: self.pool_phase })
+        self.growing.then_some(Growth {
+            qid: self.qid(),
+            phase: self.pool_phase,
+        })
     }
 
     /// Transfer an abandoned builder's release back to the event worker. Do not
@@ -1885,7 +2077,9 @@ fn record_start(slot: usize, offset: usize, window: usize, stride: usize) -> Res
     if slot >= RECORD_SLOTS || offset > stride || window > stride - offset {
         return Err(EINVAL);
     }
-    slot.checked_mul(stride).and_then(|start| start.checked_add(offset)).ok_or(EINVAL)
+    slot.checked_mul(stride)
+        .and_then(|start| start.checked_add(offset))
+        .ok_or(EINVAL)
 }
 
 impl Graph {
@@ -1957,8 +2151,7 @@ pub(crate) trait Host {
     ) -> Result<qos::Publication>;
     fn qos_cancel(&mut self, publication: qos::Publication) -> Result;
     fn publish_qid(&mut self, id: kick::Id) -> Result;
-    fn publish_outer(&mut self, priority: u8, slot: &crate::g17::fw::channels::WorkSlot)
-        -> Result;
+    fn publish_outer(&mut self, priority: u8, slot: &crate::g17::fw::channels::WorkSlot) -> Result;
     fn notify(&mut self, message: u64) -> Result;
     fn note_submission(&mut self) -> Result;
 }
@@ -2023,8 +2216,12 @@ impl Queue {
         let first = !self.installed && self.ordinal == 0;
         // The first prototype only waits on an installed consumer channel.
         // A retry without a published source falls back to completion on CPU.
-        if first && !native.is_empty() { return Err(EAGAIN); }
-        if native.len() > crate::g17::kick::COMPUTE_CHANNELS { return Err(EINVAL); }
+        if first && !native.is_empty() {
+            return Err(EAGAIN);
+        }
+        if native.len() > crate::g17::kick::COMPUTE_CHANNELS {
+            return Err(EINVAL);
+        }
         let entry_signal = first
             || dependencies
                 .iter()
@@ -2081,7 +2278,9 @@ impl Queue {
         let policy = packet.context.policy();
         let ring = 1u8 << policy.priority();
         let config = self.queue_config(&identity, first, args.context_id, policy, &packet)?;
-        let cached = self.config_cache.and_then(|(config, at)| (at == epoch).then_some(config));
+        let cached = self
+            .config_cache
+            .and_then(|(config, at)| (at == epoch).then_some(config));
         let send_config = first || super::render::publication::required(cached, config);
         let announce =
             KickAnnounce::new(qid, DataMaster::Compute, kick_timestamp, policy.priority())?;
@@ -2155,10 +2354,16 @@ impl Queue {
             let cursors = self.graph.cursors()?;
             let mut wait_vas = KVec::with_capacity(native.len(), GFP_KERNEL)?;
             for (index, wait) in native.iter().enumerate() {
-                let record = wait.bytes(crate::g17::fw::stamp_value(kick_timestamp.get() as u32),
-                    packet.order.sequence);
-                let address = self.graph.record(record_slot, NATIVE_WAIT_OFFSET + index * NATIVE_WAIT_STRIDE,
-                    NATIVE_WAIT_STRIDE, record)?;
+                let record = wait.bytes(
+                    crate::g17::fw::stamp_value(kick_timestamp.get() as u32),
+                    packet.order.sequence,
+                );
+                let address = self.graph.record(
+                    record_slot,
+                    NATIVE_WAIT_OFFSET + index * NATIVE_WAIT_STRIDE,
+                    NATIVE_WAIT_STRIDE,
+                    record,
+                )?;
                 wait_vas.push(address, GFP_KERNEL)?;
             }
             let prepared_kick = self.kick.prepare_entry(&kick_args)?;
@@ -2207,8 +2412,11 @@ impl Queue {
                         packet.mark_published();
                         visible = true;
                     })
-                })().or_else(|error| {
-                    if !visible { self.pool.cancel_unpublished(target)?; }
+                })()
+                .or_else(|error| {
+                    if !visible {
+                        self.pool.cancel_unpublished(target)?;
+                    }
                     Err(error)
                 })?;
                 visible = true;
@@ -2336,8 +2544,13 @@ impl Queue {
             .replays
             .front()
             .is_some_and(|front| Arc::ptr_eq(front, packet));
-        retained_capacity(self.quarantined, self.released, self.active.len,
-                          self.replays.len, replay_front)?;
+        retained_capacity(
+            self.quarantined,
+            self.released,
+            self.active.len,
+            self.replays.len,
+            replay_front,
+        )?;
         if !packet.context.is_current()
             || !self
                 .binding
@@ -2425,17 +2638,30 @@ impl Queue {
                u8::from(self.quarantined), u8::from(self.awaiting_witness), u8::from(self.previous.is_some()),
                u8::from(self.exit.is_some()), u8::from(self.growing), self.pool_phase, self.active.len, IN_FLIGHT)?;
         match self.graph.cursors() {
-            Ok(cursors) if cursors.count != 0 => writeln!(f, "items_used={} items_total={}",
-                cursors.producer.wrapping_sub(cursors.consumer) % cursors.count, cursors.count - 1),
+            Ok(cursors) if cursors.count != 0 => writeln!(
+                f,
+                "items_used={} items_total={}",
+                cursors.producer.wrapping_sub(cursors.consumer) % cursors.count,
+                cursors.count - 1
+            ),
             _ => writeln!(f, "items_unavailable=1"),
         }?;
-        writeln!(f, "compute_settling qid={} release={} pool_release={}", self.qid(),
-                 u8::from(self.release_settling()), u8::from(self.pool_release_pending()))?;
+        writeln!(
+            f,
+            "compute_settling qid={} release={} pool_release={}",
+            self.qid(),
+            u8::from(self.release_settling()),
+            u8::from(self.pool_release_pending())
+        )?;
         if let Some(binding) = self.binding.as_ref() {
-            binding.context.write_capacity(f, "compute", usize::from(self.qid()))?;
+            binding
+                .context
+                .write_capacity(f, "compute", usize::from(self.qid()))?;
         }
         if let Some(previous) = self.previous.as_ref() {
-            previous.context.write_capacity(f, "compute_previous", usize::from(self.qid()))?;
+            previous
+                .context
+                .write_capacity(f, "compute_previous", usize::from(self.qid()))?;
         }
         Ok(())
     }
@@ -2544,10 +2770,18 @@ impl Queue {
 
     /// An open client's idle channel that [`Self::share_idle`] can hand over.
     pub(crate) fn shareable(&self) -> bool {
-        self.claims == 0 && self.installed && self.owner.is_some() && self.retirement_ready
-            && !self.growing && !self.quarantined && !self.awaiting_witness
-            && self.exit.is_none() && self.active.len == 0 && self.replays.len == 0
-            && self.previous.is_none() && self.pool_phase == PoolPhase::Populated
+        self.claims == 0
+            && self.installed
+            && self.owner.is_some()
+            && self.retirement_ready
+            && !self.growing
+            && !self.quarantined
+            && !self.awaiting_witness
+            && self.exit.is_none()
+            && self.active.len == 0
+            && self.replays.len == 0
+            && self.previous.is_none()
+            && self.pool_phase == PoolPhase::Populated
             && !self.source_hint.has_readers(&self.source_readers)
     }
 
@@ -2560,7 +2794,8 @@ impl Queue {
 
 impl Queue {
     pub(crate) fn can_rearm(&self) -> bool {
-        self.pool_phase == PoolPhase::Vacant && (self.reusable() || self.recycled_pending())
+        self.pool_phase == PoolPhase::Vacant
+            && (self.reusable() || self.recycled_pending())
             && !self.source_hint.has_readers(&self.source_readers)
     }
 }
@@ -2571,19 +2806,35 @@ impl Queue {
     /// caller validates the current preparation epoch and cancels only a true
     /// result's never-published QID; installed rings and identities stay intact.
     pub(crate) fn rollback_unpublished(
-        &mut self, owner: u64, context: &Arc<Context>,
+        &mut self,
+        owner: u64,
+        context: &Arc<Context>,
     ) -> Result<(bool, Option<Binding>)> {
-        if self.owner != Some(owner) || !self.unpublished_binding
-            || self.binding.as_ref().is_none_or(|binding| !Arc::ptr_eq(&binding.context, context))
-            || self.growing || self.quarantined || self.awaiting_witness
-            || self.exit.is_some() || self.active.len != 0 || self.replays.len != 0
-            || self.retire_pending || self.failure_status_pending
+        if self.owner != Some(owner)
+            || !self.unpublished_binding
+            || self
+                .binding
+                .as_ref()
+                .is_none_or(|binding| !Arc::ptr_eq(&binding.context, context))
+            || self.growing
+            || self.quarantined
+            || self.awaiting_witness
+            || self.exit.is_some()
+            || self.active.len != 0
+            || self.replays.len != 0
+            || self.retire_pending
+            || self.failure_status_pending
             || self.pool_phase != PoolPhase::Populated
-            || self.previous.as_ref().is_some_and(|previous| previous.publication.is_some())
+            || self
+                .previous
+                .as_ref()
+                .is_some_and(|previous| previous.publication.is_some())
         {
             return Ok((false, None));
         }
-        if !self.installed { return Ok((true, None)); }
+        if !self.installed {
+            return Ok((true, None));
+        }
         let mut retired = None;
         if let Some(previous) = self.previous.as_ref() {
             self.graph.set_owner(&previous.context)?;
@@ -2604,37 +2855,61 @@ impl Queue {
     }
 }
 
-
 impl Queue {
     /// Same immutable singleton identity and current physical epoch.
-    pub(crate) fn has_input_source(&self, source: &Arc<crate::g17::fence::Submission>,
-        status: &Arc<VmStatus>, epoch: u64) -> bool
-    {
-        !self.quarantined && self.replays.len == 0 && self.active.iter().any(|active|
-            active.ticket.is_some_and(|ticket| ticket.epoch == epoch)
-                && Arc::ptr_eq(active.packet.completion.status(), status)
-                && active.packet.completion.is_input_source(source))
+    pub(crate) fn has_input_source(
+        &self,
+        source: &Arc<crate::g17::fence::Submission>,
+        status: &Arc<VmStatus>,
+        epoch: u64,
+    ) -> bool {
+        !self.quarantined
+            && self.replays.len == 0
+            && self.active.iter().any(|active| {
+                active.ticket.is_some_and(|ticket| ticket.epoch == epoch)
+                    && Arc::ptr_eq(active.packet.completion.status(), status)
+                    && active.packet.completion.is_input_source(source)
+            })
     }
 
-    pub(crate) fn source_dependency(&mut self, source: &crate::g17::sync_input::Source,
-        status: &Arc<VmStatus>, epoch: u64) -> Result<Option<(u64,
-            crate::g17::fw::kick::KickDependency, u64, u32, crate::g17::sync_input::Hold)>>
-    {
+    pub(crate) fn source_dependency(
+        &mut self,
+        source: &crate::g17::sync_input::Source,
+        status: &Arc<VmStatus>,
+        epoch: u64,
+    ) -> Result<Option<SourceDependency>> {
         for active in self.active.iter() {
-            if !active.packet.completion.is_input_source(&source.submission) { continue; }
-            if !Arc::ptr_eq(active.packet.completion.status(), status) { return Err(EINVAL); }
-            if self.quarantined || self.replays.len != 0 { return Err(EAGAIN); }
+            if !active.packet.completion.is_input_source(&source.submission) {
+                continue;
+            }
+            if !Arc::ptr_eq(active.packet.completion.status(), status) {
+                return Err(EINVAL);
+            }
+            if self.quarantined || self.replays.len != 0 {
+                return Err(EAGAIN);
+            }
             let ticket = active.ticket.ok_or(EAGAIN)?;
-            if ticket.epoch != epoch { return Err(EAGAIN); }
+            if ticket.epoch != epoch {
+                return Err(EAGAIN);
+            }
             self.valid_ticket(active, &ticket)?;
-            if active.packet.cancel_requested() { return Err(ECANCELED); }
+            if active.packet.cancel_requested() {
+                return Err(ECANCELED);
+            }
             source.submission.source_status()?;
-            let dependency = crate::g17::fw::kick::KickDependency::new(self.qid(),
-                crate::g17::fw::kick::KickTimestamp::new(ticket.kick).ok_or(EIO)?).ok_or(EIO)?;
+            let dependency = crate::g17::fw::kick::KickDependency::new(
+                self.qid(),
+                crate::g17::fw::kick::KickTimestamp::new(ticket.kick).ok_or(EIO)?,
+            )
+            .ok_or(EIO)?;
             let hold = self.source_hint.hold(&self.source_readers)?;
-            return Ok(Some((active.published, dependency,
+            return Ok(Some((
+                active.published,
+                dependency,
                 self.graph.support.gpu_va() + STAMP as u64,
-                u32::from(self.qid()), hold)));
+                u32::from(self.qid()),
+                hold,
+            )));
         }
         Ok(None)
     }
@@ -2650,3 +2925,12 @@ impl Queue {
         }
     }
 }
+
+/// Publication, dependency, stamp address, queue and the retained source hold.
+pub(crate) type SourceDependency = (
+    u64,
+    crate::g17::fw::kick::KickDependency,
+    u64,
+    u32,
+    crate::g17::sync_input::Hold,
+);

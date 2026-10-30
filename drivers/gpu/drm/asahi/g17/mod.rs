@@ -57,8 +57,10 @@ mod recovery;
 mod replay;
 mod reports;
 mod runtime;
+pub(crate) mod stats;
 pub(crate) mod status;
 mod teardown;
+pub(crate) mod telemetry;
 mod timeout;
 mod validation;
 
@@ -734,6 +736,16 @@ impl Firmware {
     /// Returns the delay in ns for a follow-up idle check. Queue owners report only submitted,
     /// unretired work; quarantined work retaining mappings is excluded. Submissions published
     /// without the device mutex count as activity, and a clear that races one is abandoned.
+    fn observe_statistics_power(&mut self) {
+        if self.rings.statistics_suspended() {
+            return;
+        }
+        self.rings.observe_statistics_power(
+            self.bridge.regs.g17_core_power() & 0xf != 0,
+            self.port.statistics_epoch(),
+        );
+    }
+
     fn idle_check(&mut self, now_ns: u64, in_flight: bool) -> Result<Option<u64>> {
         let submissions = self.port.submissions();
         let submitted = submissions != self.seen_submissions;
@@ -1130,6 +1142,7 @@ pub(crate) struct Gpu {
     geometry: mmu::UatGeometry,
     ids: gpu::SequenceIDs,
     shared: Arc<Shared>,
+    stats: Arc<crate::stats::StatsSnapshot>,
     _capacity: Pin<KBox<kernel::debugfs::File<capacity::View>>>,
     _reports: Pin<KBox<kernel::debugfs::File<reports::View>>>,
     _power: Pin<KBox<kernel::debugfs::File<reports::PowerView>>>,
@@ -1256,6 +1269,13 @@ impl Gpu {
             directory.read_only_file(c"power", reports::PowerView(shared.clone())),
             GFP_KERNEL,
         )?;
+        let stats = Arc::new(
+            crate::stats::StatsSnapshot {
+                g17_reader: Some(stats::Reader(shared.clone())),
+                ..Default::default()
+            },
+            GFP_KERNEL,
+        )?;
         let gpu = Arc::new(
             Gpu {
                 cfg,
@@ -1264,6 +1284,7 @@ impl Gpu {
                 geometry,
                 ids: Default::default(),
                 shared,
+                stats,
                 _capacity: capacity,
                 _reports: reports,
                 _power: power,
@@ -1420,7 +1441,7 @@ impl Gpu {
                     shared.feed.clone(),
                 )?,
                 seen_submissions: 0,
-                rings: channel::Rings::new()?,
+                rings: channel::Rings::new(shared.variant.graph)?,
                 recovery: recovery::State::new(),
                 effort: power::Effort::new(),
                 hold: power::Hold::new(),
@@ -1591,7 +1612,7 @@ impl gpu::Gpu for Gpu {
     }
 
     fn stats_snapshot(&self) -> Option<Arc<crate::stats::StatsSnapshot>> {
-        None
+        Some(self.stats.clone())
     }
 
     fn manager(&self) -> Option<&dyn gpu::GpuManager> {
@@ -1722,7 +1743,7 @@ impl gpu::Gpu for Gpu {
                     // until the scheduler release is consumed and reclaimed.
                     // Backend construction has rolled back all temporary leases.
                     let waited = now_ns().saturating_sub(admission_started);
-                    let limit = job::TIMEOUT_MS as u64 * 1_000_000;
+                    let limit = u64::from(job::TIMEOUT_MS) * 1_000_000;
                     if waited >= limit {
                         return Err(EBUSY);
                     }

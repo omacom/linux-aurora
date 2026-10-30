@@ -50,7 +50,7 @@ impl fmt::Display for Hex<'_> {
 pub(crate) fn copy_physical(phys: u64, size: usize) -> Result<KVVec<u8>> {
     // SAFETY: memremap() of a boot-loader range creates a temporary mapping; it has no other
     // side effects.
-    let map = unsafe { bindings::memremap(phys, size, bindings::MEMREMAP_WC as _) };
+    let map = unsafe { bindings::memremap(phys, size, bindings::MEMREMAP_WC as usize) };
     if map.is_null() {
         return Err(ENOMEM);
     }

@@ -35,6 +35,10 @@ const DEBUG_CLASS: DebugFlags = DebugFlags::Compute;
 #[versions(AGX)]
 impl super::QueueInner::ver {
     /// Submit work to a compute queue.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Submission inputs are retained separately by the existing queue interface."
+    )]
     pub(super) fn submit_compute(
         &self,
         gpu: &gpu::GpuManager::ver,
@@ -54,9 +58,10 @@ impl super::QueueInner::ver {
             return Err(EINVAL);
         }
 
-        let mut user_timestamps: fw::job::UserTimestamps = Default::default();
-        user_timestamps.start = common::get_timestamp_object(objects, cmdbuf.ts.start)?;
-        user_timestamps.end = common::get_timestamp_object(objects, cmdbuf.ts.end)?;
+        let user_timestamps = fw::job::UserTimestamps {
+            start: common::get_timestamp_object(objects, cmdbuf.ts.start)?,
+            end: common::get_timestamp_object(objects, cmdbuf.ts.end)?,
+        };
 
         // This sequence number increases per new client/VM? assigned to some slot,
         // but it's unclear *which* slot...
@@ -214,7 +219,7 @@ impl super::QueueInner::ver {
                             #[ver(G == G14 && V < V13_0B4)]
                             unk_5c_g14: U64(0),
                             restart_branch_offset: off,
-                            has_attachments: (attachments.count > 0) as u32,
+                            has_attachments: u32::from(attachments.count > 0),
                             #[ver(V >= V13_0B4)]
                             unk_64: Default::default(),
                             #[ver(V >= V13_0B4)]
@@ -316,8 +321,8 @@ impl super::QueueInner::ver {
                         unk_18: 0x0, // fixed
                         unk_mask: 0xffffffff,
                         sampler_array: U64(cmdbuf.sampler_heap),
-                        sampler_count: cmdbuf.sampler_count as u32,
-                        sampler_max: (cmdbuf.sampler_count as u32) + 1,
+                        sampler_count: cmdbuf.sampler_count,
+                        sampler_max: cmdbuf.sampler_count + 1,
                     }),
                     meta <- try_init!(fw::job::raw::JobMeta {
                         unk_0: 0,
@@ -328,7 +333,7 @@ impl super::QueueInner::ver {
                         stamp_value: ev_comp.value.next(),
                         stamp_slot: ev_comp.slot,
                         evctl_index: 0, // fixed
-                        flush_stamps: flush_stamps as u32,
+                        flush_stamps: u32::from(flush_stamps),
                         uuid,
                         event_seq: ev_comp.event_seq as u32,
                     }),
