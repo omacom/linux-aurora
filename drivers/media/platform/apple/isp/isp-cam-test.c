@@ -344,7 +344,7 @@ static int isp_test_ack_reply(struct apple_isp *isp, struct isp_channel *chan,
 	return 0;
 }
 
-static void isp_test_command_ack_failure_latches(struct kunit *test)
+static void isp_test_command_ack_failures(struct kunit *test)
 {
 	struct apple_isp *isp = isp_test_capture_alloc(test);
 	struct isp_test_ack_state state = {};
@@ -359,15 +359,24 @@ static void isp_test_command_ack_failure_latches(struct kunit *test)
 	kunit_activate_static_stub(test, ipc_chan_send, isp_test_ack_reply);
 	KUNIT_EXPECT_EQ(test, isp_cmd_ch_camera_config_select(isp, 0, 5), 0);
 	for (state.fault = 1; state.fault <= 4; state.fault++) {
-		isp->ipc_failed = false;
+		unsigned int fault = state.fault;
+
 		state.calls = 0;
 		KUNIT_EXPECT_EQ(test, isp_cmd_ch_camera_config_select(isp, 0, 5),
-				state.fault == 4 ? -ETIME : -EIO);
-		KUNIT_EXPECT_TRUE(test, isp->ipc_failed);
-		/* A late ACK cannot admit another command on an uncertain slot. */
-		KUNIT_EXPECT_EQ(test, isp_cmd_ch_camera_config_select(isp, 0, 5), -EIO);
-		KUNIT_EXPECT_EQ(test, state.calls, 1);
+				fault == 4 ? -ETIME : -EIO);
+		/* A failed command does not take the next one with it. */
+		KUNIT_EXPECT_FALSE(test, isp->ipc_failed);
+		state.fault = 0;
+		KUNIT_EXPECT_EQ(test, isp_cmd_ch_camera_config_select(isp, 0, 5), 0);
+		KUNIT_EXPECT_EQ(test, state.calls, 2);
+		state.fault = fault;
 	}
+
+	/* Firmware that never answered gets no further command. */
+	isp->ipc_failed = true;
+	state.calls = 0;
+	KUNIT_EXPECT_EQ(test, isp_cmd_ch_camera_config_select(isp, 0, 5), -EIO);
+	KUNIT_EXPECT_EQ(test, state.calls, 0);
 }
 
 static void isp_test_call_crop(struct kunit *test)
@@ -485,7 +494,7 @@ static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_call_size_capabilities),
 	KUNIT_CASE(isp_test_setfile_failure_stops_setup),
 	KUNIT_CASE(isp_test_optional_setfile_continues_setup),
-	KUNIT_CASE(isp_test_command_ack_failure_latches),
+	KUNIT_CASE(isp_test_command_ack_failures),
 	KUNIT_CASE(isp_test_sensor_geometry),
 	KUNIT_CASE(isp_test_sensor_config_list),
 	KUNIT_CASE(isp_test_sensor_config_failure),

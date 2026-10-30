@@ -239,6 +239,11 @@ static int isp_submit_buffers(struct apple_isp *isp, bool pre_start)
 	struct isp_buflist *bl = isp->cmd_virt;
 	struct isp_buflist_buffer *bufd = &bl->buffers[0];
 
+	/* Before the command area is overwritten */
+	err = isp_ipc_resync(isp);
+	if (err)
+		return err;
+
 	/* Clear what earlier commands and batches left in the reserved fields. */
 	memset(bl, 0, ISP_CMD_AREA_SIZE(isp_num_capmeta(isp)));
 	bl->type = 1;
@@ -331,11 +336,12 @@ send:
 
 	err = ipc_chan_send(isp, chan, ISP_BUFFER_TIMEOUT);
 	if (err) {
-		if (isp_is_p010(isp)) {
-			/* Keep leases owned until stop_camera halts the coprocessor. */
-			isp->ipc_failed = true;
+		/*
+		 * The firmware may have taken the batch. Keep its leases owned
+		 * until the timeout is resolved, see apple_isp_stop_camera().
+		 */
+		if (isp_is_p010(isp))
 			return err;
-		}
 		/* If we fail, consider the buffer not submitted. */
 		dev_err(isp->dev,
 			"%s: failed to send bufs: [0x%llx, 0x%llx, 0x%llx]\n",
@@ -498,8 +504,16 @@ static void isp_vb2_buf_queue(struct vb2_buffer *vb)
 	if (test_bit(ISP_STATE_STREAMING, &isp->state) &&
 	    (isp_supports_p010(isp) || !empty)) {
 		if (isp_submit_buffers(isp, false) && isp_is_p010(isp)) {
-			apple_isp_firmware_halt(isp);
-			isp_vb2_release_buffers(isp, VB2_BUF_STATE_ERROR);
+			/*
+			 * After a timeout the leases stay owned until the
+			 * stream stops. Only firmware that did not answer at
+			 * all is stopped here, before its leases are released.
+			 */
+			if (isp->ipc_failed) {
+				apple_isp_firmware_halt(isp);
+				isp_vb2_release_buffers(isp,
+							VB2_BUF_STATE_ERROR);
+			}
 			vb2_queue_error(&isp->vbq);
 		}
 	}

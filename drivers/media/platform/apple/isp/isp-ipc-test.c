@@ -188,6 +188,74 @@ static void isp_test_late_ack_keeps_cursor(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, t->chan->cursor, 1);
 }
 
+/* A P010 command ring whose slots and doorbell are plain memory */
+static struct isp_message *isp_test_command_ring(struct kunit *test,
+						 struct isp_sm_test *t)
+{
+	struct isp_channel *chan = t->chan;
+	struct isp_message *slots;
+
+	t->isp->mbox2 = (__force void __iomem *)
+		kunit_kzalloc(test, ISP_MBOX2_SIZE, GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, (__force void *)t->isp->mbox2);
+	init_waitqueue_head(&t->isp->wait);
+	isp_get_current_format(t->isp)->pixelformat = V4L2_PIX_FMT_P010;
+
+	chan->name = "IO";
+	chan->num = 8;
+	chan->doorbell = 1;
+	chan->virt = kunit_kcalloc(test, chan->num, sizeof(*slots), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, chan->virt);
+	chan->req.arg0 = 0x5000000;
+
+	return chan->virt;
+}
+
+static void isp_test_timeout_late_answer(struct kunit *test)
+{
+	struct isp_sm_test *t = isp_sm_test_alloc(test);
+	struct isp_message *slots = isp_test_command_ring(test, t);
+	struct isp_channel *chan = t->chan;
+
+	KUNIT_EXPECT_EQ(test, ipc_chan_send(t->isp, chan, 1), -ETIME);
+	KUNIT_EXPECT_PTR_EQ(test, t->isp->ipc_stale, chan);
+	KUNIT_EXPECT_FALSE(test, t->isp->ipc_failed);
+	KUNIT_EXPECT_EQ(test, chan->cursor, 0);
+
+	/* The answer comes after the deadline and is consumed by the resync. */
+	slots[0].arg0 |= ISP_IPC_FLAG_ACK;
+	KUNIT_EXPECT_EQ(test, isp_ipc_resync(t->isp), 0);
+	KUNIT_EXPECT_NULL(test, t->isp->ipc_stale);
+	KUNIT_EXPECT_EQ(test, chan->cursor, 1);
+
+	/* The next request takes the next slot; the old ACK does not answer it. */
+	KUNIT_EXPECT_EQ(test, ipc_chan_send(t->isp, chan, 1), -ETIME);
+	KUNIT_EXPECT_EQ(test, slots[1].arg0, chan->req.arg0);
+	KUNIT_EXPECT_EQ(test, chan->cursor, 1);
+	slots[1].arg0 |= ISP_IPC_FLAG_ACK;
+	KUNIT_EXPECT_EQ(test, isp_ipc_resync(t->isp), 0);
+	KUNIT_EXPECT_EQ(test, chan->cursor, 2);
+	KUNIT_EXPECT_FALSE(test, t->isp->ipc_failed);
+}
+
+static void isp_test_timeout_no_answer(struct kunit *test)
+{
+	struct isp_sm_test *t = isp_sm_test_alloc(test);
+	struct isp_message *slots = isp_test_command_ring(test, t);
+	struct isp_channel *chan = t->chan;
+
+	KUNIT_EXPECT_EQ(test, ipc_chan_send(t->isp, chan, 1), -ETIME);
+	KUNIT_EXPECT_EQ(test, isp_ipc_resync(t->isp), -EIO);
+	KUNIT_EXPECT_TRUE(test, t->isp->ipc_failed);
+	KUNIT_EXPECT_NULL(test, t->isp->ipc_stale);
+
+	/* An answer after the resync gave up admits nothing. */
+	slots[0].arg0 |= ISP_IPC_FLAG_ACK;
+	KUNIT_EXPECT_EQ(test, ipc_chan_send(t->isp, chan, 1), -EIO);
+	KUNIT_EXPECT_EQ(test, isp_ipc_resync(t->isp), -EIO);
+	KUNIT_EXPECT_EQ(test, chan->cursor, 0);
+}
+
 static void isp_test_message_payload_copy(struct kunit *test)
 {
 	struct isp_sm_test *t = isp_sm_test_alloc(test);
@@ -206,6 +274,8 @@ static void isp_test_message_payload_copy(struct kunit *test)
 static struct kunit_case isp_ipc_test_cases[] = {
 	KUNIT_CASE(isp_test_message_payload_copy),
 	KUNIT_CASE(isp_test_late_ack_keeps_cursor),
+	KUNIT_CASE(isp_test_timeout_late_answer),
+	KUNIT_CASE(isp_test_timeout_no_answer),
 	KUNIT_CASE(isp_test_command_ring_wrap),
 	KUNIT_CASE(isp_test_sm_free_releases),
 	KUNIT_CASE(isp_test_sm_free_alias),

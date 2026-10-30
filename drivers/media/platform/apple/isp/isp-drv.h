@@ -387,7 +387,17 @@ struct apple_isp {
 	struct list_head bufs_returned;
 	u64 buffer_tag;
 	unsigned long meta_returned;
-	/* A timed-out command leaves slot ownership ambiguous until reboot. */
+	/*
+	 * The channel of a timed-out request that has not been answered yet,
+	 * see isp_ipc_resync(). Sends are serialized by the callers, which
+	 * share the command area.
+	 */
+	struct isp_channel *ipc_stale;
+	/*
+	 * Not even a late answer came, so where the firmware is in the ring
+	 * is unknown. Nothing is sent until the firmware is stopped, and
+	 * resident firmware cannot be started again before the next boot.
+	 */
 	bool ipc_failed;
 };
 

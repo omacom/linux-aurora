@@ -10,6 +10,7 @@
 #include "isp-cmd.h"
 #include "isp-fw.h"
 #include "isp-iommu.h"
+#include "isp-ipc.h"
 #include "isp-regs.h"
 
 struct isp_setfile {
@@ -880,10 +881,7 @@ int apple_isp_start_camera(struct apple_isp *isp)
 	err = isp_configure_capture(isp);
 	if (err) {
 		dev_err(isp->dev, "failed to configure capture: %d\n", err);
-		if (isp->ipc_failed)
-			apple_isp_firmware_halt(isp);
-		else
-			apple_isp_firmware_shutdown(isp);
+		apple_isp_stop_camera(isp);
 		return err;
 	}
 
@@ -892,7 +890,12 @@ int apple_isp_start_camera(struct apple_isp *isp)
 
 void apple_isp_stop_camera(struct apple_isp *isp)
 {
-	if (isp->ipc_failed)
+	/*
+	 * A timed-out request is resolved before anything the firmware may
+	 * still use for it is released. Firmware that does not answer even
+	 * late is stopped first.
+	 */
+	if (isp_ipc_resync(isp))
 		apple_isp_firmware_halt(isp);
 	else
 		apple_isp_firmware_shutdown(isp);

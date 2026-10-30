@@ -1060,6 +1060,10 @@ int apple_isp_firmware_boot(struct apple_isp *isp)
 		return -EIO;
 	}
 
+	/* The firmware starts with new rings. */
+	isp->ipc_stale = NULL;
+	isp->ipc_failed = false;
+
 	/* Needs to be power cycled for IOMMU to behave correctly */
 	err = pm_runtime_resume_and_get(isp->dev);
 	if (err < 0) {
@@ -1111,5 +1115,6 @@ void apple_isp_firmware_halt(struct apple_isp *isp)
 
 	isp_firmware_shutdown(isp);
 	pm_runtime_put_sync(isp->dev);
+	isp->ipc_stale = NULL;
 	isp->fw_state = isp->hw->resident_fw ? ISP_FW_DEAD : ISP_FW_OFF;
 }

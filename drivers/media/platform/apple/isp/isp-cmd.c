@@ -31,8 +31,10 @@ int isp_cmd_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize, int
 #if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
 	KUNIT_STATIC_STUB_REDIRECT(isp_cmd_send, isp, args, insize, outsize, timeout);
 #endif
-	if (isp->ipc_failed)
-		return -EIO;
+	/* Before the command area is overwritten */
+	err = isp_ipc_resync(isp);
+	if (err)
+		return err;
 	chan = isp->chan_io;
 	req = &chan->req;
 
@@ -42,6 +44,10 @@ int isp_cmd_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize, int
 
 	memcpy(isp->cmd_virt, args, insize);
 	err = ipc_chan_send(isp, chan, timeout);
+	/*
+	 * An answered request leaves the ring in step, so a malformed answer
+	 * fails only this command. A timeout is resolved before the next one.
+	 */
 	if (isp_is_p010(isp)) {
 		struct isp_message *rsp = &chan->rsp;
 
@@ -50,8 +56,6 @@ int isp_cmd_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize, int
 		     rsp->arg4 || rsp->arg5 || rsp->arg6 || rsp->arg7 ||
 		     get_unaligned_le64(isp->cmd_virt) != get_unaligned_le64(args)))
 			err = -EIO;
-		if (err)
-			isp->ipc_failed = true;
 	}
 	if (err) {
 		u64 opcode;
