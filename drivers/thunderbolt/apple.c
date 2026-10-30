@@ -153,10 +153,10 @@ static const struct apple_cio_hw apple_cio_t6030_hw = {
 
 /*
  * The T6031 (M3 Max) ACIO boots like t8103 (no MxWrap region in its DT
- * node) and drives its DP IN adapters with the T6030 (M3 Pro) policy.
+ * node) and drives its DP IN adapters with the T6030 (M3 Pro) flow.
  */
 static const struct apple_cio_hw apple_cio_t6031_hw = {
-	.dp = &apple_dpin_m3,
+	.dp = &apple_dpin_m3_max,
 };
 
 /* Type 7 uses its existing ready-state check and has no qualified DP route. */

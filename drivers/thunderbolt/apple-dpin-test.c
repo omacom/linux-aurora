@@ -357,8 +357,10 @@ static void apple_dpin_qualification_profiles(struct kunit *test)
 		{ "apple,t6021", &apple_dpin_m2, false, &apple_dpin_disabled },
 		{ "apple,t6022", &apple_dpin_m2, true, &apple_dpin_disabled },
 		{ "apple,t6030", &apple_dpin_m3, true, &apple_dpin_m3 },
-		/* T6031 is qualified with the T6030 flow. */
-		{ "apple,t6031", &apple_dpin_m3, true, &apple_dpin_m3 },
+		/* T6031 is qualified with its own policy: the T6030 flow, no BW allocation. */
+		{ "apple,t6031", &apple_dpin_m3_max, true, &apple_dpin_m3_max },
+		{ "apple,t6031", &apple_dpin_m3_max, false, &apple_dpin_m3_max },
+		{ "apple,t6034", &apple_dpin_m3_max, true, &apple_dpin_disabled },
 		{ "apple,unknown", &apple_dpin_m1, true, &apple_dpin_disabled },
 	};
 	unsigned int i;
@@ -420,6 +422,19 @@ static void apple_dpin_all_policy_fields(struct kunit *test)
 			}
 		}
 	}
+}
+
+/* T6031 keeps T6030's DP IN flow and only adds the no-allocation host flag. */
+static void apple_dpin_m3_max_policy(struct kunit *test)
+{
+	KUNIT_EXPECT_EQ(test, apple_dpin_m3_max.flow, apple_dpin_m3.flow);
+	KUNIT_EXPECT_EQ(test, apple_dpin_m3_max.capacity_retry, apple_dpin_m3.capacity_retry);
+	KUNIT_EXPECT_EQ(test, apple_dpin_m3_max.setup_irqs, apple_dpin_m3.setup_irqs);
+	KUNIT_EXPECT_EQ(test, apple_dpin_m3_max.t602x_handshake, apple_dpin_m3.t602x_handshake);
+	KUNIT_EXPECT_EQ(test, apple_dpin_m3_max.defer_new_bringup,
+			apple_dpin_m3.defer_new_bringup);
+	KUNIT_EXPECT_EQ(test, apple_dpin_m3_max.host_policy,
+			apple_dpin_m3.host_policy | TB_HOST_DP_NO_BW_ALLOC);
 }
 
 static void apple_dpin_policy_independent_of_hooks(struct kunit *test)
@@ -1192,6 +1207,7 @@ static struct kunit_case apple_dpin_cases[] = {
 	KUNIT_CASE(apple_dpin_readiness_budgets),
 	KUNIT_CASE(apple_dpin_qualification_profiles),
 	KUNIT_CASE(apple_dpin_all_policy_fields),
+	KUNIT_CASE(apple_dpin_m3_max_policy),
 	KUNIT_CASE(apple_dpin_policy_independent_of_hooks),
 	{},
 };
