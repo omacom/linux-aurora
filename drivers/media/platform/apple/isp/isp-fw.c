@@ -1096,7 +1096,7 @@ static void isp_firmware_shutdown(struct apple_isp *isp)
  * does not start again once it has been stopped: after CISP_CMD_SUSPEND,
  * a coprocessor reset and a power cycle of its domains it never completes
  * the first handshake. It is booted once, at probe or with
- * resident_fw_deferred at the first stream, and runs until the
+ * deferred_start at the first stream, and runs until the
  * driver is unbound, probe fails or the system hibernates, also across
  * suspend; after it has stopped the device stays unusable until the next
  * system boot.

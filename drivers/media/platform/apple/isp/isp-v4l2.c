@@ -531,11 +531,12 @@ static int apple_isp_start_streaming(struct apple_isp *isp)
 	}
 
 	/*
-	 * Resident firmware was not restarted, but the channel's pools are
-	 * configured again for every stream. Metadata buffers still marked
-	 * as submitted to the previous pools would never reach the new ones.
+	 * The channel's pools are configured again for every stream, by
+	 * resident firmware that kept running or by firmware that started
+	 * afresh. Metadata buffers still marked as submitted to the previous
+	 * pools, or to firmware that stopped, would never reach the new ones.
 	 */
-	if (isp->hw->resident_fw) {
+	if (isp->hw->resident_fw || isp->hw->fw_restore) {
 		spin_lock_irqsave(&isp->buf_lock, flags);
 		for (int i = 0; i < ARRAY_SIZE(isp->meta_surfs); i++)
 			isp->meta_surfs[i]->submitted = false;

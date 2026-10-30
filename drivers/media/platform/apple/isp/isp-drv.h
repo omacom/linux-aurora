@@ -240,15 +240,17 @@ struct apple_isp_hw {
 	/*
 	 * The firmware can be started only once per system boot, so once
 	 * started it is kept running while the driver is bound. It starts at
-	 * probe, or at the first stream with resident_fw_deferred.
+	 * probe, or at the first stream with deferred_start.
 	 */
 	bool resident_fw;
 
 	/*
-	 * With resident_fw: start the firmware, and detect the camera, at the
-	 * first stream instead of at probe, so the ISP stays off until then.
+	 * Start the firmware, and detect the camera, at the first stream
+	 * instead of at probe, so the ISP stays off until then. The firmware
+	 * must be resident or start again (fw_restore): the camera is
+	 * detected only once.
 	 */
-	bool resident_fw_deferred;
+	bool deferred_start;
 };
 
 enum isp_sensor_id {
@@ -495,7 +497,7 @@ int apple_isp_program_dapf(struct apple_isp *isp);
 static inline bool isp_supports_p010(struct apple_isp *isp)
 {
 	/* Its config discovery would change formats already advertised. */
-	return isp->hw->gen == ISP_GEN_T6040 && !isp->hw->resident_fw_deferred &&
+	return isp->hw->gen == ISP_GEN_T6040 && !isp->hw->deferred_start &&
 	       isp_get_current_format(isp)->version == 0x958;
 }
 

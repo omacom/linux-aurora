@@ -99,22 +99,31 @@ static struct kunit_suite isp_dapf_test_suite = {
 
 kunit_test_suite(isp_dapf_test_suite);
 
-/* Only resident firmware may defer its start: it is detected once. */
-static void isp_test_deferred_is_resident(struct kunit *test)
+/*
+ * A deferred start detects the camera once: its firmware must keep running
+ * or start again. Firmware that starts again is not resident, and only it
+ * is quiesced before the power-down.
+ */
+static void isp_test_firmware_lifetime(struct kunit *test)
 {
 	const struct of_device_id *match;
 
 	for (match = apple_isp_of_match; match->compatible[0]; match++) {
 		const struct apple_isp_hw *hw = match->data;
 
-		if (hw->resident_fw_deferred)
-			KUNIT_EXPECT_TRUE_MSG(test, hw->resident_fw, "%s",
+		if (hw->deferred_start)
+			KUNIT_EXPECT_TRUE_MSG(test, hw->resident_fw || hw->fw_restore,
+					      "%s", match->compatible);
+		KUNIT_EXPECT_FALSE_MSG(test, hw->resident_fw && hw->fw_restore, "%s",
+				       match->compatible);
+		if (hw->coproc_quiesce)
+			KUNIT_EXPECT_TRUE_MSG(test, hw->fw_restore, "%s",
 					      match->compatible);
 	}
 }
 
 static struct kunit_case isp_hw_test_cases[] = {
-	KUNIT_CASE(isp_test_deferred_is_resident),
+	KUNIT_CASE(isp_test_firmware_lifetime),
 	{}
 };
 

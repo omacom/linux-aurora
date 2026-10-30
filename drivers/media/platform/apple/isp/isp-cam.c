@@ -214,7 +214,7 @@ static int isp_check_presets(struct apple_isp *isp, u32 num_fw_presets)
 	 * advertised: keep them, and refuse a stream on one the firmware
 	 * lacks instead.
 	 */
-	if (isp->hw->resident_fw_deferred) {
+	if (isp->hw->deferred_start) {
 		isp->num_fw_presets = num_fw_presets;
 		for (int i = 0; i < isp->num_presets; i++)
 			if (isp->presets[i].index >= num_fw_presets)
@@ -575,8 +575,12 @@ int apple_isp_detect_camera(struct apple_isp *isp)
 		dev_err(isp->dev,
 			"failed to boot firmware for initial sensor detection: %d\n",
 			err);
-		/* Resident firmware would fail a deferred retry the same way. */
-		return isp->hw->resident_fw ? err : -EPROBE_DEFER;
+		/*
+		 * Resident firmware would fail a deferred retry the same way,
+		 * and a deferred start is not a probe to defer.
+		 */
+		return isp->hw->resident_fw || isp->hw->deferred_start ?
+		       err : -EPROBE_DEFER;
 	}
 
 	err = isp_detect_camera(isp);
@@ -597,6 +601,8 @@ int apple_isp_detect_camera(struct apple_isp *isp)
 
 	apple_isp_firmware_shutdown(isp);
 
+	if (!err)
+		isp->camera_detected = true;
 	return err;
 }
 
@@ -977,11 +983,19 @@ int apple_isp_start_camera(struct apple_isp *isp)
 	struct isp_format *fmt = isp_get_current_format(isp);
 	int err;
 
-	/* A deferred start boots the firmware and detects the camera now. */
-	if (isp->hw->resident_fw_deferred && !isp->camera_detected)
+	/*
+	 * A deferred start detects the camera now. Resident firmware is then
+	 * left running; firmware that starts again is stopped after the
+	 * detection like at probe, and booted again here.
+	 */
+	if (isp->hw->deferred_start && !isp->camera_detected) {
 		err = apple_isp_detect_camera(isp);
-	else
-		err = apple_isp_firmware_boot(isp);
+		if (err < 0) {
+			dev_err(isp->dev, "failed to detect the camera: %d\n", err);
+			return err;
+		}
+	}
+	err = apple_isp_firmware_boot(isp);
 	if (err < 0) {
 		dev_err(isp->dev, "failed to boot firmware: %d\n", err);
 		return err;

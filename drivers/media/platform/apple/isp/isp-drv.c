@@ -697,7 +697,7 @@ static int apple_isp_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
-	if (!isp->hw->resident_fw_deferred) {
+	if (!isp->hw->deferred_start) {
 		err = apple_isp_detect_camera(isp);
 		if (err) {
 			dev_err(dev, "failed to detect camera: %d\n", err);
@@ -1062,7 +1062,10 @@ static const struct isp_dapf_window apple_isp_dapf_t8132[] = {
  * T8132 runs T6040's coprocessor and firmware interface, booted the same
  * way. Its two AMCCs (ADT mcc amcc_aperture_count) give two broadcast-clear
  * windows, passed one per AMCC without padding slots. No PMP_CTRL_SET is
- * sent: T8132's PMP scratch offsets are not established.
+ * sent: T8132's PMP scratch offsets are not established. Its firmware
+ * starts again from its data segment as loaded once the coprocessor was
+ * quiesced before the power-down, so the ISP is powered only while the
+ * camera is in use.
  */
 static const struct apple_isp_hw apple_isp_hw_t8132 = {
 	.gen = ISP_GEN_T6040,
@@ -1085,10 +1088,12 @@ static const struct apple_isp_hw apple_isp_hw_t8132 = {
 	.num_dapf = ARRAY_SIZE(apple_isp_dapf_t8132),
 
 	.coproc_control = ISP_COPROC_CONTROL_T8140,
+	.coproc_status = ISP_COPROC_STATUS_T8140,
+	.coproc_quiesce = ISP_COPROC_QUIESCE_T8140,
 	.boot_mode = 1,
 	.shared_size = 0xdec00000,
-	.resident_fw = true,
-	.resident_fw_deferred = true,
+	.fw_restore = true,
+	.deferred_start = true,
 };
 
 static const struct of_device_id apple_isp_of_match[] = {
