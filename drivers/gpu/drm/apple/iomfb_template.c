@@ -486,7 +486,12 @@ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *pr
 			break;
 #endif
 		if (dcp_has_panel(dcp)) {
-			dcp->brightness.nits = prop->value / dcp->brightness.scale;
+			u32 nits = prop->value / dcp->brightness.scale;
+
+			/* A report just above the ceiling is still the brightest level. */
+			if (dcp->brightness.maximum && nits > dcp->brightness.maximum)
+				nits = dcp->brightness.maximum;
+			dcp->brightness.nits = nits;
 			/* notify backlight device of the initial brightness */
 			if (!dcp->brightness.bl_dev && dcp->brightness.maximum > 0)
 				schedule_work(&dcp->bl_register_wq);
