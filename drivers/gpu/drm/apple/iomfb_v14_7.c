@@ -930,6 +930,14 @@ static void dcp_v14_external_published(struct apple_dcp_v14 *v14, const char *ke
 		ret = parse(raw->data, raw->size, &ctx);
 		if (!ret) {
 			ctx.dcp = dcp;
+			/* Timings that list no ColorModes use these; see parse_mode(). */
+			for (i = 0; i < v14->raw_count; i++)
+				if (!v14->raw[i].service &&
+				    !strcmp(v14->raw[i].key, "ColorElements") &&
+				    v14->raw[i].size) {
+					ctx.shared_colors = v14->raw[i].data;
+					ctx.shared_colors_len = v14->raw[i].size;
+				}
 			ret = dcp_modes_replace(dcp, &ctx, generation);
 		}
 		if (ret) {
