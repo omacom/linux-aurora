@@ -33,6 +33,19 @@ const struct apple_dpin_policy apple_dpin_m3 = {
 	.host_policy = TB_HOST_DP_NOTIFY,
 };
 
+/*
+ * T6031 (M3 Max): the T6030 flow, without bandwidth allocation mode. Its DCP
+ * DPTX firmware never requests bandwidth through the DP IN adapter, so an
+ * allocation-mode tunnel carries none and the sink drops the stream right
+ * after the mode set (seen on an iVANKY USB4 dock, DP OUT x2 HBR3).
+ */
+const struct apple_dpin_policy apple_dpin_m3_max = {
+	.flow = APPLE_DPIN_CHANGED,
+	.capacity_retry = true,
+	.defer_new_bringup = true,
+	.host_policy = TB_HOST_DP_NOTIFY | TB_HOST_DP_NO_BW_ALLOC,
+};
+
 enum apple_dpin_flow apple_dpin_hooks(const struct apple_dpin_policy *policy,
 				      bool queue_present, bool display_enabled)
 {
