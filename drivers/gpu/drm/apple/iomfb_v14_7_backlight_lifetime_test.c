@@ -153,7 +153,8 @@ static const struct drm_framebuffer_funcs v14_bl_fb_funcs = {
 	.destroy = v14_bl_fb_destroy,
 };
 
-static struct v14_bl_rpc *v14_bl_rpc_setup(struct kunit *test)
+static struct v14_bl_rpc *v14_bl_rpc_setup_board(struct kunit *test,
+						 const struct dcp_v14_board *board)
 {
 	struct v14_bl_rpc *c = kunit_kzalloc(test, sizeof(*c), GFP_KERNEL);
 	struct device *dev;
@@ -161,7 +162,7 @@ static struct v14_bl_rpc *v14_bl_rpc_setup(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, c);
 	c->test = test;
-	c->f = v14_bl_fixture(test, &dcp_v14_board_t6030, true);
+	c->f = v14_bl_fixture(test, board, true);
 	dev = drm_kunit_helper_alloc_device(test);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
 	c->drm = __drm_kunit_helper_alloc_drm_device(test, dev, sizeof(*c->drm), 0,
@@ -198,6 +199,11 @@ static struct v14_bl_rpc *v14_bl_rpc_setup(struct kunit *test)
 	c->f.dcp->crtc->base.dev = c->drm;
 	INIT_DELAYED_WORK(&c->f.v14->backlight_work, v14_bl_rpc_work);
 	return c;
+}
+
+static struct v14_bl_rpc *v14_bl_rpc_setup(struct kunit *test)
+{
+	return v14_bl_rpc_setup_board(test, &dcp_v14_board_t6030);
 }
 
 static struct v14_bl_actor *v14_bl_actor_start(struct kunit *test,
@@ -354,6 +360,69 @@ static void v14_bl_dpms_blank_only(struct kunit *test)
 	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, NULL);
 	KUNIT_EXPECT_EQ(test, c->power_calls, 0U);
 	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+}
+
+/* The T6030 record with levels but without panel_hw_off, as the J516C one would be. */
+static struct dcp_v14_board *v14_bl_levels_board(struct kunit *test)
+{
+	struct dcp_v14_board *board = kunit_kzalloc(test, sizeof(*board), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, board);
+	*board = dcp_v14_board_t6030;
+	board->panel_hw_off = false;
+	return board;
+}
+
+/*
+ * A board record with levels but without panel_hw_off, as the J516C one
+ * would be with its panel levels: DPMS off only blanks the panel, and power
+ * on has no display controller to restart.
+ */
+static void v14_bl_dpms_levels_blank_only(struct kunit *test)
+{
+	struct v14_bl_rpc *c = v14_bl_rpc_setup_board(test, v14_bl_levels_board(test));
+	struct platform_device *pdev = kunit_kzalloc(test, sizeof(*pdev), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, pdev);
+	KUNIT_ASSERT_TRUE(test, iomfb_v14_7_panel_nits(c->f.dcp));
+	KUNIT_ASSERT_TRUE(test, panel_hw_off);
+	platform_set_drvdata(pdev, c->f.dcp);
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	dcp_poweroff(pdev);
+	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 2);
+	KUNIT_EXPECT_PTR_EQ(test, c->f.v14->active_fb, NULL);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+	dcp_poweron(pdev);
+	KUNIT_EXPECT_EQ(test, c->power_calls, 0U);
+	KUNIT_EXPECT_FALSE(test, c->f.v14->panel_off);
+}
+
+/*
+ * The callbacks of the A472 transitions are answered where DPMS off sends
+ * A472, on the T6030 record, and stay unhandled on a record with levels
+ * alone.
+ */
+static void v14_bl_hw_off_callbacks(struct kunit *test)
+{
+	static const struct {
+		u32 tag, in_size, out_size;
+	} cbs[] = {
+		{ D(2), 0, 0 }, { D(591), 20, 0 }, { D(593), 4, 0 },
+		{ D(574), 4, 4 }, { D(700), 4, 4 },
+	};
+	struct v14_bl_fixture t6030 = v14_bl_fixture(test, &dcp_v14_board_t6030, false);
+	struct v14_bl_fixture levels = v14_bl_fixture(test, v14_bl_levels_board(test), false);
+	u8 in[20] = {}, out[4];
+	unsigned int i;
+
+	KUNIT_ASSERT_TRUE(test, dcp_v14_board_nits(levels.v14));
+	for (i = 0; i < ARRAY_SIZE(cbs); i++) {
+		KUNIT_EXPECT_EQ(test, dcp_v14_callback(t6030.v14, cbs[i].tag, in, cbs[i].in_size,
+						       out, cbs[i].out_size), 0);
+		KUNIT_EXPECT_EQ(test, dcp_v14_callback(levels.v14, cbs[i].tag, in, cbs[i].in_size,
+						       out, cbs[i].out_size), -EOPNOTSUPP);
+	}
 }
 
 static bool v14_bl_in_system_sleep(void)
@@ -516,6 +585,8 @@ static struct kunit_case v14_bl_lifetime_cases[] = {
 	KUNIT_CASE(v14_bl_running_work_suspend),
 	KUNIT_CASE(v14_bl_dpms_dispatch),
 	KUNIT_CASE(v14_bl_dpms_blank_only),
+	KUNIT_CASE(v14_bl_dpms_levels_blank_only),
+	KUNIT_CASE(v14_bl_hw_off_callbacks),
 	KUNIT_CASE(v14_bl_sleep_blank_only),
 	KUNIT_CASE(v14_bl_power_on_refused),
 	KUNIT_CASE(v14_bl_failed_submit_unknown),
