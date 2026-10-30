@@ -56,41 +56,35 @@ static void isp_surf_vunmap(struct apple_isp *isp, struct isp_surf *surf)
 static void isp_surf_unreserve_iova(struct apple_isp *isp,
 				    struct isp_surf *surf)
 {
-	if (surf->mm) {
-		mutex_lock(&isp->iovad_lock);
-		drm_mm_remove_node(surf->mm);
-		mutex_unlock(&isp->iovad_lock);
-		kfree(surf->mm);
-	}
-	surf->mm = NULL;
+	if (surf->iova_reserved)
+		mtree_erase(&isp->iovas, surf->iova >> isp->shift);
+	surf->iova_reserved = false;
 }
 
+/*
+ * The IOVA range starts at the top of the firmware heap. Hand out the lowest
+ * free range of whole IOMMU pages above it.
+ */
 static int isp_surf_reserve_iova(struct apple_isp *isp, struct isp_surf *surf)
 {
+	unsigned long first = DIV_ROUND_UP_ULL(isp->fw.heap_top, 1ULL << isp->shift);
+	unsigned long last = ((isp->fw.heap_top + isp->iova_size) >> isp->shift) - 1;
+	unsigned long pages = DIV_ROUND_UP_ULL(surf->size, 1ULL << isp->shift);
+	unsigned long index;
 	int err;
 
-	surf->mm = kzalloc(sizeof(*surf->mm), GFP_KERNEL);
-	if (!surf->mm)
-		return -ENOMEM;
-
-	mutex_lock(&isp->iovad_lock);
-	err = drm_mm_insert_node_generic(&isp->iovad, surf->mm,
-					 ALIGN(surf->size, 1UL << isp->shift),
-					 1UL << isp->shift, 0, 0);
-	mutex_unlock(&isp->iovad_lock);
+	err = mtree_alloc_range(&isp->iovas, &index, surf, pages, first, last,
+				GFP_KERNEL);
 	if (err < 0) {
 		dev_err(isp->dev, "failed to reserve 0x%llx of iova space\n",
 			surf->size);
-		goto mm_free;
+		return err;
 	}
 
-	surf->iova = surf->mm->start;
+	surf->iova = (dma_addr_t)index << isp->shift;
+	surf->iova_reserved = true;
 
 	return 0;
-mm_free:
-	kfree(surf->mm);
-	surf->mm = NULL;
-	return err;
 }
 
 static void isp_surf_iommu_unmap(struct apple_isp *isp, struct isp_surf *surf)
@@ -129,7 +123,7 @@ static int isp_surf_iommu_map(struct apple_isp *isp, struct isp_surf *surf)
 static void __isp_surf_init(struct apple_isp *isp, struct isp_surf *surf,
 			    u64 size, bool gc)
 {
-	surf->mm = NULL;
+	surf->iova_reserved = false;
 	surf->virt = NULL;
 	surf->size = ALIGN(size, 1UL << isp->shift);
 	surf->num_pages = surf->size >> isp->shift;
@@ -291,7 +285,7 @@ int apple_isp_iommu_map_sgt(struct apple_isp *isp, struct isp_surf *surf,
 	ssize_t mapped;
 
 	// TODO userptr sends unaligned sizes
-	surf->mm = NULL;
+	surf->iova_reserved = false;
 	surf->size = size;
 
 	err = isp_surf_reserve_iova(isp, surf);

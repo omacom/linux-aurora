@@ -230,11 +230,11 @@ static int apple_isp_init_iommu(struct apple_isp *isp)
 
 	// FIXME: refactor this, maybe use regular iova stuff?
 	isp->iova_size = vm_size - (heap_base & 0xffffffff);
-	drm_mm_init(&isp->iovad, isp->fw.heap_top, isp->iova_size);
+	mt_init_flags(&isp->iovas, MT_FLAGS_ALLOC_RANGE);
 
 	err = apple_isp_map_fw_mmio(isp);
 	if (err) {
-		drm_mm_takedown(&isp->iovad);
+		mtree_destroy(&isp->iovas);
 		return err;
 	}
 
@@ -244,7 +244,8 @@ static int apple_isp_init_iommu(struct apple_isp *isp)
 static void apple_isp_free_iommu(struct apple_isp *isp)
 {
 	apple_isp_unmap_fw_mmio(isp, isp->hw->num_fw_mmio);
-	drm_mm_takedown(&isp->iovad);
+	WARN_ON(!mtree_empty(&isp->iovas));
+	mtree_destroy(&isp->iovas);
 }
 
 static int isp_of_read_coord(struct device *dev, struct device_node *np,
@@ -542,7 +543,6 @@ static int apple_isp_probe(struct platform_device *pdev)
 		goto detach_genpd;
 	}
 
-	mutex_init(&isp->iovad_lock);
 	mutex_init(&isp->video_lock);
 	spin_lock_init(&isp->buf_lock);
 	init_waitqueue_head(&isp->wait);

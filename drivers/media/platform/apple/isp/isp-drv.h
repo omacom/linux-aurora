@@ -6,11 +6,11 @@
 
 #include <linux/hrtimer.h>
 #include <linux/list.h>
+#include <linux/maple_tree.h>
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <linux/spinlock.h>
 
-#include <drm/drm_mm.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/videobuf2-core.h>
@@ -82,7 +82,6 @@ enum isp_firmware_version {
 };
 
 struct isp_surf {
-	struct drm_mm_node *mm;
 	struct list_head head;
 	u64 size;
 	u64 type;
@@ -94,6 +93,7 @@ struct isp_surf {
 	refcount_t refcount;
 	bool gc;
 	bool submitted;
+	bool iova_reserved; /* @iova comes from &apple_isp.iovas */
 };
 
 struct isp_message {
@@ -334,10 +334,10 @@ struct apple_isp {
 
 	struct iommu_domain *domain;
 	unsigned long shift;
-	struct drm_mm iovad; /* TODO iova.c can't allocate bottom-up */
-	u64 iova_size; /* size of the iovad range */
+	/* allocated IOVA ranges, in IOMMU pages, lowest free range first */
+	struct maple_tree iovas;
+	u64 iova_size; /* size of the range @iovas allocates from */
 	u64 fw_iova_mask; /* see isp_fw_iova() */
-	struct mutex iovad_lock;
 
 	struct isp_firmware {
 		u64 heap_base;
