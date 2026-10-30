@@ -1403,7 +1403,11 @@ bool dcp_t6030_ext_native(const struct device_node *np)
 	of_node_put(piodma);
 	if (dart.args_count != 1 || dart.args[0] != 4 || !of_device_is_available(dart.np))
 		goto out;
-	display = of_find_compatible_node(NULL, NULL, "apple,t6030-display-subsystem");
+	/* The display subsystem of the processor's own SoC. */
+	display = of_find_compatible_node(NULL, NULL,
+					  of_device_is_compatible(np, "apple,t6031-dcpext") ?
+					  "apple,t6031-display-subsystem" :
+					  "apple,t6030-display-subsystem");
 	n = display && of_device_is_available(display) ?
 		of_count_phandle_with_args(display, "iommus", "#iommu-cells") : 0;
 	for (i = 0; i < n && !native; i++) {
