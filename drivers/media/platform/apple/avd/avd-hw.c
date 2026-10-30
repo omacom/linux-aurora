@@ -61,8 +61,10 @@ int avd_boot(struct avd_dev *avd)
 	/* wait for cm3 to boot */
 	ret = readl_poll_timeout(avd->mbox + AVD_REG_FLAG0_SET,
 			val, val == 1, 10, 10000);
-	if (ret)
+	if (ret) {
+		dev_err(avd->dev, "cm3 did not start: flag0 %#x\n", val);
 		return ret;
+	}
 
 	return 0;
 }
