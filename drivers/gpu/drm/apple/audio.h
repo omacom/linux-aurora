@@ -37,8 +37,6 @@ void dcpaud_release_link(struct platform_device *pdev, const u64 *gen);
 bool dcp_audiosrv_link_on(struct device *dev, u64 gen);
 /* The prepared link still belongs to the client of the published instance. */
 bool dcp_audiosrv_link_live(struct device *dev);
-/* The display processor drives a Type-C route rather than the HDMI port. */
-bool dcp_audiosrv_typec(struct device *dev);
 #endif
 
 #endif /* __AUDIO_H__ */
