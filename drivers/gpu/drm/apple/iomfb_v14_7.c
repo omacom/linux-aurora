@@ -3271,6 +3271,17 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
 		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
 	if (!ret)
 		ret = dcp_v14_set_power(v14, true);
+	/*
+	 * The mode was set with the pipe off. A mode that needs DSC is then
+	 * reset again ("pipe not enabled"), and the power-on only configures
+	 * DSC: the firmware starts the timings in a mode set of its own, after
+	 * the hotplug notification it sends itself, and drops a swap that
+	 * reaches it before then without completing it, so A407 times out.
+	 * Setting the mode once more with the pipe on starts the timings
+	 * before the first swap.
+	 */
+	if (!ret)
+		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
 	if (!ret) {
 		v14->panel_width = mode.mode.hdisplay;
 		v14->panel_height = mode.mode.vdisplay;
@@ -3383,6 +3394,7 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
 #include "iomfb_v14_7_external_audio_test.c"
+#include "iomfb_v14_7_external_modeset_test.c"
 #include "iomfb_v14_7_backlight_test.c"
 #include "iomfb_v14_7_backlight_lifetime_test.c"
 #endif
