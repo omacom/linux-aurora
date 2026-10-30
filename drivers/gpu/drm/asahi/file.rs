@@ -16,8 +16,8 @@ use crate::{
         AsahiDrmDevice, //
     },
     gem,
-    memacct,
     gpu,
+    memacct,
     mmu,
     queue,
     util::{
@@ -132,11 +132,16 @@ pub(crate) struct SyncItem {
 }
 
 impl SyncItem {
-    fn parse_one(file: &DrmFile, mut data: uapi::drm_asahi_sync, out: bool,
-        bundled: bool) -> Result<SyncItem>
-    {
+    fn parse_one(
+        file: &DrmFile,
+        mut data: uapi::drm_asahi_sync,
+        out: bool,
+        bundled: bool,
+    ) -> Result<SyncItem> {
         if data.sync_type == crate::g17::sync_output::SYNC_CUMULATIVE {
-            if !out || !bundled || data.timeline_value == 0 { return Err(EINVAL); }
+            if !out || !bundled || data.timeline_value == 0 {
+                return Err(EINVAL);
+            }
             data.sync_type = uapi::drm_asahi_sync_type_DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ;
         }
         match data.sync_type {
@@ -230,12 +235,16 @@ impl SyncItem {
                 }
                 anchor = Some(i as usize);
             }
-            vec.push(Self::parse_one(file, sync, i >= in_count,
-                allow_cumulative)?, GFP_KERNEL)?;
+            vec.push(
+                Self::parse_one(file, sync, i >= in_count, allow_cumulative)?,
+                GFP_KERNEL,
+            )?;
         }
         if let Some(anchor) = anchor {
             let bundle = crate::g17::sync_output::SignalBundle::new(
-                &vec[in_count as usize..], anchor - in_count as usize)?;
+                &vec[in_count as usize..],
+                anchor - in_count as usize,
+            )?;
             vec[anchor].cumulative = Some(bundle);
         } else {
             for sync in &mut vec[in_count as usize..] {
@@ -713,22 +722,28 @@ impl File {
         };
 
         let size = gem::checked_object_size(data.size.try_into()?)?;
-        let commit = memacct::LEDGER.admit(&file.inner().mem, size as u64).inspect_err(|_| {
-            cls_pr_debug!(
-                Errors,
-                "gem_create: {:#x} bytes refused by the GPU memory limits\n",
-                size
-            );
-        })?;
+        let commit = memacct::LEDGER
+            .admit(&file.inner().mem, size as u64)
+            .inspect_err(|_| {
+                cls_pr_debug!(
+                    Errors,
+                    "gem_create: {:#x} bytes refused by the GPU memory limits\n",
+                    size
+                );
+            })?;
         // Large G17 user objects are populated in full by the first VM_BIND.
         // Do not multiply direct reclaim/compaction latency by their folio
         // count. Userspace can evict its BO cache and retry after ENOMEM.
-        let pages_no_reclaim = gem::user_pages_no_reclaim(
-            size,
-            reg_data.gpu.as_any().is::<crate::g17::Gpu>(),
-        );
+        let pages_no_reclaim =
+            gem::user_pages_no_reclaim(size, reg_data.gpu.as_any().is::<crate::g17::Gpu>());
         let gem = gem::new_object(
-            device, size, data.flags, resv_obj, reclaim_cpu, pages_no_reclaim, commit,
+            device,
+            size,
+            data.flags,
+            resv_obj,
+            reclaim_cpu,
+            pages_no_reclaim,
+            commit,
         )?;
         if reg_data.gpu.prepare_new_objects() {
             gem::prepare_new_object(&gem)?;
@@ -1306,7 +1321,10 @@ impl File {
         if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
             && !reg_data.gpu.as_any().is::<crate::g17::Gpu>()
         {
-            cls_pr_debug!(Errors, "queue_create: HIGH priority is not supported on this GPU\n");
+            cls_pr_debug!(
+                Errors,
+                "queue_create: HIGH priority is not supported on this GPU\n"
+            );
             return Err(EINVAL);
         }
         // SAFETY: capable() only reads the calling task's credentials (ioctl process context).
@@ -1314,7 +1332,10 @@ impl File {
             && !unsafe { bindings::capable(bindings::CAP_SYS_NICE as _) }
             && !file.is_current_master()
         {
-            cls_pr_debug!(Errors, "queue_create: HIGH priority needs CAP_SYS_NICE or DRM master\n");
+            cls_pr_debug!(
+                Errors,
+                "queue_create: HIGH priority needs CAP_SYS_NICE or DRM master\n"
+            );
             return Err(EACCES);
         }
 
@@ -1425,9 +1446,13 @@ impl File {
         if guarded {
             copy_commands(&mut vec)?;
         }
-        let syncs =
-            SyncItem::parse_array(file, data.syncs, data.in_sync_count, data.out_sync_count,
-                gpu.as_any().is::<crate::g17::Gpu>())?;
+        let syncs = SyncItem::parse_array(
+            file,
+            data.syncs,
+            data.in_sync_count,
+            data.out_sync_count,
+            gpu.as_any().is::<crate::g17::Gpu>(),
+        )?;
 
         mod_dev_dbg!(
             device,

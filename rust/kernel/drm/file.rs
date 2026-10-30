@@ -163,9 +163,7 @@ impl<T: DriverFile> File<T> {
 
         // SAFETY: `printer` is the printer `drm_show_fdinfo()` passes, valid for this call; `raw`
         // and the region name outlive the call.
-        unsafe {
-            bindings::drm_print_memory_stats(printer, &raw, supported, c"system".as_ptr())
-        };
+        unsafe { bindings::drm_print_memory_stats(printer, &raw, supported, c"system".as_ptr()) };
     }
 
     /// The postclose callback of a `struct drm_file`.

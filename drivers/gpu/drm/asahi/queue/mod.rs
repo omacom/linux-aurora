@@ -67,7 +67,9 @@ mod render;
 /// Trait implemented by all versioned queues.
 pub(crate) trait Queue: Send + Sync {
     fn reserve_render_scs(&mut self, layouts: [u64; 2]) -> Result {
-        if layouts != [0; 2] { return Err(EINVAL); }
+        if layouts != [0; 2] {
+            return Err(EINVAL);
+        }
         Ok(())
     }
 
@@ -266,7 +268,10 @@ impl sched::JobImpl for QueueJob::ver {
         Some(&crate::THIS_MODULE);
 
     fn timeout_data(&self) -> QueueTimeout {
-        QueueTimeout { dev: self.dev.clone(), id: self.id }
+        QueueTimeout {
+            dev: self.dev.clone(),
+            id: self.id,
+        }
     }
 
     fn prepare(job: &mut Self) -> Option<Fence> {
@@ -759,13 +764,21 @@ impl Queue for Queue::ver {
             match header.cmd_type as u32 {
                 uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
                     let render: uapi::drm_asahi_cmd_render = cmdbuf.read_up_to(payload_size)?;
-                    if render.ts_frag_end_copies.iter().any(|ts| ts.handle != 0 || ts.offset != 0) {
+                    if render
+                        .ts_frag_end_copies
+                        .iter()
+                        .any(|ts| ts.handle != 0 || ts.offset != 0)
+                    {
                         return Err(EINVAL);
                     }
                 }
                 uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
                     let compute: uapi::drm_asahi_cmd_compute = cmdbuf.read_up_to(payload_size)?;
-                    if compute.ts_end_copies.iter().any(|ts| ts.handle != 0 || ts.offset != 0) {
+                    if compute
+                        .ts_end_copies
+                        .iter()
+                        .any(|ts| ts.handle != 0 || ts.offset != 0)
+                    {
                         return Err(EINVAL);
                     }
                 }

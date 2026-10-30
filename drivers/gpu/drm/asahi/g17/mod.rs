@@ -31,31 +31,31 @@ mod completion;
 pub(crate) mod context;
 mod data_segment;
 mod dependency;
-#[cfg(CONFIG_DRM_ASAHI_G15)]
-pub(crate) use dependency::inherited_error;
 mod sync_input;
 pub(crate) mod sync_output;
 mod trace;
+#[cfg(CONFIG_DRM_ASAHI_G15)]
+pub(crate) use dependency::inherited_error;
+mod capacity;
 mod event;
 mod feed;
 mod fence;
 mod freelist;
 pub(crate) mod fw;
-mod ids;
 pub(crate) mod hazard;
+mod ids;
 mod initdata;
 mod job;
-mod capacity;
 mod kick;
 mod object;
 mod port;
 pub(crate) mod power;
-mod reports;
 mod preparation;
 mod qos;
 mod queue;
 mod recovery;
 mod replay;
+mod reports;
 mod runtime;
 pub(crate) mod status;
 mod teardown;
@@ -75,12 +75,12 @@ use kernel::{
     c_str,
     device::{self, Core},
     drm::gem::shmem,
+    impl_has_delayed_work, impl_has_work,
     io::{
         IoBase,
         IoSysMap,
         Region, //
     },
-    impl_has_delayed_work, impl_has_work,
     new_condvar, new_delayed_work, new_mutex, new_work, platform,
     prelude::*,
     soc::apple::rtkit,
@@ -755,10 +755,12 @@ impl Firmware {
             }
             power::IdleAction::Recheck(delay) => Some(delay),
         };
-        Ok(match (effort, self.idle_hold(now_ns, in_flight || submitted)) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        })
+        Ok(
+            match (effort, self.idle_hold(now_ns, in_flight || submitted)) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+        )
     }
 
     /// Drives the idle hold (see power::Hold); returns the delay in ns for its next check. A
@@ -767,7 +769,10 @@ impl Firmware {
         const RETRY_NS: u64 = 1_000_000;
         let hold_ms = power::IDLE_HOLD_MS.load(Ordering::Relaxed);
         for _ in 0..2 {
-            match self.hold.step(now_ns, in_flight, self.effort.submissions(), hold_ms) {
+            match self
+                .hold
+                .step(now_ns, in_flight, self.effort.submissions(), hold_ms)
+            {
                 power::HoldAction::None => return None,
                 power::HoldAction::Recheck(delay) => return Some(delay),
                 power::HoldAction::Assert => {
@@ -994,7 +999,6 @@ impl Shared {
         self.renders.notify();
     }
 
-
     /// The session's port, valid while `lease` is held: shutdown and device loss join every
     /// lease before they detach the session.
     fn port<'a>(&self, lease: &'a preparation::Lease) -> Option<&'a port::Port> {
@@ -1141,7 +1145,10 @@ impl Gpu {
     ) -> Result<Arc<Gpu>> {
         let calibration = if cfg.chip_id == crate::hw::t6040::CHIP_ID {
             Some(calibration::Calibration::read(dev).inspect_err(|_| {
-                dev_err!(dev.as_ref(), "Missing or invalid T6040 GPU calibration handoff\n");
+                dev_err!(
+                    dev.as_ref(),
+                    "Missing or invalid T6040 GPU calibration handoff\n"
+                );
             })?)
         } else {
             None
@@ -1172,11 +1179,14 @@ impl Gpu {
         };
         let max_frequency_khz = Self::max_frequency_khz(dev)?;
         let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
-        let idle_delay = power::idle_delay(
-            node.get_opt_property(c_str!("apple,idle-off-delay-ms"))?,
-        )?;
+        let idle_delay =
+            power::idle_delay(node.get_opt_property(c_str!("apple,idle-off-delay-ms"))?)?;
         power::IDLE_HOLD_MS.store(idle_delay, Ordering::Relaxed);
-        dev_info!(dev.as_ref(), "GPU idle power-off delay: {} ms\n", idle_delay);
+        dev_info!(
+            dev.as_ref(),
+            "GPU idle power-off delay: {} ms\n",
+            idle_delay
+        );
         let channels = availability::Availability::new()?;
         let progress = availability::Availability::new()?;
         let queues = availability::Availability::new()?;
@@ -1282,8 +1292,12 @@ impl Gpu {
         let version = Self::os_firmware_version(dev);
         // iBoot strings can be shared by OS releases. Prefer the reported release's
         // candidate, but admit only an exact loaded image, regardless of that hint.
-        let preferred = builds.iter().filter(|build| Some(build.os_version) == version);
-        let others = builds.iter().filter(|build| Some(build.os_version) != version);
+        let preferred = builds
+            .iter()
+            .filter(|build| Some(build.os_version) == version);
+        let others = builds
+            .iter()
+            .filter(|build| Some(build.os_version) != version);
         for build in Iterator::chain(preferred, others) {
             if Self::identify_image(dev, build).is_ok() {
                 dev_info!(dev.as_ref(), "GPU firmware: {}\n", build.name);
@@ -1306,13 +1320,10 @@ impl Gpu {
         let data = node.reserved_mem_region_to_resource_byname(c_str!("fw-data"))?;
         let start = text.start();
         let end = start.checked_add(text.size()).ok_or(EINVAL)?;
-        crate::fwid::identify(
-            dev.as_ref().as_ref(),
-            start..end,
-            data.size(),
-            build.images,
-        )
-        .inspect_err(|e| dev_err!(dev.as_ref(), "GPU firmware image not admitted: {:?}\n", e))?;
+        crate::fwid::identify(dev.as_ref().as_ref(), start..end, data.size(), build.images)
+            .inspect_err(|e| {
+                dev_err!(dev.as_ref(), "GPU firmware image not admitted: {:?}\n", e)
+            })?;
         Ok(())
     }
 
@@ -1372,13 +1383,21 @@ impl Gpu {
             mmu::PROT_GPU_FW_SHARED_RW,
             CpuMap::WriteCombined,
         )?;
-        let primary = Coprocessor::new(pdev, dev, cfg, &uat, shared, Role::Primary)
-            .inspect_err(|e| dev_err!(dev.as_ref(), "Primary coprocessor setup failed: {:?}\n", e))?;
+        let primary =
+            Coprocessor::new(pdev, dev, cfg, &uat, shared, Role::Primary).inspect_err(|e| {
+                dev_err!(dev.as_ref(), "Primary coprocessor setup failed: {:?}\n", e)
+            })?;
         let secondary = match cfg.secondary_root_offset {
             Some(_) => Some(
-                Coprocessor::new(pdev, dev, cfg, &uat, shared, Role::Secondary).inspect_err(|e| {
-                    dev_err!(dev.as_ref(), "Secondary coprocessor setup failed: {:?}\n", e)
-                })?,
+                Coprocessor::new(pdev, dev, cfg, &uat, shared, Role::Secondary).inspect_err(
+                    |e| {
+                        dev_err!(
+                            dev.as_ref(),
+                            "Secondary coprocessor setup failed: {:?}\n",
+                            e
+                        )
+                    },
+                )?,
             ),
             None => None,
         };
@@ -1450,13 +1469,18 @@ impl Gpu {
             session.uat.confirm_firmware_root_entries(root_entries)?;
         }
         let mailbox: *const Mailbox = &*session.primary.rtkit;
-        session.port.attach(session.init.port_views(mailbox)?, session.bridge.regs.clone())?;
+        session.port.attach(
+            session.init.port_views(mailbox)?,
+            session.bridge.regs.clone(),
+        )?;
         session.uat.mirror_secondary_root()?;
         if cfg.fabric_bridge {
             session.bridge.regs.enable_g17_gating()?;
         }
         let ack = shared.variant.init_ack;
-        session.primary.init(session.init.root_va(Role::Primary)?, ack)?;
+        session
+            .primary
+            .init(session.init.root_va(Role::Primary)?, ack)?;
         if ack == fw::variant::InitAck::Status {
             Self::wait_for_init_accepted(dev, &session.init, &session.primary)?;
         }
@@ -1469,7 +1493,12 @@ impl Gpu {
                 secondary.notify(MSG_POWER_ON_DONE)?;
             }
         }
-        Self::wait_for_opening(dev, &session.init, &session.primary, session.secondary.as_ref())?;
+        Self::wait_for_opening(
+            dev,
+            &session.init,
+            &session.primary,
+            session.secondary.as_ref(),
+        )?;
         session
             .uat
             .activate_render_context(&session._render_global)?;
@@ -1590,8 +1619,7 @@ impl gpu::Gpu for Gpu {
                 | sync_output::FEATURE_CUMULATIVE_SIGNALS;
         let variant = self.shared.variant;
         if variant.few_primitives {
-            params.features |=
-                u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES);
+            params.features |= u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES);
         }
         if variant.ray_traversal {
             params.features |=
@@ -1694,12 +1722,16 @@ impl gpu::Gpu for Gpu {
                     // Backend construction has rolled back all temporary leases.
                     let waited = now_ns().saturating_sub(admission_started);
                     let limit = job::TIMEOUT_MS as u64 * 1_000_000;
-                    if waited >= limit { return Err(EBUSY); }
+                    if waited >= limit {
+                        return Err(EBUSY);
+                    }
                     self.shared.queue_events();
                     // A returned queue slot or reclaimed context wakes this.
-                    self.shared
-                        .queues
-                        .block(observed, (limit - waited).div_ceil(1_000_000) as u32, true)?;
+                    self.shared.queues.block(
+                        observed,
+                        (limit - waited).div_ceil(1_000_000) as u32,
+                        true,
+                    )?;
                 }
                 result => break result?,
             }

@@ -13,7 +13,12 @@ use super::{
     recovery::Class,
     status::VmStatus,
 };
-use crate::{driver::AsahiDrmDevice, file, hw::t8140::{dynamic, resources as cfg}, mmu};
+use crate::{
+    driver::AsahiDrmDevice,
+    file,
+    hw::t8140::{dynamic, resources as cfg},
+    mmu,
+};
 use core::sync::atomic::{fence as barrier, AtomicBool, AtomicI32, AtomicU8, Ordering};
 use kernel::{
     dma_fence::{Fence, FenceContexts, RawDmaFence, UserFence},
@@ -86,7 +91,9 @@ impl Destinations {
         Ok(Self(destinations))
     }
 
-    pub(crate) fn has_outputs(&self) -> bool { self.0.iter().any(Option::is_some) }
+    pub(crate) fn has_outputs(&self) -> bool {
+        self.0.iter().any(Option::is_some)
+    }
 
     fn iter(&self) -> core::slice::Iter<'_, Option<Destination>> {
         self.0.iter()
@@ -287,14 +294,17 @@ impl Completion {
         sources: Option<Arc<super::sync_input::Sources>>,
     ) -> Result<Arc<Self>> {
         let fence = fence::independent(contexts)?;
-        let ordered = !compute
-            && (host_predecessors || destinations.iter().any(Option::is_some));
+        let ordered = !compute && (host_predecessors || destinations.iter().any(Option::is_some));
         let terminal = if host_predecessors {
             Some(fence::independent(contexts)?)
         } else {
             None
         };
-        let output = Output { fence, member, destinations };
+        let output = Output {
+            fence,
+            member,
+            destinations,
+        };
         let output = if ordered {
             HostOutput::Ordered(Publication::new(output, context.status().clone())?)
         } else {
@@ -334,7 +344,9 @@ impl Completion {
         Fence::from_fence(&self.output.output().fence)
     }
     pub(crate) fn scheduler_fence(&self) -> Fence {
-        self.terminal.as_ref().map_or_else(|| self.fence(), |fence| Fence::from_fence(fence))
+        self.terminal
+            .as_ref()
+            .map_or_else(|| self.fence(), |fence| Fence::from_fence(fence))
     }
     pub(crate) fn publication(&self) -> Option<Arc<Publication>> {
         match &self.output {
@@ -382,11 +394,15 @@ impl Completion {
         }
         match self.check_source_inputs() {
             Ok(()) => self.output.output().member.note_retired(),
-            Err(error) => { self.note_input_error(error); }
+            Err(error) => {
+                self.note_input_error(error);
+            }
         }
     }
     pub(super) fn check_source_inputs(&self) -> Result {
-        if let Some(sources) = &self.sources { sources.check()?; }
+        if let Some(sources) = &self.sources {
+            sources.check()?;
+        }
         Ok(())
     }
 
@@ -394,7 +410,11 @@ impl Completion {
         self.output.output().member.work_state()
     }
     pub(crate) fn has_timestamps(&self) -> bool {
-        self.output.output().destinations.iter().any(Option::is_some)
+        self.output
+            .output()
+            .destinations
+            .iter()
+            .any(Option::is_some)
     }
 
     pub(crate) fn compute_timestamp_va(&self) -> Result<u64> {
@@ -597,7 +617,9 @@ impl Completion {
     /// An exact whole-pair drain or processor stop allows rehabilitation. The
     /// VM pin goes first; the still-held lease excludes reuse until both settle.
     pub(crate) fn release_after_retirement(&self) {
-        if let Some(sources) = &self.sources { sources.release(); }
+        if let Some(sources) = &self.sources {
+            sources.release();
+        }
         drop(self.vm_job.lock().take());
         let lease = self.render.lock().take();
         if let Some(lease) = lease.as_ref() {
@@ -607,7 +629,9 @@ impl Completion {
     }
 
     fn release_healthy(&self) {
-        if let Some(sources) = &self.sources { sources.release(); }
+        if let Some(sources) = &self.sources {
+            sources.release();
+        }
         drop(self.render.lock().take());
         drop(self.vm_job.lock().take());
     }
@@ -617,7 +641,9 @@ impl Completion {
     #[track_caller]
     pub(crate) fn complete(&self, mut result: Result<[u64; 4]>) {
         if result.is_ok() {
-            if let Err(error) = self.check_source_inputs() { result = Err(error); }
+            if let Err(error) = self.check_source_inputs() {
+                result = Err(error);
+            }
         }
         if self.signalled.swap(true, Ordering::AcqRel) {
             return;

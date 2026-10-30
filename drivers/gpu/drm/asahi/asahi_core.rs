@@ -12,22 +12,22 @@ mod driver;
 mod event;
 mod file;
 mod float;
-mod fwid;
 mod fw;
-mod gem;
-mod g17;
+mod fwid;
 #[cfg(CONFIG_DRM_ASAHI_G15)]
 mod g15;
 // Without the G15 backend, only the UAT adoption the T8122 runtime shares with it.
 #[cfg(all(CONFIG_DRM_ASAHI_UAT_ADOPTION, not(CONFIG_DRM_ASAHI_G15)))]
 #[path = "g15/adopt.rs"]
 mod g15;
+mod g17;
+mod gem;
 mod gpu;
 mod hw;
 mod initdata;
+mod m3;
 mod mem;
 mod memacct;
-mod m3;
 mod microseq;
 mod mmu;
 mod object;
