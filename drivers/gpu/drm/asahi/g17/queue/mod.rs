@@ -84,6 +84,7 @@ impl Frontend {
 pub(crate) struct Queue<B: Backend> {
     dev: AsahiDevRef,
     context: Arc<Context>,
+    usage: Arc<crate::usage::Client>,
     backend: Arc<B>,
     render: Option<Scheduler<B>>,
     compute: Option<Scheduler<B>>,
@@ -116,6 +117,7 @@ impl<B: Backend> Queue<B> {
         backend: Arc<B>,
         frontend: Frontend,
         slot: admission::QueueSlot,
+        usage: Arc<crate::usage::Client>,
     ) -> Result<Self> {
         let Frontend {
             fences,
@@ -128,6 +130,7 @@ impl<B: Backend> Queue<B> {
         Ok(Self {
             dev: dev.into(),
             context,
+            usage,
             backend,
             render,
             compute: None,
@@ -277,6 +280,7 @@ impl<B: Backend> Queue<B> {
             host_predecessors.clone().next().is_some(),
             self.backend.feed(),
             sources.clone(),
+            self.usage.clone(),
         )?;
         let publication = completion
             .publication()

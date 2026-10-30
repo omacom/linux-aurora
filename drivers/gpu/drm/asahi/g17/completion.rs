@@ -255,6 +255,7 @@ pub(crate) struct Completion {
     terminal: Option<UserFence<CompletionFence>>,
     compute: Option<PooledTimestamps>,
     feed: Option<Arc<super::feed::Feed>>,
+    usage: Arc<crate::usage::Client>,
     sources: Option<Arc<super::sync_input::Sources>>,
     #[pin]
     vm_job: Mutex<Option<mmu::VmJobGuard>>,
@@ -292,6 +293,7 @@ impl Completion {
         host_predecessors: bool,
         feed: Option<Arc<super::feed::Feed>>,
         sources: Option<Arc<super::sync_input::Sources>>,
+        usage: Arc<crate::usage::Client>,
     ) -> Result<Arc<Self>> {
         let fence = fence::independent(contexts)?;
         let ordered = !compute && (host_predecessors || destinations.iter().any(Option::is_some));
@@ -322,6 +324,7 @@ impl Completion {
                 terminal,
                 compute,
                 feed,
+                usage,
                 sources,
                 vm_job <- new_mutex!(Some(vm_job), "G17 command VM pin"),
                 render <- new_mutex!(None, "G17 command render lease"),
@@ -650,6 +653,16 @@ impl Completion {
         }
         if result.is_ok() && self.interrupted() {
             result = Err(ECANCELED);
+        }
+        if let Ok(ticks) = &result {
+            use crate::usage::Engine;
+            let hz = cfg::COMMAND_TIMESTAMP_HZ as u32;
+            if self.compute.is_some() {
+                self.usage.add(Engine::Compute, ticks[0], ticks[1], hz);
+            } else {
+                self.usage.add(Engine::Vertex, ticks[0], ticks[1], hz);
+                self.usage.add(Engine::Fragment, ticks[2], ticks[3], hz);
+            }
         }
         if let (Some(feed), Ok(ticks)) = (&self.feed, &result) {
             // Compute reports its dispatch envelope in the first pair, a

@@ -280,6 +280,8 @@ pub(crate) struct File {
     params_size: core::sync::atomic::AtomicU64,
     /// GPU memory this client created and holds.
     mem: Arc<memacct::Client>,
+    /// Completed engine time, retained by queues after handle destruction.
+    usage: Arc<crate::usage::Client>,
 }
 
 /// Convenience type alias for our DRM `File` type.
@@ -300,9 +302,10 @@ impl drm::file::DriverFile for File {
             let id = gpu.ids().file.next();
             let user_range = gpu.user_range();
             let mem = memacct::Client::new()?;
+            let usage = Arc::new(crate::usage::Client::new(), GFP_KERNEL)?;
 
             mod_dev_dbg!(device, "[File {}]: DRM device opened\n", id);
-            KBox::pin_init(File::new(id, user_range, mem), GFP_KERNEL)
+            KBox::pin_init(File::new(id, user_range, mem, usage), GFP_KERNEL)
         })
     }
 
@@ -314,6 +317,17 @@ impl drm::file::DriverFile for File {
             resident: Some(self.mem.resident()),
             ..Default::default()
         })
+    }
+
+    fn engine_stats(&self, mut emit: impl FnMut(&CStr, u64)) {
+        let names = [
+            kernel::c_str!("vertex"),
+            kernel::c_str!("fragment"),
+            kernel::c_str!("compute"),
+        ];
+        for (name, ns) in names.into_iter().zip(self.usage.snapshot()) {
+            emit(name, ns);
+        }
     }
 
     fn as_raw(&self) -> *mut bindings::drm_file {
@@ -329,6 +343,7 @@ impl File {
         id: u64,
         user_range: Range<u64>,
         mem: Arc<memacct::Client>,
+        usage: Arc<crate::usage::Client>,
     ) -> impl PinInit<Self, Error> {
         unsafe {
             pin_init::pin_init_from_closure(move |slot: *mut Self| {
@@ -356,6 +371,7 @@ impl File {
                 (*slot).user_range = user_range;
                 addr_of_mut!((*slot).params_size).write(core::sync::atomic::AtomicU64::new(0));
                 addr_of_mut!((*slot).mem).write(mem);
+                addr_of_mut!((*slot).usage).write(usage);
                 Ok(())
             })
         }
@@ -1358,6 +1374,7 @@ impl File {
             // TODO: Plumb deeper the enum
             uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME - data.priority,
             data.usc_exec_base,
+            file.inner().usage.clone(),
         )?;
 
         queue.reserve_render_scs(data.render_scs_layout)?;

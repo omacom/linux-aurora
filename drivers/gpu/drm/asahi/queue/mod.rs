@@ -153,6 +153,7 @@ pub(crate) struct QueueInner {
     notifier_list: Arc<GpuObject<fw::event::NotifierList>>,
     notifier: Arc<GpuObject<fw::event::Notifier::ver>>,
     usc_exec_base: u64,
+    usage: Arc<crate::usage::Client>,
     id: u64,
     #[ver(V >= V13_0B4)]
     counter: AtomicU64,
@@ -487,6 +488,7 @@ impl Queue::ver {
         id: u64,
         priority: u32,
         usc_exec_base: u64,
+        usage: Arc<crate::usage::Client>,
     ) -> Result<Queue::ver> {
         mod_dev_dbg!(dev, "[Queue {}] Creating queue\n", id);
 
@@ -552,6 +554,7 @@ impl Queue::ver {
                 notifier_list: Arc::new(notifier_list, GFP_KERNEL)?,
                 notifier,
                 usc_exec_base,
+                usage,
                 id,
                 #[ver(V >= V13_0B4)]
                 counter: AtomicU64::new(0),

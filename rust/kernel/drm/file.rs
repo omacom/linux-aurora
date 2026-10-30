@@ -44,6 +44,11 @@ pub trait DriverFile {
     fn memory_stats(&self) -> Option<MemoryStats> {
         None
     }
+
+    /// Emit completed per-engine busy time in nanoseconds for this client's fdinfo.
+    /// Engine names must be stable, unique and contain no whitespace or colons.
+    /// The default emits no engine keys. See `Documentation/gpu/drm-usage-stats.rst`.
+    fn engine_stats(&self, _emit: impl FnMut(&crate::str::CStr, u64)) {}
 }
 
 /// An open DRM File.
@@ -136,6 +141,18 @@ impl<T: DriverFile> File<T> {
         // `driver_priv` was set by `open_callback()`. The seq_file read holds a reference to the
         // file, so `postclose_callback()` cannot run concurrently.
         let file = unsafe { File::<T>::from_raw(raw_file) };
+        file.inner().engine_stats(|name, ns| {
+            // SAFETY: The DRM core owns printer throughout this callback; the format and
+            // name are NUL-terminated, and the vararg types match %s and %llu.
+            unsafe {
+                bindings::drm_printf(
+                    printer,
+                    c"drm-engine-%s:\t%llu ns\n".as_ptr(),
+                    name.as_char_ptr(),
+                    ns as core::ffi::c_ulonglong,
+                )
+            };
+        });
         let Some(stats) = file.inner().memory_stats() else {
             return;
         };

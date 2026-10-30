@@ -102,6 +102,10 @@ impl super::QueueInner::ver {
             GFP_KERNEL,
         )?;
 
+        let usage_timestamps = timestamps.clone();
+        let usage = self.usage.clone();
+        let timestamp_hz = gpu.get_cfg().base_clock_hz;
+
         let uuid = 0;
         mod_dev_dbg!(self.dev, "[Submission {}] UUID = {:#x?}\n", id, uuid);
 
@@ -150,20 +154,18 @@ impl super::QueueInner::ver {
                             notifier_buf: inner_weak_ptr!(notifier.weak_pointer(), state.unk_buf),
                         })?;
 
-                        if user_timestamps.any() {
-                            builder.add(microseq::Timestamp::ver {
-                                header: microseq::op::Timestamp::new(true),
-                                command_time: inner_weak_ptr!(ptr, command_time),
-                                ts_pointers: inner_weak_ptr!(ptr, timestamp_pointers),
-                                update_ts: inner_weak_ptr!(ptr, timestamp_pointers.start_addr),
-                                work_queue: ev_comp.info_ptr,
-                                user_ts_pointers: inner_weak_ptr!(ptr, user_timestamp_pointers),
-                                #[ver(V >= V13_0B4)]
-                                unk_ts: inner_weak_ptr!(ptr, context_store_req),
-                                uuid,
-                                unk_30_padding: 0,
-                            })?;
-                        }
+                        builder.add(microseq::Timestamp::ver {
+                            header: microseq::op::Timestamp::new(true),
+                            command_time: inner_weak_ptr!(ptr, command_time),
+                            ts_pointers: inner_weak_ptr!(ptr, timestamp_pointers),
+                            update_ts: inner_weak_ptr!(ptr, timestamp_pointers.start_addr),
+                            work_queue: ev_comp.info_ptr,
+                            user_ts_pointers: inner_weak_ptr!(ptr, user_timestamp_pointers),
+                            #[ver(V >= V13_0B4)]
+                            unk_ts: inner_weak_ptr!(ptr, context_store_req),
+                            uuid,
+                            unk_30_padding: 0,
+                        })?;
 
                         #[ver(G < G14X)]
                         builder.add(microseq::WaitForIdle {
@@ -174,20 +176,18 @@ impl super::QueueInner::ver {
                             header: microseq::op::WaitForIdle2::HEADER,
                         })?;
 
-                        if user_timestamps.any() {
-                            builder.add(microseq::Timestamp::ver {
-                                header: microseq::op::Timestamp::new(false),
-                                command_time: inner_weak_ptr!(ptr, command_time),
-                                ts_pointers: inner_weak_ptr!(ptr, timestamp_pointers),
-                                update_ts: inner_weak_ptr!(ptr, timestamp_pointers.end_addr),
-                                work_queue: ev_comp.info_ptr,
-                                user_ts_pointers: inner_weak_ptr!(ptr, user_timestamp_pointers),
-                                #[ver(V >= V13_0B4)]
-                                unk_ts: inner_weak_ptr!(ptr, context_store_req),
-                                uuid,
-                                unk_30_padding: 0,
-                            })?;
-                        }
+                        builder.add(microseq::Timestamp::ver {
+                            header: microseq::op::Timestamp::new(false),
+                            command_time: inner_weak_ptr!(ptr, command_time),
+                            ts_pointers: inner_weak_ptr!(ptr, timestamp_pointers),
+                            update_ts: inner_weak_ptr!(ptr, timestamp_pointers.end_addr),
+                            work_queue: ev_comp.info_ptr,
+                            user_ts_pointers: inner_weak_ptr!(ptr, user_timestamp_pointers),
+                            #[ver(V >= V13_0B4)]
+                            unk_ts: inner_weak_ptr!(ptr, context_store_req),
+                            uuid,
+                            unk_30_padding: 0,
+                        })?;
 
                         let off = builder.offset_to(start_comp);
                         builder.add(microseq::FinalizeCompute::ver {
@@ -362,6 +362,15 @@ impl super::QueueInner::ver {
         comp_job.add_cb(comp, vm_bind.slot(), move |error| {
             if let Some(err) = error {
                 fence.set_error(err.into())
+            } else {
+                usage_timestamps.with(|raw, _| {
+                    usage.add(
+                        crate::usage::Engine::Compute,
+                        raw.start.load(Ordering::Relaxed),
+                        raw.end.load(Ordering::Relaxed),
+                        timestamp_hz,
+                    );
+                });
             }
 
             fence.command_complete();

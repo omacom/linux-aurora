@@ -1701,6 +1701,7 @@ impl gpu::Gpu for Gpu {
         _ualloc_priv: Arc<Mutex<alloc::DefaultAllocator>>,
         priority: u32,
         usc_exec_base: u64,
+        usage: Arc<crate::usage::Client>,
     ) -> Result<KBox<dyn crate::queue::Queue>> {
         let dev = self.shared.drm()?;
         let owner = self.ids.queue.next();
@@ -1742,6 +1743,7 @@ impl gpu::Gpu for Gpu {
             backend.clone(),
             frontend,
             slot,
+            usage,
         ) {
             Ok(frontend) => frontend,
             Err(error) => {
