@@ -29,7 +29,11 @@ pub(crate) fn register_idle(
     // SAFETY: `word` is a static atomic that outlives the attribute; the C side reads and writes
     // it with READ_ONCE/WRITE_ONCE.
     let ret = unsafe { asahi_sysfs_register_idle(dev.cast(), word) };
-    if ret < 0 { Err(kernel::error::Error::from_errno(ret)) } else { Ok(()) }
+    if ret < 0 {
+        Err(kernel::error::Error::from_errno(ret))
+    } else {
+        Ok(())
+    }
 }
 
 /// Register only after initialization succeeds, keeping the snapshot Arc alive.

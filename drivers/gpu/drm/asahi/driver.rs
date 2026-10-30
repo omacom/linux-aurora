@@ -227,10 +227,7 @@ impl platform::Driver for AsahiPlatformDriver {
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
     type Data<'bound> = AsahiPlatformDriverData<'bound>;
 
-    fn unbind<'bound>(
-        _pdev: &'bound platform::Device<Core<'_>>,
-        this: Pin<&Self::Data<'bound>>,
-    ) {
+    fn unbind<'bound>(_pdev: &'bound platform::Device<Core<'_>>, this: Pin<&Self::Data<'bound>>) {
         if let Some(gpu) = this.g17.as_ref() {
             // Driver data is dropped after devres, so CPU control must happen in unbind.
             gpu.shutdown();
@@ -449,7 +446,11 @@ impl AsahiPlatformDriver {
         if let Err(error) =
             crate::sysfs_exports::register_idle(raw_dev, crate::g17::power::IDLE_HOLD_MS.as_ptr())
         {
-            dev_warn!(pdev.as_ref(), "idle_off_delay_ms not registered: {:?}\n", error);
+            dev_warn!(
+                pdev.as_ref(),
+                "idle_off_delay_ms not registered: {:?}\n",
+                error
+            );
         }
         Ok(AsahiPlatformDriverData {
             _device: reg.device().into(),

@@ -47,7 +47,8 @@ impl event::Transport for Service<'_> {
         role: Role,
         mut consume: impl FnMut(&mut Self, Event) -> Result<bool>,
     ) -> Result {
-        let mut events = channel::Events::new(role);
+        let mut events =
+            channel::Events::new(role, self.firmware.primary.state.shared.variant.graph);
         while let Some(event) =
             events.next(&self.firmware.primary.state.shared.dev, &self.firmware.init)?
         {
@@ -232,7 +233,9 @@ impl recovery::Queues for Service<'_> {
             })
     }
     fn report_blamed_render(&self, qid: u8) {
-        self.firmware.queues.report_render_recovery(qid, &self.firmware.port);
+        self.firmware
+            .queues
+            .report_render_recovery(qid, &self.firmware.port);
     }
     fn settle_blamed_render(&mut self, qid: u8, error: Error) {
         let result = self
@@ -264,11 +267,9 @@ impl Firmware {
             .flatten()
             .filter_map(|entry| entry.queue.as_deref_mut())
         {
-            queue.release_witnessed(
-                state,
-                |owner| port.qos_complete(&[owner]),
-                &mut |event| deferred.push(event),
-            )?;
+            queue.release_witnessed(state, |owner| port.qos_complete(&[owner]), &mut |event| {
+                deferred.push(event)
+            })?;
         }
         Ok(())
     }
@@ -313,7 +314,10 @@ impl Firmware {
         });
         // Publishers without the device mutex stamp their tickets with this
         // mirror; they rejoin only after preparation admission reopens.
-        service.firmware.port.set_generation(service.firmware.recovery.generation());
+        service
+            .firmware
+            .port
+            .set_generation(service.firmware.recovery.generation());
         let result = result?;
         if let Some(error) = result.target_error {
             dev_warn!(
@@ -394,7 +398,8 @@ impl crate::g17::Shared {
         deferred.finish();
         crate::g17::trace::event(1);
         if recover {
-            self.preparations.wait_drained_until(super::now_ns().saturating_add(super::WORK_RING_WAIT_NS))?;
+            self.preparations
+                .wait_drained_until(super::now_ns().saturating_add(super::WORK_RING_WAIT_NS))?;
         }
         let mut state = self.state.lock();
         let Some(firmware) = (*state).as_deref_mut() else {
@@ -451,8 +456,10 @@ impl crate::g17::Shared {
             || self.progress.has_waiters()
             || self.queues.has_waiters()
             || self.renders.has_waiters()
-            || now.saturating_sub(self.housekeeping_ns.load(core::sync::atomic::Ordering::Relaxed))
-                >= HOUSEKEEPING_NS;
+            || now.saturating_sub(
+                self.housekeeping_ns
+                    .load(core::sync::atomic::Ordering::Relaxed),
+            ) >= HOUSEKEEPING_NS;
         let mut lingers = None;
         let mut pools = None;
         let mut shrinking = false;

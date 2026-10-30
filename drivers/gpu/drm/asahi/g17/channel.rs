@@ -85,7 +85,12 @@ impl Rings {
         }
     }
 
-    fn consume_report(init: &InitData, role: Role, ring: ReportRing, reports: &mut super::reports::Reports) -> Result {
+    fn consume_report(
+        init: &InitData,
+        role: Role,
+        ring: ReportRing,
+        reports: &mut super::reports::Reports,
+    ) -> Result {
         let (state, entries, capacity, allowed_types) = ring.geometry();
         let consumer_word = init.status_word(role, state)?;
         let producer_word = init.status_word(role, state + RX_PRODUCER_OFFSET)?;
