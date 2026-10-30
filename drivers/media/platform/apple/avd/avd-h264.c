@@ -120,9 +120,11 @@ static const u32 default_8x8_inter[] = {
 	0x191b1c1e, 0x1b1c1e20, 0x1c1e2021, 0x1e202123,
 };
 
-static inline u32 mv_color_size(u32 w, u32 h)
+static inline u32 mv_color_size(struct avd_ctx *ctx, u32 w, u32 h)
 {
-	return (DIV_ROUND_UP(w, 16) + 1) * (DIV_ROUND_UP(h, 16) + 1) * 64;
+	u32 per_mb = ctx->dev->variant->quirks & AVD_QUIRK_H264_MV_128 ? 128 : 64;
+
+	return (DIV_ROUND_UP(w, 16) + 1) * (DIV_ROUND_UP(h, 16) + 1) * per_mb;
 }
 
 /* sorry for the formatting */
@@ -562,7 +564,7 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 		dma_addr_t mv_color_addr =
 			vb ? vb2_dma_contig_plane_dma_addr(vb, 0) +
 					(vb->planes[0].length -
-					 mv_color_size(fmt_width(ctx),
+					 mv_color_size(ctx, fmt_width(ctx),
 						       fmt_height(ctx))) :
 			     run->addresses.mv_color;
 
@@ -782,7 +784,7 @@ static void avd_h264_run_preamble(struct avd_ctx *ctx, struct avd_h264_run *run)
 
 	dst_len = run->base.bufs.dst->vb2_buf.planes[0].length;
 
-	mv_color_len = mv_color_size(fmt_width(ctx), fmt_height(ctx));
+	mv_color_len = mv_color_size(ctx, fmt_width(ctx), fmt_height(ctx));
 
 	run->addresses.mv_color = run->base.y_out + (dst_len - mv_color_len);
 }
@@ -1157,7 +1159,7 @@ static void avd_h264_adjust_decoded_fmt(struct avd_ctx *ctx,
 					struct v4l2_pix_format_mplane *pix_mp)
 {
 	pix_mp->plane_fmt[0].sizeimage +=
-		mv_color_size(pix_mp->width, pix_mp->height);
+		mv_color_size(ctx, pix_mp->width, pix_mp->height);
 }
 
 static int avd_h264_try_ctrl(struct avd_ctx *ctx, struct v4l2_ctrl *ctrl)
