@@ -67,6 +67,9 @@ const CORE_MASK_1: usize = 0xd01514;
 const CORE_MASKS_G14X: usize = 0xe01500;
 const FAULT_INFO_G14X: usize = 0xd8c0;
 const FAULT_ADDR_G14X: usize = 0xd8c8;
+/// Selects which of the two MMU fault banks `FAULT_INFO_G14X`/`FAULT_ADDR_G14X` show (G15 and
+/// later).
+const FAULT_BANK_SELECT: usize = 0xd800;
 
 /// G17 GPU-to-fabric bridge control words. Bit 0 enables the bridge; the other bits are status.
 const G17_BRIDGE_CONTROL: [usize; 2] = [0x1000104, 0x1000108];
@@ -464,107 +467,117 @@ impl Resources<'_> {
             fault_info >> 30
         };
 
-        let unit_code = ((fault_info >> 9) & 0xff) as u8;
-        let unit = match unit_code {
-            0x00..=0x9f => match unit_code & 0xf {
-                0x0 => FaultUnit::DCMP(unit_code >> 4),
-                0x1 => FaultUnit::UL1C(unit_code >> 4),
-                0x2 => FaultUnit::CMP(unit_code >> 4),
-                0x3 => FaultUnit::GSL1(unit_code >> 4),
-                0x4 => FaultUnit::IAP(unit_code >> 4),
-                0x5 => FaultUnit::VCE(unit_code >> 4),
-                0x6 => FaultUnit::TE(unit_code >> 4),
-                0x7 => FaultUnit::RAS(unit_code >> 4),
-                0x8 => FaultUnit::VDM(unit_code >> 4),
-                0x9 => FaultUnit::PPP(unit_code >> 4),
-                0xa => FaultUnit::IPF(unit_code >> 4),
-                0xb => FaultUnit::IPF_CPF(unit_code >> 4),
-                0xc => FaultUnit::VF(unit_code >> 4),
-                0xd => FaultUnit::VF_CPF(unit_code >> 4),
-                0xe => FaultUnit::ZLS(unit_code >> 4),
-                _ => FaultUnit::Unknown(unit_code),
-            },
-            0xa1 => FaultUnit::dPM,
-            0xa2 => FaultUnit::dCDM_KS(0),
-            0xa3 => FaultUnit::dCDM_KS(1),
-            0xa4 => FaultUnit::dCDM_KS(2),
-            0xa5 => FaultUnit::dIPP,
-            0xa6 => FaultUnit::dIPP_CS,
-            0xa7 => FaultUnit::dVDM_CSD,
-            0xa8 => FaultUnit::dVDM_SSD,
-            0xa9 => FaultUnit::dVDM_ILF,
-            0xaa => FaultUnit::dVDM_ILD,
-            0xab => FaultUnit::dRDE(0),
-            0xac => FaultUnit::dRDE(1),
-            0xad => FaultUnit::FC,
-            0xae => FaultUnit::GSL2,
-            0xb0..=0xb7 => FaultUnit::GL2CC_META(unit_code & 0xf),
-            0xb8 => FaultUnit::GL2CC_MB,
-            0xd0..=0xdf if g14x => match unit_code & 0xf {
-                0x0 => FaultUnit::gCDM_CS,
-                0x1 => FaultUnit::gCDM_ID,
-                0x2 => FaultUnit::gCDM_CSR,
-                0x3 => FaultUnit::gCDM_CSW,
-                0x4 => FaultUnit::gCDM_CTXR,
-                0x5 => FaultUnit::gCDM_CTXW,
-                0x6 => FaultUnit::gIPP,
-                0x7 => FaultUnit::gIPP_CS,
-                0x8 => FaultUnit::gKSM_RCE,
-                _ => FaultUnit::Unknown(unit_code),
-            },
-            0xe0..=0xff if g14x => match unit_code & 0xf {
-                0x0 => FaultUnit::gPM_SP((unit_code >> 4) & 1),
-                0x1 => FaultUnit::gVDM_CSD_SP((unit_code >> 4) & 1),
-                0x2 => FaultUnit::gVDM_SSD_SP((unit_code >> 4) & 1),
-                0x3 => FaultUnit::gVDM_ILF_SP((unit_code >> 4) & 1),
-                0x4 => FaultUnit::gVDM_TFP_SP((unit_code >> 4) & 1),
-                0x5 => FaultUnit::gVDM_MMB_SP((unit_code >> 4) & 1),
-                0x6 => FaultUnit::gRDE0_SP((unit_code >> 4) & 1),
-                _ => FaultUnit::Unknown(unit_code),
-            },
-            0xe0..=0xff if !g14x => match unit_code & 0xf {
-                0x0 => FaultUnit::gPM_SP((unit_code >> 4) & 1),
-                0x1 => FaultUnit::gVDM_CSD_SP((unit_code >> 4) & 1),
-                0x2 => FaultUnit::gVDM_SSD_SP((unit_code >> 4) & 1),
-                0x3 => FaultUnit::gVDM_ILF_SP((unit_code >> 4) & 1),
-                0x4 => FaultUnit::gVDM_TFP_SP((unit_code >> 4) & 1),
-                0x5 => FaultUnit::gVDM_MMB_SP((unit_code >> 4) & 1),
-                0x6 => FaultUnit::gCDM_CS_KS0_SP((unit_code >> 4) & 1),
-                0x7 => FaultUnit::gCDM_CS_KS1_SP((unit_code >> 4) & 1),
-                0x8 => FaultUnit::gCDM_CS_KS2_SP((unit_code >> 4) & 1),
-                0x9 => FaultUnit::gCDM_KS0_SP((unit_code >> 4) & 1),
-                0xa => FaultUnit::gCDM_KS1_SP((unit_code >> 4) & 1),
-                0xb => FaultUnit::gCDM_KS2_SP((unit_code >> 4) & 1),
-                0xc => FaultUnit::gIPP_SP((unit_code >> 4) & 1),
-                0xd => FaultUnit::gIPP_CS_SP((unit_code >> 4) & 1),
-                0xe => FaultUnit::gRDE0_SP((unit_code >> 4) & 1),
-                0xf => FaultUnit::gRDE1_SP((unit_code >> 4) & 1),
-                _ => FaultUnit::Unknown(unit_code),
-            },
-            _ => FaultUnit::Unknown(unit_code),
-        };
-
-        let reason = match (fault_info >> 1) & 0x7 {
-            0 => FaultReason::Unmapped,
-            1 => FaultReason::AfFault,
-            2 => FaultReason::WriteOnly,
-            3 => FaultReason::ReadOnly,
-            4 => FaultReason::NoAccess,
-            a => FaultReason::Unknown(a as u8),
-        };
-
-        Some(FaultInfo {
-            address: fault_addr << 6,
-            sideband: ((fault_info >> 23) & 0x7f) as u8,
-            vm_slot: ((fault_info >> 17) & 0x3f) as u32,
-            unit_code,
-            unit,
-            level: ((fault_info >> 7) & 3) as u8,
-            unk_5: ((fault_info >> 5) & 3) as u8,
-            read: (fault_info & (1 << 4)) != 0,
-            reason,
-        })
+        decode_fault(fault_info, fault_addr, g14x)
     }
+}
+
+/// Decodes an MMU fault status word and its raw address register (64-byte units) into a
+/// [`FaultInfo`], if the status records a fault. `g14x` selects the G14X-and-later unit numbering.
+pub(crate) fn decode_fault(fault_info: u64, fault_addr: u64, g14x: bool) -> Option<FaultInfo> {
+    if fault_info & 1 == 0 {
+        return None;
+    }
+
+    let unit_code = ((fault_info >> 9) & 0xff) as u8;
+    let unit = match unit_code {
+        0x00..=0x9f => match unit_code & 0xf {
+            0x0 => FaultUnit::DCMP(unit_code >> 4),
+            0x1 => FaultUnit::UL1C(unit_code >> 4),
+            0x2 => FaultUnit::CMP(unit_code >> 4),
+            0x3 => FaultUnit::GSL1(unit_code >> 4),
+            0x4 => FaultUnit::IAP(unit_code >> 4),
+            0x5 => FaultUnit::VCE(unit_code >> 4),
+            0x6 => FaultUnit::TE(unit_code >> 4),
+            0x7 => FaultUnit::RAS(unit_code >> 4),
+            0x8 => FaultUnit::VDM(unit_code >> 4),
+            0x9 => FaultUnit::PPP(unit_code >> 4),
+            0xa => FaultUnit::IPF(unit_code >> 4),
+            0xb => FaultUnit::IPF_CPF(unit_code >> 4),
+            0xc => FaultUnit::VF(unit_code >> 4),
+            0xd => FaultUnit::VF_CPF(unit_code >> 4),
+            0xe => FaultUnit::ZLS(unit_code >> 4),
+            _ => FaultUnit::Unknown(unit_code),
+        },
+        0xa1 => FaultUnit::dPM,
+        0xa2 => FaultUnit::dCDM_KS(0),
+        0xa3 => FaultUnit::dCDM_KS(1),
+        0xa4 => FaultUnit::dCDM_KS(2),
+        0xa5 => FaultUnit::dIPP,
+        0xa6 => FaultUnit::dIPP_CS,
+        0xa7 => FaultUnit::dVDM_CSD,
+        0xa8 => FaultUnit::dVDM_SSD,
+        0xa9 => FaultUnit::dVDM_ILF,
+        0xaa => FaultUnit::dVDM_ILD,
+        0xab => FaultUnit::dRDE(0),
+        0xac => FaultUnit::dRDE(1),
+        0xad => FaultUnit::FC,
+        0xae => FaultUnit::GSL2,
+        0xb0..=0xb7 => FaultUnit::GL2CC_META(unit_code & 0xf),
+        0xb8 => FaultUnit::GL2CC_MB,
+        0xd0..=0xdf if g14x => match unit_code & 0xf {
+            0x0 => FaultUnit::gCDM_CS,
+            0x1 => FaultUnit::gCDM_ID,
+            0x2 => FaultUnit::gCDM_CSR,
+            0x3 => FaultUnit::gCDM_CSW,
+            0x4 => FaultUnit::gCDM_CTXR,
+            0x5 => FaultUnit::gCDM_CTXW,
+            0x6 => FaultUnit::gIPP,
+            0x7 => FaultUnit::gIPP_CS,
+            0x8 => FaultUnit::gKSM_RCE,
+            _ => FaultUnit::Unknown(unit_code),
+        },
+        0xe0..=0xff if g14x => match unit_code & 0xf {
+            0x0 => FaultUnit::gPM_SP((unit_code >> 4) & 1),
+            0x1 => FaultUnit::gVDM_CSD_SP((unit_code >> 4) & 1),
+            0x2 => FaultUnit::gVDM_SSD_SP((unit_code >> 4) & 1),
+            0x3 => FaultUnit::gVDM_ILF_SP((unit_code >> 4) & 1),
+            0x4 => FaultUnit::gVDM_TFP_SP((unit_code >> 4) & 1),
+            0x5 => FaultUnit::gVDM_MMB_SP((unit_code >> 4) & 1),
+            0x6 => FaultUnit::gRDE0_SP((unit_code >> 4) & 1),
+            _ => FaultUnit::Unknown(unit_code),
+        },
+        0xe0..=0xff if !g14x => match unit_code & 0xf {
+            0x0 => FaultUnit::gPM_SP((unit_code >> 4) & 1),
+            0x1 => FaultUnit::gVDM_CSD_SP((unit_code >> 4) & 1),
+            0x2 => FaultUnit::gVDM_SSD_SP((unit_code >> 4) & 1),
+            0x3 => FaultUnit::gVDM_ILF_SP((unit_code >> 4) & 1),
+            0x4 => FaultUnit::gVDM_TFP_SP((unit_code >> 4) & 1),
+            0x5 => FaultUnit::gVDM_MMB_SP((unit_code >> 4) & 1),
+            0x6 => FaultUnit::gCDM_CS_KS0_SP((unit_code >> 4) & 1),
+            0x7 => FaultUnit::gCDM_CS_KS1_SP((unit_code >> 4) & 1),
+            0x8 => FaultUnit::gCDM_CS_KS2_SP((unit_code >> 4) & 1),
+            0x9 => FaultUnit::gCDM_KS0_SP((unit_code >> 4) & 1),
+            0xa => FaultUnit::gCDM_KS1_SP((unit_code >> 4) & 1),
+            0xb => FaultUnit::gCDM_KS2_SP((unit_code >> 4) & 1),
+            0xc => FaultUnit::gIPP_SP((unit_code >> 4) & 1),
+            0xd => FaultUnit::gIPP_CS_SP((unit_code >> 4) & 1),
+            0xe => FaultUnit::gRDE0_SP((unit_code >> 4) & 1),
+            0xf => FaultUnit::gRDE1_SP((unit_code >> 4) & 1),
+            _ => FaultUnit::Unknown(unit_code),
+        },
+        _ => FaultUnit::Unknown(unit_code),
+    };
+
+    let reason = match (fault_info >> 1) & 0x7 {
+        0 => FaultReason::Unmapped,
+        1 => FaultReason::AfFault,
+        2 => FaultReason::WriteOnly,
+        3 => FaultReason::ReadOnly,
+        4 => FaultReason::NoAccess,
+        a => FaultReason::Unknown(a as u8),
+    };
+
+    Some(FaultInfo {
+        address: fault_addr << 6,
+        sideband: ((fault_info >> 23) & 0x7f) as u8,
+        vm_slot: ((fault_info >> 17) & 0x3f) as u32,
+        unit_code,
+        unit,
+        level: ((fault_info >> 7) & 3) as u8,
+        unk_5: ((fault_info >> 5) & 3) as u8,
+        read: (fault_info & (1 << 4)) != 0,
+        reason,
+    })
 }
 
 /// Device resources of a G17 GPU.
@@ -703,6 +716,22 @@ impl G17Resources {
         sgx.try_write64(tag(KSM_SLOT_TIMESTAMP), KSM_MAILBOX_TAG)?;
         sgx.try_read64(KSM_MAILBOX_DATA)?;
         Ok(())
+    }
+
+    /// Raw status and address words of both MMU fault banks, restoring the bank selector: the
+    /// G15/G16 layout (`g16::regs::Regs::engine_state`), which T6040's G16S hardware shares. Only
+    /// while the firmware is halted, since it uses the same selector.
+    pub(crate) fn fault_banks(&self) -> Result<[(u64, u64); 2]> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        let selector = sgx.try_read64(FAULT_BANK_SELECT)?;
+        let mut banks = [(0, 0); 2];
+        for (bank, words) in banks.iter_mut().enumerate() {
+            sgx.try_write64(bank as u64, FAULT_BANK_SELECT)?;
+            *words = (sgx.try_read64(FAULT_INFO_G14X)?, sgx.try_read64(FAULT_ADDR_G14X)?);
+        }
+        sgx.try_write64(selector, FAULT_BANK_SELECT)?;
+        Ok(banks)
     }
 
     fn sgx_read32<const OFF: usize>(&self) -> u32 {

@@ -113,6 +113,8 @@ pub(super) trait Queues {
     fn note_interrupted(&mut self, qid: u8, stamp: u32) -> Interrupted;
     /// Optional diagnostics only; absence cannot alter attribution or release.
     fn report_blamed_render(&self, _qid: u8) {}
+    /// Optional diagnostics: logs the MMU fault banks while the firmware is halted.
+    fn report_mmu_fault(&self) {}
     fn settle_blamed_render(&mut self, qid: u8, error: Error);
     fn settle_cancelled_renders(&mut self, qids: u128);
     fn rescan_compute(&mut self) -> Result;
@@ -259,6 +261,7 @@ pub(super) fn service<H: Host>(
     }
     let mut sources = host.fault_sources()?;
     sources.report(request.generation, super::queue::compute::retirement::stampless_total());
+    host.report_mmu_fault();
     if let Some(qid) = request.blamed {
         host.report_blamed_render(qid);
     }

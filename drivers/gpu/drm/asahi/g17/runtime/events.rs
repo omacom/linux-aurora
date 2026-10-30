@@ -271,6 +271,28 @@ impl recovery::Queues for Service<'_> {
             .queues
             .report_render_recovery(qid, &self.firmware.port);
     }
+    fn report_mmu_fault(&self) {
+        let banks = match self.firmware.port.fault_banks() {
+            Ok(banks) => banks,
+            Err(error) => {
+                pr_warn!("G17: recovery MMU fault banks unreadable: {:?}\n", error);
+                return;
+            }
+        };
+        for (bank, &(status, address)) in banks.iter().enumerate() {
+            match crate::regs::decode_fault(status, address, true) {
+                Some(info) => pr_warn!(
+                    "G17: recovery MMU fault bank {}: address {:#x} {} {:?} unit {:?} ({:#x}) level {} vm_slot {} sideband {:#x} (status {:#x})\n",
+                    bank, info.address, if info.read { "read" } else { "write" }, info.reason,
+                    info.unit, info.unit_code, info.level, info.vm_slot, info.sideband, status
+                ),
+                None => pr_info!(
+                    "G17: recovery MMU fault bank {}: no fault (status {:#x})\n",
+                    bank, status
+                ),
+            }
+        }
+    }
     fn settle_blamed_render(&mut self, qid: u8, error: Error) {
         let result = self
             .firmware

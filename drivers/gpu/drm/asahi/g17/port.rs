@@ -221,6 +221,11 @@ impl Port {
         self.views.as_ref().ok_or(ENODEV)
     }
 
+    /// Both MMU fault banks, for recovery diagnostics while the firmware is halted.
+    pub(super) fn fault_banks(&self) -> Result<[(u64, u64); 2]> {
+        self.regs.as_ref().ok_or(ENODEV)?.fault_banks()
+    }
+
     fn ring(&self, priority: u8) -> Result<(usize, RingView)> {
         let index = usize::from(priority);
         Ok((index, *self.views()?.compute.get(index).ok_or(EINVAL)?))
