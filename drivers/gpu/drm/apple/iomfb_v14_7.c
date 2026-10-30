@@ -2115,13 +2115,22 @@ bool iomfb_v14_7_external_failed(struct apple_dcp *dcp)
 	       (dcp->v14 && READ_ONCE(dcp->v14->failed));
 }
 
+/* True if @ps is a power state labelled dispext<N><suffix>. */
+static bool dcpext_ps_is(struct device_node *ps, const char *suffix)
+{
+	const char *label;
+
+	return ps && !of_property_read_string(ps, "label", &label) &&
+	       strstarts(label, "dispext") && strlen(label) >= strlen(suffix) &&
+	       !strcmp(label + strlen(label) - strlen(suffix), suffix);
+}
+
 /* Refuse startup unless both the hardware floor and PMP vote are in place. */
 static int dcpext_check_power(struct apple_dcp *dcp)
 {
 	struct device *dev = dcp->dev;
-	struct device_node *ps, *entry;
+	struct device_node *ps, *fe, *entry;
 	struct regmap *map;
-	const char *label, *suffix;
 	u32 offset, value;
 	int ret;
 
@@ -2129,13 +2138,15 @@ static int dcpext_check_power(struct apple_dcp *dcp)
 	if (!ps)
 		return -ENODEV;
 	/*
-	 * The pipe's own domain, which carries the floor: dispext<N>_cpu, or on
-	 * T6031 dispext<N>_fe, whose parent is the CPU domain.
+	 * The floor is on the pipe's CPU domain, dispext<N>_cpu. On T6031 the
+	 * pipe sits on dispext<N>_fe, whose parent is the CPU domain.
 	 */
-	suffix = of_device_is_compatible(dev->of_node, "apple,t6031-dcpext") ? "_fe" : "_cpu";
-	ret = of_property_read_string(ps, "label", &label);
-	if (ret || !strstarts(label, "dispext") || strlen(label) < strlen(suffix) ||
-	    strcmp(label + strlen(label) - strlen(suffix), suffix)) {
+	if (of_device_is_compatible(dev->of_node, "apple,t6031-dcpext")) {
+		fe = ps;
+		ps = dcpext_ps_is(fe, "_fe") ? of_parse_phandle(fe, "power-domains", 0) : NULL;
+		of_node_put(fe);
+	}
+	if (!dcpext_ps_is(ps, "_cpu")) {
 		of_node_put(ps);
 		return -EINVAL;
 	}

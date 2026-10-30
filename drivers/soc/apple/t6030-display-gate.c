@@ -1503,9 +1503,9 @@ static int __init gate_ext_apply(struct gate_ext *ext, bool native)
 		return -ENOMEM;
 	/*
 	 * PMGR applies the floor at probe, before the PMP can manage this CPU.
-	 * On the processor's own power state, which keeps its parents on.
+	 * On the CPU's power state: a T6031 FE state does not hold a floor.
 	 */
-	ret = gate_set_u32(cs, ext->own, "apple,min-state", PMGR_PS_ACTIVE);
+	ret = gate_set_u32(cs, ext->cpu, "apple,min-state", PMGR_PS_ACTIVE);
 	/* The driver must wait for this request's acknowledgement before RUN. */
 	if (!ret)
 		ret = gate_set_u32(cs, ext->dcp, "apple,pmp-report", ext->entry->phandle);
