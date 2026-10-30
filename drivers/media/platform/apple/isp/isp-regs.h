@@ -24,6 +24,10 @@
 #define ISP_COPROC_IRQ_MASK_5  0x1400a14
 
 #define ISP_COPROC_CONTROL_T8140 0x1600044
+#define ISP_COPROC_STATUS_T8140	 0x1600048
+#define ISP_COPROC_QUIESCE_T8140 0x1600040
+/* Requests the quiesce when set, and reads back once it has happened */
+#define ISP_COPROC_QUIESCED	 BIT(25)
 
 /*
  * ISP17a (T8140) reset. The fourth fabric word is at 0xa50, off the 0x100

@@ -196,6 +196,14 @@ struct apple_isp_hw {
 	bool mbox_irq_route;
 	/* coprocessor control register, 0 for ISP_COPROC_CONTROL */
 	u32 coproc_control;
+	/* coprocessor status register, 0 for ISP_COPROC_STATUS */
+	u32 coproc_status;
+	/*
+	 * coprocessor quiesce register, 0 for none. The CPU core domains of
+	 * a coprocessor that stopped only power down cleanly once it has
+	 * quiesced; otherwise they stay busy and never run again.
+	 */
+	u32 coproc_quiesce;
 
 	/* windows mapped 1:1 for the firmware */
 	const struct isp_mmio_window *fw_mmio;

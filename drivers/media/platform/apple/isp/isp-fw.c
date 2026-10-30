@@ -54,6 +54,11 @@ static inline u32 isp_coproc_control(struct apple_isp *isp)
 	return isp->hw->coproc_control ?: ISP_COPROC_CONTROL;
 }
 
+static inline u32 isp_coproc_status(struct apple_isp *isp)
+{
+	return isp->hw->coproc_status ?: ISP_COPROC_STATUS;
+}
+
 /* Wait for the firmware to write @expected to a GPIO word. */
 static int isp_gpio_wait(struct apple_isp *isp, u32 reg, u32 expected)
 {
@@ -411,7 +416,27 @@ static void isp_restore_fw_memory(struct apple_isp *isp)
 
 static void isp_firmware_shutdown_stage1(struct apple_isp *isp)
 {
+	/* Only a coprocessor that was started has to settle and quiesce */
+	bool started = isp->hw->coproc_quiesce &&
+		       isp_coproc_read32(isp, isp_coproc_control(isp));
+	u32 val;
+
+	/* A coprocessor that powered down waits in WFI */
+	if (started &&
+	    readl_poll_timeout(isp->coproc + isp_coproc_status(isp), val,
+			       val & ISP_COPROC_IN_WFI, 100, 200 * USEC_PER_MSEC))
+		dev_warn(isp->dev, "coproc not in WFI before power-down (status 0x%x)\n",
+			 val);
+
 	isp_coproc_write32(isp, isp_coproc_control(isp), 0x0);
+
+	if (started) {
+		/* The request bit alone asks for it, and reads back once done */
+		isp_coproc_write32(isp, isp->hw->coproc_quiesce, ISP_COPROC_QUIESCED);
+		if (readl_poll_timeout(isp->coproc + isp->hw->coproc_quiesce, val,
+				       val & ISP_COPROC_QUIESCED, 10, 50 * USEC_PER_MSEC))
+			dev_warn(isp->dev, "coproc did not quiesce (0x%x)\n", val);
+	}
 
 	apple_isp_power_down_domains(isp);
 }
@@ -863,26 +888,26 @@ static int isp_firmware_boot_stage3(struct apple_isp *isp)
 
 static int isp_stop_command_processor(struct apple_isp *isp)
 {
-#if 0
-	int res = isp_cmd_stop(isp, 0);
-	if (res) {
-		isp_err(isp, "isp_cmd_stop() failed\n");
-		return res;
-	}
+	int res, ret;
 
-	/* Wait for ISP_GPIO_0 to 0xf7fbdff9 -> 0x8042006 */
 	isp_gpio_write32(isp, ISP_GPIO_0, 0xf7fbdff9);
 
-	isp_cmd_power_down(isp);
-#else
-	isp_gpio_write32(isp, ISP_GPIO_0, 0xf7fbdff9);
-
-	int res = isp_cmd_suspend(isp);
+	/*
+	 * Firmware that starts again (hw->fw_restore) is stopped for good:
+	 * STOP also powers the camera module down, which SUSPEND leaves on,
+	 * even across a reboot. POWER_DOWN follows even if STOP failed.
+	 */
+	if (isp->hw->fw_restore) {
+		res = isp_cmd_stop(isp, 0);
+		ret = isp_cmd_power_down(isp);
+		res = res ?: ret;
+	} else {
+		res = isp_cmd_suspend(isp);
+	}
 	if (res) {
-		isp_err(isp, "isp_cmd_suspend() failed\n");
+		isp_err(isp, "failed to stop the firmware: %d\n", res);
 		return res;
 	}
-#endif
 
 	if (isp_gpio_wait(isp, ISP_GPIO_0, 0x8042006)) {
 		isp_err(isp, "never received magic number from firmware\n");
