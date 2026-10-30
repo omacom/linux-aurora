@@ -21,6 +21,12 @@ struct dcp_parse_ctx {
 	/* External H17P candidates require separate publication/lookup proof. */
 	bool automatic_1080p180_rgb8;
 	bool ambiguous_180hz;
+	/*
+	 * An external display's ColorElements, serialized, for timings that
+	 * list no ColorModes of their own (T6031 dcpext, firmware 14.7).
+	 */
+	const void *shared_colors;
+	u32 shared_colors_len;
 #if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)
 	/*
 	 * T6030 external processor audio elements (DCP firmware 14.7, external
