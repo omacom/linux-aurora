@@ -55,3 +55,22 @@
 	compatible = "apple,j516-macaudio", "apple,j316-macaudio", "apple,macaudio";
 	model = "MacBook Pro J516";
 };
+
+/*
+ * On this J516C only dcpext0 brings up an external display: dcpext1..3 time
+ * out in the DPTX remote port (HPD assert, link configuration) on USB-C and
+ * on the HDMI route alike. Keep them away from the display gate, which only
+ * enables processors left "disabled", so the allocator always picks dcpext0.
+ * The DRM device waits only for available processors.
+ */
+&dcpext1 {
+	status = "fail";
+};
+
+&dcpext2 {
+	status = "fail";
+};
+
+&dcpext3 {
+	status = "fail";
+};
