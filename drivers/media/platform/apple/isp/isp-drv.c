@@ -5,10 +5,12 @@
  * Copyright (C) 2023 The Asahi Linux Contributors
  */
 
+#include <linux/io.h>
 #include <linux/iommu.h>
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
@@ -19,6 +21,41 @@
 #include "isp-iommu.h"
 #include "isp-regs.h"
 #include "isp-v4l2.h"
+
+static void apple_isp_kvfree(void *data)
+{
+	kvfree(data);
+}
+
+/*
+ * Keep a copy of the firmware data segment as the boot loader loaded it
+ * (hw->fw_restore). This must run before the firmware first starts.
+ */
+static int apple_isp_copy_fw_data(struct apple_isp *isp)
+{
+	struct device *dev = isp->dev;
+	struct resource res;
+	int err;
+
+	err = of_reserved_mem_region_to_resource_byname(dev->of_node, "data", &res);
+	if (err)
+		return err;
+
+	isp->fw_data_size = resource_size(&res);
+	isp->fw_data = devm_memremap(dev, res.start, isp->fw_data_size, MEMREMAP_WB);
+	if (IS_ERR(isp->fw_data))
+		return PTR_ERR(isp->fw_data);
+
+	isp->fw_data_copy = kvmalloc(isp->fw_data_size, GFP_KERNEL);
+	if (!isp->fw_data_copy)
+		return -ENOMEM;
+	err = devm_add_action_or_reset(dev, apple_isp_kvfree, isp->fw_data_copy);
+	if (err)
+		return err;
+
+	memcpy(isp->fw_data_copy, isp->fw_data, isp->fw_data_size);
+	return 0;
+}
 
 static void apple_isp_detach_genpd(struct apple_isp *isp)
 {
@@ -649,6 +686,15 @@ static int apple_isp_probe(struct platform_device *pdev)
 		goto free_iommu;
 	}
 
+	if (isp->hw->fw_restore) {
+		err = apple_isp_copy_fw_data(isp);
+		if (err) {
+			dev_err(dev, "failed to copy the firmware data: %d\n", err);
+			apple_isp_free_firmware_surface(isp);
+			goto free_iommu;
+		}
+	}
+
 	pm_runtime_enable(dev);
 
 	if (!isp->hw->resident_fw_deferred) {
@@ -1129,6 +1175,23 @@ static const struct dev_pm_ops apple_isp_pm_ops = {
 	RUNTIME_PM_OPS(apple_isp_runtime_suspend, apple_isp_runtime_resume, NULL)
 };
 
+/*
+ * Stop firmware that starts again (hw->fw_restore) before a reboot or a
+ * kexec, so that the next kernel finds its data segment as loaded.
+ */
+static void apple_isp_shutdown(struct platform_device *pdev)
+{
+	struct apple_isp *isp = platform_get_drvdata(pdev);
+
+	if (!isp || !isp->hw->fw_restore)
+		return;
+	/* A stream that still runs is stopped cleanly first, as for hibernation */
+	apple_isp_video_suspend(isp);
+	mutex_lock(&isp->video_lock);
+	apple_isp_firmware_halt(isp);
+	mutex_unlock(&isp->video_lock);
+}
+
 static struct platform_driver apple_isp_driver = {
 	.driver	= {
 		.name		= "apple-isp",
@@ -1137,6 +1200,7 @@ static struct platform_driver apple_isp_driver = {
 	},
 	.probe	= apple_isp_probe,
 	.remove	= apple_isp_remove,
+	.shutdown = apple_isp_shutdown,
 };
 module_platform_driver(apple_isp_driver);
 

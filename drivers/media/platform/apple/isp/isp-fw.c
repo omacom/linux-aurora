@@ -6,6 +6,7 @@
 
 #include <asm/io.h>
 #include <linux/delay.h>
+#include <linux/highmem.h>
 #include <linux/iopoll.h>
 #include <linux/overflow.h>
 #include <linux/pm_runtime.h>
@@ -391,6 +392,23 @@ static int isp_reset_coproc(struct apple_isp *isp)
 	return 0;
 }
 
+/*
+ * With hw->fw_restore, put the firmware memory back as the boot loader left
+ * it: the data segment from its copy, and the main memory above it cleared.
+ */
+static void isp_restore_fw_memory(struct apple_isp *isp)
+{
+	struct isp_surf *tail = isp->main_tail_surf;
+
+	if (!isp->fw_data_copy)
+		return;
+
+	memcpy(isp->fw_data, isp->fw_data_copy, isp->fw_data_size);
+	if (tail)
+		for (u32 i = 0; i < tail->num_pages; i++)
+			clear_highpage(tail->pages[i]);
+}
+
 static void isp_firmware_shutdown_stage1(struct apple_isp *isp)
 {
 	isp_coproc_write32(isp, isp_coproc_control(isp), 0x0);
@@ -402,6 +420,8 @@ static int isp_firmware_boot_stage1(struct apple_isp *isp)
 {
 	int err;
 	// u32 val;
+
+	isp_restore_fw_memory(isp);
 
 	err = apple_isp_power_up_domains(isp);
 	if (err < 0)
@@ -977,6 +997,9 @@ static void isp_firmware_stop(struct apple_isp *isp)
 	isp_firmware_shutdown_stage3(isp);
 	isp_firmware_shutdown_stage2(isp);
 	isp_collect_gc_surface(isp);
+
+	/* Also leave it as loaded for a rebound driver or another kernel. */
+	isp_restore_fw_memory(isp);
 }
 
 static int isp_firmware_boot(struct apple_isp *isp)
@@ -988,6 +1011,8 @@ static int isp_firmware_boot(struct apple_isp *isp)
 		/* Stage 1 stops the coprocessor and powers it down itself. */
 		isp_err(isp, "failed firmware boot stage 1: %d\n", err);
 		isp_collect_gc_surface(isp);
+		/* The firmware may have run: leave its memory as loaded. */
+		isp_restore_fw_memory(isp);
 		return err;
 	}
 

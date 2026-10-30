@@ -222,6 +222,14 @@ struct apple_isp_hw {
 	bool meta_exposure;
 
 	/*
+	 * The firmware leaves its data segment changed when it stops, and
+	 * does not start from it again. Keep a copy of the segment as the
+	 * boot loader loaded it, taken at probe before the firmware first
+	 * runs, and put it back whenever the firmware has stopped.
+	 */
+	bool fw_restore;
+
+	/*
 	 * The firmware can be started only once per system boot, so once
 	 * started it is kept running while the driver is bound. It starts at
 	 * probe, or at the first stream with resident_fw_deferred.
@@ -381,6 +389,10 @@ struct apple_isp {
 	struct isp_surf *extra_surf;
 	struct isp_surf *data_surf;
 	struct isp_surf *main_tail_surf;
+	/* With hw->fw_restore: the firmware data segment and its copy */
+	void *fw_data;
+	void *fw_data_copy;
+	size_t fw_data_size;
 	struct isp_surf *log_surf;
 	struct isp_surf *bt_surf;
 	struct isp_surf *meta_surfs[ISP_MAX_BUFFERS];
