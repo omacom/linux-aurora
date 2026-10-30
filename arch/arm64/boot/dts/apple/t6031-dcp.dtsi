@@ -166,6 +166,8 @@
 		iommus = <&dcpext0_dart 5>;
 		power-domains = <&ps_dispext0_fe>;
 		resets = <&ps_dispext0_cpu>;
+		/* Linked here so dtc gives the PMP request entry a phandle. */
+		apple,pmp-report = <&pmp_report_dispext0>;
 		phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
 		       <&atcphy2 PHY_TYPE_DP>;
 		phy-names = "typec0", "typec1", "typec2";
@@ -265,6 +267,8 @@
 		iommus = <&dcpext1_dart 5>;
 		power-domains = <&ps_dispext1_fe>;
 		resets = <&ps_dispext1_cpu>;
+		/* Linked here so dtc gives the PMP request entry a phandle. */
+		apple,pmp-report = <&pmp_report_dispext1>;
 		phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
 		       <&atcphy2 PHY_TYPE_DP>;
 		phy-names = "typec0", "typec1", "typec2";
@@ -364,6 +368,8 @@
 		iommus = <&dcpext2_dart 5>;
 		power-domains = <&ps_dispext2_fe>;
 		resets = <&ps_dispext2_cpu>;
+		/* Linked here so dtc gives the PMP request entry a phandle. */
+		apple,pmp-report = <&pmp_report_dispext2>;
 		phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
 		       <&atcphy2 PHY_TYPE_DP>;
 		phy-names = "typec0", "typec1", "typec2";
@@ -463,6 +469,8 @@
 		iommus = <&dcpext3_dart 5>;
 		power-domains = <&ps_dispext3_fe>;
 		resets = <&ps_dispext3_cpu>;
+		/* Linked here so dtc gives the PMP request entry a phandle. */
+		apple,pmp-report = <&pmp_report_dispext3>;
 		phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
 		       <&atcphy2 PHY_TYPE_DP>;
 		phy-names = "typec0", "typec1", "typec2";
