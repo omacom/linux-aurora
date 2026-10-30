@@ -24,6 +24,8 @@
 #define ISP_BUFFER_TIMEOUT msecs_to_jiffies(1500)
 #define ISP_STRIDE_ALIGNMENT 64
 
+static void isp_vb2_set_min_buffers(struct apple_isp *isp);
+
 /* Capture rates offered to userspace, in frames per second */
 static const unsigned int isp_frame_rates[] = { 30, 25, 24, 20, 15 };
 
@@ -835,6 +837,7 @@ static int isp_vidioc_set_format(struct file *file, void *fh,
 	isp_get_sp_pix_format(isp, f, fmt);
 
 	isp->vbq.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	isp_vb2_set_min_buffers(isp);
 
 	return 0;
 }
@@ -1023,6 +1026,22 @@ static void isp_free_meta_surfaces(struct apple_isp *isp)
 			isp_free_surface(isp, isp->meta_surfs[i]);
 		isp->meta_surfs[i] = NULL;
 	}
+}
+
+/*
+ * vb2 allocates at least min_queued_buffers + 1 buffers, and the queue may
+ * hold no more than the rendered pool (isp_vb2_queue_setup()). The P010 pool
+ * has two slots, so a P010 stream starts with one queued buffer; otherwise
+ * REQBUFS can never get the three buffers vb2 asks for and fails with ENOMEM.
+ * Only called while the queue has no buffers.
+ */
+static void isp_vb2_set_min_buffers(struct apple_isp *isp)
+{
+	struct vb2_queue *vbq = &isp->vbq;
+
+	vbq->min_queued_buffers = min_t(unsigned int, ISP_MIN_FRAMES,
+					 isp_num_rendered(isp) - 1);
+	vbq->min_reqbufs_allocation = vbq->min_queued_buffers + 1;
 }
 
 static int isp_vb2_queue_init(struct apple_isp *isp)
