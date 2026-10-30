@@ -2121,17 +2121,21 @@ static int dcpext_check_power(struct apple_dcp *dcp)
 	struct device *dev = dcp->dev;
 	struct device_node *ps, *entry;
 	struct regmap *map;
-	const char *label;
+	const char *label, *suffix;
 	u32 offset, value;
 	int ret;
 
 	ps = of_parse_phandle(dev->of_node, "power-domains", 0);
 	if (!ps)
 		return -ENODEV;
-	/* The CPU domain of this pipe: dispext<N>_cpu. */
+	/*
+	 * The pipe's own domain, which carries the floor: dispext<N>_cpu, or on
+	 * T6031 dispext<N>_fe, whose parent is the CPU domain.
+	 */
+	suffix = of_device_is_compatible(dev->of_node, "apple,t6031-dcpext") ? "_fe" : "_cpu";
 	ret = of_property_read_string(ps, "label", &label);
-	if (ret || !strstarts(label, "dispext") || strlen(label) < 4 ||
-	    strcmp(label + strlen(label) - 4, "_cpu")) {
+	if (ret || !strstarts(label, "dispext") || strlen(label) < strlen(suffix) ||
+	    strcmp(label + strlen(label) - strlen(suffix), suffix)) {
 		of_node_put(ps);
 		return -EINVAL;
 	}
