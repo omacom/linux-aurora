@@ -105,6 +105,8 @@ static const struct dcp_v14_board dcp_v14_board_t6030 = {
 	.handoff = "apple,t6030-handoff",
 	.promotion = true,
 	.panel_nits = true,
+	/* Measured on the J514S: DPMS off stops the panel's display controller. */
+	.panel_hw_off = true,
 };
 
 /*
@@ -311,7 +313,7 @@ struct apple_dcp_v14 {
 
 static bool panel_hw_off = true;
 module_param(panel_hw_off, bool, 0644);
-MODULE_PARM_DESC(panel_hw_off, "Internal 14.7 panel: stop its display controller on DPMS off, not only blank it [default: true]");
+MODULE_PARM_DESC(panel_hw_off, "Internal 14.7 panel of the J514S/J516S: stop its display controller on DPMS off, not only blank it [default: true]");
 
 /*
  * The panel's DCP session; one per boot, RTKit is never started twice. The
@@ -329,6 +331,17 @@ static void dcp_v14_backlight_work(struct work_struct *work);
 static bool dcp_v14_board_nits(const struct apple_dcp_v14 *v14)
 {
 	return !v14->external && v14->panel_nits && v14->board && v14->board->panel_nits;
+}
+
+/*
+ * The panel whose display controller DPMS off stops, and which answers the
+ * callbacks of that transition: one with levels on a board record that asks
+ * for it (T6030: J514S, J516S). A record that has levels without the flag
+ * only blanks its panel.
+ */
+static bool dcp_v14_board_hw_off(const struct apple_dcp_v14 *v14)
+{
+	return dcp_v14_board_nits(v14) && v14->board->panel_hw_off;
 }
 
 bool iomfb_v14_7_panel_nits(struct apple_dcp *dcp)
@@ -1165,11 +1178,11 @@ static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_siz
 	 * at power on, which the backlight restore after A472(1) answers. Only
 	 * the J514S/J516S panel sends A472 so; elsewhere these stay unhandled.
 	 */
-	if (dcp_v14_board_nits(v14) &&
+	if (dcp_v14_board_hw_off(v14) &&
 	    ((tag == D(2) && SHAPE(0, 0)) || (tag == D(591) && SHAPE(20, 0)) ||
 	     (tag == D(593) && SHAPE(4, 0))))
 		return 0;
-	if (dcp_v14_board_nits(v14) && (tag == D(574) || tag == D(700)) && SHAPE(4, 4)) {
+	if (dcp_v14_board_hw_off(v14) && (tag == D(574) || tag == D(700)) && SHAPE(4, 4)) {
 		if (tag == D(574) && in[0] > 1)
 			return -EINVAL;
 		put_unaligned_le32(0, out);
@@ -3453,7 +3466,7 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 	 * Only the J514S/J516S panel, the one this was measured on, and only
 	 * on DPMS off: suspend-to-idle cuts that power itself.
 	 */
-	if (!panel_hw_off || !dcp_v14_board_nits(v14) || dcp_v14_system_sleep())
+	if (!panel_hw_off || !dcp_v14_board_hw_off(v14) || dcp_v14_system_sleep())
 		return;
 	mutex_lock(&v14->lock);
 	if (!v14->panel_off && !READ_ONCE(v14->failed) && !READ_ONCE(dcp->crashed) &&

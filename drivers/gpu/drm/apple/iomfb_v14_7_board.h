@@ -53,6 +53,13 @@ struct dcp_v14_board {
 	bool swap_timestamps;
 	/* This board has a qualified panel level block; machine admission is separate. */
 	bool panel_nits;
+	/*
+	 * DPMS off may stop the panel's display controller (A472 with the
+	 * hardware-power selector), not only blank it, and the callbacks of
+	 * that transition are answered. Only where that was measured: a record
+	 * with levels need not have it.
+	 */
+	bool panel_hw_off;
 };
 
 /* Whether the DCP node or the machine (as @ctx gives them) has @compat. */

@@ -76,6 +76,8 @@ static void v14_board_j516c(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, b->ctm_set, 0);
 	KUNIT_EXPECT_EQ(test, b->ctm_get, 0);
 	KUNIT_EXPECT_TRUE(test, b->base_edid);
+	/* DPMS off only blanks its panel. */
+	KUNIT_EXPECT_FALSE(test, b->panel_hw_off);
 }
 
 /*
@@ -102,6 +104,7 @@ static void v14_board_j514c(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, b->ctm_set, 0);
 	/* Its panel is not the J516C's: no base EDID. */
 	KUNIT_EXPECT_FALSE(test, b->base_edid);
+	KUNIT_EXPECT_FALSE(test, b->panel_hw_off);
 	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
 	/* Not the J516C record. */
@@ -161,6 +164,8 @@ static void v14_board_unchanged(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, b->log_bringup);
 	KUNIT_EXPECT_EQ(test, b->ctm_set, 0);
 	KUNIT_EXPECT_FALSE(test, b->base_edid);
+	/* The J514S/J516S panel, on which DPMS off stops the display controller. */
+	KUNIT_EXPECT_TRUE(test, b->panel_hw_off);
 	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, J613_DCP_IMAGE));
 	/* The T6030 record serves a T6030 DCP on any machine, as before. */
@@ -176,6 +181,7 @@ static void v14_board_unchanged(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, b->promotion);
 	KUNIT_EXPECT_FALSE(test, b->log_bringup);
 	KUNIT_EXPECT_FALSE(test, b->base_edid);
+	KUNIT_EXPECT_FALSE(test, b->panel_hw_off);
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
 
 	/* A T8122 DCP on a T6031 machine has no record. */
