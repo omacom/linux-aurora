@@ -1750,10 +1750,11 @@ int dcp_tunnel_crossbar_down(struct apple_dcp *dcp, u32 unit)
 }
 
 /*
- * T6030 routes a direct DP PHY output of its crossbar on select and clocks
- * it only while a link runs, as it does its DP IN outputs. From DCP's link
- * configuration calls: clocks up once a link is configured at a nonzero
- * rate, down before the rate changes and when DCP deactivates the port.
+ * T6030 and T6031 route a direct DP PHY output of their crossbar on select
+ * and clock it only while a link runs, as they do their DP IN outputs. From
+ * DCP's link configuration calls: clocks up once a link is configured at a
+ * nonzero rate, down before the rate changes and when DCP deactivates the
+ * port.
  * The output is the borrowed Type-C route's, or the fixed route's. Other
  * SoCs clock it at select. Runs inside a DCP apcall: only tb_lock.
  */
@@ -1763,7 +1764,9 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
 	struct mux_control *xbar = NULL;
 	int ret;
 
-	if (!of_machine_is_compatible("apple,t6030"))
+	/* The crossbar driver runs both in its T6030 mode (t6030_dpin). */
+	if (!of_machine_is_compatible("apple,t6030") &&
+	    !of_machine_is_compatible("apple,t6031"))
 		return 0;
 	guard(mutex)(&dcp->tb_lock);
 	route = dcp->active_typec_route;
