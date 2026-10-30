@@ -10,6 +10,7 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 #define READ_ONCE(x) (x)
 #define BIT(n) (1U << (n))
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define lockdep_assert_held(x) ((void)0)
 #define list_for_each_entry(r, head, link) \
 	for ((r) = *(head); (r); (r) = (r)->next)
@@ -52,11 +53,14 @@ struct apple_dcp_typec_port {
 	struct apple_connector *connector, *secondary_connector;
 	bool dp_wanted, dp_hpd;
 };
-static bool t6030;
+/* The root compatible being tested: NULL for an SoC outside T6030/T6031. */
+static const char *machine;
+static const char *const socs[] = { NULL, "apple,t6030", "apple,t6031" };
 static bool of_machine_is_compatible(const char *compatible)
 {
-	assert(!strcmp(compatible, "apple,t6030"));
-	return t6030;
+	assert(!strcmp(compatible, "apple,t6030") ||
+	       !strcmp(compatible, "apple,t6031"));
+	return machine && !strcmp(compatible, machine);
 }
 #define drm_crtc_index(crtc) ((crtc)->index)
 static bool dcp_typec_route_busy(struct apple_dcp_typec_route *r)
@@ -100,8 +104,9 @@ int main(void)
 	source0.next = &source2;
 	for (unsigned int i = 0; i < 3; i++)
 		chip.mux[i].chip = &chip;
-	for (unsigned int soc = 0; soc < 2; soc++) {
-		t6030 = soc;
+	for (unsigned int soc = 0; soc < ARRAY_SIZE(socs); soc++) {
+		machine = socs[soc];
+		assert(dcp_fabric_t603x() == (soc != 0));
 		for (unsigned int named = 0; named < 2; named++) {
 			source0.dpin[0] = source2.dpin[0] =
 				named ? &chip.mux[1] : NULL;

@@ -357,7 +357,8 @@ static void apple_dpin_qualification_profiles(struct kunit *test)
 		{ "apple,t6021", &apple_dpin_m2, false, &apple_dpin_disabled },
 		{ "apple,t6022", &apple_dpin_m2, true, &apple_dpin_disabled },
 		{ "apple,t6030", &apple_dpin_m3, true, &apple_dpin_m3 },
-		{ "apple,t6031", &apple_dpin_m3, true, &apple_dpin_disabled },
+		/* T6031 is qualified with the T6030 flow. */
+		{ "apple,t6031", &apple_dpin_m3, true, &apple_dpin_m3 },
 		{ "apple,unknown", &apple_dpin_m1, true, &apple_dpin_disabled },
 	};
 	unsigned int i;
