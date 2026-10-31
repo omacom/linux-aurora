@@ -2282,6 +2282,14 @@
     "{output}"
    ],
    "note": "Build only the host Kconfig tool in an isolated output directory; check all built-in/module dependency combinations."
+  },
+  {
+   "name": "tools/asahi/test-j613-dcp-power.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/test-j613-dcp-power.py"
+   ]
   }
  ],
  "helpers": {
