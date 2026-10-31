@@ -3,6 +3,7 @@
 #ifndef AVD_INST_H_
 #define AVD_INST_H_
 /* instruction stream things  */
+#include <linux/bitfield.h>
 #include <linux/types.h>
 
 #include "avd.h"
