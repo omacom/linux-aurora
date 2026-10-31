@@ -646,6 +646,17 @@ static int avd_probe(struct platform_device *pdev)
 
 	avd_pm_enable(avd);
 
+	/*
+	 * Boot the firmware once now: the transport and the codec list depend
+	 * on what the loaded image reports, and clients enumerate formats and
+	 * size their contexts before the first decode would power it up.
+	 */
+	ret = pm_runtime_resume_and_get(avd->dev);
+	if (ret < 0)
+		dev_warn(avd->dev, "firmware probe boot failed: %d\n", ret);
+	else
+		pm_runtime_put_autosuspend(avd->dev);
+
 	ret = avd_v4l2_init(avd);
 	if (ret)
 		goto err_disable_runtime_pm;

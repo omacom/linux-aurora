@@ -128,8 +128,8 @@ struct avd_decoded_buffer {
 	/* Pending CPU fill, retained with the buffer until dequeue. */
 	size_t grey_chroma_offset;
 	bool grey_chroma_10bit;
-	/* H.264: scratch bank + 1 of the picture decoded into this buffer */
-	u8 h264_bank;
+	/* H.264/HEVC: scratch bank + 1 of the picture decoded into this buffer */
+	u8 bank;
 
 	union {
 		struct avd_vp9_decoded_buffer_info vp9;
@@ -262,6 +262,8 @@ struct avd_dev {
 
 	const struct avd_variant *variant;
 	unsigned int capabilities;
+	/* What the loaded image's CODECS trailer (or its absence) allows. */
+	unsigned int fw_capabilities;
 };
 
 struct avd_segment {

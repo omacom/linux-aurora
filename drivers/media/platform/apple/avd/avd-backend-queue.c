@@ -59,6 +59,7 @@ struct avd_qfw {
 	u32 ring_words;
 	u32 wp;			/* host write count, free-running */
 	u32 fifo_slots;
+	u32 codec_mask;		/* info+0x24, bit n = codec n */
 	bool usable;		/* last boot found a matching ABI 2 image */
 };
 
@@ -126,6 +127,7 @@ static bool avd_qfw_check(struct avd_dev *avd)
 	q->ring_off = info[12];
 	q->ring_words = info[13];
 	q->fifo_slots = min_t(u32, info[10], avd->variant->fifo_slots ?: 1);
+	q->codec_mask = info[9];
 	q->wp = 0;
 	q->usable = true;
 	return true;
@@ -339,8 +341,15 @@ void avd_qfw_select(struct avd_dev *avd)
 		/* Legacy boot left mailbox 0 disabled. */
 		writel_relaxed(AVD_MBOX_ENABLE, avd->mbox + AVD_REG_MBOX0_STATUS);
 		avd->backend = &avd_qfw_backend;
+		/*
+		 * Codecs held back for a newer firmware (T6040 HEVC) are
+		 * enabled by a queue image that lists them in its codec mask.
+		 */
+		avd->capabilities = avd->fw_capabilities |
+			(avd->variant->capabilities & avd->qfw->codec_mask);
 	} else {
 		avd->backend = &avd_open_backend;
+		avd->capabilities = avd->fw_capabilities;
 	}
 	if (avd->backend != old)
 		dev_info(avd->dev, "using %s transport (%u frames in flight)\n",

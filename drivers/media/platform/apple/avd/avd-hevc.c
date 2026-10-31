@@ -79,10 +79,14 @@ struct avd_hevc_run {
 	struct avd_hevc_tile_info tile_info;
 };
 
-struct avd_hevc_ctx {
-	struct v4l2_ctrl_hevc_scaling_matrix scaling_matrix_cache;
+/* See avd-h264.c: one bank per picture in flight on the queued transport. */
+#define AVD_HEVC_BANKS	2
 
+struct avd_hevc_bank {
+	bool busy;
 	struct avd_h264_bufs {
+		/* VP to PP instruction FIFO for pictures of this bank */
+		struct avd_buf inst;
 		struct avd_buf mv_above_info;
 		struct avd_buf az_above;
 		struct avd_buf ip_above;
@@ -91,9 +95,17 @@ struct avd_hevc_ctx {
 		struct avd_buf lf_left;
 		struct avd_buf lf_left_info;
 		struct avd_buf sw_left;
-		struct avd_buf inst;
 		struct avd_buf pipe_state;
 	} bufs;
+};
+
+struct avd_hevc_ctx {
+	struct v4l2_ctrl_hevc_scaling_matrix scaling_matrix_cache;
+
+	unsigned int nbanks;
+	struct avd_hevc_bank bank[AVD_HEVC_BANKS];
+	/* bank of the picture being built */
+	struct avd_hevc_bank *b;
 
 	int submit_num;
 };
@@ -110,7 +122,7 @@ static void stream_refs(struct avd_ctx *ctx, struct avd_hevc_run *run)
 
 	push(ctx->dev->variant->quirks & AVD_QUIRK_HEVC_V5_HEADER ?
 		     HEVC_DMA_CONFIG : 0, "reference_dma_config");
-	pusha(hevc_ctx->bufs.mv_above_info.addr, "mv_above_info", 7);
+	pusha(hevc_ctx->b->bufs.mv_above_info.addr, "mv_above_info", 7);
 	pusha(run->addresses.mv_color, "mv_color", 0);
 
 	push(0, "");
@@ -357,30 +369,30 @@ static void set_header(struct avd_ctx *ctx, struct avd_hevc_run *run)
 	if (avd->variant->revision == 3)
 		push(0, "zero");
 	else if (!(avd->variant->quirks & AVD_QUIRK_NO_PIPE_STATE))
-		pusha(hevc_ctx->bufs.pipe_state.addr, "pipe_state", 0);
+		pusha(hevc_ctx->b->bufs.pipe_state.addr, "pipe_state", 0);
 
-	pusha(hevc_ctx->bufs.ip_above.addr, "scratch_addr", 0);
-	pusha(hevc_ctx->bufs.lf_above.addr, "scratch_addr", 1);
-	pusha(hevc_ctx->bufs.lf_above_info.addr, "scratch_addr", 2);
+	pusha(hevc_ctx->b->bufs.ip_above.addr, "scratch_addr", 0);
+	pusha(hevc_ctx->b->bufs.lf_above.addr, "scratch_addr", 1);
+	pusha(hevc_ctx->b->bufs.lf_above_info.addr, "scratch_addr", 2);
 
 	if ((pps->flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED) ||
 	    !(avd->variant->quirks & AVD_QUIRK_HEVC_V5_HEADER)) {
-		pusha(hevc_ctx->bufs.lf_left.addr,
+		pusha(hevc_ctx->b->bufs.lf_left.addr,
 		      "scratch_addr", 3);
-		pusha(hevc_ctx->bufs.lf_left_info.addr,
+		pusha(hevc_ctx->b->bufs.lf_left_info.addr,
 		      "scratch_addr", 4);
 		if (avd->variant->quirks & AVD_QUIRK_HEVC_V5_HEADER)
 			pusha(0, "reserved_scratch", 0);
-		pusha(hevc_ctx->bufs.az_above.addr,
+		pusha(hevc_ctx->b->bufs.az_above.addr,
 		      "scratch_addr", 8);
-		pusha(hevc_ctx->bufs.sw_left.addr,
+		pusha(hevc_ctx->b->bufs.sw_left.addr,
 		      "scratch_addr", 9);
 	} else {
 		pusha(0, "", 3);
 		pusha(0, "", 4);
 		if (avd->variant->quirks & AVD_QUIRK_HEVC_V5_HEADER)
 			pusha(0, "reserved_scratch", 0);
-		pusha(hevc_ctx->bufs.az_above.addr,
+		pusha(hevc_ctx->b->bufs.az_above.addr,
 		      "scratch_addr", 8);
 		pusha(0, "", 9);
 	}
@@ -1056,17 +1068,16 @@ static int avd_hevc_validate_sps(struct avd_ctx *ctx,
 	return 0;
 }
 
-static int avd_hevc_alloc_bufs(struct avd_ctx *ctx)
+static int avd_hevc_alloc_bufs(struct avd_ctx *ctx, struct avd_hevc_bank *bank)
 {
 	struct avd_dev *avd = ctx->dev;
-	struct avd_hevc_ctx *hevc_ctx = ctx->priv;
 	int ret;
 
-	ret = avd_buf_alloc(avd, &hevc_ctx->bufs.inst, fifo_size());
+	ret = avd_buf_alloc(avd, &bank->bufs.inst, fifo_size());
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &hevc_ctx->bufs.pipe_state, 0x200);
+	ret = avd_buf_alloc(avd, &bank->bufs.pipe_state, 0x200);
 	if (ret)
 		return ret;
 
@@ -1077,20 +1088,26 @@ static void avd_hevc_stop(struct avd_ctx *ctx)
 {
 	struct avd_hevc_ctx *hevc_ctx = ctx->priv;
 	struct avd_dev *avd = ctx->dev;
+	unsigned int i;
 
+	ctx->max_frames = 1;
 	if (!hevc_ctx)
 		return;
 
-	avd_buf_free(avd, &hevc_ctx->bufs.pipe_state);
-	avd_buf_free(avd, &hevc_ctx->bufs.inst);
-	avd_buf_free(avd, &hevc_ctx->bufs.mv_above_info);
-	avd_buf_free(avd, &hevc_ctx->bufs.az_above);
-	avd_buf_free(avd, &hevc_ctx->bufs.ip_above);
-	avd_buf_free(avd, &hevc_ctx->bufs.lf_above);
-	avd_buf_free(avd, &hevc_ctx->bufs.lf_above_info);
-	avd_buf_free(avd, &hevc_ctx->bufs.lf_left);
-	avd_buf_free(avd, &hevc_ctx->bufs.lf_left_info);
-	avd_buf_free(avd, &hevc_ctx->bufs.sw_left);
+	for (i = 0; i < AVD_HEVC_BANKS; i++) {
+		struct avd_h264_bufs *bufs = &hevc_ctx->bank[i].bufs;
+
+		avd_buf_free(avd, &bufs->pipe_state);
+		avd_buf_free(avd, &bufs->inst);
+		avd_buf_free(avd, &bufs->mv_above_info);
+		avd_buf_free(avd, &bufs->az_above);
+		avd_buf_free(avd, &bufs->ip_above);
+		avd_buf_free(avd, &bufs->lf_above);
+		avd_buf_free(avd, &bufs->lf_above_info);
+		avd_buf_free(avd, &bufs->lf_left);
+		avd_buf_free(avd, &bufs->lf_left_info);
+		avd_buf_free(avd, &bufs->sw_left);
+	}
 
 	kfree(hevc_ctx);
 	ctx->priv = NULL;
@@ -1099,6 +1116,7 @@ static void avd_hevc_stop(struct avd_ctx *ctx)
 static int avd_hevc_start(struct avd_ctx *ctx)
 {
 	struct avd_hevc_ctx *hevc_ctx;
+	unsigned int i;
 	int ret;
 
 	hevc_ctx = kzalloc(sizeof(*hevc_ctx), GFP_KERNEL);
@@ -1106,15 +1124,53 @@ static int avd_hevc_start(struct avd_ctx *ctx)
 		return -ENOMEM;
 
 	ctx->priv = hevc_ctx;
-	ret = avd_hevc_alloc_bufs(ctx);
-	if (ret)
-		goto err_free_ctx;
+	/* Overlap pictures only where the firmware chains VP to PP itself. */
+	hevc_ctx->nbanks = avd_backend_is_qfw(ctx->dev) ? AVD_HEVC_BANKS : 1;
+	hevc_ctx->b = &hevc_ctx->bank[0];
+	for (i = 0; i < hevc_ctx->nbanks; i++) {
+		ret = avd_hevc_alloc_bufs(ctx, &hevc_ctx->bank[i]);
+		if (ret)
+			goto err_free_ctx;
+	}
+	ctx->max_frames = hevc_ctx->nbanks;
 
 	return 0;
 
 err_free_ctx:
 	avd_hevc_stop(ctx);
 	return ret;
+}
+
+/* Take a bank no unretired picture uses; record it in the CAPTURE buffer. */
+static int avd_hevc_pick_bank(struct avd_ctx *ctx, struct avd_decoded_buffer *dst)
+{
+	struct avd_hevc_ctx *hevc_ctx = ctx->priv;
+	unsigned int i;
+
+	for (i = 0; i < hevc_ctx->nbanks; i++) {
+		if (hevc_ctx->bank[i].busy)
+			continue;
+		hevc_ctx->bank[i].busy = true;
+		hevc_ctx->b = &hevc_ctx->bank[i];
+		dst->bank = i + 1;
+		return 0;
+	}
+	return -EBUSY;
+}
+
+static void avd_hevc_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *src_buf,
+			  struct vb2_v4l2_buffer *dst_buf,
+			  enum vb2_buffer_state result)
+{
+	struct avd_hevc_ctx *hevc_ctx = ctx->priv;
+	struct avd_decoded_buffer *buf;
+
+	if (!dst_buf || !hevc_ctx)
+		return;
+	buf = vb2_to_avd_decoded_buf(&dst_buf->vb2_buf);
+	if (buf->bank && buf->bank <= hevc_ctx->nbanks)
+		hevc_ctx->bank[buf->bank - 1].busy = false;
+	buf->bank = 0;
 }
 
 static int avd_hevc_alloc_scratch(struct avd_ctx *ctx, struct avd_hevc_run *run)
@@ -1152,51 +1208,51 @@ static int avd_hevc_alloc_scratch(struct avd_ctx *ctx, struct avd_hevc_run *run)
 				  tile_info->row_height[i] :
 				  max_row;
 
-	ret = avd_buf_alloc(avd, &hevc_ctx->bufs.ip_above,
+	ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.ip_above,
 			    ((max_col * max_cu_width) / 4) * bit_depth);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &hevc_ctx->bufs.mv_above_info,
+	ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.mv_above_info,
 			    ((max_col * max_cu_width) / 16) * 20);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &hevc_ctx->bufs.lf_above,
+	ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.lf_above,
 			    DIV_ROUND_UP(w, 16) * bit_depth * (10 + 6) +
 				    (cols - 1) * 256);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &hevc_ctx->bufs.lf_above_info,
+	ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.lf_above_info,
 			    DIV_ROUND_UP(w + 7, 16) * 36 + cols * 128);
 	if (ret)
 		return ret;
 
 	if (pps->flags & V4L2_HEVC_PPS_FLAG_TILES_ENABLED) {
-		ret = avd_buf_alloc(avd, &hevc_ctx->bufs.lf_left,
+		ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.lf_left,
 				    ((max_row * max_cu_width) / 4) * 36 +
 					    144 /* why? */);
 		if (ret)
 			return ret;
-		ret = avd_buf_alloc(avd, &hevc_ctx->bufs.lf_left_info,
+		ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.lf_left_info,
 				    ((max_row * max_cu_width) / 4) * 9);
 		if (ret)
 			return ret;
 
-		ret = avd_buf_alloc(avd, &hevc_ctx->bufs.az_above,
+		ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.az_above,
 				    /* not sure if its cols or rows */
 				    DIV_ROUND_UP(w, 64) * 144 +
 					    (cols - 1) * 128);
 		if (ret)
 			return ret;
 
-		ret = avd_buf_alloc(avd, &hevc_ctx->bufs.sw_left,
+		ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.sw_left,
 				    ((max_row * max_cu_width) / 4) * 216);
 		if (ret)
 			return ret;
 	} else {
-		ret = avd_buf_alloc(avd, &hevc_ctx->bufs.az_above,
+		ret = avd_buf_alloc(avd, &hevc_ctx->b->bufs.az_above,
 				    DIV_ROUND_UP(w + 7, 16) * 4 * bit_depth);
 		if (ret)
 			return ret;
@@ -1345,6 +1401,7 @@ static int avd_hevc_run_preamble(struct avd_ctx *ctx, struct avd_hevc_run *run)
 
 static int avd_hevc_run(struct avd_ctx *ctx)
 {
+	struct avd_hevc_ctx *hevc_ctx = ctx->priv;
 	struct avd_hevc_run run = {};
 	struct avd_decoded_buffer *dst;
 	int ret;
@@ -1355,6 +1412,10 @@ static int avd_hevc_run(struct avd_ctx *ctx)
 
 	dst = vb2_to_avd_decoded_buf(&run.base.bufs.dst->vb2_buf);
 	update_dec_buf_info(dst, &run.sl[0]);
+
+	ret = avd_hevc_pick_bank(ctx, dst);
+	if (ret)
+		goto complete;
 
 	ret = avd_hevc_compute_tiles(ctx, &run);
 	if (ret)
@@ -1372,8 +1433,10 @@ static int avd_hevc_run(struct avd_ctx *ctx)
 	set_header(ctx, &run);
 	ret = stream_slices(ctx, &run);
 	avd_run_postamble(ctx, &run.base);
-	if (!ret)
+	if (!ret) {
+		ctx->job_fifo = hevc_ctx->b->bufs.inst.addr;
 		ret = avd_submit_job(ctx);
+	}
 	goto done;
 
 complete:
@@ -1427,6 +1490,7 @@ const struct avd_coded_fmt_ops avd_hevc_fmt_ops = {
 	.start = avd_hevc_start,
 	.stop = avd_hevc_stop,
 	.run = avd_hevc_run,
+	.done = avd_hevc_done,
 	.submit = avd_hevc_submit,
 	.pp_kicks = avd_hevc_pp_kicks,
 	.try_ctrl = avd_hevc_try_ctrl,

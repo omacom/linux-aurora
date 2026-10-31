@@ -179,15 +179,17 @@ static void avd_open_capabilities(struct avd_dev *avd)
 	/* Without a CODECS trailer, keep codecs that need a newer firmware hidden. */
 	avd->capabilities = avd->variant->capabilities &
 			    ~avd->variant->fw_caps_required;
+	avd->fw_capabilities = avd->capabilities;
 	if (!avd->fw || avd->fw->size < 0x40)
 		return;
 	info = (const char *)avd->fw->data + avd->fw->size - 0x40;
 	if (memcmp(info, "CODECS:", 7))
-		return;
+		return;	/* fw_capabilities already set above */
 	avd->capabilities = 0;
 	for (i = 0; i < ARRAY_SIZE(codecs); i++)
 		if (strnstr(info, codecs[i].name, 0x40))
 			avd->capabilities |= avd->variant->capabilities & codecs[i].bit;
+	avd->fw_capabilities = avd->capabilities;
 }
 
 static int avd_open_request_firmware(struct avd_dev *avd)

@@ -65,7 +65,7 @@ struct avd_h264_run {
  */
 #define AVD_H264_BANKS	2
 
-struct avd_h264_bank {
+struct avd_bank {
 	bool monochrome;
 	bool busy;		/* a picture of this bank is not retired yet */
 	bool submitted;		/* ... and its last slice went to the hardware */
@@ -97,9 +97,9 @@ struct avd_h264_ctx {
 	} reflists;
 
 	unsigned int nbanks;
-	struct avd_h264_bank bank[AVD_H264_BANKS];
+	struct avd_bank bank[AVD_H264_BANKS];
 	/* bank of the picture being built */
-	struct avd_h264_bank *b;
+	struct avd_bank *b;
 };
 
 /* ffmpeg submits wrong timestamp, use first_mb_in_slice as a workaround */
@@ -556,7 +556,7 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 	}
 }
 
-static int avd_h264_alloc_bufs(struct avd_ctx *ctx, struct avd_h264_bank *bank)
+static int avd_h264_alloc_bufs(struct avd_ctx *ctx, struct avd_bank *bank)
 {
 	struct avd_dev *dev = ctx->dev;
 	int ret, w, bit_depth, mb;
@@ -638,7 +638,7 @@ static int avd_h264_validate_sps(struct avd_ctx *ctx,
 }
 
 /* Free the slices held for one bank's picture. */
-static void avd_h264_drop_bank_slices(struct avd_ctx *ctx, struct avd_h264_bank *bank)
+static void avd_h264_drop_bank_slices(struct avd_ctx *ctx, struct avd_bank *bank)
 {
 	for (size_t i = 0; i < bank->slice_num; i++)
 		avd_buf_free(ctx->dev, &bank->slices[i]);
@@ -665,7 +665,7 @@ static void avd_h264_stop(struct avd_ctx *ctx)
 		return;
 
 	for (i = 0; i < AVD_H264_BANKS; i++) {
-		struct avd_h264_bank *bank = &h264_ctx->bank[i];
+		struct avd_bank *bank = &h264_ctx->bank[i];
 
 		avd_buf_free(dev, &bank->bufs.pipe_state);
 		avd_buf_free(dev, &bank->bufs.inst);
@@ -706,7 +706,7 @@ static int avd_h264_start(struct avd_ctx *ctx)
 	h264_ctx->b = &h264_ctx->bank[0];
 
 	for (unsigned int i = 0; i < h264_ctx->nbanks; i++) {
-		struct avd_h264_bank *bank = &h264_ctx->bank[i];
+		struct avd_bank *bank = &h264_ctx->bank[i];
 
 		/* assume one slice per row */
 		bank->alloc_slice_num =
@@ -896,7 +896,7 @@ VISIBLE_IF_KUNIT bool avd_h264_slice_fits(const struct v4l2_ctrl_h264_sps *sps,
 static int avd_h264_pick_bank(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
-	struct avd_h264_bank *bank = NULL;
+	struct avd_bank *bank = NULL;
 	unsigned int i;
 
 	/* A picture whose last slice never came: start over in its bank. */
@@ -912,7 +912,7 @@ static int avd_h264_pick_bank(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
 	bank->submitted = false;
 	h264_ctx->b = bank;
 	/* 0 means no bank, so a stale or missing value never frees one. */
-	vb2_to_avd_decoded_buf(&dst->vb2_buf)->h264_bank = bank - h264_ctx->bank + 1;
+	vb2_to_avd_decoded_buf(&dst->vb2_buf)->bank = bank - h264_ctx->bank + 1;
 	return 0;
 }
 
@@ -1028,16 +1028,16 @@ static void avd_h264_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *src_buf,
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
 	struct avd_decoded_buffer *buf;
-	struct avd_h264_bank *bank;
+	struct avd_bank *bank;
 
 	if (src_buf->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF || !dst_buf)
 		return;
 
 	buf = vb2_to_avd_decoded_buf(&dst_buf->vb2_buf);
-	if (!buf->h264_bank || buf->h264_bank > h264_ctx->nbanks)
+	if (!buf->bank || buf->bank > h264_ctx->nbanks)
 		return;
-	bank = &h264_ctx->bank[buf->h264_bank - 1];
-	buf->h264_bank = 0;
+	bank = &h264_ctx->bank[buf->bank - 1];
+	buf->bank = 0;
 	avd_h264_drop_bank_slices(ctx, bank);
 	bank->busy = false;
 	bank->submitted = false;
