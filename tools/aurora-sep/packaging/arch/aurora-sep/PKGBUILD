@@ -7,7 +7,7 @@
 
 pkgname=aurora-sep
 pkgver=1
-pkgrel=12
+pkgrel=13
 pkgdesc="Loader and desktop integration for the Apple SEP (Touch ID) driver"
 url="https://github.com/aurora-silicon/linux/tree/aurora-wip/tools/aurora-sep"
 arch=(any)
@@ -19,6 +19,9 @@ depends=(
   kmod
   sh
 )
+# Same path as aurora-touchid's apple-sep.conf. A second copy would pass
+# both option lines, and the set-once parameters refuse to load.
+conflicts=(aurora-touchid)
 optdepends=('glib2-devel: fingerprint at the GNOME login screen')
 source=(load-driver
         aurora-sep.service
@@ -29,9 +32,10 @@ source=(load-driver
         logind-aurora-sep.conf
         aurora-sep-greeter-fingerprint
         aurora-sep-greeter-fingerprint.service
+        apple-sep.conf
         README.md
         XART-SAFETY.md)
-sha256sums=('abea60bb264ced349f7cf671d8d26e1609a81a60ea4c34d66ec6f7f73b847dbb'
+sha256sums=('67cf483a359406447969f5c17504c0899041b7166fc0cea374d082f9b7559c57'
             '447f99cc3c7e683134f31b993aa825fadde24e4854954a3035c96e6631d4d4d0'
             'f8d0c4b9385e6716d5ac5dd9941a57459fbc551a8238383bcde36cd929d0523f'
             '40f0d21446a85bab3e3800b31342e94e553af0fcde2c985503147519737e011d'
@@ -40,8 +44,9 @@ sha256sums=('abea60bb264ced349f7cf671d8d26e1609a81a60ea4c34d66ec6f7f73b847dbb'
             '0695bd9ce4c207241db13c3ea07819a032d8213417021378f5015ab9317cde12'
             '5936eb76db666496a8700dade7ac6bcb3785b517958dcea10685690f1822c86f'
             'ffab97b20bfd5f0eb1ab641179a131843349cf16890fff0cf2d893f0b5681b37'
-            'dbcf59cecd62c0245cf39c3c8ee41e3088e2890da89288e91d1c53ee3f02cba4'
-            '393bd394471e33706253027c48c19d9c1c8a4f6c0d9891bad1bd1364f7081a16')
+            'aa3189cea883b24f9f57ee6af6ae7c43673d58355753b8dab63b07ed6cc79b93'
+            '59fa683e3a3827df1f088513106f6bc041dc1946d559dcd3b2bebe7086d21060'
+            '2f98e34c7048f26d1ef93df23b1b080fcf1b0af5c6354fbf582c9f29cb29628c')
 
 # A unit and the helper it runs ($1, installed as $3), pointed at the
 # packaged helper.
@@ -69,5 +74,7 @@ package() {
     >"$pkgdir/usr/lib/systemd/system/fprintd.service.d/50-aurora-sep-no-timeout.conf"
   install -Dm644 logind-aurora-sep.conf \
     "$pkgdir/usr/lib/systemd/logind.conf.d/50-aurora-sep.conf"
+  install -Dm644 apple-sep.conf \
+    "$pkgdir/usr/lib/modprobe.d/apple-sep.conf"
   install -Dm644 -t "$pkgdir/usr/share/doc/$pkgname" README.md XART-SAFETY.md
 }

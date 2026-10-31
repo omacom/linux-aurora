@@ -2,11 +2,18 @@
 
 ## Current default
 
-`xart_writes=1` is the driver default. The APFS extent-ownership checks,
-record validation and write-ordering checks remain mandatory; unsupported
-layouts fail closed. `xart_writes=0 provision_keybag=0` explicitly selects
-read-only operation. `provision_keybag=1` is the default: create the Linux
-identity if missing and recover an existing identity without replacing it.
+`xart_writes=0 provision_keybag=0` is the driver default: read-only
+operation. The enclave still boots. Touch ID enrol and verify stay off,
+because a match saves anti-replay state. `aurora-sep` and `aurora-touchid`
+each install `/usr/lib/modprobe.d/apple-sep.conf` with
+`xart_writes=1 provision_keybag=1` and conflict over that path.
+A `--read-only` install hides that file with `/etc/modprobe.d/apple-sep.conf`
+setting both back to 0. An older install used
+`/etc/modprobe.d/aurora-sep.conf`; install renames it onto `apple-sep.conf`.
+The APFS extent-ownership checks, record validation
+and write-ordering checks remain mandatory whenever writes are enabled;
+unsupported layouts fail closed. `provision_keybag=1` creates the Linux
+identity if missing and recovers an existing identity without replacing it.
 The historical evidence below records the earlier opt-in deployments and
 does not establish qualification on every supported Mac or APFS layout.
 

@@ -35,10 +35,10 @@ impl<'a> KeybagCreateIntent<'a> {
 impl Drop for KeybagCreateIntent<'_> {
     fn drop(&mut self) {
         if !self.sent {
-            if let Err(e) = keybag::mark_refused(self.slot) {
+            if let Err(e) = keybag::discard_uncommitted(self.slot) {
                 dev_err!(
                     self.dev,
-                    "sks: cannot mark unsent keybag create retryable: {:?}\n",
+                    "sks: cannot remove unsent keybag create record: {:?}\n",
                     e
                 );
             }
@@ -610,17 +610,18 @@ impl SepData {
     }
 
     // A completed CREATE_KEYBAG that the enclave answered with a non-zero
-    // status created nothing, so the persisted intent must not block the next
-    // attempt: without this, every later seal fails with EEXIST. Any other
-    // failure (timeout, no answer) keeps the intent and stays fail-closed.
+    // status created nothing, so the header-only intent must not block the
+    // next attempt and must not stay behind as a 52-byte file. A timeout or
+    // no answer after sending() keeps the intent and stays fail-closed: the
+    // enclave may hold a bag this host never named.
     fn sks_mark_create_refused(&self, slot: keybag::Slot, status: i8) {
         if status == 0 {
             return;
         }
-        if let Err(e) = keybag::mark_refused(slot) {
+        if let Err(e) = keybag::discard_uncommitted(slot) {
             dev_err!(
                 self.dev,
-                "sks: cannot mark refused keybag create retryable: {:?}\n",
+                "sks: cannot remove refused keybag create record: {:?}\n",
                 e
             );
         }
@@ -698,6 +699,8 @@ impl SepData {
                 self.dev,
                 "sks: CREATE_KEYBAG exchange did not complete (buffers unregistered, wedged, or OOL write failed)\n"
             );
+            // sent is true, so the intent file stays. A timeout can mean the
+            // enclave created a bag this host never named.
             return false;
         };
         let Some(body) = self.sks_report_response(crate::sks::SKS_CREATE_NAME, &out) else {

@@ -101,6 +101,16 @@ static_assert!(VERIFY_WORK_ID != 0);
 const LATE_ATTACH_WORK_ID: u64 = 4;
 static_assert!(LATE_ATTACH_WORK_ID != VERIFY_WORK_ID && LATE_ATTACH_WORK_ID != ENROL_WORK_ID);
 static_assert!(LATE_ATTACH_WORK_ID != SETTLE_WORK_ID && LATE_ATTACH_WORK_ID != 0);
+const STORE_WAIT_WORK_ID: u64 = 5;
+static_assert!(STORE_WAIT_WORK_ID != SETTLE_WORK_ID && STORE_WAIT_WORK_ID != ENROL_WORK_ID);
+static_assert!(STORE_WAIT_WORK_ID != VERIFY_WORK_ID && STORE_WAIT_WORK_ID != LATE_ATTACH_WORK_ID);
+
+// A udev load runs before udev has created the iBoot system container's
+// partition-label link, which the xART store is opened through. A cold boot
+// waits for the link in steps of this length, at most this many steps, so the
+// enclave's first xART requests find the store; then it boots without it.
+const STORE_WAIT_STEP_MS: time::Msecs = 500;
+const STORE_WAIT_STEPS: u32 = 60;
 
 // When an attach-time sensor bring-up falls short, one more round runs this
 // long after Touch ID was activated. A round that cannot run yet, because the
@@ -690,6 +700,11 @@ struct SepData {
     late_attach_wanted: Atomic<bool>,
     late_attach_defers: Atomic<u32>,
 
+    // The iBoot system container's link did not exist at probe; the cold boot
+    // waits for it (see `store_wait_tick`). And how many steps it has waited.
+    store_pending: Atomic<bool>,
+    store_wait_steps: Atomic<u32>,
+
     #[pin]
     ool_sks: Mutex<Option<OolPair>>,
 
@@ -793,6 +808,9 @@ struct SepData {
 
     #[pin]
     late_attach_work: DelayedWork<SepData, LATE_ATTACH_WORK_ID>,
+
+    #[pin]
+    store_wait_work: DelayedWork<SepData, STORE_WAIT_WORK_ID>,
 }
 
 impl_has_work! {
@@ -804,6 +822,7 @@ impl_has_work! {
 impl_has_delayed_work! {
     impl HasDelayedWork<Self, 1> for SepData { self.settle_work }
     impl HasDelayedWork<Self, LATE_ATTACH_WORK_ID> for SepData { self.late_attach_work }
+    impl HasDelayedWork<Self, STORE_WAIT_WORK_ID> for SepData { self.store_wait_work }
 }
 
 // SAFETY: every field is either internally synchronised (the mutexes, the
@@ -815,6 +834,44 @@ unsafe impl Send for SepData {}
 unsafe impl Sync for SepData {}
 
 impl SepData {
+    /// Opens the shared xART store from the iBoot system container, with the
+    /// module parameters and the platform's guard applied, and logs its
+    /// summary. `ENODEV` means the container's device link does not exist.
+    fn open_xart_store(
+        dev: &device::Device,
+        profile: &profile::PlatformProfile,
+    ) -> Result<xart_store::Store> {
+        let xart_writes = *module_parameters::xart_writes.value() != 0;
+        let xart_start = *module_parameters::xart_start_sector.value();
+        let xart_guard =
+            xart_guard::level(*module_parameters::xart_guard.value(), profile.xart_guard);
+        let mut store = xart_store::Store::open_owner(xart_writes, xart_start)?;
+        match xart_guard {
+            Some(level) if store.writes_enabled() => store.set_guard(level)?,
+            None if store.writes_enabled() => dev_info!(
+                dev,
+                "xART guard off: the enclave may rewrite any session record\n"
+            ),
+            _ => {}
+        }
+        let (slots, records, revision, malformed, duplicates, repaired, writable) =
+            store.summary();
+        let base = store.base();
+        dev_info!(
+            dev,
+            "xART: APFS-resolved .gl extent (base {:#x}); {} slots, {} live records, max revision {}, {} malformed, {} duplicate, {} repaired; writes {}\n",
+            base,
+            slots,
+            records,
+            revision,
+            malformed,
+            duplicates,
+            repaired,
+            if writable { "ENABLED" } else { "disabled" }
+        );
+        Ok(store)
+    }
+
     fn new(pdev: &platform::Device<device::Core<'_>>) -> Result<Arc<SepData>> {
         let profile = profile::detect()?;
         let built = shmem::build(pdev, profile.shmem_capacity, profile.shmem_first_item)?;
@@ -845,44 +902,27 @@ impl SepData {
         )?;
         let dma_ring = dma::Coherent::<u8>::zeroed_slice(dev, DMA_RING_SIZE, GFP_KERNEL)?;
 
-        let xart_writes = *module_parameters::xart_writes.value() != 0;
-        let xart_start = *module_parameters::xart_start_sector.value();
-        let xart_guard =
-            xart_guard::level(*module_parameters::xart_guard.value(), profile.xart_guard);
-        let store = match xart_store::Store::open_owner(xart_writes, xart_start) {
-            Ok(mut store) => {
-                match xart_guard {
-                    Some(level) if store.writes_enabled() => store.set_guard(level)?,
-                    None if store.writes_enabled() => dev_info!(
-                        dev,
-                        "xART guard off: the enclave may rewrite any session record\n"
-                    ),
-                    _ => {}
-                }
-                let (slots, records, revision, malformed, duplicates, repaired, writable) =
-                    store.summary();
-                let base = store.base();
+        let (store, store_pending) = match Self::open_xart_store(dev, profile) {
+            Ok(store) => (Some(store), false),
+            Err(e) if e == ENODEV => {
                 dev_info!(
                     dev,
-                    "xART: APFS-resolved .gl extent (base {:#x}); {} slots, {} live records, max revision {}, {} malformed, {} duplicate, {} repaired; writes {}\n",
-                    base,
-                    slots,
-                    records,
-                    revision,
-                    malformed,
-                    duplicates,
-                    repaired,
-                    if writable { "ENABLED" } else { "disabled" }
+                    "xART: the iBoot system container is not available yet; waiting for it before booting the SEP\n"
                 );
-                Some(store)
+                (None, true)
             }
             Err(e) => {
-                dev_err!(
+                // The enclave must still be booted: on the M1 and M2 laptops
+                // the Secure Enclave sits in the path of the microphone data
+                // lines, and the microphones only work once it runs. Without
+                // the store the enclave's xART requests are refused (see
+                // `on_xarm`), so Touch ID and trusted keys stay unavailable.
+                dev_warn!(
                     dev,
-                    "xART gigalocker in the iBoot container is unavailable or invalid: {:?}\n",
+                    "xART gigalocker in the iBoot container is unavailable or invalid ({:?}); booting the SEP without it: Touch ID and trusted keys stay unavailable until the next boot\n",
                     e
                 );
-                return Err(e);
+                (None, false)
             }
         };
 
@@ -921,6 +961,8 @@ impl SepData {
                 sensor_test_fault_done: Atomic::new(false),
                 late_attach_wanted: Atomic::new(false),
                 late_attach_defers: Atomic::new(0),
+                store_pending: Atomic::new(store_pending),
+                store_wait_steps: Atomic::new(0),
                 keybag_designated: Atomic::new(false),
                 bringup_started: Atomic::new(false),
                 touchid_started: Atomic::new(false),
@@ -983,6 +1025,7 @@ impl SepData {
                 verify_work <- new_work!("SepData::verify_work"),
                 settle_work <- new_delayed_work!("SepData::settle_work"),
                 late_attach_work <- new_delayed_work!("SepData::late_attach_work"),
+                store_wait_work <- new_delayed_work!("SepData::store_wait_work"),
             }),
             GFP_KERNEL,
         )
@@ -1011,6 +1054,9 @@ impl SepData {
         if dt::registration_already_sent(sep_node) {
             return Err(EBUSY);
         }
+        if self.shutting_down.load(Relaxed) {
+            return Err(ENODEV);
+        }
 
         if let Err(e) = dt::mark_registration_sent(sep_node, iova) {
             dev_err!(
@@ -1035,6 +1081,9 @@ impl SepData {
         // reload's TZ0 would go unanswered. Record the boot first, as the warm
         // path does, so a reload stops at probe and says to reboot instead.
         let iova = self.shmem.lock().as_ref().map_or(0, |buf| buf.dma_handle());
+        if self.shutting_down.load(Relaxed) {
+            return Err(ENODEV);
+        }
         if let Err(e) = dt::mark_registration_sent(sep_node, iova) {
             dev_err!(
                 self.dev,
@@ -2127,6 +2176,73 @@ impl SepData {
             .enqueue_delayed::<Arc<SepData>, SETTLE_WORK_ID>(this.clone(), delay);
     }
 
+    /// Waits one step for the iBoot system container; see `store_wait_tick`.
+    fn arm_store_wait(this: &Arc<SepData>) {
+        if this.shutting_down.load(Relaxed) {
+            return;
+        }
+        let delay = time::msecs_to_jiffies(STORE_WAIT_STEP_MS);
+        let _ = workqueue::system_dfl()
+            .enqueue_delayed::<Arc<SepData>, STORE_WAIT_WORK_ID>(this.clone(), delay);
+    }
+
+    /// One step of the wait for the container: opens the store once its link
+    /// exists, or gives up after the last step, and boots the enclave either
+    /// way. The boot must not wait for the store forever: the microphones of
+    /// the M1 and M2 laptops depend on it.
+    fn store_wait_tick(this: &Arc<SepData>) {
+        if this.shutting_down.load(Relaxed) {
+            return;
+        }
+        let steps = this.store_wait_steps.load(Relaxed) + 1;
+        this.store_wait_steps.store(steps, Relaxed);
+        match Self::open_xart_store(&this.dev, this.profile) {
+            Ok(store) => {
+                *this.store.lock() = Some(store);
+                let writable = this.xart_writable();
+                let guard = this.with_store(|store| store.guard_state()).flatten();
+                diag::refresh_store(writable, guard);
+            }
+            Err(e) if e == ENODEV && steps < STORE_WAIT_STEPS => {
+                return Self::arm_store_wait(this);
+            }
+            Err(e) => dev_warn!(
+                this.dev,
+                "xART gigalocker in the iBoot container is unavailable or invalid after {} steps of {} ms ({:?}); booting the SEP without it: Touch ID and trusted keys stay unavailable until the next boot\n",
+                steps,
+                STORE_WAIT_STEP_MS,
+                e
+            ),
+        }
+        if this.shutting_down.load(Relaxed) {
+            return;
+        }
+        this.store_pending.store(false, Relaxed);
+        let Some(sep_node) = dt::sep_node() else {
+            dev_err!(this.dev, "the SEP node is gone; not booting the SEP\n");
+            // Same end as a failed settle: diag must not stay `unknown`, or
+            // every trusted-key caller waits out the full bring-up timeout.
+            diag::attach(false);
+            diag::bringup_ended();
+            this.finish_bringup();
+            return;
+        };
+        if this.shutting_down.load(Relaxed) {
+            return;
+        }
+        if let Err(e) = this.attach(&sep_node) {
+            dev_err!(this.dev, "could not boot the SEP ({:?})\n", e);
+            diag::attach(false);
+            diag::bringup_ended();
+            this.finish_bringup();
+        } else {
+            // Cold boot sets `registered` only after the IMG4 ack, so this
+            // cannot wait for that flag. The synchronous probe path arms
+            // settle only once that flag is already set.
+            Self::arm_settle(this);
+        }
+    }
+
     fn settle_tick(this: &Arc<SepData>) {
         match this.phase.load(Relaxed) {
             PHASE_ATTACH => Self::tick_attach(this),
@@ -2383,9 +2499,20 @@ impl SepData {
             handle.unregister();
         }
 
+        // Finish the store wait before dropping the mailbox. A tick blocked in
+        // open_xart_store rechecks shutting_down before it attaches, and this
+        // waits for that return. Waiting until after the mailbox is gone lets
+        // the tick publish the boot marker, so the next probe stops with
+        // EBUSY.
+        unsafe {
+            sep_cancel_delayed_work_sync(
+                DelayedWork::raw_as_work(core::ptr::addr_of!(self.store_wait_work)).cast(),
+            );
+        }
+
         *self.mbox.lock() = None;
 
-        // SAFETY: all five pointers refer to pinned work fields in `self`.
+        // SAFETY: all six pointers refer to pinned work fields in `self`.
         // Shutdown blocks requeueing, and the mailbox can no longer add work.
         unsafe {
             sep_cancel_work_sync(Work::raw_get(core::ptr::addr_of!(self.rx_work)).cast());
@@ -2396,6 +2523,9 @@ impl SepData {
             );
             sep_cancel_delayed_work_sync(
                 DelayedWork::raw_as_work(core::ptr::addr_of!(self.late_attach_work)).cast(),
+            );
+            sep_cancel_delayed_work_sync(
+                DelayedWork::raw_as_work(core::ptr::addr_of!(self.store_wait_work)).cast(),
             );
         }
 
@@ -2572,6 +2702,14 @@ impl WorkItem<LATE_ATTACH_WORK_ID> for SepData {
     }
 }
 
+impl WorkItem<STORE_WAIT_WORK_ID> for SepData {
+    type Pointer = Arc<SepData>;
+
+    fn run(this: Arc<SepData>) {
+        SepData::store_wait_tick(&this);
+    }
+}
+
 impl WorkItem<ENROL_WORK_ID> for SepData {
     type Pointer = Arc<SepData>;
 
@@ -2605,12 +2743,22 @@ impl WorkItem<VERIFY_WORK_ID> for SepData {
 
 struct SepDriver(Arc<SepData>);
 
-// Deliberately not exported as a module alias: udev must not load the driver
-// on its own. The loader service loads it once the iBoot system container's
-// partition link exists, which the xART store needs at probe, and only after
-// the owner has enabled it (or chosen read-only) for this Mac.
-const OF_TABLE: kernel::device_id::IdArray<of::DeviceId, (), 1> =
-    kernel::device_id::IdArray::new([(of::DeviceId::new(c"apple,sep"), ())]);
+// Exported as a module alias so that udev loads the driver on every board
+// whose device tree enables the SEP: the M1 and M2 laptops need the enclave
+// booted for their microphones. A udev load may run before the iBoot system
+// container's partition link exists, which the xART store is opened through;
+// probe then waits for it before booting (see `store_wait_tick`). Writes to
+// the shared store and identity provisioning stay opt-in through the
+// xart_writes and provision_keybag module parameters, so a load the owner did
+// not ask for does not write the shared xART store. It does create
+// /var/lib/aurora-sep-host-state.bin (2359296 bytes) the first time that
+// Linux-only store is opened.
+kernel::of_device_table!(
+    OF_TABLE,
+    MODULE_OF_TABLE,
+    (),
+    [(of::DeviceId::new(c"apple,sep"), ())]
+);
 
 impl platform::Driver for SepDriver {
     type IdInfo = ();
@@ -2662,7 +2810,11 @@ impl platform::Driver for SepDriver {
 
         *data.mbox.lock() = Some(Mailbox::new_byname(dev, c"mbox", data.clone())?);
 
-        data.attach(&sep_node)?;
+        if data.store_pending.load(Relaxed) {
+            SepData::arm_store_wait(&data);
+        } else {
+            data.attach(&sep_node)?;
+        }
 
         if let Err(e) = data.register_fv_kernel() {
             dev_err!(dev, "could not register the FileVault kernel API: {:?}\n", e);
@@ -2737,16 +2889,16 @@ module! {
     license: "Dual MIT/GPL",
     params: {
         xart_writes: u8 {
-            default: 1,
-            description: "Allow shared xART writes only if APFS proves a single unsnapshotted .gl extent; set to 0 for read-only operation",
+            default: 0,
+            description: "Allow shared xART writes only if APFS proves a single unsnapshotted .gl extent; 0 (the default) is read-only operation, enough to boot the enclave",
         },
         xart_start_sector: u64 {
             default: 0,
             description: "Expected 512-byte start sector of the APFS .gl extent in the iBoot container. Zero accepts the APFS result; nonzero must match it and cannot override it",
         },
         provision_keybag: u8 {
-            default: 1,
-            description: "Create the Linux identity keybag when none exists; set to 0 to disable first-boot provisioning; requires xart_writes=1",
+            default: 0,
+            description: "Create the Linux identity keybag when none exists (first-boot provisioning); requires xart_writes=1",
         },
         xart_guard: i8 {
             default: -1,

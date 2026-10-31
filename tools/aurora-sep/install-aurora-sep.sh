@@ -297,8 +297,13 @@ PIN_BEGIN="# >>> aurora-sep pin (remove with: install-aurora-sep.sh --uninstall)
 PIN_END="# <<< aurora-sep pin"
 STATE=/var/lib/aurora-sep
 FALLBACK_ID=aurora-sep-previous-kernel
-# Written only by --read-only; keeps the driver from writing to the enclave.
-MODPROBE_CONF=/etc/modprobe.d/aurora-sep.conf
+# Written only by --read-only. The name matches the file aurora-sep and
+# aurora-touchid install under /usr/lib/modprobe.d, so this file hides it.
+# A second name would pass both option lines, and the driver's set-once
+# parameters then refuse to load. Earlier installs wrote MODPROBE_CONF_OLD;
+# sep_migrate_modprobe_conf renames that onto this name.
+MODPROBE_CONF=/etc/modprobe.d/apple-sep.conf
+MODPROBE_CONF_OLD=/etc/modprobe.d/aurora-sep.conf
 READ_ONLY=0
 DESKTOP_FIXES=0
 DESKTOP_FIXES_DATA=""
@@ -3643,6 +3648,28 @@ calibration() {
     warn "could not extract the calibration; Touch ID will not work until it is present at $out"
 }
 
+# Path of a --read-only override, under either name this script has used.
+sep_read_only_conf() {
+  if [[ -f $MODPROBE_CONF ]]; then
+    printf '%s\n' "$MODPROBE_CONF"
+  elif [[ -f $MODPROBE_CONF_OLD ]]; then
+    printf '%s\n' "$MODPROBE_CONF_OLD"
+  fi
+}
+
+# An earlier --read-only install wrote MODPROBE_CONF_OLD. That name does not
+# hide /usr/lib/modprobe.d/apple-sep.conf, so modprobe passes both option
+# lines and the set-once parameters refuse to load. Rename it. If both
+# names exist, drop the old one.
+sep_migrate_modprobe_conf() {
+  [[ -e $MODPROBE_CONF_OLD ]] || return 0
+  if [[ -e $MODPROBE_CONF ]]; then
+    $sudo rm -f -- "$MODPROBE_CONF_OLD"
+  else
+    $sudo mv -- "$MODPROBE_CONF_OLD" "$MODPROBE_CONF"
+  fi
+}
+
 # The first line in modprobe.d that blacklists or redirects apple_sep, other
 # than our own file. Either spelling is the owner saying "do not load this".
 sep_block_line() {
@@ -3661,6 +3688,7 @@ sep_block_line() {
 # the owner has to be able to opt out, and a block they already set must win.
 sep_policy() {
   local block
+  sep_migrate_modprobe_conf
   block=$(sep_block_line)
   if [[ -n $block ]]; then
     warn "apple_sep is blocked on this Mac ($block).
@@ -3686,7 +3714,7 @@ sep_policy() {
 
 sep_write_notice() {
   (( READ_ONLY )) && return 0
-  [[ -f $MODPROBE_CONF || -n $(sep_block_line) ]] && return 0
+  [[ -n $(sep_read_only_conf) || -n $(sep_block_line) ]] && return 0
   warn "on the first boot of a Mac with a Touch ID profile, the SEP driver creates
     an identity keybag and writes to the enclave's anti-replay store. Use a Mac
     you can DFU-restore. If you cannot, press Ctrl-C now and run with --read-only:
@@ -4213,10 +4241,11 @@ package_database_check() {
 }
 
 install_all() {
-  local entry file sha kernel chain rc
+  local entry file sha kernel chain rc ro
   local -a entries candidate_archives=()
   release_source
   require_supported_soc
+  sep_migrate_modprobe_conf
   if ((ESP_ARCHIVE_HISTORY)); then
     ((!READ_ONLY)) || die "--archive-esp-history changes the EFI partition and cannot be combined with --read-only"
     esp_history_run archive
@@ -4472,9 +4501,9 @@ install_all() {
     say "Done. Reboot: expect the desktop on the boot framebuffer. Touch ID is not supported
     on M3 yet. How to help bring this M3 further: step 11 of the test plan that the
     --agent-prompt command below prints."
-  elif [[ -f $MODPROBE_CONF ]]; then
+  elif ro=$(sep_read_only_conf); [[ -n $ro ]]; then
     say "Done, read-only. Reboot; the SEP driver will attach and report without writing."
-    echo "   Enrolling a finger needs writes: delete $MODPROBE_CONF, reboot, then run aurora-touchid-setup."
+    echo "   Enrolling a finger needs writes: delete $ro, reboot, then run aurora-touchid-setup."
   else
     say "Done. Reboot, then run:  aurora-touchid-setup"
   fi
@@ -4615,7 +4644,7 @@ uninstall_all() {
       ;;
     handoff) m3_restore_bringup ;;
   esac
-  $sudo rm -f "$MODPROBE_CONF"
+  $sudo rm -f "$MODPROBE_CONF" "$MODPROBE_CONF_OLD"
   # Keep recovery state and modules if the checked entry cannot be removed.
   if [[ $(boot_chain) == limine ]] && m3_limine_cleanup_needed; then
     m3_limine_remove_check remove
@@ -4675,7 +4704,7 @@ sep_diag() {
 }
 
 reset_touchid() {
-  local yes=0 force=0 arg f d keybag found=0
+  local yes=0 force=0 arg f d keybag found=0 ro
   for arg in "$@"; do
     case $arg in
       --yes) yes=1 ;;
@@ -4684,8 +4713,9 @@ reset_touchid() {
     esac
   done
   grep -qa 'apple,' /proc/device-tree/compatible 2>/dev/null || die "this is not an Apple Silicon Mac"
-  [[ -f $MODPROBE_CONF ]] &&
-    die "this Mac was installed read-only ($MODPROBE_CONF): a new keybag needs enclave writes. Delete that file first if you mean to allow them."
+  ro=$(sep_read_only_conf)
+  [[ -z $ro ]] ||
+    die "this Mac was installed read-only ($ro): a new keybag needs enclave writes. Delete that file first if you mean to allow them."
   for f in "${TOUCHID_STATE_FILES[@]}"; do [[ -e $f ]] && found=1; done
   ((found)) || die "no Touch ID state on this Mac; nothing to reset"
 
