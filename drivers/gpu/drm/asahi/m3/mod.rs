@@ -198,3 +198,7 @@ mod t8122_admission;
 pub(crate) mod m3_soc;
 
 mod t8122_hwdata;
+
+mod m3_init_26;
+mod m3_profile;
+mod m3_mmio_26;

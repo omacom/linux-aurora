@@ -77,6 +77,17 @@ fn check(compat: Vec<u8>, reg: Vec<u32>, names: Vec<u8>, irqs: Vec<u32>, cells: 
     assert!(!ok(&compat,&reg,&names,&irqs,1));
     let mut v=names.clone(); v[0]^=1; assert!(!ok(&compat,&reg,&v,&irqs,cells));
     for v in [b"apple,asc-mailbox-v4\\0".to_vec(), b"apple,t8122-agx-asc-mailbox\\0unknown\\0".to_vec(), b"apple,t6031-agx-asc-mailbox\\0".to_vec()] { assert!(!ok(&v,&reg,&names,&irqs,cells)); }
+    // Compatible lists are ordered: reversing either supported pair must fail.
+    for pair in soc.mailbox_compatibles {
+        let parts: Vec<_> = pair.split(|byte| *byte == 0).filter(|part| !part.is_empty()).collect();
+        if parts.len() == 2 {
+            let mut reversed = parts[1].to_vec();
+            reversed.push(0);
+            reversed.extend_from_slice(parts[0]);
+            reversed.push(0);
+            assert!(!ok(&reversed,&reg,&names,&irqs,cells));
+        }
+    }
     for v in soc.mailbox_compatibles { assert!(ok(&v.to_vec(),&reg,&names,&irqs,cells)); }
 }
 fn main() {

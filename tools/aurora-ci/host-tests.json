@@ -2298,6 +2298,34 @@
         "python3",
         "tools/asahi/test-m3-mailbox.py"
       ]
+    },
+    {
+      "name": "tools/asahi/m3-firmware-tests.rs",
+      "group": "tools",
+      "argv": [
+        "{output}",
+        "--test-threads=1"
+      ],
+      "setup": [
+        [
+          "rustc",
+          "--edition=2021",
+          "--test",
+          "tools/asahi/m3-firmware-tests.rs",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/test-m3-uapi.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/test-m3-uapi.py"
+      ],
+      "rust": "1.85.0"
     }
   ],
   "helpers": {
@@ -2305,7 +2333,8 @@
     "tools/testing/selftests/drivers/gpu/asahi-g15/uat-owner.c": "compiled and executed by the registered asahi-g15/run.py actual reservation-owner fixture",
     "tools/testing/selftests/drivers/gpu/asahi-g15/pmp-bridge.c": "compiled and executed by the registered asahi-g15/run.py maintained PMP fixture",
     "tools/asahi/t6030-pmp-graph-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
-    "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite"
+    "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
+    "tools/asahi/m3-uapi-tests.rs": "compiled and executed by the registered tools/asahi/test-m3-uapi.py paired-header suite"
   },
   "excluded": {
     "tools/aurora-sep/tests/coordinator/runtime-check.sh": "Needs /dev/sep-bio, a running kernel booted with trusted.source=applesep, the hw_random sysfs interface and fprintd. Coordinator payload for an approved device.",
