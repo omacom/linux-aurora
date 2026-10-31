@@ -241,7 +241,11 @@ struct avd_dev {
 	struct delayed_work queue_work;
 	struct list_head contexts;
 	/* One m2m dispatch reservation; never identifies firmware-owned work. */
-	struct avd_ctx *queued_ctx;
+	/*
+	 * m2m runs one device_run at a time until job_finish; a job that finds
+	 * no free slot waits here and is restarted when a frame retires.
+	 */
+	struct avd_ctx *deferred_ctx;
 	struct avd_frame frames[AVD_MAX_FRAMES];
 	struct avd_buf *frame_fp[AVD_MAX_FRAMES];
 	u64 frame_seq;

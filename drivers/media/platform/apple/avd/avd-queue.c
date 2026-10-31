@@ -210,6 +210,14 @@ static void avd_queue_worker(struct work_struct *work)
 		}
 	}
 	avd_retire(avd);
+	/* Restart a job that found no free slot. */
+	spin_lock_irqsave(&avd->queue_lock, flags);
+	ctx = avd->inflight < avd->backend->max_inflight(avd) ? avd->deferred_ctx : NULL;
+	if (ctx)
+		avd->deferred_ctx = NULL;
+	spin_unlock_irqrestore(&avd->queue_lock, flags);
+	if (ctx)
+		schedule_work(&ctx->submit_work);
 	/* Freed slots/dependencies must wake contexts whose job_ready was false. */
 	list_for_each_entry(ctx, &avd->contexts, queue_node)
 		v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
@@ -259,9 +267,14 @@ int avd_queue_ready(void *priv)
 	 * A faulted or cooling-down decoder still schedules: submission fails
 	 * those frames at once, so clients see errors instead of waiting.
 	 */
-	ready = !avd->queued_ctx && !READ_ONCE(ctx->draining) &&
-		!READ_ONCE(avd->stopping) &&
-		avd->inflight < avd->backend->max_inflight(avd);
+	/*
+	 * Slot capacity is not a readiness condition: every context with work
+	 * enters the m2m job queue, which runs them in order, and a job that
+	 * finds no free slot is deferred until one retires. Gating readiness on
+	 * one reserved context let the first context in the list win every
+	 * time and starved the others (multi-stream decodes timing out).
+	 */
+	ready = !READ_ONCE(ctx->draining) && !READ_ONCE(avd->stopping);
 	if (ready && ctx->next_dep == AVD_DEP_PREV_DONE) {
 		/* Legacy codecs may hold several pictures in separate banks. */
 		unsigned int limit = ctx->coded_fmt_desc && !ctx->coded_fmt_desc->frame_ops ?
@@ -273,9 +286,6 @@ int avd_queue_ready(void *priv)
 				held++;
 		ready = held < limit;
 	}
-	/* Prevent several queued m2m contexts from observing the same free slot. */
-	if (ready)
-		avd->queued_ctx = ctx;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	return ready;
 }
@@ -292,8 +302,8 @@ static void avd_queue_submit_work(struct work_struct *work)
 
 	mutex_lock(&avd->queue_mutex);
 	spin_lock_irqsave(&avd->queue_lock, flags);
-	if (avd->queued_ctx == ctx)
-		avd->queued_ctx = NULL;
+	if (avd->deferred_ctx == ctx)
+		avd->deferred_ctx = NULL;
 	if (avd->stopping || ctx->draining || avd->faulted || ctx->broken ||
 	    time_before(jiffies, READ_ONCE(avd->cooldown_until))) {
 		struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
@@ -306,13 +316,22 @@ static void avd_queue_submit_work(struct work_struct *work)
 						 VB2_BUF_STATE_ERROR);
 		goto unlock;
 	}
-	for (i = 0; i < AVD_MAX_FRAMES; i++) {
-		if (avd->frames[i].state == AVD_FRAME_FREE) {
-			f = &avd->frames[i];
-			break;
+	if (avd->inflight < avd->backend->max_inflight(avd)) {
+		for (i = 0; i < AVD_MAX_FRAMES; i++) {
+			if (avd->frames[i].state == AVD_FRAME_FREE) {
+				f = &avd->frames[i];
+				break;
+			}
 		}
 	}
-	ret = f ? avd_slot_reserve(f, ctx, ++avd->frame_seq) : -EBUSY;
+	if (!f) {
+		/* Keep the m2m job; the worker restarts it when a slot frees. */
+		avd->deferred_ctx = ctx;
+		spin_unlock_irqrestore(&avd->queue_lock, flags);
+		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		goto unlock;
+	}
+	ret = avd_slot_reserve(f, ctx, ++avd->frame_seq);
 	if (!ret)
 		avd->inflight++;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
@@ -456,6 +475,7 @@ void avd_queue_drain(struct avd_ctx *ctx)
 	struct avd_dev *avd = ctx->dev;
 	unsigned long flags;
 	unsigned int i;
+	bool finish_deferred = false;
 	int ret;
 
 	/* Session stop/reset accesses registers even when there are no frames. */
@@ -464,9 +484,15 @@ void avd_queue_drain(struct avd_ctx *ctx)
 	mutex_lock(&avd->queue_mutex);
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	WRITE_ONCE(ctx->draining, true);
-	if (avd->queued_ctx == ctx)
-		avd->queued_ctx = NULL;
+	if (avd->deferred_ctx == ctx) {
+		avd->deferred_ctx = NULL;
+		finish_deferred = true;
+	}
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
+	/* A deferred job is still m2m's running job: end it so abort can wait. */
+	if (finish_deferred)
+		v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
+						 VB2_BUF_STATE_ERROR);
 	for (i = 0; ret >= 0 && i < AVD_MAX_FRAMES; i++) {
 		if (avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx) {
 			if (avd->backend->abort)

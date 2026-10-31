@@ -172,12 +172,11 @@ static void avd_dispatch_reservation(struct kunit *test)
 	avd->backend = &backend;
 	ctx[0].dev = avd;
 	ctx[1].dev = avd;
+	/* Every context with work is ready; capacity is checked at dispatch. */
 	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[0]), 1);
-	/* The second context must not reserve the same observed capacity. */
-	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 0);
-	avd->queued_ctx = NULL;
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 1);
 	avd->inflight = AVD_MAX_FRAMES;
-	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 0);
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 1);
 	avd->inflight = 1;
 	avd->frames[0].state = AVD_FRAME_SUBMITTED;
 	avd->frames[0].ctx = &ctx[1];
