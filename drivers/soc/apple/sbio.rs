@@ -1107,8 +1107,9 @@ impl SepData {
         registration::bring_up(retry, &mut attempts)
     }
 
-    /// One attach-time bring-up. A profile without a nonce session only
-    /// wakes and patches the sensor here; its first verify calibrates it.
+    /// One attach-time bring-up. A profile without a nonce session wakes and
+    /// patches the sensor here, and configures the data-ready line once that
+    /// patch is in place. Its first verify calibrates it.
     fn attach_bring_sensor_online(&self) -> bool {
         if self.profile.nonce_session {
             return self.bring_sensor_online();
@@ -1125,6 +1126,9 @@ impl SepData {
         }
         let online = self.complete_bringup(patch);
         diag::sensor_brought_up(bind, online);
+        if online {
+            self.configure_data_ready();
+        }
         online
     }
 
@@ -1281,9 +1285,63 @@ impl SepData {
         self.late_attach_wanted.xchg(false, Relaxed)
     }
 
+    /// Configures the data-ready line once. The sensor is patched and idle
+    /// here: reconfiguring the line mid-capture drops the firmware patch, so
+    /// a later call returns once the line is available. A board that does not
+    /// describe the line falls back to SPI polling.
+    fn configure_data_ready(&self) {
+        if sensor::irq_available() {
+            return;
+        }
+        if sensor::irq_setup() {
+            dev_info!(self.dev, "sensor: interrupt-driven capture\n");
+        } else {
+            dev_warn!(
+                self.dev,
+                "sensor: no data-ready interrupt (describe it in DT); capture falls back to SPI polling\n"
+            );
+        }
+    }
+
+    /// Whether a 13.5 registration still holds a patched sensor this driver
+    /// left powered, so the next bring-up can skip the power cycle. A
+    /// nonce-session profile, a sensor this driver switched off, and a
+    /// registration that never completed return false without an SPI read.
+    /// State 9 forces a reload even when the acknowledgement is still accepted.
+    fn sensor_patch_held(&self) -> bool {
+        if self.profile.nonce_session
+            || !sensor::left_powered()
+            || self.bringup.load(Relaxed) < BRINGUP_ESTABLISHED
+        {
+            return false;
+        }
+        let Ok(st) = sensor::status() else {
+            return false;
+        };
+        registration::registration_still_held(
+            true,
+            true,
+            st.is_silent(),
+            st.patch_ack() == sensor::PATCH_ACCEPTED,
+            st.state == sensor::STATE_NEEDS_PATCH,
+        )
+    }
+
     fn bring_sensor_online(&self) -> bool {
         let bind = diag::sensor_bind();
-        let Some(mut patch) = self.wake_sensor() else {
+        let patch_held = self.sensor_patch_held();
+        if patch_held {
+            dev_info!(
+                self.dev,
+                "sensor: patch still acknowledged; keeping the registration\n"
+            );
+        }
+        let patch_now = if patch_held {
+            Some(PatchLoaded(()))
+        } else {
+            self.wake_sensor()
+        };
+        let Some(mut patch) = patch_now else {
             diag::sensor_brought_up(bind, false);
             return false;
         };
@@ -1306,11 +1364,43 @@ impl SepData {
             }
             self.sensor_calibrated.store(true, Relaxed);
             if parameters.is_none() {
-                let Some(reloaded_patch) = self.wake_sensor() else {
-                    diag::sensor_brought_up(bind, false);
-                    return false;
+                let reload = match sensor::status() {
+                    Err(error) => {
+                        dev_warn!(
+                            self.dev,
+                            "sensor: status read after calibration failed ({:?}); registering again\n",
+                            error
+                        );
+                        true
+                    }
+                    Ok(st) => {
+                        let again = registration::needs_reload_after_calibration(
+                            self.profile.nonce_session,
+                            st.is_silent(),
+                            st.patch_ack() == sensor::PATCH_ACCEPTED,
+                            st.state == sensor::STATE_NEEDS_PATCH,
+                        );
+                        if again {
+                            dev_info!(
+                                self.dev,
+                                "sensor: status after calibration requires a new registration\n"
+                            );
+                        } else {
+                            dev_info!(
+                                self.dev,
+                                "sensor: calibration left the patch in place; not registering again\n"
+                            );
+                        }
+                        again
+                    }
                 };
-                patch = reloaded_patch;
+                if reload {
+                    let Some(reloaded_patch) = self.wake_sensor() else {
+                        diag::sensor_brought_up(bind, false);
+                        return false;
+                    };
+                    patch = reloaded_patch;
+                }
             }
         }
 
@@ -1323,19 +1413,8 @@ impl SepData {
             None => self.complete_bringup(patch),
         };
         diag::sensor_brought_up(bind, ok);
-        // The sensor is patched and idle here -- the only safe moment to
-        // configure the data-ready interrupt, which is then left alone for the
-        // driver's life. Interrupt capture is the default; a machine that does
-        // not describe a data-ready line falls back to SPI polling.
-        if ok && !sensor::irq_available() {
-            if sensor::irq_setup() {
-                dev_info!(self.dev, "sensor: interrupt-driven capture\n");
-            } else {
-                dev_warn!(
-                    self.dev,
-                    "sensor: no data-ready interrupt (describe it in DT); capture falls back to SPI polling\n"
-                );
-            }
+        if ok {
+            self.configure_data_ready();
         }
         ok
     }
@@ -1562,11 +1641,12 @@ impl SepData {
             && bio::verify_is_live(&self.bio_session.lock(), self.capture_epoch.load(Relaxed))
     }
 
-    // Every verify registers the sensor again. On a profile with a nonce
-    // session that registration can fail as the attach-time one does, most
-    // often the first one after a system suspend, and a new attempt recovers
-    // it in the same way. Without one, the failure ends the user's
-    // authentication even though the sensor works.
+    // A nonce-session verify registers again. That registration can fail the
+    // way the attach-time one does, most often the first one after suspend,
+    // and a new attempt recovers it. Without a nonce session a failed
+    // bring-up ends the authentication. A 13.5 verify keeps a registration
+    // whose patch is still acknowledged, and power-cycles when this driver
+    // has switched the sensor off or the status no longer shows the patch.
     fn bring_sensor_online_for_verify(&self) -> bool {
         if !self.profile.nonce_session {
             return self.bring_sensor_online();
