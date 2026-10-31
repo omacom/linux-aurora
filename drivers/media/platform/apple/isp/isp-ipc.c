@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright 2023 Eileen Yoon <eyn@gmx.com> */
 
+#include <kunit/static_stub.h>
+
 #include "isp-iommu.h"
 #include "isp-ipc.h"
 #include "isp-regs.h"
@@ -175,6 +177,8 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 		  unsigned long timeout)
 {
 	long t;
+
+	KUNIT_STATIC_STUB_REDIRECT(ipc_chan_send, isp, chan, timeout);
 
 	chan_write_msg(isp, chan, &chan->req);
 	dma_wmb();
