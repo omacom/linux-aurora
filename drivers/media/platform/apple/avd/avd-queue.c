@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
@@ -9,6 +10,14 @@
 #include "avd-queue-internal.h"
 
 #define AVD_FRAME_TIMEOUT msecs_to_jiffies(2000)
+/* A stream that fails this many frames in a row in hardware is stopped. */
+#define AVD_CTX_MAX_HW_ERRORS 3
+/* Never reset the decoder more often than this. */
+#define AVD_RECOVER_GAP_MS 20
+/* More than AVD_STORM_MAX recoveries within AVD_STORM_WINDOW: cool down. */
+#define AVD_STORM_MAX 8
+#define AVD_STORM_WINDOW msecs_to_jiffies(10000)
+#define AVD_COOLDOWN msecs_to_jiffies(10000)
 #define AVD_RETRY_DELAY msecs_to_jiffies(1)
 #define AVD_PROGRAM_SIZE SZ_2M
 
@@ -41,6 +50,13 @@ static void avd_retire(struct avd_dev *avd)
 			spin_unlock_irqrestore(&avd->queue_lock, flags);
 			ctx = f->ctx;
 			state = f->status ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE;
+			if (!f->status) {
+				ctx->hw_errors = 0;
+			} else if (++ctx->hw_errors >= AVD_CTX_MAX_HW_ERRORS && !ctx->broken) {
+				ctx->broken = true;
+				dev_err(avd->dev, "stream stopped after %u failed frames; restart streaming to retry\n",
+					ctx->hw_errors);
+			}
 			if (ctx->coded_fmt_desc->frame_ops) {
 				if (ctx->coded_fmt_desc->frame_ops->retire)
 					ctx->coded_fmt_desc->frame_ops->retire(ctx, f, state);
@@ -81,7 +97,28 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 	unsigned int i;
 	int ret;
 
+	/*
+	 * A stream whose every frame faults (an H0 error storm) used to reset
+	 * the decoder back to back, about once per millisecond, until the
+	 * machine hung. Space recoveries out, and after a storm stop taking
+	 * new frames for a while instead of resetting again.
+	 */
+	if (avd->last_recover &&
+	    time_before(jiffies, avd->last_recover + msecs_to_jiffies(AVD_RECOVER_GAP_MS)))
+		msleep(AVD_RECOVER_GAP_MS);
+	if (!avd->storm_count || time_after(jiffies, avd->storm_start + AVD_STORM_WINDOW)) {
+		avd->storm_start = jiffies;
+		avd->storm_count = 0;
+	}
+	if (++avd->storm_count > AVD_STORM_MAX) {
+		dev_err(avd->dev, "%u decoder recoveries in %u s: failing new frames for %u s\n",
+			avd->storm_count, jiffies_to_msecs(AVD_STORM_WINDOW) / 1000,
+			jiffies_to_msecs(AVD_COOLDOWN) / 1000);
+		WRITE_ONCE(avd->cooldown_until, jiffies + AVD_COOLDOWN);
+		avd->storm_count = 0;
+	}
 	ret = avd_pm_recover(avd);
+	avd->last_recover = jiffies ?: 1;
 	WRITE_ONCE(avd->faulted, !!ret);
 	if (ret)
 		dev_err(avd->dev, "queue reset failed: %d\n", ret);
@@ -218,9 +255,12 @@ int avd_queue_ready(void *priv)
 	bool ready;
 
 	spin_lock_irqsave(&avd->queue_lock, flags);
+	/*
+	 * A faulted or cooling-down decoder still schedules: submission fails
+	 * those frames at once, so clients see errors instead of waiting.
+	 */
 	ready = !avd->queued_ctx && !READ_ONCE(ctx->draining) &&
 		!READ_ONCE(avd->stopping) &&
-		!READ_ONCE(avd->faulted) &&
 		avd->inflight < avd->backend->max_inflight(avd);
 	if (ready && ctx->next_dep == AVD_DEP_PREV_DONE) {
 		/* Legacy codecs may hold several pictures in separate banks. */
@@ -254,8 +294,14 @@ static void avd_queue_submit_work(struct work_struct *work)
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	if (avd->queued_ctx == ctx)
 		avd->queued_ctx = NULL;
-	if (avd->stopping || ctx->draining || avd->faulted) {
+	if (avd->stopping || ctx->draining || avd->faulted || ctx->broken ||
+	    time_before(jiffies, READ_ONCE(avd->cooldown_until))) {
+		struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+
 		spin_unlock_irqrestore(&avd->queue_lock, flags);
+		/* Complete the request's controls too, or its fd never signals. */
+		if (src && src->vb2_buf.req_obj.req)
+			v4l2_ctrl_request_complete(src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
 		v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
 		goto unlock;

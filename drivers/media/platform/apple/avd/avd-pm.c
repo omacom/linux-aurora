@@ -369,6 +369,8 @@ int avd_pm_power_on(struct avd_dev *avd)
 		return ret;
 	}
 	avd_pm_enable_irq(avd);
+	/* A clean boot after power-up ends a failed recovery's fault state. */
+	WRITE_ONCE(avd->faulted, false);
 
 	if (avd->pm.queue->resubmit)
 		avd->pm.queue->resubmit(avd);

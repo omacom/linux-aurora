@@ -248,6 +248,12 @@ struct avd_dev {
 	unsigned int inflight;
 	bool stopping;
 	bool faulted;
+	/* Recovery pacing: when the last one ran, and a sliding storm count. */
+	unsigned long last_recover;
+	unsigned long storm_start;
+	unsigned int storm_count;
+	/* After a recovery storm, fail new frames until this time. */
+	unsigned long cooldown_until;
 	u64 fw_generation;
 	const struct avd_backend_ops *backend;
 	void *backend_priv;
@@ -301,6 +307,10 @@ struct avd_ctx {
 	struct list_head queue_node;
 	struct work_struct submit_work;
 	bool draining;
+	/* Consecutive frames that failed in hardware; reset by a good frame. */
+	unsigned int hw_errors;
+	/* Too many hardware errors: fail every frame until streaming restarts. */
+	bool broken;
 	bool session_started;
 	u64 session_generation;
 	enum avd_frame_dep next_dep;

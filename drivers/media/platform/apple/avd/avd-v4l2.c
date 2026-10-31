@@ -896,6 +896,9 @@ static int avd_start_streaming(struct vb2_queue *q, unsigned int count)
 	WRITE_ONCE(ctx->draining, false);
 	if (V4L2_TYPE_IS_CAPTURE(q->type))
 		return 0;
+	/* A new stream gets a fresh hardware error budget. */
+	ctx->hw_errors = 0;
+	ctx->broken = false;
 
 	desc = ctx->coded_fmt_desc;
 	if (WARN_ON(!desc)) {
