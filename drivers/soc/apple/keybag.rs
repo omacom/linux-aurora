@@ -177,6 +177,15 @@ pub(crate) fn read(slot: Slot) -> Result<State> {
         head[OFF_STATE + 3],
     ]);
     if state == STATE_REFUSED {
+        let expected_crc = crc16_ccitt_false(&checksum_input(state, &[], &[0; UUID_LEN], &[])?);
+        let crc = u16::from_le_bytes([head[OFF_CRC], head[OFF_CRC + 1]]);
+        if size != HEADER as u64
+            || crc != expected_crc
+            || head[OFF_LEN..OFF_CRC].iter().any(|byte| *byte != 0)
+            || head[OFF_CRC + 2..].iter().any(|byte| *byte != 0)
+        {
+            return Err(EINVAL);
+        }
         return Ok(State::Absent(NoStoredKeyBag { slot }));
     }
     let Some(provenance) = UuidProvenance::from_state(state) else {

@@ -46,28 +46,45 @@ pub(crate) fn write(kind: u8, blob: &[u8]) -> Result<()> {
     file.sync()
 }
 
-pub(crate) fn read(kind: u8) -> Option<KVec<u8>> {
-    let path = path_for(kind)?;
-    let file = shim::StoreFile::open_readonly(path).ok()?;
-    let size = file.size().ok()?;
+/// `Ok(None)` only when the file is missing. A file that exists but cannot be
+/// read or fails validation is an error: "cannot tell" must never read as
+/// "nothing saved", or a caller may select a fresh context over a saved one.
+pub(crate) fn read(kind: u8) -> Result<Option<KVec<u8>>> {
+    let path = path_for(kind).ok_or(EINVAL)?;
+    let file = match shim::StoreFile::open_readonly(path) {
+        Ok(file) => file,
+        Err(e) if e == ENOENT => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let size = file.size()?;
     if size < HEADER as u64 {
-        return None;
+        return Err(EINVAL);
     }
     let mut head = [0u8; HEADER];
-    file.read_exact(0, &mut head).ok()?;
+    file.read_exact(0, &mut head)?;
     if head[..MAGIC.len()] != MAGIC {
-        return None;
+        return Err(EINVAL);
     }
     let len = u32::from_le_bytes([head[8], head[9], head[10], head[11]]) as usize;
     let crc = u16::from_le_bytes([head[12], head[13]]);
     if len == 0 || len > MAX_CATACOMB || size != (HEADER + len) as u64 {
-        return None;
+        return Err(EINVAL);
     }
-    let mut blob: KVec<u8> = KVec::with_capacity(len, GFP_KERNEL).ok()?;
-    blob.resize(len, 0, GFP_KERNEL).ok()?;
-    file.read_exact(HEADER as u64, &mut blob).ok()?;
+    let mut blob: KVec<u8> = KVec::with_capacity(len, GFP_KERNEL)?;
+    blob.resize(len, 0, GFP_KERNEL)?;
+    file.read_exact(HEADER as u64, &mut blob)?;
     if crc16_ccitt_false(&blob) != crc {
-        return None;
+        return Err(EINVAL);
     }
-    Some(blob)
+    Ok(Some(blob))
+}
+
+/// True only for a present, valid file.
+pub(crate) fn is_saved(kind: u8) -> bool {
+    matches!(read(kind), Ok(Some(_)))
+}
+
+/// True only when the file is provably missing.
+pub(crate) fn is_absent(kind: u8) -> bool {
+    matches!(read(kind), Ok(None))
 }
