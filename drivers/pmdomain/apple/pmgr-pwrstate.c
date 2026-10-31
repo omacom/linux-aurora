@@ -36,6 +36,8 @@
 #define APPLE_PMGR_PS_PWRGATE   0x0
 
 #define APPLE_PMGR_PS_SET_TIMEOUT 100
+/* m1n1 poll32() allows this many 1 us steps for one PS transition. */
+#define APPLE_PMGR_PS_RESTORE_TIMEOUT 10000
 #define APPLE_PMGR_RESET_TIME 1
 
 struct apple_pmgr_ps {
@@ -45,10 +47,12 @@ struct apple_pmgr_ps {
 	struct regmap *regmap;
 	u32 offset;
 	u32 min_state;
+	u32 poll_timeout; /* 0: the 100 us poll */
 	bool force_disable;
 	bool force_reset;
 	bool externally_clocked;
 	bool system_sleep;
+	bool restore_pending;
 	bool firmware_owned;
 	/* Never enable automatic power management (apple,no-auto-pm). */
 	bool no_auto_pm;
@@ -61,7 +65,8 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 {
 	int ret;
 	struct apple_pmgr_ps *ps = genpd_to_apple_pmgr_ps(genpd);
-	u32 reg, cur;
+	u32 reg, cur = 0;
+	unsigned int timeout = ps->poll_timeout ?: APPLE_PMGR_PS_SET_TIMEOUT;
 
 	ret = regmap_read(ps->regmap, ps->offset, &reg);
 	if (ret < 0)
@@ -113,18 +118,35 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *genpd, u32 pstate, bool a
 		ret = regmap_read_poll_timeout_atomic(
 			ps->regmap, ps->offset, cur,
 			FIELD_GET(APPLE_PMGR_PS_ACTUAL, cur) >= APPLE_PMGR_PS_CLKGATE, 1,
-			APPLE_PMGR_PS_SET_TIMEOUT);
+			timeout);
 	} else {
 		ret = regmap_read_poll_timeout_atomic(
 			ps->regmap, ps->offset, cur,
 			FIELD_GET(APPLE_PMGR_PS_ACTUAL, cur) == pstate, 1,
-			APPLE_PMGR_PS_SET_TIMEOUT);
+			timeout);
 	}
 
-	if (ret < 0)
+	/*
+	 * s2idle noirq asks for active while the FSM is still in clock-gate.
+	 * fpwm1 (keyboard backlight) reads 0xa4f here: target 0xf, actual 0x4,
+	 * WAS_CLKGATED, BUSY. The target is already latched. Do not log and
+	 * do not power-gate it back; resume_early polls it out after the rest
+	 * of noirq and before the consumer's resume writes the device.
+	 */
+	if (ret < 0 && ps->system_sleep && pstate == APPLE_PMGR_PS_ACTIVE &&
+	    !ps->poll_timeout &&
+	    FIELD_GET(APPLE_PMGR_PS_TARGET, cur) == pstate &&
+	    (cur & APPLE_PMGR_BUSY) &&
+	    FIELD_GET(APPLE_PMGR_PS_ACTUAL, cur) == APPLE_PMGR_PS_CLKGATE) {
+		ps->restore_pending = true;
+	} else if (ret < 0) {
+		ps->restore_pending = false;
 		dev_err_ratelimited(ps->dev,
 				    "PS %s: Failed to reach power state 0x%x (requested 0x%x, now: 0x%x)\n",
 				    genpd->name, pstate, reg, cur);
+	} else {
+		ps->restore_pending = false;
+	}
 
 	if (auto_enable) {
 		/* Not all devices implement this; this is a no-op where not implemented. */
@@ -158,7 +180,8 @@ static bool apple_pmgr_ps_is_active(struct apple_pmgr_ps *ps)
  * system sleep transition: genpd ignores the error there and records the
  * domain as on. The PM core runs those phases after the suspend_late callback
  * of every device and before any resume_early callback, so keep requesting
- * the domain on between this device's two callbacks.
+ * the domain on between this device's two callbacks. An in-progress active
+ * request (busy, still in clock-gate) is retried from resume_early.
  */
 static int apple_pmgr_ps_power_on(struct generic_pm_domain *genpd)
 {
@@ -210,7 +233,23 @@ static int apple_pmgr_ps_suspend_late(struct device *dev)
 
 static int apple_pmgr_ps_resume_early(struct device *dev)
 {
+	struct apple_pmgr_ps *ps = dev_get_drvdata(dev);
+	bool pending = ps->restore_pending;
+
+	ps->restore_pending = false;
 	apple_pmgr_ps_set_system_sleep(dev, false);
+
+	/*
+	 * IRQs are on again and every resume_noirq has finished, including
+	 * domains this FSM may have been waiting on. The LED resume write
+	 * has not run. Busy-wait the m1n1 window; a domain that already
+	 * reached active returns immediately.
+	 */
+	if (pending) {
+		ps->poll_timeout = APPLE_PMGR_PS_RESTORE_TIMEOUT;
+		apple_pmgr_ps_set(&ps->genpd, APPLE_PMGR_PS_ACTIVE, !ps->no_auto_pm);
+		ps->poll_timeout = 0;
+	}
 
 	return 0;
 }
