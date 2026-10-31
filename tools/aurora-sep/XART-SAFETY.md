@@ -100,6 +100,8 @@ the kernel log names the refused kind. What to do depends on the case:
   until it has been checked there.
 - A warm-attach Mac set up under the guard whose verify is refused: report
   the log line. `xart_guard=0` restores use at the cost of the protection.
+- After a boot policy change (a new Stage 1, another boot object), see
+  "Boot policy changes" below: one record, one boot, with a backup first.
 - A list that could not be read: every record that existed at boot is
   protected and nothing can be adopted, so new records cannot be written
   either.
@@ -109,6 +111,75 @@ the kernel log names the refused kind. What to do depends on the case:
 
 Turning the guard back on later does not list the records written while it
 was off.
+
+### Boot policy changes
+
+Installing a new Stage 1, changing the boot object, or converting the boot
+mode changes the boot policy the Mac keeps for Linux. The first time
+Linux's identity keybag is unlocked under the new policy (`CHANGE_LOCK_STATE`
+in `refkey.rs`, at the loader's first trusted-key seal), the enclave
+rewrites one session record that already existed. Linux did not create it,
+so the guard refuses it. The enclave then never answers the unlock, the
+machine ref-key stays down, and every trusted-key seal fails with EIO. The
+keybag, the ref-key and the enrolled fingerprints are untouched, and since
+the write was refused, so is the record.
+
+This was seen on the MacBook Pro M4 Pro (T6040, J616s) on 2026-10-28, after
+a Stage 1 reinstall that changed only the kernel collection hash (`coih`).
+The same kernel, under the old policy, unlocked the keybag without any
+session record write. Linux had never created a record there: the guard
+ran from Linux's first boot and its list stayed empty.
+
+Under an unchanged policy that first unlock rewrites no session record at
+all (every J616s boot before the change). So the driver treats a rewrite
+inside it as the policy change and lets exactly one through, by itself, on
+the first boot after the change:
+
+- only during the first unlock of an identity keybag that already existed,
+  once per boot; a keybag or ref-key created this boot closes the window;
+- only one kind-4 session record, only a rewrite, never a delete or a
+  shared root, and the record is not added to Linux's list;
+- only once the record's previous value is durable in
+  `/var/lib/aurora-sep-xart-policy-previous.bin` (kind, session id, length,
+  CRC, then the value); if it cannot be saved, the write is refused.
+
+The kernel log names the record ("allowed one rewrite of kind-4 record
+... for a boot policy change"), and `aurora-sep-load` logs the m1n1, iBoot
+and OS firmware versions the boot came up with.
+
+When the driver did not let it through (a kernel from before this, or a
+second record), `aurora-sep-policy-change` (root) allows it on the next
+boot:
+
+- After the change, with Touch ID down and the refusal in this boot's log,
+  run it with no arguments. It takes the session id from the refusal.
+- Before a planned change, run it with `--expect`. The record cannot be
+  named in advance, so the allowance covers the first existing kind-4
+  record the enclave asks to rewrite. The identity unlock is the first
+  thing that asks.
+
+Either way it first copies the whole 6 MiB gigalocker extent, the driver's
+host files and `/var/lib/fprint` to
+`/var/lib/aurora-rollback/sep-policy-change-<time>/` with `SHA256SUMS`, then
+writes `/var/lib/aurora-sep-xart-allow-once.bin`. At the next probe the
+driver empties that file before it uses it, so the allowance lasts one boot
+whether or not it is used. It covers one rewrite of one existing session
+record on the same terms as above, previous value saved first. The kernel
+log names the record either way. `--status`
+shows what is armed and what this boot refused; `--cancel` removes an
+allowance that was not used yet.
+
+`aurora-sep-load` recognises a refusal and stops at once with a message
+that points here, instead of retrying for two minutes.
+
+On the J616s the first such update (2026-10-28, Stage 1 window change)
+rewrote one kind-4 record and one shared root. The other six kind-4
+records and the kind-3 record kept their revisions, Ryan's enrolled
+finger matched afterwards, and it kept matching across later reboots.
+
+The copy of the gigalocker is evidence and a last resort, not an undo:
+writing an old copy back does not roll back the enclave's anti-replay
+counters, and the enclave may refuse it.
 
 ### What `aurora-sep-ready` reports
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=Offer fingerprint on a login screen that came up before Touch ID
+Documentation=file:///usr/share/doc/aurora-sep/README.md
+# Runs once both are up. Requisite: when Touch ID did not come up, there is
+# nothing to offer and the login screen stays as it is.
+After=aurora-sep-ready.service gdm.service
+Requisite=aurora-sep-ready.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/aurora-sep-greeter-fingerprint refresh
+
+[Install]
+WantedBy=gdm.service

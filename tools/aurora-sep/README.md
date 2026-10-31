@@ -300,17 +300,18 @@ and serves the copy to the login screen's shell alone through a GResource
 overlay. When the check is not exactly as expected, for example after a
 GNOME update, it changes nothing. The enable key above still applies.
 
-The login screen asks fprintd for the reader once, as it comes up, so the
-same unit also holds it back until `aurora-sep-ready.service` has finished:
-a few seconds on a healthy boot, but as long as the enclave takes when it is
-slow, up to 90 s after boot. Without fingerprint at the login screen that
-wait buys nothing, which is why both are one switch, off by default. It
-needs `gresource` from glib2-devel. With the packages, or after installing
-it by hand, turn it on with `systemctl enable`:
+The login screen asks fprintd for the reader once, as it comes up, and the
+enclave can take most of a minute after boot. The login screen does not wait
+for it: `aurora-sep-greeter-refresh.service` runs once both are up, and when
+Touch ID came up later and nobody has logged in, it shows the login screen
+again so it offers fingerprint. With automatic login, or once someone has
+logged in, it changes nothing. Both are one switch, off by default. It needs
+`gresource` from glib2-devel. With the packages, or after installing it by
+hand, turn it on with `systemctl enable`:
 
 ```sh
 install -Dm755 aurora-sep-greeter-fingerprint /usr/local/sbin/aurora-sep-greeter-fingerprint
-install -Dm644 aurora-sep-greeter-fingerprint.service /etc/systemd/system/
+install -Dm644 aurora-sep-greeter-fingerprint.service aurora-sep-greeter-refresh.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable aurora-sep-greeter-fingerprint.service
 ```

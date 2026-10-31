@@ -49,6 +49,22 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
+# The driver's diag attributes, when this kernel has them.
+diag=
+for d in /sys/bus/platform/devices/*.sep/diag; do
+    [ -d "$d" ] && diag=$d && break
+done
+
+# A refused xART write does not go away by waiting: the enclave keeps asking
+# for the same record. After a boot policy change (a new Stage 1, another
+# boot object) it is the record that the first unlock of Linux's keybag under
+# the new policy rewrites. Say so once, instead of retrying for minutes.
+guard_refused() {
+    [ -n "$diag" ] || return 1
+    refusals=$(cat "$diag/xart_guard_refusals" 2>/dev/null || echo 0)
+    [ -n "$refusals" ] && [ "$refusals" != 0 ]
+}
+
 start=$(uptime_s)
 deadline=$((start + ready_timeout))
 verified=false
@@ -66,6 +82,10 @@ while :; do
         keyctl revoke "$key_id" >/dev/null 2>&1 || true
     fi
     [ "$verified" = true ] && break
+    if guard_refused; then
+        log "the xART guard refused a record the enclave needs to unlock Linux's keybag. After a boot policy change (a new Stage 1 or boot object) the driver lets that one update through by itself; this one it could not. Touch ID and its fingerprints are intact. To allow it on the next boot, run aurora-sep-policy-change and reboot; see XART-SAFETY.md"
+        exit 1
+    fi
     [ "$(uptime_s)" -lt "$deadline" ] || break
     sleep 0.1
 done
@@ -75,6 +95,19 @@ if [ "$verified" != true ]; then
     exit 1
 fi
 log "trusted keys work after $(($(uptime_s) - start)) s"
+
+# The driver let the enclave update its record for a boot policy change.
+# Note what this boot came up with, for the record.
+if journalctl -k -b -o cat --no-pager -g 'for a boot policy change; its previous value' 2>/dev/null |
+    grep -q .; then
+    chosen=/proc/device-tree/chosen
+    versions=
+    for prop in m1n1-stage1-version m1n1-stage2-version iboot1-version iboot2-version os-fw-version; do
+        [ -r "$chosen/asahi,$prop" ] &&
+            versions="$versions $prop=$(tr -d '\0' <"$chosen/asahi,$prop")"
+    done
+    log "the boot policy changed since the last boot; the enclave updated its record and Touch ID kept its fingerprints ($versions )"
+fi
 
 if [ ! -s "$keybag" ] || [ ! -s "$refkey" ]; then
     log "$keybag or $refkey is missing or empty"

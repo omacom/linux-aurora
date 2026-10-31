@@ -106,11 +106,16 @@ unsafe extern "C" fn tk_seal(p: *mut c_void, _datablob: *mut c_char) -> c_int {
         let blob = match sep.refkey_seal_trusted(key) {
             Ok(blob) => blob,
             Err(e) => {
-                dev_warn!(
-                    sep.dev,
-                    "trusted-keys: seal failed ({:?}); the machine ref-key may not be established yet\n",
-                    e
-                );
+                // Callers retry until the ref-key is up: warn once, and keep
+                // each failure for debugging.
+                kernel::do_once_lite! {
+                    dev_warn!(
+                        sep.dev,
+                        "trusted-keys: seal failed ({:?}); the machine ref-key may not be established yet\n",
+                        e
+                    );
+                }
+                dev_dbg!(sep.dev, "trusted-keys: seal failed ({:?})\n", e);
                 return e.to_errno();
             }
         };
