@@ -76,6 +76,7 @@ static int avd_open_submit(struct avd_dev *avd, struct avd_frame *f)
 	u32 *words = f->prog->cpu;
 	unsigned int i;
 	void __iomem *reg;
+	u32 max;
 
 	if (avd->compat_active)
 		return -EBUSY;
@@ -95,33 +96,29 @@ static int avd_open_submit(struct avd_dev *avd, struct avd_frame *f)
 	reg = avd->ctrl + avd->variant->vp_slot_offset + vp * 4;
 	avd->compat_active = f;
 	avd->compat_ctx = ctx;
+	avd->compat_pp_kicked = false;
+	max = readl(avd->ctrl + avd->variant->submit_queue_max_offset + vp * 4);
 	for (i = 0; i < f->prog_words; i++) {
-		/* Preserve the old firmware's segment FIFO pacing in this shim. */
-		if (i && (words[i] & GENMASK(31, 24)) == AVD_OP_EXEC &&
-		    (!(avd->variant->quirks & AVD_QUIRK_V5_QUEUE_PACING) ||
-		     codec == AVD_CODEC_HEVC)) {
-			u32 max = readl(avd->ctrl + avd->variant->submit_queue_max_offset + vp * 4);
+		/*
+		 * Never write the VP FIFO register without room in its queue: a
+		 * write the block cannot accept may stall the bus. The old driver
+		 * only looked between segments, and programs exceed the 128-word
+		 * queue. Wait a bounded time for room, then give the frame to
+		 * the watchdog instead of writing.
+		 */
+		if (max) {
 			u32 cur = readl(avd->ctrl +
 					avd->variant->submit_queue_status_offset + vp * 4);
 
-			if (cur >= max) {
-				/* Already emitted words: only reset may release this slot. */
+			if (cur >= max &&
+			    readl_relaxed_poll_timeout(avd->ctrl +
+					avd->variant->submit_queue_status_offset + vp * 4,
+					cur, cur < max, 5, 2000)) {
+				dev_err_ratelimited(avd->dev,
+						    "VP%u queue full (%u/%u), not writing\n",
+						    vp, cur, max);
 				f->deadline = jiffies;
 				return 0;
-			}
-			if (cur >= max / 2) {
-				/*
-				 * Wait for the VP to drain below half full, but
-				 * only as long as it takes. The old fixed sleep
-				 * (100-150 us on v5 pacing parts, 500-650 us
-				 * elsewhere) stays the upper bound.
-				 */
-				u32 wait_us = avd->variant->quirks &
-					      AVD_QUIRK_V5_QUEUE_PACING ? 150 : 650;
-
-				readl_relaxed_poll_timeout(avd->ctrl +
-					avd->variant->submit_queue_status_offset + vp * 4,
-					cur, cur < max / 2, 10, wait_us);
 			}
 		}
 		writel(words[i], reg);
@@ -149,12 +146,24 @@ static irqreturn_t avd_open_irq(struct avd_dev *avd)
 		return IRQ_HANDLED;
 	}
 	if (status & 0x1000) {
+		/*
+		 * Only the PP this driver kicked for the active frame can finish
+		 * it. A surplus PP DONE of a multi-kick picture used to complete
+		 * the next frame early, so userspace reused its buffers while the
+		 * engine was still writing them.
+		 */
+		if (!avd->compat_pp_kicked) {
+			dev_dbg_ratelimited(avd->dev, "PP DONE before the frame's VP, ignored\n");
+			return IRQ_HANDLED;
+		}
 		avd->compat_active = NULL;
+		avd->compat_pp_kicked = false;
 		avd_frame_complete(avd, f->tag, 0);
 	} else if (status & 0x100) {
 		/* Old firmware only: no request tag and no firmware-side PP kick. */
 		if (f->ctx->coded_fmt_desc->ops->submit)
 			f->ctx->coded_fmt_desc->ops->submit(f->ctx);
+		avd->compat_pp_kicked = true;
 	} else {
 		dev_err_ratelimited(avd->dev, "open firmware error %#x\n", status);
 		f->deadline = jiffies;

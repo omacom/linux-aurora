@@ -10,14 +10,13 @@
 #include "avd-queue-internal.h"
 
 #define AVD_FRAME_TIMEOUT msecs_to_jiffies(2000)
-/* A stream that fails this many frames in a row in hardware is stopped. */
-#define AVD_CTX_MAX_HW_ERRORS 3
+/* A stream is stopped at its first frame that fails in hardware. */
+#define AVD_CTX_MAX_HW_ERRORS 1
 /* Never reset the decoder more often than this. */
 #define AVD_RECOVER_GAP_MS 20
-/* More than AVD_STORM_MAX recoveries within AVD_STORM_WINDOW: cool down. */
-#define AVD_STORM_MAX 8
-#define AVD_STORM_WINDOW msecs_to_jiffies(10000)
-#define AVD_COOLDOWN msecs_to_jiffies(10000)
+/* A third recovery within AVD_STORM_WINDOW is refused: the decoder is retired. */
+#define AVD_STORM_MAX 2
+#define AVD_STORM_WINDOW msecs_to_jiffies(60000)
 #define AVD_RETRY_DELAY msecs_to_jiffies(1)
 #define AVD_PROGRAM_SIZE SZ_2M
 
@@ -104,30 +103,37 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 	int ret;
 
 	/*
-	 * A stream whose every frame faults (an H0 error storm) used to reset
-	 * the decoder back to back, about once per millisecond, until the
-	 * machine hung. Space recoveries out, and after a storm stop taking
-	 * new frames for a while instead of resetting again.
+	 * Every decoder reset is a risk to the whole machine (three hard hangs
+	 * on the J616s followed timeouts and resets), so recover sparingly:
+	 * at least AVD_RECOVER_GAP_MS apart, at most AVD_STORM_MAX times in
+	 * AVD_STORM_WINDOW, and never again after a recovery fails. A retired
+	 * decoder fails every frame without touching the hardware until the
+	 * module is reloaded.
 	 */
-	if (avd->last_recover &&
-	    time_before(jiffies, avd->last_recover + msecs_to_jiffies(AVD_RECOVER_GAP_MS)))
-		msleep(AVD_RECOVER_GAP_MS);
-	if (!avd->storm_count || time_after(jiffies, avd->storm_start + AVD_STORM_WINDOW)) {
-		avd->storm_start = jiffies;
-		avd->storm_count = 0;
+	if (avd->faulted) {
+		ret = -ENODEV;
+	} else {
+		if (!avd->storm_count ||
+		    time_after(jiffies, avd->storm_start + AVD_STORM_WINDOW)) {
+			avd->storm_start = jiffies;
+			avd->storm_count = 0;
+		}
+		if (++avd->storm_count > AVD_STORM_MAX) {
+			ret = -EBUSY;
+		} else {
+			if (avd->last_recover &&
+			    time_before(jiffies, avd->last_recover +
+					msecs_to_jiffies(AVD_RECOVER_GAP_MS)))
+				msleep(AVD_RECOVER_GAP_MS);
+			ret = avd_pm_recover(avd);
+			avd->last_recover = jiffies ?: 1;
+		}
+		if (ret) {
+			WRITE_ONCE(avd->faulted, true);
+			dev_err(avd->dev, "decoder retired after %s (%d): reload the module to use it again\n",
+				ret == -EBUSY ? "repeated resets" : "a failed reset", ret);
+		}
 	}
-	if (++avd->storm_count > AVD_STORM_MAX) {
-		dev_err(avd->dev, "%u decoder recoveries in %u s: failing new frames for %u s\n",
-			avd->storm_count, jiffies_to_msecs(AVD_STORM_WINDOW) / 1000,
-			jiffies_to_msecs(AVD_COOLDOWN) / 1000);
-		WRITE_ONCE(avd->cooldown_until, jiffies + AVD_COOLDOWN);
-		avd->storm_count = 0;
-	}
-	ret = avd_pm_recover(avd);
-	avd->last_recover = jiffies ?: 1;
-	WRITE_ONCE(avd->faulted, !!ret);
-	if (ret)
-		dev_err(avd->dev, "queue reset failed: %d\n", ret);
 	avd->compat_active = NULL;
 	list_for_each_entry(ctx, &avd->contexts, queue_node)
 		ctx->session_started = false;
@@ -270,7 +276,7 @@ int avd_queue_ready(void *priv)
 
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	/*
-	 * A faulted or cooling-down decoder still schedules: submission fails
+	 * A retired decoder still schedules: submission fails
 	 * those frames at once, so clients see errors instead of waiting.
 	 */
 	/*
@@ -310,8 +316,7 @@ static void avd_queue_submit_work(struct work_struct *work)
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	if (avd->deferred_ctx == ctx)
 		avd->deferred_ctx = NULL;
-	if (avd->stopping || ctx->draining || avd->faulted || ctx->broken ||
-	    time_before(jiffies, READ_ONCE(avd->cooldown_until))) {
+	if (avd->stopping || ctx->draining || READ_ONCE(avd->faulted) || ctx->broken) {
 		struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 
 		spin_unlock_irqrestore(&avd->queue_lock, flags);

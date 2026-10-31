@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/limits.h>
@@ -16,12 +17,10 @@
 
 void avd_pm_enable_irq(struct avd_dev *avd)
 {
-	unsigned long flags;
-
 	if (avd->pm.irq >= 0 && !avd->pm.irq_enabled) {
-		spin_lock_irqsave(&avd->pm.irq_lock, flags);
+		mutex_lock(&avd->pm.hw_lock);
 		avd->pm.hw_on = true;
-		spin_unlock_irqrestore(&avd->pm.irq_lock, flags);
+		mutex_unlock(&avd->pm.hw_lock);
 		enable_irq(avd->pm.irq);
 		avd->pm.irq_enabled = true;
 	}
@@ -30,19 +29,17 @@ void avd_pm_enable_irq(struct avd_dev *avd)
 /*
  * Callers may hold queue_mutex, which the threaded handler takes first, so
  * never wait for the handler here (disable_irq() would deadlock). Instead
- * close hardware access under irq_lock: a handler already touching the
+ * close hardware access under hw_lock: a handler already touching the
  * decoder finishes before this returns, and any later one sees hw_on clear
  * or a new irq_gen and leaves the hardware alone.
  */
 static void avd_pm_disable_irq(struct avd_dev *avd)
 {
-	unsigned long flags;
-
 	if (avd->pm.irq >= 0 && avd->pm.irq_enabled) {
-		spin_lock_irqsave(&avd->pm.irq_lock, flags);
+		mutex_lock(&avd->pm.hw_lock);
 		avd->pm.hw_on = false;
 		avd->pm.irq_gen++;
-		spin_unlock_irqrestore(&avd->pm.irq_lock, flags);
+		mutex_unlock(&avd->pm.hw_lock);
 		disable_irq_nosync(avd->pm.irq);
 		avd->pm.irq_enabled = false;
 	}
@@ -52,12 +49,12 @@ static void avd_pm_disable_irq(struct avd_dev *avd)
 irqreturn_t avd_pm_irq(struct avd_dev *avd, unsigned int gen)
 {
 	irqreturn_t ret = IRQ_HANDLED;
-	unsigned long flags;
 
-	spin_lock_irqsave(&avd->pm.irq_lock, flags);
+	/* Caller holds queue_mutex; hw_lock holders never wait for it. */
+	mutex_lock(&avd->pm.hw_lock);
 	if (avd->pm.hw_on && gen == avd->pm.irq_gen)
 		ret = avd->backend->irq(avd);
-	spin_unlock_irqrestore(&avd->pm.irq_lock, flags);
+	mutex_unlock(&avd->pm.hw_lock);
 	return ret;
 }
 
@@ -194,7 +191,7 @@ void avd_pm_init(struct avd_dev *avd, const struct avd_backend_ops *backend,
 	avd->pm.dart_active = false;
 	avd->pm.irq = -1;
 	avd->pm.irq_enabled = false;
-	spin_lock_init(&avd->pm.irq_lock);
+	mutex_init(&avd->pm.hw_lock);
 	avd->pm.hw_on = false;
 	avd->pm.irq_gen = 0;
 	avd->backend = backend;
@@ -319,21 +316,31 @@ int avd_pm_recover(struct avd_dev *avd)
 	avd_pm_disable_irq(avd);
 	dev_warn(avd->dev, "recover: stop firmware\n");
 	avd->backend->shutdown(avd);
-	dev_warn(avd->dev, "recover: reset\n");
-	ret = reset_control_reset(avd->rstc);
-	if (ret) {
-		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
-		return ret;
-	}
+	/*
+	 * Block the decoder's DMA at its DART before resetting the engine: with
+	 * the empty domain attached, any transfer still in flight faults at the
+	 * DART instead of reaching memory that may already be reused, and the
+	 * pmgr reset (which does not wait for the engine to go idle on every
+	 * SoC) never cuts a transfer that is half way through the DART. Then
+	 * give outstanding transfers time to drain into faults.
+	 */
 	if (avd->domain) {
 		if (!avd->empty_domain)
 			return -ENODEV;
-		dev_warn(avd->dev, "recover: DART flush\n");
+		dev_warn(avd->dev, "recover: block DMA\n");
 		ret = iommu_attach_device(avd->empty_domain, avd->dev);
 		if (ret) {
 			dev_err(avd->dev, "recover: DART empty attach failed: %d\n", ret);
 			return ret;
 		}
+		usleep_range(5000, 6000);
+	}
+	dev_warn(avd->dev, "recover: reset\n");
+	ret = reset_control_reset(avd->rstc);
+	if (ret)
+		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
+	if (avd->domain) {
+		dev_warn(avd->dev, "recover: restore DMA\n");
 		iommu_detach_device(avd->empty_domain, avd->dev);
 		/* Do not reboot against an empty/blocked domain after a failed restore. */
 		if (iommu_get_domain_for_dev(avd->dev) != avd->domain) {
@@ -341,6 +348,8 @@ int avd_pm_recover(struct avd_dev *avd)
 			return -EIO;
 		}
 	}
+	if (ret)
+		return ret;
 	dev_warn(avd->dev, "recover: boot firmware\n");
 	ret = avd_pm_backend_resume(avd);
 	if (ret) {
@@ -373,8 +382,6 @@ int avd_pm_power_on(struct avd_dev *avd)
 		return ret;
 	}
 	avd_pm_enable_irq(avd);
-	/* A clean boot after power-up ends a failed recovery's fault state. */
-	WRITE_ONCE(avd->faulted, false);
 
 	if (avd->pm.queue->resubmit)
 		avd->pm.queue->resubmit(avd);

@@ -251,13 +251,12 @@ struct avd_dev {
 	u64 frame_seq;
 	unsigned int inflight;
 	bool stopping;
+	/* Retired after a failed or too frequent recovery, until module reload. */
 	bool faulted;
 	/* Recovery pacing: when the last one ran, and a sliding storm count. */
 	unsigned long last_recover;
 	unsigned long storm_start;
 	unsigned int storm_count;
-	/* After a recovery storm, fail new frames until this time. */
-	unsigned long cooldown_until;
 	u64 fw_generation;
 	const struct avd_backend_ops *backend;
 	void *backend_priv;
@@ -266,6 +265,8 @@ struct avd_dev {
 	/* Open firmware queue ABI 2 state, NULL when the node has no SRAM. */
 	struct avd_qfw *qfw;
 	struct avd_frame *compat_active;
+	/* The active legacy frame's VP finished and its PP was kicked. */
+	bool compat_pp_kicked;
 	/* Context of the last legacy submission, for VP DONE without a frame. */
 	struct avd_ctx *compat_ctx;
 	bool compat_held;

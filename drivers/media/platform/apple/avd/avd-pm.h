@@ -32,12 +32,13 @@ struct avd_pm {
 	int irq;
 	bool irq_enabled;
 	/*
-	 * irq_lock guards hw_on and irq_gen. The threaded handler touches the
-	 * decoder only under irq_lock with hw_on set and an unchanged irq_gen,
+	 * hw_lock guards hw_on and irq_gen. The threaded handler touches the
+	 * decoder only under hw_lock with hw_on set and an unchanged irq_gen,
 	 * so turning the IRQ off never has to wait for the handler thread
 	 * (which may itself be waiting for queue_mutex).
 	 */
-	spinlock_t irq_lock;
+	/* A mutex: decoder MMIO is never done with interrupts off. */
+	struct mutex hw_lock;
 	bool hw_on;
 	unsigned int irq_gen;
 	void __iomem *piodma;
