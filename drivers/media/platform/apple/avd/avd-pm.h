@@ -29,6 +29,8 @@ struct avd_pm {
 	struct mutex lock;
 	struct list_head deferred_unmaps;
 	bool dart_active;
+	int irq;
+	bool irq_enabled;
 	wait_queue_head_t idle_wait;
 	/* Protected by queue_lock; counts drain operations, not stopped streams. */
 	unsigned int draining;

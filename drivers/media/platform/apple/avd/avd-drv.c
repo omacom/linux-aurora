@@ -627,8 +627,9 @@ static int avd_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 1);
 	if (irq < 0)
 		return irq;
+	avd->pm.irq = irq;
 	ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
-			avd_irq_handler, IRQF_ONESHOT,
+			avd_irq_handler, IRQF_ONESHOT | IRQF_NO_AUTOEN,
 			dev_name(&pdev->dev), avd);
 	if (ret) {
 		dev_err(avd->dev, "Could not request IRQ 1");

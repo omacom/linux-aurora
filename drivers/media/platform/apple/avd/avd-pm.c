@@ -9,6 +9,15 @@
 #define AVD_AUTOSUSPEND_MS 100
 #define AVD_DRAIN_TIMEOUT_MS 5000
 
+static void avd_pm_disable_irq(struct avd_dev *avd)
+{
+	if (avd->pm.irq >= 0 && avd->pm.irq_enabled) {
+		/* Wait out threaded handlers before the domain can disappear. */
+		disable_irq(avd->pm.irq);
+		avd->pm.irq_enabled = false;
+	}
+}
+
 struct avd_dma_release {
 	struct avd_deferred_unmap unmap;
 	void *cpu;
@@ -140,6 +149,8 @@ void avd_pm_init(struct avd_dev *avd, const struct avd_backend_ops *backend,
 	INIT_LIST_HEAD(&avd->pm.deferred_unmaps);
 	init_waitqueue_head(&avd->pm.idle_wait);
 	avd->pm.dart_active = false;
+	avd->pm.irq = -1;
+	avd->pm.irq_enabled = false;
 	avd->backend = backend;
 	avd->pm.queue = queue;
 }
@@ -162,6 +173,8 @@ void avd_pm_disable(struct avd_dev *avd)
 	if (ret < 0)
 		dev_warn(avd->dev, "final power transition failed: %d\n", ret);
 	pm_runtime_disable(avd->dev);
+	/* Also close the host IRQ if the final hardware transition failed. */
+	avd_pm_disable_irq(avd);
 	pm_runtime_dont_use_autosuspend(avd->dev);
 	/* Resume may have kicked the already-stopped queue. */
 	cancel_delayed_work_sync(&avd->queue_work);
@@ -230,6 +243,10 @@ int avd_pm_power_on(struct avd_dev *avd)
 		mutex_unlock(&avd->pm.lock);
 		return ret;
 	}
+	if (avd->pm.irq >= 0 && !avd->pm.irq_enabled) {
+		enable_irq(avd->pm.irq);
+		avd->pm.irq_enabled = true;
+	}
 
 	if (avd->pm.queue->resubmit)
 		avd->pm.queue->resubmit(avd);
@@ -253,6 +270,7 @@ int avd_pm_power_off(struct avd_dev *avd)
 	} else {
 		backend->shutdown(avd);
 	}
+	avd_pm_disable_irq(avd);
 
 	/* No more firmware DMA; suppliers stay on until this callback returns. */
 	mutex_lock(&avd->pm.lock);
