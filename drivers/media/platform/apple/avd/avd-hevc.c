@@ -1338,6 +1338,51 @@ static int avd_hevc_compute_tiles(struct avd_ctx *ctx, struct avd_hevc_run *run)
 	return 0;
 }
 
+/*
+ * The slice builder below expects the GStreamer layout: the slices tile the
+ * OUTPUT buffer as whole NALs, bit_size covers the whole NAL and
+ * data_byte_offset is the slice data's offset inside it. FFmpeg's request
+ * API backend instead gives each slice's data_byte_offset from the start of
+ * the buffer and a bit_size of the slice data only, so every slice was given
+ * a wrong address and size and the VP raised its error interrupt on every
+ * frame. Detect the absolute layout (complete and unambiguous) and rewrite
+ * the run's private copy into the equivalent NAL-relative description.
+ */
+static void avd_hevc_normalize_slices(struct avd_hevc_run *run, u32 payload)
+{
+	struct v4l2_ctrl_hevc_slice_params *sl =
+		(struct v4l2_ctrl_hevc_slice_params *)run->sl;
+	u64 nal_end = 0, data_end = 0, prev_end = 0;
+	bool nal = true, absolute = true;
+	int i;
+
+	if (!run->num_slices || !payload)
+		return;
+	for (i = 0; i < run->num_slices; i++) {
+		u64 bytes = DIV_ROUND_UP((u64)sl[i].bit_size, 8);
+		u64 start = sl[i].data_byte_offset;
+
+		if (!bytes || start >= bytes || nal_end + bytes > payload)
+			nal = false;
+		nal_end += bytes;
+		if (!bytes || start < data_end || start + bytes > payload)
+			absolute = false;
+		data_end = start + bytes;
+	}
+	nal &= nal_end == payload;
+	absolute &= data_end == payload;
+	if (!absolute || nal)
+		return;
+	for (i = 0; i < run->num_slices; i++) {
+		u64 bytes = DIV_ROUND_UP((u64)sl[i].bit_size, 8);
+		u64 start = sl[i].data_byte_offset;
+
+		sl[i].data_byte_offset = start - prev_end;
+		sl[i].bit_size = (start - prev_end + bytes) * 8;
+		prev_end = start + bytes;
+	}
+}
+
 static int avd_hevc_run_preamble(struct avd_ctx *ctx, struct avd_hevc_run *run)
 {
 	struct v4l2_ctrl *ctrl, *sl, *ep;
@@ -1410,6 +1455,8 @@ static int avd_hevc_run(struct avd_ctx *ctx)
 	if (ret)
 		return ret;
 
+	avd_hevc_normalize_slices(&run,
+				  vb2_get_plane_payload(&run.base.bufs.src->vb2_buf, 0));
 	dst = vb2_to_avd_decoded_buf(&run.base.bufs.dst->vb2_buf);
 	update_dec_buf_info(dst, &run.sl[0]);
 
