@@ -291,6 +291,7 @@ pub(crate) static T8122: Soc = Soc {
     cores_per_cluster: 10,
     mailbox_compatibles: &[
         b"apple,t8122-agx-asc-mailbox\0",
+        b"apple,t8122-agx-asc-mailbox\0apple,asc-mailbox-v4\0",
         b"apple,t8122-asc-mailbox\0apple,asc-mailbox-v4\0",
     ],
     mailbox_interrupts: &[0, 723, 4, 0, 724, 4, 0, 725, 4, 0, 726, 4],
