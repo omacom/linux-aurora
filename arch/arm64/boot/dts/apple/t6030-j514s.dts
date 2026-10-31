@@ -18,6 +18,10 @@
 	compatible = "apple,j514s", "apple,t6030", "apple,arm-platform";
 	model = "Apple MacBook Pro (14-inch, M3 Pro, Nov 2023)";
 
+	aliases {
+		sep = &sep;
+	};
+
 	chosen {
 		asahi,t6030-dispext = "1";
 	};
@@ -96,4 +100,28 @@
 
 &isp {
 	apple,platform-id = <16>;
+};
+
+/* apple_sep enables the SEP and its DART when it loads. */
+&sep_mbox {
+	status = "okay";
+};
+
+/*
+ * Touch ID sensor (Mesa 0x3352, J514s ADT /arm-io/spi2/mesa): power on
+ * NUB GPIO 33, active high. As on J613, the data-ready line (AP GPIO 200)
+ * is left out, so the driver polls until its trigger is confirmed. Native
+ * chip select only.
+ */
+&spi2 {
+	status = "okay";
+};
+
+&mesa {
+	status = "okay";
+	enable-gpios = <&pinctrl_nub 33 GPIO_ACTIVE_HIGH>;
+	spi-cs-setup-delay-ns = <20>;
+	spi-cs-hold-delay-ns = <20>;
+	/* Per-device factory data from this Mac's own iBoot system container. */
+	firmware-name = "apple/mesacal-j514s.bin";
 };

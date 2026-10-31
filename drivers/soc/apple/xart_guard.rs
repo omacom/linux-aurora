@@ -1004,6 +1004,7 @@ mod tests {
         assert_eq!(level(-1, profile::T6020_SEPOS13.xart_guard), Some(1));
         assert_eq!(level(-1, profile::T8112.xart_guard), Some(1));
         assert_eq!(level(-1, profile::T8122.xart_guard), Some(1));
+        assert_eq!(level(-1, profile::T6030.xart_guard), Some(1));
         // Off on the Neo, whose Linux records predate the list.
         assert_eq!(level(-1, profile::T8140.xart_guard), None);
         assert_eq!(level(i8::MIN, 1), Some(1));
