@@ -24,8 +24,6 @@
 #include "avd-regs.h"
 #include "avd-apple-protocol.h"
 
-#define AVD_CODEC_INFO_MAX_SIZE	0x40
-
 static void calc_tile_meta(u32 w, u32 h, u32 bpb, u32 tile_dim,
 			   u32 meta_hdr_bytes, u32 *tile, u32 *meta)
 {
@@ -592,7 +590,6 @@ static int avd_probe(struct platform_device *pdev)
 {
 	struct avd_dev *avd;
 	const struct of_device_id *match;
-	const char *codec_info = NULL;
 	int ret, irq;
 
 	avd = devm_kzalloc(&pdev->dev, sizeof(*avd), GFP_KERNEL);

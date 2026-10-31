@@ -42,9 +42,12 @@
 
 int avd_boot(struct avd_dev *avd)
 {
+	struct resource *code = platform_get_resource_byname(avd->pdev, IORESOURCE_MEM, "code");
 	u32 val;
 	int ret;
 
+	if (!avd->fw || !avd->fw->size || !code || avd->fw->size > resource_size(code))
+		return -EINVAL;
 	if (avd->variant->revision != 3)
 		dev_info_once(avd->dev, "booting hw version: %04x",
 				readl_relaxed(avd->ctrl));

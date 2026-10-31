@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only OR MIT
+// SPDX-License-Identifier: GPL-2.0-only
+/* Legacy transport split from avd-drv.c; Copyright The Asahi Linux Contributors. */
 #include <linux/delay.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
@@ -78,6 +79,8 @@ static int avd_open_submit(struct avd_dev *avd, struct avd_frame *f)
 	if (codec > AVD_CODEC_AV1 || !words || !f->prog_words ||
 	    f->prog_words > f->prog->size / sizeof(u32))
 		return -EINVAL;
+	if (!(avd->capabilities & BIT(codec)))
+		return -EOPNOTSUPP;
 	for (i = 0; i < codec; i++)
 		vp += avd->variant->vp_slots[i];
 	if (avd->variant->vp_slot_base[codec])
@@ -143,6 +146,32 @@ const struct avd_backend_ops avd_open_backend = {
 	.irq = avd_open_irq,
 };
 
+static void avd_open_capabilities(struct avd_dev *avd)
+{
+	static const struct {
+		const char *name;
+		u32 bit;
+	} codecs[] = {
+		{ "h265", AVD_CAPABILITY_HEVC },
+		{ "h264", AVD_CAPABILITY_H264 },
+		{ "vp9", AVD_CAPABILITY_VP9 },
+		{ "av1", AVD_CAPABILITY_AV1 },
+	};
+	const char *info;
+	unsigned int i;
+
+	avd->capabilities = avd->variant->capabilities;
+	if (!avd->fw || avd->fw->size < 0x40)
+		return;
+	info = avd->fw->data + avd->fw->size - 0x40;
+	if (memcmp(info, "CODECS:", 7))
+		return;
+	avd->capabilities = 0;
+	for (i = 0; i < ARRAY_SIZE(codecs); i++)
+		if (strnstr(info, codecs[i].name, 0x40))
+			avd->capabilities |= avd->variant->capabilities & codecs[i].bit;
+}
+
 int avd_backend_select(struct avd_dev *avd)
 {
 	int ret;
@@ -152,13 +181,17 @@ int avd_backend_select(struct avd_dev *avd)
 		ret = avd_apple_backend.probe(avd);
 		if (!ret) {
 			avd->backend = &avd_apple_backend;
+			avd->capabilities = avd->variant->capabilities;
 			return 0;
 		}
 		if (ret != -ENOENT && ret != -EOPNOTSUPP)
 			return ret;
 	}
 	avd->backend = &avd_open_backend;
-	return request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
+	ret = request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
+	if (!ret)
+		avd_open_capabilities(avd);
+	return ret;
 }
 
 int avd_backend_boot(struct avd_dev *avd)
@@ -170,6 +203,7 @@ int avd_backend_boot(struct avd_dev *avd)
 		if (ret)
 			return ret;
 		avd->backend = &avd_open_backend;
+		avd_open_capabilities(avd);
 		ret = avd->backend->boot(avd);
 	}
 	if (!ret)
