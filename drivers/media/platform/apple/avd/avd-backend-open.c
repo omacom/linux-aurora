@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Legacy transport split from avd-drv.c; Copyright The Asahi Linux Contributors. */
 #include <linux/delay.h>
+#include <linux/iopoll.h>
 #include <linux/jiffies.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
@@ -105,10 +106,18 @@ static int avd_open_submit(struct avd_dev *avd, struct avd_frame *f)
 				return 0;
 			}
 			if (cur >= max / 2) {
-				if (avd->variant->quirks & AVD_QUIRK_V5_QUEUE_PACING)
-					usleep_range(100, 150);
-				else
-					usleep_range(500, 650);
+				/*
+				 * Wait for the VP to drain below half full, but
+				 * only as long as it takes. The old fixed sleep
+				 * (100-150 us on v5 pacing parts, 500-650 us
+				 * elsewhere) stays the upper bound.
+				 */
+				u32 wait_us = avd->variant->quirks &
+					      AVD_QUIRK_V5_QUEUE_PACING ? 150 : 650;
+
+				readl_relaxed_poll_timeout(avd->ctrl +
+					avd->variant->submit_queue_status_offset + vp * 4,
+					cur, cur < max / 2, 10, wait_us);
 			}
 		}
 		writel(words[i], reg);
