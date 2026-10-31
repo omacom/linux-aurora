@@ -15,3 +15,34 @@ mod m3_init_storage;
 mod m3_thermal_policy;
 #[path = "../../drivers/gpu/drm/asahi/m3/t8122_hwdata.rs"]
 mod t8122_hwdata;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_init_26.rs"]
+mod m3_init_26;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_profile.rs"]
+mod m3_profile;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_mmio_26.rs"]
+mod m3_mmio_26;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_queue_layout.rs"]
+mod m3_queue_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_pool_layout.rs"]
+mod m3_pool_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_layout.rs"]
+mod m3_compute_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_channel_format.rs"]
+mod m3_channel_format;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_sequence.rs"]
+mod m3_compute_sequence;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_state_layout.rs"]
+mod m3_state_layout;
+
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_storage.rs"]
+mod m3_compute_storage;
