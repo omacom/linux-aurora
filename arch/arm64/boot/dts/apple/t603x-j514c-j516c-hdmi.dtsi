@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * HDMI port of the M3 Max MacBook Pros (J514C, J516C), as on the J514S/J516S
+ * (t603x-j514s-j516s-hdmi.dtsi).
+ *
+ * The ADT's atc3-dpphy is a DisplayPort-only port (port-type 6, no USB)
+ * behind display-crossbar0's atc3 endpoint, feeding the on-board DP-to-HDMI
+ * converter (dp2hdmi-gpio0). Its power enables are the J514S/J516S SMC pins
+ * (gP0f hdmi_pwr_en, gP1a dp2hdmi_pwr_en); the hotplug signal is AOP GPIO 42
+ * (atc3-hdmi function-hdmi_hpd), not 47 as on the J514S/J516S.
+ *
+ * Any dispext can reach ATC3 through the crossbar; dcpext0 takes the fixed
+ * route here, as the first external processor does on T6030, and stays a
+ * hybrid pipeline that is lent to a USB-C port while no HDMI display is
+ * attached. (On the J516C dcpext3 times out on the fixed route just as
+ * dcpext1..3 do on USB-C.)
+ *
+ * The port's audio (DPA1 over the SIO) is not described yet.
+ */
+
+/ {
+	aliases {
+		/* m1n1 copies the ADT's atc-phy3 calibration to this alias. */
+		atcphy3 = &atcphy3;
+	};
+};
+
+&soc {
+	/*
+	 * Only the DisplayPort block of ATC3 is described, so the PHY driver
+	 * runs it DisplayPort-only and never touches the USB2 or PIPE blocks.
+	 * The ADT's atc-phy3 and atc3-dpxbar sit where the T6030's do.
+	 */
+	atcphy3: phy@1303000000 {
+		compatible = "apple,t6031-atcphy", "apple,t8122-atcphy";
+		reg = <0x13 0x03000000 0x0 0x4c000>;
+		reg-names = "core";
+
+		#phy-cells = <1>;
+		#reset-cells = <0>;
+
+		orientation-switch;
+		mode-switch;
+		power-domains = <&ps_atc3_common>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@2 {
+				reg = <2>;
+				atcphy3_dp: endpoint {
+					remote-endpoint = <&dcpext0_dpout>;
+				};
+			};
+		};
+	};
+
+	atcphy3_xbar: mux@130304c000 {
+		compatible = "apple,t6031-display-crossbar",
+			     "apple,t6020-display-crossbar";
+		reg = <0x13 0x0304c000 0x0 0x4000>;
+		#mux-control-cells = <1>;
+		power-domains = <&ps_atc3_usb>;
+	};
+};
+
+&dcpext0 {
+	apple,connector-type = "HDMI-A";
+
+	/* HDMI HPD, also used as the hotplug interrupt */
+	hdmi-hpd-gpios = <&pinctrl_aop 42 GPIO_ACTIVE_HIGH>;
+	hdmi-pwren-gpios = <&smc_gpio 15 GPIO_ACTIVE_HIGH>;
+	dp2hdmi-pwren-gpios = <&smc_gpio 26 GPIO_ACTIVE_HIGH>;
+
+	phys = <&atcphy3 PHY_TYPE_DP>, <&atcphy0 PHY_TYPE_DP>,
+	       <&atcphy1 PHY_TYPE_DP>, <&atcphy2 PHY_TYPE_DP>;
+	phy-names = "dp-phy", "typec0", "typec1", "typec2";
+	mux-controls = <&atcphy3_xbar 0>, <&atcphy0_xbar 0>,
+		       <&atcphy1_xbar 0>, <&atcphy2_xbar 0>,
+		       <&atcphy0_xbar 1>, <&atcphy0_xbar 2>,
+		       <&atcphy1_xbar 1>, <&atcphy1_xbar 2>,
+		       <&atcphy2_xbar 1>, <&atcphy2_xbar 2>;
+	mux-control-names = "dp-xbar", "typec0", "typec1", "typec2",
+			    "typec0-dpin0", "typec0-dpin1",
+			    "typec1-dpin0", "typec1-dpin1",
+			    "typec2-dpin0", "typec2-dpin1";
+	/* The crossbar's upstream port N is dispextN (ADT display-crossbar0). */
+	mux-index = <0>;
+	apple,dptx-phy = <3>;
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+			dcpext0_dpout: endpoint {
+				remote-endpoint = <&atcphy3_dp>;
+			};
+		};
+	};
+};
+
+/*
+ * ATC3 has no USB consumer that would hold its common block on, so across
+ * system sleep it would power down and lose the HDMI PHY state.
+ */
+&ps_atc3_common {
+	apple,always-on;
+};
