@@ -2326,6 +2326,15 @@
         "tools/asahi/test-m3-uapi.py"
       ],
       "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/test-m3-power.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/test-m3-power.py"
+      ],
+      "rust": "1.85.0"
     }
   ],
   "helpers": {

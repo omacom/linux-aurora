@@ -18,6 +18,10 @@ pub(crate) struct Area {
 }
 
 impl Area {
+    pub(crate) fn writable(self) -> bool {
+        self.writable
+    }
+
     pub(crate) fn page_offset(self) -> usize {
         (self.physical & 0x3fff) as usize
     }
@@ -76,6 +80,16 @@ pub(crate) fn area(slot: usize, bases: RegisterBases) -> Result<Option<Area>, Er
     };
     let physical = base.checked_add(offset).ok_or(Error::Address)?;
     if physical == 0 || physical.checked_add(bytes as u64).ok_or(Error::Address)? > 1 << 42 {
+        return Err(Error::Address);
+    }
+    if split
+        && (physical & 0x3fff != 0
+            || physical
+                .checked_add(0x200_0000)
+                .and_then(|v| v.checked_add((bytes / 2) as u64))
+                .filter(|v| *v <= 1 << 42)
+                .is_none())
+    {
         return Err(Error::Address);
     }
     Ok(Some(Area {
@@ -143,8 +157,7 @@ pub(crate) fn encode(
 mod tests {
     use super::*;
 
-    // Register identities already present in the public T8122 configuration;
-    // memory-controller bank geometry is shared with the public 25G83 encoder.
+    // Resource owners exercise subpage mappings and split memory-controller banks.
     const BASES: RegisterBases = RegisterBases {
         gpu: 0x2_9000_0000,
         interrupt: 0x2_d101_4000,
@@ -259,6 +272,22 @@ mod tests {
                 encode(0, BASES, Some(good), &mut output[..length]),
                 Err(Error::Size)
             );
+            assert_eq!(output, [0xa5; RECORD_BYTES]);
+        }
+    }
+    #[test]
+    fn split_banks_require_page_alignment_and_both_fit_the_bus() {
+        for memory in [BASES.memory + 4, (1 << 42) - 0x100_0000] {
+            let mut bases = BASES;
+            bases.memory = memory;
+            let mut output = [0xa5; RECORD_BYTES];
+            assert!(encode(
+                3,
+                bases,
+                Some(Region::new(0xffff_fc21_0000_0000, 0x30000).unwrap()),
+                &mut output
+            )
+            .is_err());
             assert_eq!(output, [0xa5; RECORD_BYTES]);
         }
     }

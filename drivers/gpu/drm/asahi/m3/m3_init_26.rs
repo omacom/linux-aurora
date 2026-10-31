@@ -62,7 +62,7 @@ pub(crate) fn allocation(index: usize) -> Result<Allocation, Error> {
 }
 
 pub(crate) fn cached(index: usize) -> bool {
-    matches!(index, 38 | 39 | 42 | 43 | 44 | PERFORMANCE_CONTROL)
+    matches!(index, 39 | PERFORMANCE_CONTROL)
 }
 
 pub(crate) struct PointerGraph<'a> {
@@ -103,7 +103,10 @@ impl PointerGraph<'_> {
         }
         let scratch = self.scratch.at(0, 0x8000)?;
         let scratch_end = scratch.checked_add(0x8000).ok_or(Error::Address)?;
-        if scratch & 0x3fff != 0 || scratch_end > 0xffff_fc2f_fc00_0000 {
+        if scratch & 0x3fff != 0
+            || scratch < 0xffff_fc20_0000_0000
+            || scratch_end > 0xffff_fc2f_fc00_0000
+        {
             return Err(Error::Address);
         }
         for (index, address) in addresses.iter().enumerate() {
@@ -270,6 +273,21 @@ mod tests {
         owners[1] = owners[0];
         let mut output = [0xa5; RUNTIME_SIZE];
         assert!(graph(&owners).runtime(&mut output).is_err());
+        assert_eq!(output, [0xa5; RUNTIME_SIZE]);
+    }
+    #[test]
+    fn only_atomic_controller_owners_are_firmware_cacheable() {
+        let selected: Vec<_> = (0..COUNT).filter(|index| cached(*index)).collect();
+        assert_eq!(selected, vec![39, PERFORMANCE_CONTROL]);
+    }
+
+    #[test]
+    fn scratch_requires_its_firmware_host_window() {
+        let owners = owners(0);
+        let mut value = graph(&owners);
+        value.scratch = Region::new(0xffff_fc10_0000_0000, 0x8000).unwrap();
+        let mut output = [0xa5; RUNTIME_SIZE];
+        assert_eq!(value.runtime(&mut output), Err(Error::Address));
         assert_eq!(output, [0xa5; RUNTIME_SIZE]);
     }
 }

@@ -255,6 +255,51 @@ impl Firmware {
     }
 }
 
+/// Only the admitted extended image has this host-owned boot descriptor slot.
+fn loader_span(profile: super::m3_profile::Profile, data_bytes: u64, input_bytes: usize)
+    -> Option<core::ops::Range<usize>> {
+    if profile != super::m3_profile::Profile::Extended || input_bytes != 53 * 40
+        || data_bytes != T8122_LAYOUT_26.data_size { return None; }
+    let start: usize = 0x12_28e0;
+    let end = start.checked_add(input_bytes)?;
+    if end as u64 > data_bytes { return None; }
+    Some(start..end)
+}
+
+#[cfg(not(test))]
+impl Firmware {
+    /// Call after RTKit application startup and before exposing the InitData root.
+    /// The protocol grants the host this slot only during that boot interval.
+    pub(crate) fn publish_io_table(
+        &self,
+        pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
+        descriptors: &[u8],
+    ) -> kernel::error::Result {
+        use kernel::{c_str, io::mem::{Mem, MemFlag}, prelude::*};
+        let data = self.resources.regions[5];
+        let span = loader_span(self.profile(), data.size, descriptors.len()).ok_or(EINVAL)?;
+        let node = pdev.as_ref().of_node().ok_or(ENODEV)?;
+        let resource = agx_resources::reserved_resource(&node, c_str!("fw-data"))?;
+        if resource.start() != data.base || resource.size() != data.size { return Err(EINVAL); }
+        // SAFETY: This exact admitted no-map reservation remains firmware-owned.
+        // Only its bounded host boot slot is accessed, before root publication.
+        let mapping = unsafe { Mem::try_new(resource, MemFlag::WC.into()) }?;
+        if span.end > mapping.size() { return Err(EINVAL); }
+        // Validate the whole slot before changing any byte. Unexpected prior
+        // contents indicate a protocol/ownership mismatch, not a patchable image.
+        for offset in span.clone() {
+            // SAFETY: span is bounded by the retained mapping above.
+            if unsafe { mapping.ptr().add(offset).read_volatile() } != 0 { return Err(EBUSY); }
+        }
+        for (offset, byte) in span.zip(descriptors.iter().copied()) {
+            // SAFETY: same bounded host slot, exclusive under the boot protocol.
+            unsafe { mapping.ptr().add(offset).write_volatile(byte) };
+        }
+        crate::m3::agx_memory::publish();
+        Ok(())
+    }
+}
+
 #[cfg(not(test))]
 pub(crate) fn identify_loaded(
     pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
@@ -525,6 +570,20 @@ mod tests {
         }
         assert!(!KNOWN_IMAGES_T8122[0].accepts_runtime(None, &digest));
         assert!(!newer.accepts_runtime(KNOWN_IMAGES_T8122[0].uuid, &[0; 32]));
+    }
+
+    #[test]
+    fn loader_slot_is_exact_bounded_and_profile_specific() {
+        use super::super::m3_profile::Profile;
+        let length = 53 * 40;
+        assert_eq!(loader_span(Profile::Extended, 0x12c000, length), Some(0x1228e0..0x123128));
+        for size in [0, 0x123127, 0x12bfff, 0x12c001, u64::MAX] {
+            assert!(loader_span(Profile::Extended, size, length).is_none());
+        }
+        for bytes in [0, length - 1, length + 1, usize::MAX] {
+            assert!(loader_span(Profile::Extended, 0x12c000, bytes).is_none());
+        }
+        assert!(loader_span(Profile::Legacy, 0x12c000, length).is_none());
     }
 
 }
