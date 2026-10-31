@@ -230,8 +230,10 @@ int avd_backend_boot(struct avd_dev *avd)
 {
 	int ret;
 
-	if (!avd_backend_is_apple(avd))
+	if (!avd_backend_is_apple(avd)) {
 		avd_pm_prepare_piodma(avd);
+		avd_qfw_prepare_boot(avd);
+	}
 	ret = avd->backend->boot(avd);
 	/* Never switch command ABIs after frames have used this backend. */
 	if (ret == -ENOENT && !avd->fw_generation && avd_backend_is_apple(avd)) {
@@ -243,6 +245,7 @@ int avd_backend_boot(struct avd_dev *avd)
 		avd->backend = &avd_open_backend;
 		avd_open_capabilities(avd);
 		avd_pm_prepare_piodma(avd);
+		avd_qfw_prepare_boot(avd);
 		ret = avd->backend->boot(avd);
 	}
 	if (!ret)

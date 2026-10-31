@@ -314,6 +314,17 @@ bool avd_backend_is_qfw(const struct avd_dev *avd)
 }
 
 /*
+ * SRAM survives a CM3 reload, so a stale info block from an earlier ABI 2
+ * image could make a legacy image look queue capable. Clear the magic before
+ * every open-firmware boot; only an image that publishes it again qualifies.
+ */
+void avd_qfw_prepare_boot(struct avd_dev *avd)
+{
+	if (avd->qfw)
+		writel(0, avd->qfw->sram + AVDQ_INFO);
+}
+
+/*
  * Called after every successful open-firmware boot (probe, resume, reset),
  * with no frame owned by the firmware. Picks the queued transport when the
  * loaded image speaks ABI 2 for this node, else the legacy one.
