@@ -214,20 +214,24 @@ int avd_queue_ready(void *priv)
 	bool ready;
 
 	spin_lock_irqsave(&avd->queue_lock, flags);
-	ready = !READ_ONCE(ctx->draining) && !READ_ONCE(avd->stopping) &&
+	ready = !avd->queued_ctx && !READ_ONCE(ctx->draining) &&
+		!READ_ONCE(avd->stopping) &&
 		!READ_ONCE(avd->faulted) &&
 		avd->inflight < avd->backend->max_inflight(avd);
 	for (i = 0; ready && i < AVD_MAX_FRAMES; i++)
 		if (ctx->next_dep == AVD_DEP_PREV_DONE &&
 		    avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx)
 			ready = false;
+	/* Prevent several queued m2m contexts from observing the same free slot. */
+	if (ready)
+		avd->queued_ctx = ctx;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	return ready;
 }
 
-void avd_queue_run(void *priv)
+static void avd_queue_submit_work(struct work_struct *work)
 {
-	struct avd_ctx *ctx = priv;
+	struct avd_ctx *ctx = container_of(work, struct avd_ctx, submit_work);
 	struct avd_dev *avd = ctx->dev;
 	const struct avd_codec_frame_ops *ops = ctx->coded_fmt_desc->frame_ops;
 	struct avd_frame *f = NULL;
@@ -236,12 +240,15 @@ void avd_queue_run(void *priv)
 	int ret;
 
 	mutex_lock(&avd->queue_mutex);
+	spin_lock_irqsave(&avd->queue_lock, flags);
+	if (avd->queued_ctx == ctx)
+		avd->queued_ctx = NULL;
 	if (avd->stopping || ctx->draining || avd->faulted) {
+		spin_unlock_irqrestore(&avd->queue_lock, flags);
 		v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
 		goto unlock;
 	}
-	spin_lock_irqsave(&avd->queue_lock, flags);
 	for (i = 0; i < AVD_MAX_FRAMES; i++) {
 		if (avd->frames[i].state == AVD_FRAME_FREE) {
 			f = &avd->frames[i];
@@ -367,13 +374,26 @@ void avd_queue_run(void *priv)
 	mutex_unlock(&avd->queue_mutex);
 }
 
+void avd_queue_run(void *priv)
+{
+	struct avd_ctx *ctx = priv;
+
+	/* try_schedule() may invoke device_run synchronously under queue_mutex. */
+	schedule_work(&ctx->submit_work);
+}
+
 void avd_queue_drain(struct avd_ctx *ctx)
 {
 	struct avd_dev *avd = ctx->dev;
+	unsigned long flags;
 	unsigned int i;
 
 	mutex_lock(&avd->queue_mutex);
+	spin_lock_irqsave(&avd->queue_lock, flags);
 	WRITE_ONCE(ctx->draining, true);
+	if (avd->queued_ctx == ctx)
+		avd->queued_ctx = NULL;
+	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	for (i = 0; i < AVD_MAX_FRAMES; i++) {
 		if (avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx) {
 			if (avd->backend->abort)
@@ -408,6 +428,7 @@ void avd_queue_add_ctx(struct avd_ctx *ctx)
 	struct avd_ctx *other;
 	u32 id;
 
+	INIT_WORK(&ctx->submit_work, avd_queue_submit_work);
 	mutex_lock(&ctx->dev->queue_mutex);
 	/* Borage decode prefix has ten client bits. */
 	for (id = 0; id < 1024; id++) {

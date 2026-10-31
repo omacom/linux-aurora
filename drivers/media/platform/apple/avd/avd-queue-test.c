@@ -2,6 +2,7 @@
 #include <kunit/test.h>
 #include <linux/unaligned.h>
 
+#include "avd.h"
 #include "avd-apple-protocol.h"
 #include "avd-queue-internal.h"
 
@@ -152,12 +153,47 @@ static void avd_command_builders(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, avd_apple_session_command(cmd, 2, 3, 0, 0), -EINVAL);
 }
 
+static unsigned int avd_test_max_inflight(struct avd_dev *avd)
+{
+	return AVD_MAX_FRAMES;
+}
+
+static void avd_dispatch_reservation(struct kunit *test)
+{
+	static const struct avd_backend_ops backend = {
+		.max_inflight = avd_test_max_inflight,
+	};
+	struct avd_dev *avd = kunit_kzalloc(test, sizeof(*avd), GFP_KERNEL);
+	struct avd_ctx *ctx = kunit_kcalloc(test, 2, sizeof(*ctx), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, avd);
+	KUNIT_ASSERT_NOT_NULL(test, ctx);
+	spin_lock_init(&avd->queue_lock);
+	avd->backend = &backend;
+	ctx[0].dev = avd;
+	ctx[1].dev = avd;
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[0]), 1);
+	/* The second context must not reserve the same observed capacity. */
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 0);
+	avd->queued_ctx = NULL;
+	avd->inflight = AVD_MAX_FRAMES;
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 0);
+	avd->inflight = 1;
+	avd->frames[0].state = AVD_FRAME_SUBMITTED;
+	avd->frames[0].ctx = &ctx[1];
+	ctx[1].next_dep = AVD_DEP_PREV_DONE;
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 0);
+	avd->frames[0].state = AVD_FRAME_FREE;
+	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 1);
+}
+
 static struct kunit_case avd_queue_cases[] = {
 	KUNIT_CASE(avd_slots_and_tags),
 	KUNIT_CASE(avd_retirement_order),
 	KUNIT_CASE(avd_watchdog_and_retry),
 	KUNIT_CASE(avd_completion_parser),
 	KUNIT_CASE(avd_command_builders),
+	KUNIT_CASE(avd_dispatch_reservation),
 	{}
 };
 

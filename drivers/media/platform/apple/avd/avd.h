@@ -229,6 +229,8 @@ struct avd_dev {
 	struct mutex queue_mutex;
 	struct delayed_work queue_work;
 	struct list_head contexts;
+	/* One m2m dispatch reservation; never identifies firmware-owned work. */
+	struct avd_ctx *queued_ctx;
 	struct avd_frame frames[AVD_MAX_FRAMES];
 	struct avd_buf *frame_fp[AVD_MAX_FRAMES];
 	u64 frame_seq;
@@ -279,6 +281,7 @@ struct avd_ctx {
 	bool decomp;
 
 	struct list_head queue_node;
+	struct work_struct submit_work;
 	bool draining;
 	bool session_started;
 	u64 session_generation;

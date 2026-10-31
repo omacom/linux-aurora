@@ -250,6 +250,7 @@ static int avd_release(struct file *filp)
 	v4l2_fh_del(&ctx->fh, filp);
 	avd_queue_del_ctx(ctx);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
+	cancel_work_sync(&ctx->submit_work);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
 	avd_buf_free(ctx->dev, &ctx->inst);
