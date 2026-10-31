@@ -359,3 +359,54 @@ The T6040 device tree's current fixed TEXT/DATA reservations should eventually
 come from a bootloader handoff describing the loaded image and mapping lifetimes.
 They are firmware-build-specific. This change does not implement that handoff
 or replace those reservations with 25G76 addresses.
+
+Capture size enumeration
+------------------------
+
+The shared driver preserves the order of its device-tree presets and any
+validated firmware output modes. It then adds common video-call sizes that
+fit within those presets' processed crop extents. The added preset retains
+its source firmware configuration and pixel-format eligibility. Crops are
+centred on even coordinates, have the exact output aspect ratio and never
+require upscaling. Sensor input dimensions alone are not a processed output
+capability: input rows can contain stacked exposures.
+
+The common sizes include 640x480, 1280x720, 1920x1080, 1080x1920,
+1760x1328, 1328x1760, 1552x1552, 1280x960 and 960x1280. A sensor that
+cannot provide the larger square also gets the largest even square that
+fits its established crops. Existing sizes are not duplicated. This is a
+shared output policy, not a list indexed by board or sensor model.
+
+Neither the crop nor output-configuration command reports scaler limits
+or rotation support. The driver does not infer a larger processed image
+from raw input dimensions, rotate a portrait image into a landscape one,
+or advertise a size that requires enlargement. Consequently, an exact
+macOS size may remain unavailable even though a smaller size with the
+same aspect ratio can be offered.
+
+Read-only inspection on the running kernel::
+
+    v4l2-ctl -d /dev/video0 --list-formats-ext
+    v4l2-ctl -d /dev/video0 --log-status
+    dmesg | grep -A20 'sensor config'
+
+The status ioctl prints already cached firmware configuration replies;
+it does not start capture or send additional firmware queries. The cache
+is currently populated only on the existing supported P010 discovery path.
+A missing cache is not evidence that the sensor has no other modes.
+
+After booting a test kernel, enumerate again and qualify each added size
+that is actually offered. For example, for 640x480 NV12::
+
+    v4l2-ctl -d /dev/video0 \
+        --set-fmt-video=width=640,height=480,pixelformat=NV12 \
+        --get-fmt-video --stream-mmap=4 --stream-count=30 --stream-to=/dev/null
+    gst-launch-1.0 -v v4l2src device=/dev/video0 num-buffers=30 ! \
+        video/x-raw,format=NV12,width=640,height=480,framerate=30/1 ! \
+        fakesink sync=false
+
+Repeat with each added width and height and, when offered, P010. Check
+that the negotiated dimensions equal the requested dimensions: S_FMT may
+otherwise choose a nearby preset. Confirm 30 completed frames, correct
+aspect ratio and chroma, and no new ISP or DART errors. Enumeration and unit tests do not establish successful capture at a
+new size; capture qualification must be performed separately.

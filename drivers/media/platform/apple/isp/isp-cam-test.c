@@ -370,7 +370,119 @@ static void isp_test_command_ack_failure_latches(struct kunit *test)
 	}
 }
 
+static void isp_test_call_crop(struct kunit *test)
+{
+	struct isp_preset source = {
+		.index = 7, .input_dim = { 1936, 1096 },
+		.output_dim = { 1920, 1080 }, .crop_offset = { 8, 8 },
+		.crop_size = { 1920, 1080 }, .p010 = true,
+	};
+	struct isp_preset result;
+
+	KUNIT_ASSERT_TRUE(test,
+			  isp_size_from_crop(&source, (struct coord){ 640, 480 }, &result));
+	KUNIT_EXPECT_EQ(test, result.index, 7);
+	KUNIT_EXPECT_TRUE(test, result.p010);
+	KUNIT_EXPECT_EQ(test, result.crop_offset.x, 248);
+	KUNIT_EXPECT_EQ(test, result.crop_offset.y, 8);
+	KUNIT_EXPECT_EQ(test, result.crop_size.x, 1440);
+	KUNIT_EXPECT_EQ(test, result.crop_size.y, 1080);
+	KUNIT_EXPECT_EQ(test, result.output_dim.x, 640);
+	KUNIT_EXPECT_EQ(test, result.output_dim.y, 480);
+}
+
+static void isp_test_call_crop_bounds(struct kunit *test)
+{
+	struct isp_preset source = {
+		.input_dim = { 1920, 2160 }, .output_dim = { 1920, 1080 },
+		.crop_size = { 1920, 1080 },
+	};
+	struct isp_preset result;
+	static const struct coord rejected[] = {
+		{ 1080, 1920 }, { 1760, 1328 }, { 1552, 1552 },
+		{ 1922, 1080 }, { 0, 480 }, { 641, 480 },
+	};
+
+	/* Stacked input rows do not make a portrait or a larger square. */
+	for (unsigned int i = 0; i < ARRAY_SIZE(rejected); i++)
+		KUNIT_EXPECT_FALSE(test, isp_size_from_crop(&source, rejected[i], &result));
+	source.crop_offset.x = 2;
+	KUNIT_EXPECT_FALSE(test,
+			   isp_size_from_crop(&source, (struct coord){ 640, 480 }, &result));
+	source.crop_offset.x = U32_MAX;
+	KUNIT_EXPECT_FALSE(test,
+			   isp_size_from_crop(&source, (struct coord){ 640, 480 }, &result));
+}
+
+static void isp_test_call_size_table(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_preset source = {
+		.index = 7, .input_dim = { 1920, 1920 },
+		.output_dim = { 1920, 1920 }, .crop_size = { 1920, 1920 },
+	};
+
+	isp->presets = &source;
+	isp->num_presets = 1;
+	KUNIT_ASSERT_EQ(test, isp_add_call_sizes(isp), 0);
+	KUNIT_EXPECT_EQ(test, isp->num_presets, ARRAY_SIZE(isp_call_sizes) + 1);
+	KUNIT_EXPECT_EQ(test, isp->presets[0].output_dim.x, 1920);
+	KUNIT_EXPECT_EQ(test, isp->presets[0].output_dim.y, 1920);
+	for (unsigned int i = 0; i < ARRAY_SIZE(isp_call_sizes); i++) {
+		struct isp_preset *preset = &isp->presets[i + 1];
+
+		KUNIT_EXPECT_EQ(test, preset->output_dim.x, isp_call_sizes[i].x);
+		KUNIT_EXPECT_EQ(test, preset->output_dim.y, isp_call_sizes[i].y);
+		KUNIT_EXPECT_EQ(test, preset->index, 7);
+		KUNIT_EXPECT_FALSE(test, preset->p010);
+		KUNIT_EXPECT_EQ(test, preset->crop_size.x * preset->output_dim.y,
+				preset->crop_size.y * preset->output_dim.x);
+		KUNIT_EXPECT_EQ(test, (preset->crop_offset.x | preset->crop_offset.y |
+				       preset->crop_size.x | preset->crop_size.y) & 1, 0);
+		KUNIT_EXPECT_LE(test, preset->crop_offset.x + preset->crop_size.x, 1920);
+		KUNIT_EXPECT_LE(test, preset->crop_offset.y + preset->crop_size.y, 1920);
+	}
+	/* Rebuilding preserves order and never duplicates an existing size. */
+	KUNIT_ASSERT_EQ(test, isp_add_call_sizes(isp), 0);
+	KUNIT_EXPECT_EQ(test, isp->num_presets, ARRAY_SIZE(isp_call_sizes) + 1);
+}
+
+static void isp_test_call_size_capabilities(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_preset sources[] = {
+		{ .index = 5, .input_dim = { 1920, 2160 },
+		  .output_dim = { 1920, 1080 }, .crop_size = { 1920, 1080 }, .p010 = true },
+		{ .index = 5, .input_dim = { 1920, 2160 },
+		  .output_dim = { 1280, 720 }, .crop_size = { 1280, 720 }, .p010 = true },
+		{ .index = 9, .input_dim = { 1536, 3024 },
+		  .output_dim = { 1536, 3024 }, .crop_size = { 1536, 3024 }, .p010 = true },
+	};
+
+	isp->presets = sources;
+	isp->num_presets = ARRAY_SIZE(sources);
+	KUNIT_ASSERT_EQ(test, isp_add_call_sizes(isp), 0);
+	KUNIT_EXPECT_EQ(test, isp->num_presets, 9);
+	for (unsigned int i = 0; i < ARRAY_SIZE(sources); i++)
+		KUNIT_EXPECT_MEMEQ(test, &isp->presets[i], &sources[i], sizeof(sources[i]));
+	for (unsigned int i = ARRAY_SIZE(sources); i < isp->num_presets; i++) {
+		struct isp_preset *preset = &isp->presets[i];
+
+		KUNIT_EXPECT_TRUE(test, preset->p010);
+		KUNIT_EXPECT_FALSE(test, preset->output_dim.x == 1760 &&
+				   preset->output_dim.y == 1328);
+		KUNIT_EXPECT_FALSE(test, preset->output_dim.x == 1552 &&
+				   preset->output_dim.y == 1552);
+	}
+	KUNIT_EXPECT_EQ(test, isp->presets[8].output_dim.x, 1536);
+	KUNIT_EXPECT_EQ(test, isp->presets[8].output_dim.y, 1536);
+}
+
 static struct kunit_case isp_cam_test_cases[] = {
+	KUNIT_CASE(isp_test_call_crop),
+	KUNIT_CASE(isp_test_call_crop_bounds),
+	KUNIT_CASE(isp_test_call_size_table),
+	KUNIT_CASE(isp_test_call_size_capabilities),
 	KUNIT_CASE(isp_test_setfile_failure_stops_setup),
 	KUNIT_CASE(isp_test_optional_setfile_continues_setup),
 	KUNIT_CASE(isp_test_command_ack_failure_latches),
