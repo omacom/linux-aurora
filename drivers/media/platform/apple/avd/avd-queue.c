@@ -81,10 +81,7 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 	unsigned int i;
 	int ret;
 
-	avd->backend->shutdown(avd);
-	ret = reset_control_reset(avd->rstc);
-	if (!ret)
-		ret = avd_backend_boot(avd);
+	ret = avd_pm_recover(avd);
 	WRITE_ONCE(avd->faulted, !!ret);
 	if (ret)
 		dev_err(avd->dev, "queue reset failed: %d\n", ret);
@@ -99,6 +96,8 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 		avd->frames[i].state = AVD_FRAME_DONE;
 	}
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
+	if (!ret)
+		avd_pm_enable_irq(avd);
 }
 
 static int avd_send_frame(struct avd_dev *avd, struct avd_frame *f)

@@ -31,6 +31,8 @@ struct avd_pm {
 	bool dart_active;
 	int irq;
 	bool irq_enabled;
+	void __iomem *piodma;
+	phys_addr_t sram_phys;
 	wait_queue_head_t idle_wait;
 	/* Protected by queue_lock; counts drain operations, not stopped streams. */
 	unsigned int draining;
@@ -43,12 +45,18 @@ bool avd_pm_can_suspend(const struct avd_frame *frames, unsigned int draining);
 void avd_pm_init(struct avd_dev *avd, const struct avd_backend_ops *backend,
 		 const struct avd_queue_pm_ops *queue);
 void avd_pm_enable(struct avd_dev *avd);
+int avd_pm_map_piodma(struct avd_dev *avd);
+void avd_pm_prepare_piodma(struct avd_dev *avd);
 /* After queue cleanup: release deferred DMA mappings before the final off. */
 void avd_pm_disable(struct avd_dev *avd);
 /* Called in process context, after the last frame has retired its mapping. */
 void avd_pm_unmap(struct avd_dev *avd, struct avd_deferred_unmap *unmap);
 int avd_pm_power_on(struct avd_dev *avd);
 int avd_pm_power_off(struct avd_dev *avd);
+/* Caller holds a PM reference and queue_mutex; leaves the host IRQ closed. */
+int avd_pm_recover(struct avd_dev *avd);
+/* After recovery has invalidated every previously firmware-owned slot. */
+void avd_pm_enable_irq(struct avd_dev *avd);
 void avd_pm_drain_begin(struct avd_dev *avd);
 void avd_pm_drain_end(struct avd_dev *avd);
 void avd_pm_queue_changed(struct avd_dev *avd);

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 #include <linux/dma-mapping.h>
+#include <linux/io.h>
+#include <linux/limits.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
+#include <linux/reset.h>
 #include <linux/slab.h>
 
 #include "avd.h"
@@ -8,6 +12,15 @@
 /* [C] Keep Linux's existing default until the idle-timer capture is available. */
 #define AVD_AUTOSUSPEND_MS 100
 #define AVD_DRAIN_TIMEOUT_MS 5000
+#define AVD_PIODMA_SRAM_BASE 0x24
+
+void avd_pm_enable_irq(struct avd_dev *avd)
+{
+	if (avd->pm.irq >= 0 && !avd->pm.irq_enabled) {
+		enable_irq(avd->pm.irq);
+		avd->pm.irq_enabled = true;
+	}
+}
 
 static void avd_pm_disable_irq(struct avd_dev *avd)
 {
@@ -162,6 +175,36 @@ void avd_pm_enable(struct avd_dev *avd)
 	pm_runtime_enable(avd->dev);
 }
 
+int avd_pm_map_piodma(struct avd_dev *avd)
+{
+	struct resource *piodma, *sram;
+
+	piodma = platform_get_resource_byname(avd->pdev, IORESOURCE_MEM, "piodma");
+	/* Old DTs support only the legacy transport; never invent a resource. */
+	if (!piodma)
+		return 0;
+	sram = platform_get_resource_byname(avd->pdev, IORESOURCE_MEM, "sram");
+	if (!sram || !IS_ALIGNED(sram->start, 16) ||
+	    (sram->start >> 4) > U32_MAX ||
+	    resource_size(piodma) < AVD_PIODMA_SRAM_BASE + sizeof(u32))
+		return -EINVAL;
+	avd->pm.piodma = devm_ioremap_resource(avd->dev, piodma);
+	if (IS_ERR(avd->pm.piodma))
+		return PTR_ERR(avd->pm.piodma);
+	avd->pm.sram_phys = sram->start;
+	if (of_count_phandle_with_args(avd->dev->of_node, "iommus", "#iommu-cells") < 2)
+		dev_warn(avd->dev, "PIODMA transport requires decode and DMA IOMMU streams\n");
+	return 0;
+}
+
+void avd_pm_prepare_piodma(struct avd_dev *avd)
+{
+	/* Public CM3 boot ABI: replay the SRAM base after every power loss/reset. */
+	if (avd->pm.piodma)
+		writel((u32)(avd->pm.sram_phys >> 4),
+		       avd->pm.piodma + AVD_PIODMA_SRAM_BASE);
+}
+
 void avd_pm_disable(struct avd_dev *avd)
 {
 	int ret;
@@ -223,6 +266,34 @@ int avd_pm_backend_resume(struct avd_dev *avd)
 	return ret;
 }
 
+int avd_pm_recover(struct avd_dev *avd)
+{
+	int ret;
+
+	if (!avd->pm.dart_active)
+		return -EHOSTDOWN;
+	avd_pm_disable_irq(avd);
+	avd->backend->shutdown(avd);
+	ret = reset_control_reset(avd->rstc);
+	if (ret)
+		return ret;
+	if (avd->domain) {
+		if (!avd->empty_domain)
+			return -ENODEV;
+		ret = iommu_attach_device(avd->empty_domain, avd->dev);
+		if (ret)
+			return ret;
+		iommu_detach_device(avd->empty_domain, avd->dev);
+		/* Do not reboot against an empty/blocked domain after a failed restore. */
+		if (iommu_get_domain_for_dev(avd->dev) != avd->domain)
+			return -EIO;
+	}
+	ret = avd_pm_backend_resume(avd);
+	if (ret)
+		avd->backend->shutdown(avd);
+	return ret;
+}
+
 int avd_pm_power_on(struct avd_dev *avd)
 {
 	const struct avd_backend_ops *backend = avd->backend;
@@ -243,10 +314,7 @@ int avd_pm_power_on(struct avd_dev *avd)
 		mutex_unlock(&avd->pm.lock);
 		return ret;
 	}
-	if (avd->pm.irq >= 0 && !avd->pm.irq_enabled) {
-		enable_irq(avd->pm.irq);
-		avd->pm.irq_enabled = true;
-	}
+	avd_pm_enable_irq(avd);
 
 	if (avd->pm.queue->resubmit)
 		avd->pm.queue->resubmit(avd);

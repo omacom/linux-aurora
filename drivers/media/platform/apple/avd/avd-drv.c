@@ -598,6 +598,9 @@ static int avd_probe(struct platform_device *pdev)
 	avd->ctrl = devm_platform_ioremap_resource_byname(pdev, "ctrl");
 	if (IS_ERR(avd->ctrl))
 		return PTR_ERR(avd->ctrl);
+	ret = avd_pm_map_piodma(avd);
+	if (ret)
+		return ret;
 
 	avd->domain = iommu_get_domain_for_dev(avd->dev);
 	if (avd->domain) {
