@@ -1,0 +1,56 @@
+# ADT-vs-DT check for the Apple T6032 (M3 Ultra) j575d device tree.
+#
+# Builds the t6032-j575d DTB and verifies it against the j575dap ADT of the
+# pinned macOS 27.0.1 (26A434) firmware, which the checker fetches by HTTP
+# range request (two small ranges, never the ~25 GB image) and verifies
+# against pinned SHA256 hashes. The fixes from the 27.0.1 ADT pass (USB-C
+# drd3, dropped laptop-only nodes, GPU/DCP/ANE nodes) fail the build when
+# they regress. See .github/scripts/adt-dt-check-t6032.py for the checks.
+
+name: t6032-adt-dt-check
+
+on:
+  pull_request:
+    paths:
+      - "arch/arm64/boot/dts/apple/t6032*"
+      - "arch/arm64/boot/dts/apple/t6031*"
+      - "arch/arm64/boot/dts/apple/t603x*"
+      - ".github/scripts/adt-dt-check-t6032.py"
+      - ".github/scripts/adt-dt-check-t6032-mutation.sh"
+      - ".github/workflows/t6032-adt-dt-check.yml"
+  push:
+    paths:
+      - "arch/arm64/boot/dts/apple/t6032*"
+      - "arch/arm64/boot/dts/apple/t6031*"
+      - "arch/arm64/boot/dts/apple/t603x*"
+      - ".github/scripts/adt-dt-check-t6032.py"
+      - ".github/scripts/adt-dt-check-t6032-mutation.sh"
+      - ".github/workflows/t6032-adt-dt-check.yml"
+  workflow_dispatch:
+
+jobs:
+  adt-dt-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu flex bison device-tree-compiler
+          pip install pyliblzfse
+
+      - name: Build t6032-j575d.dtb
+        run: |
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- defconfig
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- apple/t6032-j575d.dtb
+
+      - name: Check the DTB against the 27.0.1 j575dap ADT
+        run: |
+          python3 .github/scripts/adt-dt-check-t6032.py --fetch-ipsw \
+            build/arch/arm64/boot/dts/apple/t6032-j575d.dtb
+
+      - name: A gated node switched on must fail the check
+        run: bash .github/scripts/adt-dt-check-t6032-mutation.sh \
+            build/arch/arm64/boot/dts/apple/t6032-j575d.dtb
