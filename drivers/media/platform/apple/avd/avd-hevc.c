@@ -1395,6 +1395,13 @@ static int avd_hevc_try_ctrl(struct avd_ctx *ctx, struct v4l2_ctrl *ctrl)
 	return 0;
 }
 
+static unsigned int avd_hevc_pp_kicks(struct avd_ctx *ctx)
+{
+	struct avd_hevc_ctx *priv = ctx->priv;
+
+	return max_t(int, priv->submit_num, 1);
+}
+
 static void avd_hevc_submit(struct avd_ctx *ctx)
 {
 	struct avd_hevc_ctx *hevc_ctx = ctx->priv;
@@ -1421,6 +1428,7 @@ const struct avd_coded_fmt_ops avd_hevc_fmt_ops = {
 	.stop = avd_hevc_stop,
 	.run = avd_hevc_run,
 	.submit = avd_hevc_submit,
+	.pp_kicks = avd_hevc_pp_kicks,
 	.try_ctrl = avd_hevc_try_ctrl,
 	.get_image_fmt = avd_hevc_get_image_fmt,
 };

@@ -149,6 +149,8 @@ struct avd_coded_fmt_ops {
 	void (*adjust_decoded_fmt)(struct avd_ctx *ctx,
 			struct v4l2_pix_format_mplane *pix_mp);
 	void (*submit)(struct avd_ctx *ctx);
+	/* PP EXEC commands the last built frame needs (submit's count), >= 1. */
+	unsigned int (*pp_kicks)(struct avd_ctx *ctx);
 	int (*start)(struct avd_ctx *ctx);
 	void (*stop)(struct avd_ctx *ctx);
 	int (*run)(struct avd_ctx *ctx);
@@ -199,6 +201,8 @@ struct avd_variant {
 	void (*configure_stream)(struct avd_dev *avd, dma_addr_t addr,
 			u8 fifo_idx, u32 vp_slot);
 	const char* fw_name;
+	/* Older image tried when fw_name is not installed (legacy transport). */
+	const char *fw_name_fallback;
 	unsigned char revision; /* the same as the device tree */
 	/* just for convenience */
 	u32 vp_slot_offset;
@@ -247,6 +251,8 @@ struct avd_dev {
 	void *backend_priv;
 	/* Only the open-firmware compatibility path uses these. */
 	struct avd_frame *building;
+	/* Open firmware queue ABI 2 state, NULL when the node has no SRAM. */
+	struct avd_qfw *qfw;
 	struct avd_frame *compat_active;
 	bool compat_held;
 
@@ -364,6 +370,11 @@ void avd_queue_del_ctx(struct avd_ctx *ctx);
 int avd_open_build_program(struct avd_ctx *ctx);
 extern const struct avd_backend_ops avd_open_backend;
 extern const struct avd_backend_ops avd_apple_backend;
+extern const struct avd_backend_ops avd_qfw_backend;
+struct avd_qfw;
+int avd_qfw_probe(struct avd_dev *avd);
+void avd_qfw_select(struct avd_dev *avd);
+bool avd_backend_is_qfw(const struct avd_dev *avd);
 int avd_backend_select(struct avd_dev *avd);
 int avd_backend_boot(struct avd_dev *avd);
 void avd_shutdown(struct avd_dev *avd);

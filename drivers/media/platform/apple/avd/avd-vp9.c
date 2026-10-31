@@ -1049,6 +1049,13 @@ static enum avd_image_fmt avd_vp9_get_image_fmt(struct avd_ctx *ctx,
 #undef BIT_DEPTH
 }
 
+static unsigned int avd_vp9_pp_kicks(struct avd_ctx *ctx)
+{
+	struct avd_vp9_ctx *priv = ctx->priv;
+
+	return max_t(int, priv->submit_num, 1);
+}
+
 static void avd_vp9_submit(struct avd_ctx *ctx)
 {
 	struct avd_vp9_ctx *vp9_ctx = ctx->priv;
@@ -1078,5 +1085,6 @@ const struct avd_coded_fmt_ops avd_vp9_fmt_ops = {
 	.run = avd_vp9_run,
 	.done = avd_vp9_done,
 	.submit = avd_vp9_submit,
+	.pp_kicks = avd_vp9_pp_kicks,
 	.get_image_fmt = avd_vp9_get_image_fmt,
 };

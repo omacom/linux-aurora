@@ -1515,6 +1515,13 @@ static enum avd_image_fmt avd_av1_get_image_fmt(struct avd_ctx *ctx,
 #undef BIT_DEPTH
 }
 
+static unsigned int avd_av1_pp_kicks(struct avd_ctx *ctx)
+{
+	struct avd_av1_ctx *priv = ctx->priv;
+
+	return max_t(int, priv->submit_num, 1);
+}
+
 static void avd_av1_submit(struct avd_ctx *ctx)
 {
 	struct avd_av1_ctx *av1_ctx = ctx->priv;
@@ -1570,6 +1577,7 @@ const struct avd_coded_fmt_ops avd_av1_fmt_ops = {
 	.stop = avd_av1_stop,
 	.run = avd_av1_run,
 	.submit = avd_av1_submit,
+	.pp_kicks = avd_av1_pp_kicks,
 	.try_ctrl = avd_av1_try_ctrl,
 	.get_image_fmt = avd_av1_get_image_fmt,
 };

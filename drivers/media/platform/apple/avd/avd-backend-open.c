@@ -45,7 +45,8 @@ int avd_open_build_program(struct avd_ctx *ctx)
 		AVD_OP_EXEC_REV3_VP9_MASK : 0;
 	start = AVD_OP_EXEC_FLAG_START_REV4(avd->variant->revision == 4) |
 		AVD_OP_EXEC_FLAG_START_REV3(avd->variant->revision == 3);
-	ctx->fifo_idx = 0;
+	/* The queued transport gives every frame in flight its own FIFO. */
+	ctx->fifo_idx = avd_backend_is_qfw(avd) ? f->idx : 0;
 	words = f->prog->cpu;
 	words[pos++] = AVD_OP_EXEC | mask | start | AVD_OP_EXEC_FIFO_IDX(ctx->fifo_idx);
 	for (i = 0; i <= job->num; i++) {
@@ -187,6 +188,20 @@ static void avd_open_capabilities(struct avd_dev *avd)
 			avd->capabilities |= avd->variant->capabilities & codecs[i].bit;
 }
 
+static int avd_open_request_firmware(struct avd_dev *avd)
+{
+	int ret;
+
+	if (!avd->variant->fw_name_fallback)
+		return request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
+	ret = firmware_request_nowarn(&avd->fw, avd->variant->fw_name, avd->dev);
+	if (ret != -ENOENT)
+		return ret;
+	dev_info(avd->dev, "%s not installed, using %s\n",
+		 avd->variant->fw_name, avd->variant->fw_name_fallback);
+	return request_firmware(&avd->fw, avd->variant->fw_name_fallback, avd->dev);
+}
+
 int avd_backend_select(struct avd_dev *avd)
 {
 	int ret;
@@ -203,9 +218,11 @@ int avd_backend_select(struct avd_dev *avd)
 			return ret;
 	}
 	avd->backend = &avd_open_backend;
-	ret = request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
+	ret = avd_open_request_firmware(avd);
 	if (!ret)
 		avd_open_capabilities(avd);
+	if (!ret)
+		ret = avd_qfw_probe(avd);
 	return ret;
 }
 
@@ -218,7 +235,9 @@ int avd_backend_boot(struct avd_dev *avd)
 	ret = avd->backend->boot(avd);
 	/* Never switch command ABIs after frames have used this backend. */
 	if (ret == -ENOENT && !avd->fw_generation && avd_backend_is_apple(avd)) {
-		ret = request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
+		ret = avd_open_request_firmware(avd);
+		if (!ret)
+			ret = avd_qfw_probe(avd);
 		if (ret)
 			return ret;
 		avd->backend = &avd_open_backend;
@@ -226,6 +245,8 @@ int avd_backend_boot(struct avd_dev *avd)
 		avd_pm_prepare_piodma(avd);
 		ret = avd->backend->boot(avd);
 	}
+	if (!ret)
+		avd_qfw_select(avd);
 	if (!ret)
 		avd->fw_generation++;
 	return ret;

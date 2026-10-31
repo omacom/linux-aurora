@@ -510,7 +510,9 @@ static const struct avd_variant avd_t6040_variant = {
 			AVD_CAPABILITY_AV1,
 	/* HEVC only with firmware whose CODECS trailer lists h265. */
 	.fw_caps_required = AVD_CAPABILITY_HEVC,
-	.fw_name = "apple/avd-fw-v5-t1.bin",
+	/* v5-t2 matches T6040's SRAM aperture, which the queued transport needs. */
+	.fw_name = "apple/avd-fw-v5-t2.bin",
+	.fw_name_fallback = "apple/avd-fw-v5-t1.bin",
 	.revision = 4,
 	.vp_slot_offset = 0xc,
 	.submit_offset = 0x40,
