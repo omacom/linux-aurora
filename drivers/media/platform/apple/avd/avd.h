@@ -256,6 +256,8 @@ struct avd_dev {
 	/* Open firmware queue ABI 2 state, NULL when the node has no SRAM. */
 	struct avd_qfw *qfw;
 	struct avd_frame *compat_active;
+	/* Context of the last legacy submission, for VP DONE without a frame. */
+	struct avd_ctx *compat_ctx;
 	bool compat_held;
 
 	struct reset_control *rstc;

@@ -470,6 +470,8 @@ void avd_queue_del_ctx(struct avd_ctx *ctx)
 {
 	avd_queue_drain(ctx);
 	mutex_lock(&ctx->dev->queue_mutex);
+	if (ctx->dev->compat_ctx == ctx)
+		ctx->dev->compat_ctx = NULL;
 	list_del_init(&ctx->queue_node);
 	mutex_unlock(&ctx->dev->queue_mutex);
 }

@@ -94,6 +94,7 @@ static int avd_open_submit(struct avd_dev *avd, struct avd_frame *f)
 	avd->variant->configure_stream(avd, ctx->inst.addr, ctx->fifo_idx, vp);
 	reg = avd->ctrl + avd->variant->vp_slot_offset + vp * 4;
 	avd->compat_active = f;
+	avd->compat_ctx = ctx;
 	for (i = 0; i < f->prog_words; i++) {
 		/* Preserve the old firmware's segment FIFO pacing in this shim. */
 		if (i && (words[i] & GENMASK(31, 24)) == AVD_OP_EXEC &&
@@ -134,8 +135,18 @@ static irqreturn_t avd_open_irq(struct avd_dev *avd)
 	u32 status = readl(avd->mbox + AVD_REG_MBOX1_RETRIEVE);
 
 	writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
-	if (!f)
+	if (!f) {
+		/*
+		 * The old driver kicked PP for every VP DONE. A VP DONE with no
+		 * frame in flight (its frame already completed on a surplus PP
+		 * DONE of a multi-kick picture) still needs that kick, or the
+		 * next picture's PP is never started and it times out.
+		 */
+		if ((status & 0x11000) == 0 && (status & 0x100) && avd->compat_ctx &&
+		    avd->compat_ctx->coded_fmt_desc->ops->submit)
+			avd->compat_ctx->coded_fmt_desc->ops->submit(avd->compat_ctx);
 		return IRQ_HANDLED;
+	}
 	if (status & 0x1000) {
 		avd->compat_active = NULL;
 		avd_frame_complete(avd, f->tag, 0);
