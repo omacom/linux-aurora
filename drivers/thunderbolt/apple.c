@@ -133,6 +133,8 @@ struct apple_cio_hw {
 	bool mxwrap;
 	bool lstx_explicit;
 	bool strict_fw_ready;
+	/* M3_STAT never becomes ready; a poll timeout is not fatal. */
+	bool m3_stat_optional;
 	const struct apple_dpin_policy *dp;
 };
 
@@ -153,6 +155,19 @@ static const struct apple_cio_hw apple_cio_t6030_hw = {
 
 /* Type 7 uses its existing ready-state check and has no qualified DP route. */
 static const struct apple_cio_hw apple_cio_t8142_hw = {
+	.dp = &apple_dpin_disabled,
+};
+
+/*
+ * T8152 starts the ACIO CPU through the same coprocessor wrapper block as
+ * t6030 (the "cpu" region: run control +0x28, idle status +0x44), and its
+ * rc M3_CTRL start bit is not decoded, so the wrapper drives the start.
+ * M3_STAT never becomes ready; the RTKit boot of the co-processor is the
+ * readiness check.
+ */
+static const struct apple_cio_hw apple_cio_t8152_hw = {
+	.mxwrap = true,
+	.m3_stat_optional = true,
 	.dp = &apple_dpin_disabled,
 };
 
@@ -1236,7 +1251,14 @@ static void apple_nhi_ring_configure(struct tb_ring *ring, u32 flags, u32 e2e_fl
 		options += APPLE_CIO_NHI_RXRING_DESC_BASE;
 
 		sof_eof_mask = ring->sof_mask << 16 | ring->eof_mask;
-		writel(sof_eof_mask, options + 4);
+		/*
+		 * T8152 has no PDF range (the ACIO+0xdb0000 block of the M1/M2 DT
+		 * aborts on a read) and macOS never writes RX options + 4 there:
+		 * without a "pdf" range only the ring options are programmed. Type 7
+		 * keeps the masks in the receive ring registers.
+		 */
+		if (anhi->pdf_base || (anhi->acio && anhi->acio->type7))
+			writel(sof_eof_mask, options + 4);
 		if (anhi->pdf_base)
 			writel(sof_eof_mask,
 			       anhi->pdf_base + ring->hop * APPLE_CIO_NHI_PDF_STRIDE);
@@ -2037,9 +2059,13 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	}
 	apple_tunable_apply(anhi->nhi_base, tunable);
 
-	/* Type 7 keeps the PDF masks in the receive ring registers only. */
-	if (!acio->type7) {
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "pdf");
+	/*
+	 * The M1/M2 DTs carry a "pdf" range; type 7 keeps the PDF masks in the
+	 * receive ring registers only, and T8152 has no "pdf" range at all
+	 * (see apple_nhi_ring_configure).
+	 */
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "pdf");
+	if (res && !acio->type7) {
 		anhi->pdf_base = devm_ioremap_resource(&pdev->dev, res);
 		if (IS_ERR(anhi->pdf_base)) {
 			ret = dev_err_probe(&pdev->dev, PTR_ERR(anhi->pdf_base),
@@ -2622,7 +2648,7 @@ static int apple_cio_start(struct apple_cio *acio)
 	if (acio->hw->lstx_explicit) {
 		writel(APPLE_CIO_LSTX_CTRL_ENABLE | APPLE_CIO_LSTX_CTRL_LEVEL,
 		       acio->rc_base + APPLE_CIO_M3_CTRL);
-	} else {
+	} else if (!acio->hw->mxwrap) {
 		val = readl(acio->rc_base + APPLE_CIO_M3_CTRL);
 		writel(val | APPLE_CIO_M3_CTRL_START, acio->rc_base + APPLE_CIO_M3_CTRL);
 	}
@@ -2648,17 +2674,25 @@ static int apple_cio_start(struct apple_cio *acio)
 		goto err_free_rtkit;
 	}
 
-	if (acio->hw->strict_fw_ready)
+	state = 0;
+	if (acio->hw->m3_stat_optional) {
+		/*
+		 * T8152: M3_STAT is not shown to exist, so do not wait for it; the
+		 * RTKit boot above is the readiness check.
+		 */
+		ret = 0;
+	} else if (acio->hw->strict_fw_ready) {
 		ret = readl_poll_timeout(acio->rc_base + APPLE_CIO_M3_STAT, state,
 					 (state & APPLE_CIO_M3_STAT_CODE_VALID) ||
 					 FIELD_GET(APPLE_CIO_M3_STAT_STATE, state) ==
 					 APPLE_CIO_M3_STAT_STATE_READY,
 					 100, 500000);
-	else
+	} else {
 		ret = readl_poll_timeout(acio->rc_base + APPLE_CIO_M3_STAT, state,
 					 acio->type7 ?
 				 (state & APPLE_CIO_M3_STAT_STATE) == BIT(24) :
 				 (state & APPLE_CIO_M3_STAT_STATE), 100, 500000);
+	}
 	if (!ret && acio->hw->strict_fw_ready && (state & APPLE_CIO_M3_STAT_CODE_VALID)) {
 		dev_err(acio->dev, "M3 firmware assert, code 0x%06lx (state 0x%08x)\n",
 			FIELD_GET(APPLE_CIO_M3_STAT_CODE, state), state);
@@ -3338,6 +3372,10 @@ static const struct of_device_id apple_acio_match[] = {
 	{
 		.compatible = "apple,t6020-usb4-acio",
 		.data = &apple_cio_t6020_hw,
+	},
+	{
+		.compatible = "apple,t8152-usb4-acio",
+		.data = &apple_cio_t8152_hw,
 	},
 	{
 		.compatible = "apple,t8103-usb4-acio",

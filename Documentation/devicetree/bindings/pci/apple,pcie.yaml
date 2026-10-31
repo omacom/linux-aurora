@@ -64,6 +64,9 @@ properties:
       - items:
           - const: apple,t8112-pciec
           - const: apple,t8103-pciec
+      - items:
+          - const: apple,t8152-pciec
+          - const: apple,t8103-pciec
       - const: apple,t6000-pciec
 
   reg:
@@ -106,6 +109,13 @@ properties:
   apple,pciec-kernel-init:
     type: boolean
     description: The kernel initializes the tunneled controller from reset.
+
+  apple,pciec-preinit-status:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: |
+      Handoff status of a tunneled (PCIe-C) controller. 1 means the boot
+      loader left the port initialized; the driver then replays the
+      initialization only if the port is not running.
 
   apple,tunable-rc:
     $ref: '#/$defs/tunable'
