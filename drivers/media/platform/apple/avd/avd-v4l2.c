@@ -893,6 +893,7 @@ static int avd_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct vb2_v4l2_buffer *vbuf;
 	int ret;
 
+	WRITE_ONCE(ctx->draining, false);
 	if (V4L2_TYPE_IS_CAPTURE(q->type))
 		return 0;
 
@@ -902,7 +903,6 @@ static int avd_start_streaming(struct vb2_queue *q, unsigned int count)
 		goto err_return_buffers;
 	}
 
-	ctx->draining = false;
 	if (desc->ops->start) {
 		ret = desc->ops->start(ctx);
 		if (ret)

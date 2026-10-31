@@ -27,6 +27,17 @@ static inline int avd_slot_reserve(struct avd_frame *f, struct avd_ctx *ctx,
 	return 0;
 }
 
+/* A full inbox owns nothing: keep the prepared slot, tag and deadline. */
+static inline void avd_slot_submit_result(struct avd_frame *f, int status)
+{
+	if (status == -EBUSY) {
+		f->state = AVD_FRAME_RESERVED;
+	} else if (status) {
+		f->status = status;
+		f->state = AVD_FRAME_DONE;
+	}
+}
+
 static inline bool avd_slot_complete(struct avd_frame *f, u32 tag, int status)
 {
 	if (f->state != AVD_FRAME_SUBMITTED || f->tag != tag)

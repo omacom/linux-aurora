@@ -250,8 +250,8 @@ static int avd_release(struct file *filp)
 	struct avd_ctx *ctx = file_to_ctx(filp);
 
 	v4l2_fh_del(&ctx->fh, filp);
-	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	avd_queue_del_ctx(ctx);
+	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
 	avd_buf_free(ctx->dev, &ctx->inst);
@@ -581,6 +581,13 @@ static const struct of_device_id avd_of_match[] = {
 
 MODULE_DEVICE_TABLE(of, avd_of_match);
 
+static void avd_release_open_firmware(void *data)
+{
+	struct avd_dev *avd = data;
+
+	release_firmware(avd->fw);
+}
+
 static int avd_probe(struct platform_device *pdev)
 {
 	struct avd_dev *avd;
@@ -630,9 +637,13 @@ static int avd_probe(struct platform_device *pdev)
 	ret = avd_backend_select(avd);
 	if (ret)
 		return ret;
+	ret = devm_add_action_or_reset(avd->dev, avd_release_open_firmware, avd);
+	if (ret)
+		return ret;
 
 	ret = dma_set_mask_and_coherent(avd->dev,
-			DMA_BIT_MASK((avd->variant->quirks & AVD_QUIRK_LSR) ? 38 : 64));
+			DMA_BIT_MASK(avd_backend_is_apple(avd) ? 42 :
+			     (avd->variant->quirks & AVD_QUIRK_LSR) ? 38 : 64));
 
 	if (ret) {
 		dev_err(avd->dev, "Failed to set DMA mask");
@@ -671,7 +682,6 @@ static void avd_remove(struct platform_device *pdev)
 	struct avd_dev *avd = platform_get_drvdata(pdev);
 
 	avd_queue_cleanup(avd);
-	release_firmware(avd->fw);
 
 	avd_v4l2_cleanup(avd);
 

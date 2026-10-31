@@ -86,6 +86,8 @@ Decode +00 bit 9                SPEC 5.2: boolean argument, meaning unproved;
 Decode +50..+5f                 SPEC 5: Borage extension, nonzero use unproved;
                                 initialized to zero before codec packing
 Commands 3/4 and other values   SPEC 5.1: unproved; never sent
+PIODMA mapping stream binding   SPEC 7: three mapper roles proved, Linux binding
+                                and per-domain fp/program DVA ownership pending
 Retention and clock floors      SPEC 8: per-SoC capture required; no guessed knobs
 ==============================  ================================================
 

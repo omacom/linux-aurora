@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 #include <linux/delay.h>
 #include <linux/overflow.h>
+#include <linux/slab.h>
 
 #include "avd.h"
 #include "avd-inst.h"

@@ -62,6 +62,17 @@ static void avd_watchdog_and_retry(struct kunit *test)
 {
 	struct avd_frame f = { .state = AVD_FRAME_SUBMITTED, .deadline = ULONG_MAX - 2 };
 	unsigned int producer, consumer;
+	u32 tag = 0x124;
+	unsigned long deadline = f.deadline;
+
+	f.tag = tag;
+	avd_slot_submit_result(&f, -EBUSY);
+	KUNIT_EXPECT_EQ(test, f.state, AVD_FRAME_RESERVED);
+	KUNIT_EXPECT_EQ(test, f.tag, tag);
+	KUNIT_EXPECT_EQ(test, f.deadline, deadline);
+	f.state = AVD_FRAME_SUBMITTED;
+	avd_slot_submit_result(&f, 0);
+	KUNIT_EXPECT_EQ(test, f.state, AVD_FRAME_SUBMITTED);
 
 	KUNIT_EXPECT_FALSE(test, avd_slot_expired(&f, ULONG_MAX - 3));
 	KUNIT_EXPECT_TRUE(test, avd_slot_expired(&f, ULONG_MAX - 2));

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
+#include <linux/dma-mapping.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
@@ -122,12 +123,7 @@ static int avd_send_frame(struct avd_dev *avd, struct avd_frame *f)
 	dma_wmb();
 	ret = avd->backend->submit(avd, f);
 	spin_lock_irqsave(&avd->queue_lock, flags);
-	if (ret == -EBUSY) {
-		f->state = AVD_FRAME_RESERVED;
-	} else if (ret) {
-		f->status = ret;
-		f->state = AVD_FRAME_DONE;
-	}
+	avd_slot_submit_result(f, ret);
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	return ret;
 }
@@ -140,12 +136,18 @@ static void avd_queue_worker(struct work_struct *work)
 	unsigned long flags;
 	unsigned int i;
 	bool pending;
+	unsigned long delay = AVD_FRAME_TIMEOUT;
 
 	mutex_lock(&avd->queue_mutex);
 	if (avd->stopping)
 		goto unlock;
 	for (i = 0; i < AVD_MAX_FRAMES; i++) {
-		if (avd_slot_expired(&avd->frames[i], jiffies)) {
+		bool expired;
+
+		spin_lock_irqsave(&avd->queue_lock, flags);
+		expired = avd_slot_expired(&avd->frames[i], jiffies);
+		spin_unlock_irqrestore(&avd->queue_lock, flags);
+		if (expired) {
 			dev_err(avd->dev, "frame tag %#x timed out\n", avd->frames[i].tag);
 			avd_reset_queue(avd, -ETIMEDOUT);
 			break;
@@ -172,9 +174,20 @@ static void avd_queue_worker(struct work_struct *work)
 		v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	pending = avd->inflight != 0;
+	for (i = 0; i < AVD_MAX_FRAMES; i++) {
+		struct avd_frame *f = &avd->frames[i];
+		unsigned long remaining;
+
+		if (f->state == AVD_FRAME_FREE)
+			continue;
+		remaining = time_after(f->deadline, jiffies) ? f->deadline - jiffies : 0;
+		if (f->state == AVD_FRAME_RESERVED)
+			remaining = min(remaining, AVD_RETRY_DELAY);
+		delay = min(delay, remaining);
+	}
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	if (pending)
-		mod_delayed_work(system_wq, &avd->queue_work, AVD_RETRY_DELAY);
+		mod_delayed_work(system_wq, &avd->queue_work, delay);
  unlock:
 	mutex_unlock(&avd->queue_mutex);
 }
@@ -201,7 +214,8 @@ int avd_queue_ready(void *priv)
 	bool ready;
 
 	spin_lock_irqsave(&avd->queue_lock, flags);
-	ready = !ctx->draining && !avd->stopping && !avd->faulted &&
+	ready = !READ_ONCE(ctx->draining) && !READ_ONCE(avd->stopping) &&
+		!READ_ONCE(avd->faulted) &&
 		avd->inflight < avd->backend->max_inflight(avd);
 	for (i = 0; ready && i < AVD_MAX_FRAMES; i++)
 		if (ctx->next_dep == AVD_DEP_PREV_DONE &&
@@ -222,6 +236,11 @@ void avd_queue_run(void *priv)
 	int ret;
 
 	mutex_lock(&avd->queue_mutex);
+	if (avd->stopping || ctx->draining || avd->faulted) {
+		v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
+						 VB2_BUF_STATE_ERROR);
+		goto unlock;
+	}
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	for (i = 0; i < AVD_MAX_FRAMES; i++) {
 		if (avd->frames[i].state == AVD_FRAME_FREE) {
@@ -254,10 +273,22 @@ void avd_queue_run(void *priv)
 			if (ret)
 				goto fail;
 		}
-		if (avd_backend_is_apple(avd) && !f->fp->cpu) {
-			ret = avd_buf_alloc(avd, f->fp, avd->variant->fp_size);
-			if (ret)
+		/* NULL fp is also the codec-facing indication of an open program. */
+		f->fp = NULL;
+		if (avd_backend_is_apple(avd)) {
+			if (!avd->frame_fp[f->idx])
+				avd->frame_fp[f->idx] = devm_kzalloc(avd->dev,
+								 sizeof(*f->fp), GFP_KERNEL);
+			f->fp = avd->frame_fp[f->idx];
+			if (!f->fp) {
+				ret = -ENOMEM;
 				goto fail;
+			}
+			if (!f->fp->cpu) {
+				ret = avd_buf_alloc(avd, f->fp, avd->variant->fp_size);
+				if (ret)
+					goto fail;
+			}
 		}
 		if (f->src->vb2_buf.req_obj.req)
 			v4l2_ctrl_request_setup(f->src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
@@ -358,6 +389,8 @@ void avd_queue_drain(struct avd_ctx *ctx)
 		}
 	}
 	ctx->session_started = false;
+	if (!avd->stopping)
+		mod_delayed_work(system_wq, &avd->queue_work, 0);
 	mutex_unlock(&avd->queue_mutex);
 }
 
@@ -407,8 +440,7 @@ int avd_queue_init(struct avd_dev *avd)
 
 		f->idx = i;
 		f->prog = devm_kzalloc(avd->dev, sizeof(*f->prog), GFP_KERNEL);
-		f->fp = devm_kzalloc(avd->dev, sizeof(*f->fp), GFP_KERNEL);
-		if (!f->prog || !f->fp)
+		if (!f->prog)
 			return -ENOMEM;
 	}
 	return 0;
@@ -428,6 +460,7 @@ void avd_queue_cleanup(struct avd_dev *avd)
 	cancel_delayed_work_sync(&avd->queue_work);
 	for (i = 0; i < AVD_MAX_FRAMES; i++) {
 		avd_buf_free(avd, avd->frames[i].prog);
-		avd_buf_free(avd, avd->frames[i].fp);
+		if (avd->frame_fp[i])
+			avd_buf_free(avd, avd->frame_fp[i]);
 	}
 }

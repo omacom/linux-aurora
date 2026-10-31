@@ -230,6 +230,7 @@ struct avd_dev {
 	struct delayed_work queue_work;
 	struct list_head contexts;
 	struct avd_frame frames[AVD_MAX_FRAMES];
+	struct avd_buf *frame_fp[AVD_MAX_FRAMES];
 	u64 frame_seq;
 	unsigned int inflight;
 	bool stopping;
