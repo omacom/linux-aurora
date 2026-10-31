@@ -2,11 +2,29 @@
 //! M5 private-memory allocation encodings.
 #![allow(dead_code)]
 
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use super::initdata::M5Board;
+
 pub(crate) const BLOCK_BYTES: usize = 0x20_0000;
-pub(crate) const G17S_RENDER_BLOCK_BYTES: usize = 0x40_0000;
-/// G17S private-memory address inventory. This sizes the directory, not the
-/// physical allocation; each pool allocates only its requested initial blocks.
-const G17S_POOL_BYTES: u64 = 1 << 32;
+// Render block size and private-memory address inventory of the M5
+// part, selected at probe (`M5Board::render_pool()`). The inventory sizes the
+// directory, not the physical allocation; each pool allocates only its
+// requested initial blocks.
+static RENDER_BLOCK_BYTES: AtomicUsize = AtomicUsize::new(M5Board::J714.render_pool().0);
+static POOL_BYTES: AtomicU64 = AtomicU64::new(M5Board::J714.render_pool().1);
+
+/// Selects the board's render pool before any pool is built.
+pub(crate) fn select_render_pool(board: M5Board) {
+    let (block, pool) = board.render_pool();
+    RENDER_BLOCK_BYTES.store(block, Ordering::Relaxed);
+    POOL_BYTES.store(pool, Ordering::Relaxed);
+}
+
+pub(crate) fn render_block_bytes() -> usize {
+    RENDER_BLOCK_BYTES.load(Ordering::Relaxed)
+}
+
 const RING_MAX_PAGES: u64 = 0x3ff800;
 pub(crate) const OPERAND_BYTES: usize = 0x2_0000;
 pub(crate) const STATE_BYTES: usize = 0x100;
@@ -108,8 +126,8 @@ fn round_page(bytes: usize) -> Result<usize, PoolError> {
 
 impl PoolGeometry {
     pub(crate) fn g17s(blocks: usize) -> Result<Self, PoolError> {
-        let bytes = G17S_POOL_BYTES.min(RING_MAX_PAGES << 12)
-            & !(G17S_RENDER_BLOCK_BYTES as u64 - 1);
+        let bytes = POOL_BYTES.load(Ordering::Relaxed).min(RING_MAX_PAGES << 12)
+            & !(render_block_bytes() as u64 - 1);
         Self::g17s_render(blocks, (bytes >> 12) as u32)
     }
     pub(crate) fn new(blocks: usize, directory_entries: u32) -> Result<Self, PoolError> {
@@ -121,11 +139,11 @@ impl PoolGeometry {
     }
 
     pub(crate) fn block_bytes(self) -> usize {
-        if self.g17s_render_blocks { G17S_RENDER_BLOCK_BYTES } else { BLOCK_BYTES }
+        if self.g17s_render_blocks { render_block_bytes() } else { BLOCK_BYTES }
     }
 
     fn with_kind(blocks: usize, directory_entries: u32, g17s_render_blocks: bool) -> Result<Self, PoolError> {
-        let block_bytes = if g17s_render_blocks { G17S_RENDER_BLOCK_BYTES } else { BLOCK_BYTES };
+        let block_bytes = if g17s_render_blocks { render_block_bytes() } else { BLOCK_BYTES };
         let pages = blocks.checked_mul(block_bytes / 0x1000)
             .and_then(|n| u32::try_from(n).ok()).ok_or(PoolError::Geometry)?;
         if blocks == 0 || pages > directory_entries { return Err(PoolError::Geometry); }

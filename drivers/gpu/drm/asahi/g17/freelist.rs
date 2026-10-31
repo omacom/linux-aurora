@@ -371,7 +371,8 @@ impl Pages {
         Self::new(alloc, blocks, RunLayout::Compute)
     }
     /// Fresh zeroed M5 compute backing, built without the device mutex. M5 keeps
-    /// its directory, block list and initial 32 MiB in one retained allocation.
+    /// its directory, block list and initial eight render blocks in one retained
+    /// allocation.
     fn compute_m5(alloc: &Allocator<'_>, required: Option<super::fw::m5::pool::PoolGeometry>) -> Result<Self> {
         use super::fw::m5::pool;
         let geometry = match required { Some(geometry) => geometry,

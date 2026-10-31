@@ -1778,6 +1778,14 @@ impl M5Board {
         }
     }
 
+    /// Render block size and private-memory address inventory.
+    pub(crate) const fn render_pool(self) -> (usize, u64) {
+        match self {
+            Self::J714 => (0x40_0000, 1 << 32),
+            Self::J716c => (0x80_0000, 1 << 33),
+        }
+    }
+
     /// The minimum parameter-buffer size.
     pub(crate) const fn min_parameter_buffer(self) -> u32 {
         match self {

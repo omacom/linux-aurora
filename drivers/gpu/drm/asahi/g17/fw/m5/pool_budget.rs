@@ -2,7 +2,7 @@
 //! G17S shared render private-memory demand. Counts describe hardware and
 //! simultaneous work; byte requirements come from the submitted programs.
 
-use super::pool::{PoolError, PoolGeometry, G17S_RENDER_BLOCK_BYTES};
+use super::pool::{render_block_bytes, PoolError, PoolGeometry};
 
 #[derive(Clone, Copy)]
 pub(crate) struct RenderBudget {
@@ -44,8 +44,8 @@ fn mul(a: u64, b: u64) -> Result<u64, PoolError> {
     a.checked_mul(b).ok_or(PoolError::Geometry)
 }
 fn aligned(bytes: u64) -> Result<u64, PoolError> {
-    Ok(add(bytes, G17S_RENDER_BLOCK_BYTES as u64 - 1)?
-        & !(G17S_RENDER_BLOCK_BYTES as u64 - 1))
+    Ok(add(bytes, render_block_bytes() as u64 - 1)?
+        & !(render_block_bytes() as u64 - 1))
 }
 
 impl RenderBudget {
@@ -143,9 +143,9 @@ impl Sizes {
     /// physical blocks. The hardware directory limit is checked by geometry.
     pub(crate) fn geometry(self) -> Result<PoolGeometry, PoolError> {
         if self.minimum == 0 || self.minimum > self.ideal { return Err(PoolError::Geometry); }
-        let blocks = usize::try_from(self.ideal / G17S_RENDER_BLOCK_BYTES as u64)
+        let blocks = usize::try_from(self.ideal / render_block_bytes() as u64)
             .map_err(|_| PoolError::Geometry)?;
-        if self.ideal % G17S_RENDER_BLOCK_BYTES as u64 != 0 { return Err(PoolError::Geometry); }
+        if self.ideal % render_block_bytes() as u64 != 0 { return Err(PoolError::Geometry); }
         PoolGeometry::g17s(blocks)
     }
 }
