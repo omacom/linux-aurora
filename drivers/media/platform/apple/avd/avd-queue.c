@@ -276,10 +276,13 @@ void avd_queue_run(void *priv)
 		/* NULL fp is also the codec-facing indication of an open program. */
 		f->fp = NULL;
 		if (avd_backend_is_apple(avd)) {
-			if (!avd->frame_fp[f->idx])
-				avd->frame_fp[f->idx] = devm_kzalloc(avd->dev,
-								 sizeof(*f->fp), GFP_KERNEL);
-			f->fp = avd->frame_fp[f->idx];
+			struct avd_buf *fp = avd->frame_fp[f->idx];
+
+			if (!fp) {
+				fp = devm_kzalloc(avd->dev, sizeof(*fp), GFP_KERNEL);
+				avd->frame_fp[f->idx] = fp;
+			}
+			f->fp = fp;
 			if (!f->fp) {
 				ret = -ENOMEM;
 				goto fail;

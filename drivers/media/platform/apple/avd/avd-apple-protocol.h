@@ -19,8 +19,9 @@
 #define AVD_APPLE_NOTIFY_BASE AVD_APPLE_INBOX_BASE
 
 /* SPEC 5.1: only these session opcodes have proved builders. */
-static inline int avd_apple_session_command(u32 cmd[24], u32 client, u32 opcode,
-					  u32 property, u32 value)
+static inline int
+avd_apple_session_command(u32 cmd[24], u32 client, u32 opcode,
+			  u32 property, u32 value)
 {
 	unsigned int i;
 
