@@ -168,7 +168,12 @@ static void avd_apple_shutdown(struct avd_dev *avd)
 
 static unsigned int avd_apple_max_inflight(struct avd_dev *avd)
 {
-	return AVD_MAX_FRAMES;
+	/*
+	 * Every frame in VP->PP flight owns one hardware instruction FIFO
+	 * (EXEC bits 7:4), so the FIFO count bounds the frames in flight:
+	 * 15 on v3+ tier 1 parts, 7 on T8103 and T8140.
+	 */
+	return min_t(unsigned int, AVD_MAX_FRAMES, avd->variant->fifo_slots ?: 1);
 }
 
 static int avd_apple_send(struct avd_dev *avd, const u32 cmd[24])
