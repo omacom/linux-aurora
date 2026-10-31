@@ -100,3 +100,26 @@ pub(crate) fn fault_buffers()->impl Iterator<Item=(usize,usize)> {
         .chain((PB_FIRST..PB_FIRST+PB_GROUPS).map(|i|(i,256)))
         .chain([(TILEMAP_LABEL,1280),(HEAP_METADATA_LABEL,256)])
 }
+
+pub(crate) fn allocation_for(profile: super::m3_profile::Profile, index: usize) -> Result<Allocation,Error> {
+    let mut owner = allocation(index)?;
+    if profile == super::m3_profile::Profile::Legacy { return Ok(owner); }
+    if owner.space == Space::Firmware {
+        owner.address = 0xffff_fc24_0000_0000 + index as u64 * 0x10_0000;
+    }
+    match index {
+        8 | 20 => owner.size = 0x20000,
+        9 | 21 => { owner.address &= !0x3fff; owner.size = 0x4000; }
+        10 | 22 => {
+            owner.size = 0x4000;
+            owner.gpu_alias = Some(0x72_3000_0000 + u64::from(index == 22) * 0x4000);
+        }
+        GPU_CONTEXT => owner.size = 0x38,
+        NOTIFIER => owner.size = 0x400,
+        EVENT_COUNT => owner.size = 16,
+        BUFFER_MANAGER => owner.size = 0xc0,
+        FRAGMENT_QUEUE | TA_QUEUE => owner.size = 0x24c0,
+        _ => {}
+    }
+    Ok(owner)
+}
