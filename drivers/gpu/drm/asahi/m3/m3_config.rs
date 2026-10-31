@@ -246,6 +246,18 @@ impl Config {
         self.thermal.busy(now);
         Ok(())
     }
+    pub(crate) fn render_stats(&self) -> Result<[init::Region;2]> {
+        if self.profile==super::m3_profile::Profile::Legacy {
+            let value=self.stats_region()?;return Ok([value;2]);
+        }
+        let region=|index:usize,offset:usize| {
+            let object=&self.objects[index];
+            init::Region::new(object.va().checked_add(offset as u64).ok_or(EOVERFLOW)?,
+                object.size().checked_sub(offset).ok_or(EINVAL)?).map_err(|_|EINVAL)
+        };
+        Ok([region(UNKNOWN_C0,4)?,region(UNKNOWN_C1,8)?])
+    }
+
     pub(crate) fn stats_region(&self) -> Result<init::Region> {
         let owner = &self.objects[if self.profile == super::m3_profile::Profile::Extended {
             UNKNOWN_C3

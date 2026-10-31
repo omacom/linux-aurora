@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! Read-only T8122 identity admission. Firmware startup remains disabled.
+//! Read-only T8122 identity and firmware-interface admission.
 
 use super::m3_profile::Profile;
 
@@ -51,6 +51,28 @@ pub(crate) fn validate_identity_for(
         active_cores,
         core_slots: 10,
     })
+}
+
+/// Firmware-interface selection is exact and does not change physical GPU encodings.
+pub(crate) fn profile_for(compat:&[u32],j613:bool)->Option<Profile> {
+    match compat {
+        [14,8,3]=>Some(Profile::Legacy),
+        [26,6,2] if j613=>Some(Profile::Extended),
+        _=>None,
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) fn loaded_profile(pdev:&kernel::platform::Device<kernel::device::Core<'_>>)
+    ->kernel::error::Result<Profile> {
+    use kernel::{c_str,prelude::*};
+    let node=pdev.as_ref().of_node().ok_or(ENODEV)?;
+    let compat:KVec<u32>=node.get_property(c_str!("apple,firmware-compat"))?;
+    #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+    let j613 = super::m3_board::board_is(b"apple,j613");
+    #[cfg(not(CONFIG_DRM_ASAHI_M3_T8122))]
+    let j613 = false;
+    profile_for(&compat, j613).ok_or(ENODEV)
 }
 
 /// Shape of the voltage-sorted running-state tables: one entry per distinct millivolt,
@@ -108,7 +130,7 @@ pub(crate) fn opp_table_shape(opps: impl IntoIterator<Item = (u64, u32)>) -> Opt
 pub(crate) fn read_identity(
     pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
 ) -> kernel::error::Result<Identity> {
-    read_identity_for(pdev, Profile::Legacy)
+    read_identity_for(pdev, loaded_profile(pdev)?)
 }
 
 #[cfg(not(test))]
@@ -298,5 +320,19 @@ mod tests {
         assert!(validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [0xff, 1, 0]).is_none());
         assert!(validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [0xff, 0, 1]).is_none());
         assert!(validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [0x7f, 0, 0]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[test] fn extended_admission_requires_exact_firmware_and_j613() {
+        for board in [false,true] {
+            assert_eq!(profile_for(&[14,8,3],board),Some(Profile::Legacy));
+            assert_eq!(profile_for(&[26,6,2],board),if board{Some(Profile::Extended)}else{None});
+            for wrong in [&[][..],&[26,6][..],&[26,6,1][..],&[26,6,2,0][..],&[14,8,4][..]] {
+                assert_eq!(profile_for(wrong,board),None);
+            }
+        }
     }
 }

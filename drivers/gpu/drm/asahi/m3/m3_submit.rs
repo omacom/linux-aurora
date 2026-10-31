@@ -42,6 +42,7 @@ pub(crate) struct Packet {
     timestamps:KVec<[Option<Destination>;4]>,
     pub(crate) attachments:KVec<crate::m3::agx_attachments::Attachments>,
     pub(crate) wide_visibility:KVec<bool>,
+    pub(crate) render_attachments:KVec<[crate::m3::agx_attachments::Attachments;2]>,
     completion:UserFence<Completion>,
     finish_claimed: AtomicBool,
     /// Set before a batch with any of this packet's commands can change firmware-visible state,
@@ -197,7 +198,7 @@ impl queue::Queue for Queue {
     fn submit(&mut self,_reg_data:&crate::driver::AsahiRegData<'_>,_id:u64,mut syncs:KVec<file::SyncItem>,in_sync_count:usize,
         raw:&[u8],objects:Pin<&xarray::XArray<KBox<file::Object>>>)->Result {
         let vm_job=self.vm.retain_job()?;
-        let mut parser=agx_uapi::UapiCommandParser::new(raw);let mut commands=KVec::new();let mut timestamps=KVec::new();let mut flushes=KVec::new();let mut visibility=KVec::new();
+        let mut parser=agx_uapi::UapiCommandParser::new(raw);let mut commands=KVec::new();let mut timestamps=KVec::new();let mut flushes=KVec::new();let mut visibility=KVec::new();let mut render_attachments=KVec::new();
         while let Some(command)=parser.next_hardware().map_err(|_|EINVAL)? {
             if let agx_uapi::ParsedHardwareCommand::Render{payload,vertex_attachments,fragment_attachments,..}=command {
                 if let Err(e)=validate_render(payload,self.usc,&AddressSpace(&self.vm),self.early_tiling) {
@@ -212,6 +213,7 @@ impl queue::Queue for Queue {
                     Destination::resolve(objects,payload.fragment_timestamps.start)?,
                     Destination::resolve(objects,payload.fragment_timestamps.end)?],GFP_KERNEL)?;
                 flushes.push(crate::m3::agx_attachments::Attachments::EMPTY,GFP_KERNEL)?;
+                render_attachments.push([encode_attachments(&self.vm,&vertex_attachments)?,encode_attachments(&self.vm,&fragment_attachments)?],GFP_KERNEL)?;
                 visibility.push(false,GFP_KERNEL)?;
                 continue;
             }
@@ -227,6 +229,7 @@ impl queue::Queue for Queue {
             // The common translator validates the original command/attachment
             // addresses; this M3 scheduling hint changes none of them.
             payload.flags &= !wide;
+            render_attachments.push([crate::m3::agx_attachments::Attachments::EMPTY;2],GFP_KERNEL)?;
             flushes.push(encode_attachments(&self.vm,&attachments)?,GFP_KERNEL)?;
             let c=agx_uapi::translate_compute_command(payload,attachments,
                 agx_uapi::QueueUscWindow{base:self.usc,user_start:0x4000,user_end:(1u64<<42)-0x8000},
@@ -240,7 +243,7 @@ impl queue::Queue for Queue {
             commands.push(Command::Compute(crate::m3::agx_compute::Control{base:c.control_stream_base,end:c.control_stream_end,usc_base:self.usc}),GFP_KERNEL)?;
         }
         parser.finish().map_err(|_|EINVAL)?;
-        let packet=Arc::new(Packet{vm:self.vm.clone(),commands,timestamps,attachments:flushes,wide_visibility:visibility,
+        let packet=Arc::new(Packet{vm:self.vm.clone(),commands,timestamps,attachments:flushes,wide_visibility:visibility,render_attachments,
             completion:self.fences.new_fence(0,Completion)?.into(),
             finish_claimed:AtomicBool::new(false),published:AtomicBool::new(false),urgency:self.urgency,owner:Owner::current(),
             vm_job:KBox::pin_init(new_mutex!(Some(vm_job)),GFP_KERNEL)?},GFP_KERNEL)?;

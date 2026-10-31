@@ -32,6 +32,15 @@ impl Profile {
         }
     }
 
+    /// Keep the diagnostic AP/GPU timeline in its established 24 MHz units.
+    /// User timestamps and duration calculations retain native firmware units.
+    pub(crate) const fn profiler_ticks(self, timestamp: u64) -> u64 {
+        match self {
+            Self::Legacy => timestamp,
+            Self::Extended => (timestamp / 1000) * 24 + (timestamp % 1000) * 24 / 1000,
+        }
+    }
+
     pub(crate) fn gpu_duration_ns(self, elapsed: u64) -> Option<u64> {
         match self {
             Self::Legacy => elapsed.checked_mul(1000).map(|value| value / 24),
@@ -48,6 +57,18 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profiling_uses_one_clock_domain_without_changing_native_durations() {
+        for value in [0, 1, 999, 1000, 24_000_000, u64::MAX] {
+            assert_eq!(Profile::Legacy.profiler_ticks(value), value);
+            assert_eq!(
+                Profile::Extended.profiler_ticks(value),
+                ((value as u128) * 24 / 1000) as u64
+            );
+        }
+        assert_eq!(Profile::Extended.profiler_ticks(1_000_000_000), 24_000_000);
+    }
 
     #[test]
     fn profile_acknowledgement_is_exact_and_file_query_covers_hal() {

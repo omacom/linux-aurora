@@ -46,3 +46,39 @@ mod m3_state_layout;
 
 #[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_storage.rs"]
 mod m3_compute_storage;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_parameter_layout.rs"]
+mod m3_parameter_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_sync_layout.rs"]
+mod m3_sync_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/agx_render.rs"]
+mod agx_render;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/agx_render_state.rs"]
+mod agx_render_state;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_scene_layout.rs"]
+mod m3_scene_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_command_layout.rs"]
+mod m3_command_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_render_sequence.rs"]
+mod m3_render_sequence;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_tiler_command.rs"]
+mod m3_tiler_command;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_pass_layout.rs"]
+mod m3_pass_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_shared_layout.rs"]
+mod m3_shared_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_fragment_command.rs"]
+mod m3_fragment_command;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/agx_attachments.rs"]
+mod agx_attachments;

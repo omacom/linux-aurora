@@ -26,7 +26,7 @@ pub(crate) struct Render {
     passes:KVec<Pass>, init_bm:Buffer,
     // All active mappings above must drop before their ASID binding.
     _binding:mmu::VmBind,
-    stats: Region, sequence_bytes: KVec<u8>, tiler_bytes: KVec<u8>, fragment_bytes: KVec<u8>,
+    stats: [Region;2], profile:super::m3_profile::Profile, sequence_bytes: KVec<u8>, tiler_bytes: KVec<u8>, fragment_bytes: KVec<u8>,
     last_progress_ns:i64,
     draw:u64, heads:[u16;2], cached_views:KVec<CachedViews>,
     slot:usize, batch_count:usize, early_count:u32,
@@ -67,37 +67,45 @@ const RENDER_QUEUES: [QueueObjects; 2] = [
         scratch: s::FRAGMENT_SCRATCH, tiler: false, uuid: 0x3d0000 },
 ];
 impl Render {
-    pub(crate) fn new(dev:&driver::AsahiDrmDevice,uat:&mmu::Uat,vm:&mmu::Vm,stats:Region,clusters:u32,
-        registers:crate::m3::m3_compute_layout::RegisterSet)->Result<Self> {
+    pub(crate) fn new(dev:&driver::AsahiDrmDevice,uat:&mmu::Uat,vm:&mmu::Vm,stats:[Region;2],clusters:u32,
+        registers:crate::m3::m3_compute_layout::RegisterSet,profile:super::m3_profile::Profile)->Result<Self> {
         let lower_tlbi=crate::m3::m3_memory::LowerTlbi;
         let binding=uat.bind(vm)?;
         let mut objects=KVec::new();let mut aliases=KVec::new();
         for index in 0..s::COUNT {
-            let a=s::allocation(index).map_err(|_|EINVAL)?;
+            let a=s::allocation_for(profile,index).map_err(|_|EINVAL)?;
             let protection=prot::Prot::from_pte(a.access.pte());
             let b=match a.space {
                 Space::ClientGpu=>Buffer::at_prot(dev,uat.kernel_vm(),Some((vm,a.address)),None,
                     a.size,prot::PROT_GPU_FW_SHARED_RW,protection)?,
-                Space::Firmware=>Buffer::at_prot(dev,uat.kernel_vm(),None,Some(a.address),
+                Space::Firmware=>Buffer::at_prot(dev,uat.kernel_vm(),
+                    a.gpu_alias.map(|address|(uat.kernel_lower_vm(),address)),Some(a.address),
                     a.size,protection,prot::PROT_GPU_SHARED_RW)?,
             };
+            let mut b=b;
+            if a.gpu_alias.is_some() { aliases.push(b.map_gpu_view(vm)?,GFP_KERNEL)?; }
             objects.push(b,GFP_KERNEL)?;
         }
         // InitBM is shared, not part of a pass. Preserve its qualified mapping.
-        let init_bm=Buffer::at_prot(dev,uat.kernel_vm(),None,Some(0xfffffc200062bfe0),
+        let init_bm=Buffer::at_prot(dev,uat.kernel_vm(),None,Some(if profile==super::m3_profile::Profile::Extended {0xffff_fc24_4000_0000}
+                else {0xfffffc200062bfe0}),
             sync::INIT_BM_SIZE,prot::PROT_FW_SHARED_RW,prot::PROT_GPU_SHARED_RW)?;
         let mut passes=KVec::with_capacity(pass_layout::SLOTS,GFP_KERNEL)?;
-        for slot in 0..pass_layout::SLOTS {passes.push(Pass::new(dev,uat,vm,slot,clusters,&mut aliases)?,GFP_KERNEL)?;}
+        for slot in 0..pass_layout::SLOTS {passes.push(Pass::new(dev,uat,vm,slot,clusters,profile,&mut aliases)?,GFP_KERNEL)?;}
         let mut sequence_bytes=KVec::new();
         sequence_bytes.resize(sequence::STORAGE,0u8,GFP_KERNEL)?;
         let mut tiler_bytes=KVec::new();
-        tiler_bytes.resize(tiler::SIZE,0u8,GFP_KERNEL)?;
+        tiler_bytes.resize(if profile==super::m3_profile::Profile::Extended {tiler::EXTENDED_SIZE} else {tiler::SIZE},0u8,GFP_KERNEL)?;
         let mut fragment_bytes=KVec::new();
-        fragment_bytes.resize(fragment::SIZE,0u8,GFP_KERNEL)?;
-        let mut job=Self{passes,init_bm,stats,sequence_bytes,tiler_bytes,fragment_bytes,objects,_aliases:aliases,_binding:binding,last_progress_ns:0,draw:0,heads:[0;2],cached_views:KVec::new(),slot:0,batch_count:0,early_count:0,stage_timestamps:[true;2],base:0,checkpoint:(0,[0;2],0,0,0,0),clusters,registers,_lower_tlbi:lower_tlbi};
+        fragment_bytes.resize(if profile==super::m3_profile::Profile::Extended {fragment::EXTENDED_SIZE} else {fragment::SIZE},0u8,GFP_KERNEL)?;
+        let mut job=Self{passes,init_bm,stats,profile,sequence_bytes,tiler_bytes,fragment_bytes,objects,_aliases:aliases,_binding:binding,last_progress_ns:0,draw:0,heads:[0;2],cached_views:KVec::new(),slot:0,batch_count:0,early_count:0,stage_timestamps:[true;2],base:0,checkpoint:(0,[0;2],0,0,0,0),clusters,registers,_lower_tlbi:lower_tlbi};
         // Lists and the matching manager are built before InitBM publication.
         job.initialize_parameter_buffer()?;
-        for pool in &UMA_POOLS { pool.initialize(&mut job.objects)?; }
+        for (index,pool) in UMA_POOLS.iter().enumerate() {
+            if profile==super::m3_profile::Profile::Extended {
+                pool.initialize_extended(&mut job.objects,33+index as u8,false)?;
+            } else {pool.initialize(&mut job.objects)?;}
+        }
         job.initialize_state()?;
         job.initialize_queues()?;
         dev_info!(dev.as_ref(),"M3 native render storage initialized, PB={} MiB\n",PB_BLOCKS as usize*PB_BLOCK_SIZE/(1024*1024));
@@ -113,8 +121,14 @@ impl Render {
         let control = queue::FirmwareVa::new(self.objects[BLOCK_CONTROL].va()).map_err(|_| EINVAL)?;
         let counter = queue::FirmwareVa::new(self.objects[s::BM_COUNTER].va()).map_err(|_| EINVAL)?;
         let manager = parameter::Manager::new(pages, blocks, control, counter, PB_BLOCKS).map_err(|_| EINVAL)?;
-        let mut bytes = [0; parameter::MANAGER_SIZE];
-        manager.encode(&mut bytes).map_err(|_| EINVAL)?;
+        let extended=self.profile==super::m3_profile::Profile::Extended;
+        let mut bytes = [0; parameter::Manager::EXTENDED_SIZE];
+        let length=if extended {
+            manager.encode_extended(queue::FirmwareVa::new(self.objects[PARAMETER_PAGE_LIST].va()).map_err(|_|EINVAL)?,
+                queue::FirmwareVa::new(self.objects[PARAMETER_BLOCK_LIST].va()).map_err(|_|EINVAL)?,0,&mut bytes)
+                .map_err(|_|EINVAL)?;
+            parameter::Manager::EXTENDED_SIZE
+        } else {manager.encode(&mut bytes).map_err(|_|EINVAL)?;parameter::MANAGER_SIZE};
         for group in 0..PB_GROUPS {
             let buffer = &self.objects[PB_FIRST + group];
             let backing = parameter::Backing::new(GpuRegion::new(buffer.gpu_va()?, buffer.size()).map_err(|_| EINVAL)?)
@@ -128,18 +142,30 @@ impl Render {
                     backing.page(page).map_err(|_| EINVAL)?)?;
             }
         }
-        self.objects[BUFFER_MANAGER].write(0, &bytes)
+        self.objects[BUFFER_MANAGER].write(0, &bytes[..length])
     }
     fn initialize_state(&mut self) -> Result {
         let address = |owner: usize| queue::FirmwareVa::new(self.objects[owner].va()).map_err(|_| EINVAL);
         let notification = state::Notifier { threshold: address(s::EVENT_COUNT)?, context: self._binding.slot() };
         let list_owner = address(JOB_LIST)?;
         let mut context = [0; state::CONTEXT_SIZE];
-        state::context(&mut context).map_err(|_| EINVAL)?;
-        self.objects[GPU_CONTEXT].write(0, &context)?;
-        let mut notifier = [0; state::NOTIFIER_SIZE];
-        notification.encode(&mut notifier).map_err(|_| EINVAL)?;
-        self.objects[NOTIFIER].write(0, &notifier)?;
+        if self.profile==super::m3_profile::Profile::Extended {
+            state::context_extended(&mut context).map_err(|_|EINVAL)?;
+            self.objects[GPU_CONTEXT].write(0,&context[..state::EXTENDED_CONTEXT_SIZE])?;
+            for engine in 0..2 {
+                let value=state::Notifier {threshold:queue::FirmwareVa::new(self.objects[s::EVENT_COUNT].va()+engine as u64*8).map_err(|_|EINVAL)?,
+                    context:self._binding.slot()};
+                let mut notifier=[0;state::EXTENDED_NOTIFIER_SIZE];
+                value.encode_extended(&mut notifier).map_err(|_|EINVAL)?;
+                self.objects[NOTIFIER].write(engine*state::EXTENDED_NOTIFIER_SIZE,&notifier)?;
+            }
+        } else {
+            state::context(&mut context).map_err(|_| EINVAL)?;
+            self.objects[GPU_CONTEXT].write(0, &context)?;
+            let mut notifier = [0; state::NOTIFIER_SIZE];
+            notification.encode(&mut notifier).map_err(|_| EINVAL)?;
+            self.objects[NOTIFIER].write(0, &notifier)?;
+        }
         let mut list = [0; state::JOB_LIST_SIZE];
         state::job_list(&mut list, list_owner).map_err(|_| EINVAL)?;
         self.objects[JOB_LIST].write(0, &list)?;
@@ -157,6 +183,10 @@ impl Render {
             state::counter(bytes, value).map_err(|_| EINVAL)?;
             self.objects[owner].write(0, bytes)?;
         }
+        if self.profile==super::m3_profile::Profile::Extended {
+            self.objects[s::EVENT_COUNT].fill(0)?;
+            self.objects[s::BM_COUNTER].fill(0)?;
+        }
         Ok(())
     }
     fn initialize_queues(&mut self) -> Result {
@@ -172,8 +202,13 @@ impl Render {
             }else{[self.passes[0].get(P::TilerToFragment).va(),self.passes[0].get(P::FragmentCommand).va()]};
             let seeds=[queue::FirmwareVa::new(seed_addresses[0]).map_err(|_|EINVAL)?,
                 queue::FirmwareVa::new(seed_addresses[1]).map_err(|_|EINVAL)?];
-            let mut bytes = [0; queue::INFO_SIZE];
-            info.encode(&mut bytes).map_err(|_| EINVAL)?;
+            let mut bytes=KVec::new();
+            bytes.resize(if self.profile==super::m3_profile::Profile::Extended {
+                queue::QueueInfo::EXTENDED_SIZE
+            } else {queue::INFO_SIZE},0u8,GFP_KERNEL)?;
+            if self.profile==super::m3_profile::Profile::Extended {
+                info.encode_extended(address(owner.info)?,&mut bytes).map_err(|_|EINVAL)?;
+            } else {info.encode(&mut bytes).map_err(|_|EINVAL)?;}
             self.objects[owner.info].write(0, &bytes)?;
             let mut state = [0; queue::STATE_SIZE];
             queue::RingState { capacity: queue::QUALIFIED_CAPACITY, done: 0, read: 0, write: 0 }
@@ -187,9 +222,12 @@ impl Render {
         Ok(())
     }
     fn write_barrier(&mut self, owner: P, command: sync::Barrier) -> Result {
-        let mut bytes = [0; sync::BARRIER_SIZE];
-        command.encode(&mut bytes).map_err(|_| EINVAL)?;
-        self.passes[self.slot].get_mut(owner).write(0, &bytes)
+        let mut bytes=[0;sync::Barrier::EXTENDED_SIZE];
+        let length=if self.profile==super::m3_profile::Profile::Extended {
+            command.encode_extended(&mut bytes).map_err(|_|EINVAL)?;
+            sync::Barrier::EXTENDED_SIZE
+        } else {command.encode(&mut bytes).map_err(|_|EINVAL)?;sync::BARRIER_SIZE};
+        self.passes[self.slot].get_mut(owner).write(0,&bytes[..length])
     }
     // Construct synchronization from the actual owners after resetting a pass,
     // before publishing its ring entries. InitBM is shared and dispatched only
@@ -201,9 +239,11 @@ impl Render {
         let ta_stamp = address(s::TA_FW_STAMP)?;
         let fs_stamp = address(s::FRAGMENT_FW_STAMP)?;
         let mut init = [0; sync::INIT_BM_SIZE];
-        sync::InitBufferManager { context: self._binding.slot(), slot: 0,
-            block_count: PB_BLOCKS, manager, stamp: timeline::stamp(s::STAMP_TA - 256, 1) }
-            .encode(&mut init).map_err(|_| EINVAL)?;
+        let value=sync::InitBufferManager { context: self._binding.slot(), slot: 0,
+            block_count: PB_BLOCKS, manager, stamp: timeline::stamp(s::STAMP_TA - 256, 1) };
+        if self.profile==super::m3_profile::Profile::Extended {
+            value.encode_extended(&mut init).map_err(|_|EINVAL)?;
+        } else {value.encode(&mut init).map_err(|_|EINVAL)?;}
         self.init_bm.write(0, &init)?;
         let ta_value = timeline::stamp(s::STAMP_TA - 256, draw);
         let fs_value = timeline::stamp(s::STAMP_FRAGMENT - 256, draw);
@@ -225,7 +265,7 @@ impl Render {
     }
     // Prepare each private command after its retired slot is reset. The
     // reusable host staging allocation is copied before the next slot is built.
-    fn prepare_tiler(&mut self,r:agx_uapi::UapiRenderCommand,draw:u64)->Result {
+    fn prepare_tiler(&mut self,r:agx_uapi::UapiRenderCommand,usc:u64,draw:u64)->Result {
         use crate::m3::m3_compute_layout::GpuVa;
         let pass=&self.passes[self.slot];
         let shared=|index:usize| queue::FirmwareVa::new(self.objects[index].va()).map_err(|_|EINVAL);
@@ -243,7 +283,7 @@ impl Render {
         let value=tiler::Command {
             context:self._binding.slot(),register_set:self.registers,
             notifier:shared(NOTIFIER)?,manager:shared(BUFFER_MANAGER)?,
-            scene:fw(P::Scene)?,empty:shared(547)?,gpu_alias:GpuVa::new(command.gpu_va()?).map_err(|_|EINVAL)?,
+            scene:fw(P::Scene)?,empty:if self.profile==super::m3_profile::Profile::Extended {queue::FirmwareVa::new(pass.get(P::Scene).va()+0x100).map_err(|_|EINVAL)?} else {shared(547)?},gpu_alias:GpuVa::new(command.gpu_va()?).map_err(|_|EINVAL)?,
             sequence:Region::new(seq.va(),seq.size()).map_err(|_|EINVAL)?,pool:shared(UMA_POOLS[0].manager)?,
             scratch:fw(P::TilerScratch)?,stamp:shared(s::TA_STAMP)?,fw_stamp:shared(s::TA_FW_STAMP)?,
             stamp_value:timeline::stamp(s::STAMP_TA - 256, draw),timestamps:[fw(P::TilerStart)?,fw(P::TilerEnd)?],
@@ -253,7 +293,12 @@ impl Render {
             vdm:crate::m3::agx_render_state::compact(r.vdm_base).map_err(|_|EINVAL)?,
             multisample:r.multisample_control,ppp:r.ppp_control,process_empty_tiles:r.flags&2!=0,
         };
-        value.encode(&mut self.tiler_bytes).map_err(|_|EINVAL)?;
+        if self.profile==super::m3_profile::Profile::Extended {
+            value.encode_extended(tiler::Dispatch26 {incarnation:self._binding.generation(),serial:draw.checked_mul(2).ok_or(EOVERFLOW)?,
+                peer_stamp:timeline::stamp(s::STAMP_FRAGMENT-256,draw),usc_window:usc,
+                firmware_aux:queue::FirmwareVa::new(self.objects[UMA_POOLS[0].manager].va()+0x100).map_err(|_|EINVAL)?,
+                scene_scratch:gpu(P::FragmentScratch)?},&mut self.tiler_bytes).map_err(|_|EINVAL)?;
+        } else {value.encode(&mut self.tiler_bytes).map_err(|_|EINVAL)?;}
         self.passes[self.slot].get_mut(P::TilerCommand).write(0,&self.tiler_bytes)
     }
     fn prepare_sequences(&mut self,draw:u64)->Result {
@@ -266,14 +311,21 @@ impl Render {
             let notifier=&self.objects[NOTIFIER];
             let owners=sequence::Owners {
                 command:region(if fs{P::FragmentCommand}else{P::TilerCommand})?,sequence:region(target)?,
-                stats:self.stats,notifier:Region::new(notifier.va(),notifier.size()).map_err(|_|EINVAL)?,
+                stats:self.stats[usize::from(fs)],notifier:Region::new(notifier.va()+
+                    if fs && self.profile==super::m3_profile::Profile::Extended {0x200} else {0},
+                    if self.profile==super::m3_profile::Profile::Extended {0x200} else {notifier.size()}).map_err(|_|EINVAL)?,
                 queue:shared(if fs{s::FRAGMENT_QUEUE}else{s::TA_QUEUE})?,scene:fw(P::Scene)?,
                 manager:shared(BUFFER_MANAGER)?,pool:shared(UMA_POOLS[usize::from(fs)].manager)?,
                 fw_stamp:shared(if fs{s::FRAGMENT_FW_STAMP}else{s::TA_FW_STAMP})?,
                 context:self._binding.slot(),stamp:timeline::stamp((if fs{s::STAMP_FRAGMENT}else{s::STAMP_TA}) - 256, draw),
             };
             let timed=self.stage_timestamps[usize::from(fs)];
-            let length=if fs {
+            let length=if self.profile==super::m3_profile::Profile::Extended {
+                let pool=&self.objects[UMA_POOLS[usize::from(fs)].manager];
+                let auxiliary=super::m3_compute_layout::GpuVa::new(pool.gpu_va()?+if fs{0x200}else{0x100}).map_err(|_|EINVAL)?;
+                let serial=draw.checked_mul(2).and_then(|v|v.checked_sub(u64::from(fs))).ok_or(EOVERFLOW)?;
+                owners.encode_extended(fs,auxiliary,serial,&mut self.sequence_bytes).map_err(|_|EINVAL)?
+            } else if fs {
                 let b=pass.get(P::FragmentScratch);
                 let scratch=GpuRegion::new(b.gpu_va()?,b.size()).map_err(|_|EINVAL)?;
                 sequence::Fragment{owners,scratch,queue_command_count:timeline::previous(draw)}.encode_timestamps(&mut self.sequence_bytes,timed).map_err(|_|EINVAL)?
@@ -290,6 +342,9 @@ impl Render {
     fn patch_context(&mut self)->Result {
         let context=self._binding.slot();
         self.objects[NOTIFIER].u32(state::NOTIFIER_CONTEXT, context)?;
+        if self.profile==super::m3_profile::Profile::Extended {
+            self.objects[NOTIFIER].u32(0x200+state::NOTIFIER_CONTEXT,context)?;
+        }
         Ok(())
     }
     /// Pass geometry; TPC storage is per tiler accelerator, one per GPU cluster.
@@ -320,7 +375,8 @@ impl Render {
         let value=fragment::Command {
             context:self._binding.slot(),register_set:self.registers,
             sequence:Region::new(seq.va(),seq.size()).map_err(|_|EINVAL)?,
-            notifier:shared(NOTIFIER)?,manager:shared(BUFFER_MANAGER)?,scene:fw(P::Scene)?,empty:shared(547)?,
+            notifier:queue::FirmwareVa::new(self.objects[NOTIFIER].va()+
+                if self.profile==super::m3_profile::Profile::Extended {0x200} else {0}).map_err(|_|EINVAL)?,manager:shared(BUFFER_MANAGER)?,scene:fw(P::Scene)?,empty:if self.profile==super::m3_profile::Profile::Extended {queue::FirmwareVa::new(pass.get(P::Scene).va()+0x100).map_err(|_|EINVAL)?} else {shared(547)?},
             gpu_alias:GpuVa::new(command.gpu_va()?).map_err(|_|EINVAL)?,tilemap:gpu(P::Tilemap)?,
             heap:gpu(P::HeapMetadata)?,auxiliary:gpu(P::Auxiliary)?,scene_user:gpu(P::SceneUser)?,
             scratch:gpu(P::FragmentScratch)?,pool:shared(UMA_POOLS[1].manager)?,stamp:shared(s::FRAGMENT_STAMP)?,
@@ -341,8 +397,24 @@ impl Render {
                 stencil_clear:r.stencil_clear,sample_size:u32::from(r.sample_size),process_empty_tiles:r.flags&2!=0,
             },
         };
-        value.encode(&mut self.fragment_bytes).map_err(|_|EINVAL)?;
+        if self.profile==super::m3_profile::Profile::Extended {
+            value.encode_extended(tiler::Dispatch26 {incarnation:self._binding.generation(),serial:draw.checked_mul(2).and_then(|v|v.checked_sub(1)).ok_or(EOVERFLOW)?,
+                peer_stamp:0,usc_window:usc,
+                firmware_aux:queue::FirmwareVa::new(self.objects[UMA_POOLS[1].manager].va()+0x200).map_err(|_|EINVAL)?,
+                scene_scratch:gpu(P::FragmentScratch)?},&mut self.fragment_bytes).map_err(|_|EINVAL)?;
+        } else {value.encode(&mut self.fragment_bytes).map_err(|_|EINVAL)?;}
         self.passes[self.slot].get_mut(P::FragmentCommand).write(0,&self.fragment_bytes)
+    }
+    pub(crate) fn set_attachments(&mut self,attachments:&[crate::m3::agx_attachments::Attachments;2])->Result {
+        // Preserve the legacy renderer's existing packet format. The native
+        // interface consumes separate attachment apertures for both stages.
+        if self.profile!=super::m3_profile::Profile::Extended {return Ok(());}
+        for (fragment,list) in attachments.iter().enumerate() {
+            let field=if fragment==0 {P::TilerSequence}else{P::FragmentSequence};
+            let buffer=self.passes[self.slot].get_mut(field);
+            sequence::patch_extended_attachments(fragment!=0,list,|offset,data|buffer.write(offset,data))?;
+        }
+        crate::m3::agx_memory::publish();Ok(())
     }
     pub(crate) fn set_user_timestamps(&mut self,addresses:[[u64;2];2])->Result {
         if addresses.iter().enumerate().any(|(stage,pair)|*pair!=[0;2] && !self.stage_timestamps[stage]) {return Err(EINVAL);}
@@ -350,6 +422,9 @@ impl Render {
             (P::TilerCommand,P::TilerSequence,sequence::ta::USER_PAIR,sequence::ta::TIMESTAMP_START,sequence::ta::TIMESTAMP_END),
             (P::FragmentCommand,P::FragmentSequence,sequence::fragment::USER_PAIR,sequence::fragment::TIMESTAMP_START,sequence::fragment::TIMESTAMP_END)
         ].into_iter().enumerate() {
+            let (offset,start,end)=if self.profile==super::m3_profile::Profile::Extended {
+                if stage==0 {(0x8d8,0x1cc,0x21c)} else {(0xc20,0x1e4,0x234)}
+            } else {(offset,start,end)};
             let pair=addresses[stage];
             if !self.stage_timestamps[stage] {continue;}
             self.passes[self.slot].get_mut(command).u64(offset,pair[0])?;
@@ -365,19 +440,19 @@ impl Render {
     pub(crate) fn gpu_ns(&mut self,base:usize,count:usize)->Result<u64> {
         let start=self.passes[base].get_mut(P::TilerStart).read_u64(0)?;
         let end=self.passes[Self::at(base,count-1)].get_mut(P::FragmentEnd).read_u64(0)?;
-        Ok(if start!=0 && end>=start {(end-start)*1000/24} else {0})
+        self.profile.gpu_duration_ns(if start!=0 && end>=start {end-start} else {0}).ok_or(EOVERFLOW)
     }
     /// The batch's first tiler start and last fragment end, in 24 MHz GPU timestamp ticks.
     pub(crate) fn gpu_ticks(&mut self,base:usize,count:usize)->Result<(u64,u64)> {
-        Ok((self.passes[base].get_mut(P::TilerStart).read_u64(0)?,
-            self.passes[Self::at(base,count-1)].get_mut(P::FragmentEnd).read_u64(0)?))
+        Ok((self.profile.profiler_ticks(self.passes[base].get_mut(P::TilerStart).read_u64(0)?),
+            self.profile.profiler_ticks(self.passes[Self::at(base,count-1)].get_mut(P::FragmentEnd).read_u64(0)?)))
     }
     /// Read retained timestamps only after exact batch retirement. The first
     /// TA and final fragment delimit the batch in the shared 24 MHz counter.
     pub(crate) fn batch_gpu_span(&mut self)->Result<[u64;2]> {
         if self.batch_count == 0 {return Err(EINVAL);}
-        Ok([self.passes[self.base].get_mut(P::TilerStart).read_u64(0)?,
-            self.passes[Self::at(self.base,self.batch_count-1)].get_mut(P::FragmentEnd).read_u64(0)?])
+        let (start,end)=self.gpu_ticks(self.base,self.batch_count)?;
+        Ok([start,end])
     }
     pub(crate) fn stage_ns(&mut self,base:usize,count:usize)->Result<[u64;3]> {
         let mut total=[0;3];
@@ -390,7 +465,7 @@ impl Render {
     pub(crate) fn slot_stage_ns(&mut self,base:usize,count:usize,index:usize)->Result<[u64;3]> {
         if index>=count {return Err(EINVAL);}
         let slot=Self::at(base,index);
-        let duration=|a:u64,b:u64| if a!=0 && b>=a {(b-a)*1000/24} else {0};
+        let duration=|a:u64,b:u64| self.profile.gpu_duration_ns(if a!=0 && b>=a {b-a} else {0}).unwrap_or(0);
         let fs_start=self.passes[slot].get_mut(P::FragmentStart).read_u64(0)?;
         let fs_end=self.passes[slot].get_mut(P::FragmentEnd).read_u64(0)?;
         let ta_start=self.passes[slot].get_mut(P::TilerStart).read_u64(0)?;
@@ -415,7 +490,9 @@ impl Render {
     }
     /// Whether any draw has been published (the first one initializes the buffer manager).
     pub(crate) fn started(&self)->bool {self.draw>0}
-    pub(crate) fn first(&self)->bool {self.draw==self.batch_count as u64}
+    pub(crate) fn first(&self)->bool {
+        self.profile==super::m3_profile::Profile::Legacy && self.draw==self.batch_count as u64
+    }
     /// Start a batch in pass slots `base..`. With `overlap`, earlier batches may still run: then
     /// the VM must already be bound, no storage may grow and the slots must not be in flight
     /// (the caller keeps the in-flight passes plus this batch within SLOTS).
@@ -447,13 +524,15 @@ impl Render {
                 let binding=uat.bind(vm)?;
                 let mut views=KVec::new();let mut aliases=KVec::new();
                 for i in 0..s::COUNT {
-                    if s::allocation(i).map_err(|_|EINVAL)?.space==Space::ClientGpu {
+                    let a=s::allocation_for(self.profile,i).map_err(|_|EINVAL)?;
+                    if a.gpu_alias.is_some() {aliases.push(self.objects[i].map_gpu_view(vm)?,GFP_KERNEL)?;}
+                    if a.space==Space::ClientGpu {
                         views.push((ViewOwner::Shared(i),self.objects[i].map_gpu_view(vm)?),GFP_KERNEL)?;
                     }
                 }
                 for (slot,pass) in self.passes.iter_mut().enumerate() {
                     for field in pass_layout::FIELDS {
-                        let a=pass_layout::board_allocation(slot,field,self.clusters).map_err(|_|EINVAL)?;
+                        let a=pass_layout::allocation_for(self.profile,slot,field,self.clusters).map_err(|_|EINVAL)?;
                         if a.space==Space::ClientGpu {views.push((ViewOwner::Pass{slot,field},pass.get_mut(field).map_gpu_view(vm)?),GFP_KERNEL)?;}
                         if a.gpu_alias.is_some() {aliases.push(pass.get_mut(field).map_gpu_view(vm)?,GFP_KERNEL)?;}
                     }
@@ -498,12 +577,22 @@ impl Render {
         self.base=base;
         Ok(())
     }
+    fn publish_counts(&mut self, draw:u64) -> Result {
+        if self.profile==super::m3_profile::Profile::Extended {
+            for offset in [0,8] {self.objects[s::EVENT_COUNT].u64(offset,draw)?;}
+            for counter in [TA_POOL_COUNTER,FRAGMENT_POOL_COUNTER] {self.objects[counter].u64(0,draw)?;}
+        } else {
+            self.objects[s::BM_COUNTER].u32(0,draw as u32)?;
+            self.objects[s::EVENT_COUNT].u32(0,timeline::events(draw,2))?;
+        }
+        Ok(())
+    }
+
     /// Restore producer state only when no batch is in flight. Running firmware can
     /// consume append's WRITE updates without a new doorbell, so overlap cannot abort.
     pub(crate) fn abort_batch(&mut self)->Result {
         (self.draw,self.heads,self.batch_count,self.slot,self.early_count,self.base)=self.checkpoint;
-        self.objects[s::BM_COUNTER].u32(0,self.draw as u32)?;
-        self.objects[s::EVENT_COUNT].u32(0,timeline::events(self.draw,2))?;
+        self.publish_counts(self.draw)?;
         for (stage,pointers) in [s::TA_POINTERS,s::FRAGMENT_POINTERS].into_iter().enumerate() {
             self.objects[pointers].u32(queue::WRITE,u32::from(self.heads[stage]))?;
         }
@@ -547,8 +636,20 @@ impl Render {
         self.draw=self.draw.checked_add(1).ok_or(EOVERFLOW)?;
         self.batch_count+=1;
         let draw=self.draw;
-        self.objects[s::BM_COUNTER].u32(0,draw as u32)?;
-        self.objects[s::EVENT_COUNT].u32(0,timeline::events(draw,2))?;
+        self.publish_counts(draw)?;
+        if self.profile==super::m3_profile::Profile::Extended {
+            let pass=&self.passes[self.slot];
+            let scratch=pass.get(P::FragmentScratch);
+            let scratch_gpu=GpuRegion::new(scratch.gpu_va()?,scratch.size()).map_err(|_|EINVAL)?;
+            let scratch_fw=queue::FirmwareVa::new(scratch.va()).map_err(|_|EINVAL)?;
+            let list=pass.get(P::SceneUser);
+            let list=GpuRegion::new(list.gpu_va()?,list.size()).map_err(|_|EINVAL)?;
+            let metadata=pass.get(P::Scene);
+            let owner=Region::new(metadata.va(),metadata.size()).map_err(|_|EINVAL)?;
+            let mut bytes=[0;scene::EXTENDED_SIZE];
+            scene::encode_extended(&mut bytes,owner,scratch_gpu,scratch_fw,list).map_err(|_|EINVAL)?;
+            self.passes[self.slot].get_mut(P::Scene).write(0,&bytes)?;
+        } else {
         let entry_offset = (self.draw % u64::from(MANAGER_SCENE_COUNT)) as usize * 4;
         let scene_list = &mut self.objects[s::BM_SCENES];
         if entry_offset + 4 > scene_list.size() { return Err(ERANGE); }
@@ -560,7 +661,8 @@ impl Render {
         let mut bytes = [0; scene::SIZE];
         scene::Scene { manager_entry, manager_misc, user_buffer }.encode(&mut bytes).map_err(|_| EINVAL)?;
         self.passes[self.slot].get_mut(P::Scene).write(0, &bytes)?;
-        self.prepare_tiler(r,draw)?;
+        }
+        self.prepare_tiler(r,usc,draw)?;
         self.patch_context()?;
         self.prepare_fragment(r,usc,draw)?;
         self.prepare_sequences(draw)?;
@@ -655,7 +757,13 @@ impl Render {
             if self.objects[stamp].read_u32(0)?!=value || self.objects[fw].read_u32(0)?!=value
                 || self.objects[pointers].read_u32(queue::DONE)?!=u32::from(head)
                 || self.objects[pointers].read_u32(queue::READ)?!=u32::from(head) {return Ok(false);}
-        } Ok(true)
+        }
+        if self.profile==super::m3_profile::Profile::Extended && self.draw!=0 {
+            for pool in UMA_POOLS {
+                if self.objects[pool.manager].read_u64(0x54)?!=self.draw {return Ok(false);}
+            }
+        }
+        Ok(true)
     }
     pub(crate) fn log(&mut self,dev:&driver::AsahiDrmDevice)->Result {
         // Retain allocator state as well as payloads: an exhausted parameter
