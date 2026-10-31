@@ -2165,7 +2165,43 @@ impl SepData {
         }
     }
 
-    /// SENSOR_NONCE, the signed root key once a boot, and the session share.
+    fn load_sensor_root_key(&self) -> bool {
+        let policy = self.profile.sensor_root_key;
+        let Some(name) = policy.firmware() else {
+            return false;
+        };
+        let firmware = match kernel::firmware::Firmware::request(name, &self.dev) {
+            Ok(firmware) => firmware,
+            Err(error) => {
+                dev_err!(
+                    self.dev,
+                    "sensor: root-key firmware {} unavailable: {:?}\n",
+                    name,
+                    error
+                );
+                return false;
+            }
+        };
+        if !policy.accepts_length(firmware.data().len()) {
+            dev_err!(
+                self.dev,
+                "sensor: root-key firmware {} has unsupported length {}\n",
+                name,
+                firmware.data().len()
+            );
+            self.sensor_step_failed(c"SENSOR_ROOT_KEY");
+            return false;
+        }
+        if !self.sensor_session_request(0x86, c"SENSOR_ROOT_KEY", firmware.data()) {
+            self.sensor_step_failed(c"SENSOR_ROOT_KEY");
+            return false;
+        }
+        self.sensor_key_loaded.store(true, Relaxed);
+        self.sensor_trace(c"SENSOR_ROOT_KEY");
+        true
+    }
+
+    /// SENSOR_NONCE, the board's root-key policy, and the session share.
     fn sensor_nonce_session(&self, nonce: &[u8; 32]) -> bool {
         if *module_parameters::sensor_test_fault.value() != 0
             && !self.sensor_test_fault_done.xchg(true, Relaxed)
@@ -2182,28 +2218,11 @@ impl SepData {
         }
         self.sensor_trace(c"SENSOR_NONCE");
 
-        if !self.sensor_key_loaded.load(Relaxed) {
-            let firmware = match kernel::firmware::Firmware::request(
-                c"apple/msrk-j700.bin", &self.dev,
-            ) {
-                Ok(firmware) => firmware,
-                Err(error) => {
-                    dev_err!(
-                        self.dev,
-                        "sensor: signed root-key container unavailable: {:?}\n",
-                        error
-                    );
-                    return false;
-                }
-            };
-            if firmware.data().is_empty()
-                || !self.sensor_session_request(0x86, c"SENSOR_ROOT_KEY", firmware.data())
-            {
-                self.sensor_step_failed(c"SENSOR_ROOT_KEY");
-                return false;
-            }
-            self.sensor_key_loaded.store(true, Relaxed);
-            self.sensor_trace(c"SENSOR_ROOT_KEY");
+        if self.profile.sensor_root_key == profile::SensorRootKey::J700
+            && !self.sensor_key_loaded.load(Relaxed)
+            && !self.load_sensor_root_key()
+        {
+            return false;
         }
         // Each identification starts a new sensor-side exchange, even though
         // the signed key remains loaded for the lifetime of the enclave.
@@ -2506,8 +2525,35 @@ impl SepData {
     }
 
     fn establish_session(&self) -> bool {
-        let Some(share) = self.sensor_enclave_step(&crate::sbio::sbio_request_session_share())
-        else {
+        let op = crate::sbio::sbio_request_session_share();
+        let done = match self.sbio_transfer(&op) {
+            Ok(done) => done,
+            Err(error) => {
+                dev_warn!(self.dev, "sensor: SESSION_SHARE transfer failed: {:?}\n", error);
+                self.sensor_step_failed(c"SESSION_SHARE");
+                return false;
+            }
+        };
+        let share = if done.status.is_ok() {
+            self.sensor_trace(c"SESSION_SHARE");
+            done.payload
+        } else if self
+            .profile
+            .sensor_root_key
+            .recover_share(done.status.answered())
+        {
+            dev_info!(self.dev, "sensor: SESSION_SHARE status 0x16; loading FDR MSRk\n");
+            if !self.load_sensor_root_key() {
+                return false;
+            }
+            // One retry only: this step does not enter the recovery path again.
+            let Some(share) = self.sensor_enclave_step(&op) else {
+                return false;
+            };
+            share
+        } else {
+            dev_warn!(self.dev, "sensor: SESSION_SHARE refused with status {}\n", done.status);
+            self.sensor_step_failed(c"SESSION_SHARE");
             return false;
         };
 
