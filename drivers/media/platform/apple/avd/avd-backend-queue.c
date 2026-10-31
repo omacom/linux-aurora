@@ -182,7 +182,12 @@ static int avd_qfw_stream(struct avd_dev *avd, const u32 *words, u32 count)
 		}
 		pos = q->wp % q->ring_words;
 		chunk = min3(space, count - done, q->ring_words - pos);
-		memcpy_toio(q->sram + q->ring_off + 4 * pos, words + done, 4 * chunk);
+		/*
+		 * Word stores only: memcpy_toio() would use 64-bit and byte
+		 * stores, and the CM3 data SRAM is only ever accessed with
+		 * 32-bit ones elsewhere (info block, descriptors).
+		 */
+		__iowrite32_copy(q->sram + q->ring_off + 4 * pos, words + done, chunk);
 		q->wp += chunk;
 		done += chunk;
 		/* Words before the count that publishes them. */
