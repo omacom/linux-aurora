@@ -1786,7 +1786,8 @@ impl M5Board {
         }
     }
 
-    /// The minimum parameter-buffer size.
+    /// The minimum parameter-buffer size. Renders carry it in
+    /// pages too (`target::min_parameter_buffer_pages()`).
     pub(crate) const fn min_parameter_buffer(self) -> u32 {
         match self {
             Self::J714 => 0x0020_0000,
@@ -1931,6 +1932,14 @@ pub(crate) const J716C_REGISTER_WINDOW_SPECS: [M5RegisterWindowSpec; 29] = {
     specs[14] = jw(24, &[G + 0xec_0000, G + 0xed_0000, G + 0xee_0000, G + 0xef_0000],
                    0x10000, 0, 2);
     specs
+};
+
+const _: () = {
+    use super::target::min_parameter_buffer_pages;
+    assert!(M5Board::J714.min_parameter_buffer() as u64
+        == min_parameter_buffer_pages(M5Board::J714.clusters()) << 15);
+    assert!(M5Board::J716c.min_parameter_buffer() as u64
+        == min_parameter_buffer_pages(M5Board::J716c.clusters()) << 15);
 };
 
 pub(crate) const M5_REGISTER_WINDOW_58: M5RegisterWindowSpec =

@@ -138,7 +138,7 @@ pub(crate) fn layout(command: &Validated, clusters: u32, programs: RegisterProgr
     // future growth, rather than just the initially resident physical blocks.
     let bytes = geometry.capacity.checked_mul(geometry.block_bytes).ok_or(EOVERFLOW)?;
     let groups = if pass.few_primitives { 1 } else { clusters };
-    layout.with_m5_slices(pass, groups, 64, bytes)
+    layout.with_m5_slices(pass, clusters, groups, 64, bytes)
 }
 
 pub(crate) fn controls(pass: &RenderPass) -> Result<regs::M5RenderControls> {

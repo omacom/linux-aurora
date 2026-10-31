@@ -148,12 +148,15 @@ impl Layout {
             m5: None,
         })
     }
-    pub(crate) fn with_m5_slices(mut self, pass: &RenderPass, groups: u32,
+    pub(crate) fn with_m5_slices(mut self, pass: &RenderPass, clusters: u32, groups: u32,
         segments: u32, parameter_bytes: usize) -> Result<Self> {
         let slices = crate::g17::fw::m5::target::TargetSlices::new(
             self.tilemap_size, self.tpc_size, pass.layers, groups, segments, parameter_bytes)
             .ok_or(EINVAL)?;
-        let control = crate::g17::fw::m5::target::cluster_control(groups, u64::from(segments))
+        // The last word is the part's minimum parameter-buffer size, whatever
+        // the group count.
+        let control = crate::g17::fw::m5::target::cluster_control(groups,
+            crate::g17::fw::m5::target::min_parameter_buffer_pages(clusters))
             .ok_or(EINVAL)?;
         self.m5 = Some((slices, control));
         Ok(self)

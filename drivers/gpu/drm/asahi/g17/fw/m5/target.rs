@@ -2,6 +2,11 @@
 //! M5 render-target suballocation geometry.
 
 
+/// The part's minimum parameter-buffer size in 32 KiB pages.
+pub(crate) const fn min_parameter_buffer_pages(clusters: u32) -> u64 {
+    32 + 16 * clusters as u64
+}
+
 pub(crate) fn cluster_control(clusters: u32, pb_pages: u64) -> Option<[u64; 3]> {
     let difference = match clusters {
         1 => return Some([1, 0, pb_pages]),
