@@ -286,6 +286,7 @@ static void avd_pm_open_boot_replay_test(struct kunit *test)
 	avd->pdev = pdev;
 	avd->variant = &variant;
 	avd->fw = &fw;
+	avd->backend = &avd_open_backend;
 	/* Ordinary test RAM, never a mapped target aperture. */
 	avd->code = (__force void __iomem *)kunit_kzalloc(test, 0x100, GFP_KERNEL);
 	avd->mbox = (__force void __iomem *)kunit_kzalloc(test, 0x100, GFP_KERNEL);
@@ -300,7 +301,7 @@ static void avd_pm_open_boot_replay_test(struct kunit *test)
 		writel(0, avd->pm.piodma + 0x24);
 		/* The fixture supplies firmware readiness; no firmware is executed. */
 		writel(1, avd->mbox + AVD_REG_FLAG0_SET);
-		KUNIT_ASSERT_EQ(test, avd_boot(avd), 0);
+		KUNIT_ASSERT_EQ(test, avd_backend_boot(avd), 0);
 		KUNIT_EXPECT_EQ(test, readl(avd->pm.piodma + 0x24), 0x12345678U);
 		memcpy_fromio(observed, avd->code, sizeof(observed));
 		KUNIT_EXPECT_MEMEQ(test, observed, image, sizeof(image));

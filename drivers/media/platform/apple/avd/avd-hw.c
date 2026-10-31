@@ -52,7 +52,6 @@ int avd_boot(struct avd_dev *avd)
 		dev_info_once(avd->dev, "booting hw version: %04x",
 				readl_relaxed(avd->ctrl));
 
-	avd_pm_prepare_piodma(avd);
 	memcpy_toio(avd->code, avd->fw->data, avd->fw->size);
 
 	writel_relaxed(AVD_MBOX_ENABLE, avd->mbox + AVD_REG_MBOX1_STATUS);

@@ -253,17 +253,8 @@ int avd_pm_backend_suspend(struct avd_dev *avd)
 
 int avd_pm_backend_resume(struct avd_dev *avd)
 {
-	int ret;
-
-	/* Keep initial image-based selection, but never change ABI after use. */
-	if (!avd->fw_generation)
-		return avd_backend_boot(avd);
-	/* Apple boot re-verifies ITCM and relinks even when the image survived. */
-	ret = avd->backend->boot(avd);
-
-	if (!ret)
-		avd->fw_generation++;
-	return ret;
+	/* Includes transport setup, ITCM verification/load and a new generation. */
+	return avd_backend_boot(avd);
 }
 
 int avd_pm_recover(struct avd_dev *avd)
