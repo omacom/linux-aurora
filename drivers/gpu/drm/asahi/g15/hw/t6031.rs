@@ -129,10 +129,12 @@ pub(crate) const CONFIG: Config = Config {
         version: 0x07041100,
         counts: 0x0021040a,
     }],
-    // The stubs the boot chains of this J516C leave loaded (RTKit-2419.140.12): the macOS 14.7
-    // chain's and the macOS 14.8 boot volume's. Same segment sizes and marker; the layout, board
-    // images and initdata below do not depend on which one is loaded. A further build can be
-    // admitted for one boot with `g15_accept_text_prefix`, which logs its digest.
+    // The stubs the boot chains of J516Cs leave loaded (RTKit-2419.140.12): the macOS 14.7
+    // chain's, the macOS 14.8 boot volume's and a third TEXT seen on two further J516Cs (omacom
+    // /linux-aurora#289). Same segment sizes and marker; the layout, board images and initdata
+    // below do not depend on which one is loaded. The names say where a digest was measured,
+    // not that it identifies one build. A further digest can be admitted for one boot with
+    // `g15_accept_text_prefix`, which logs it.
     firmware: &[
         FirmwareBuild {
             name: "macOS 14.7 stub firmware (iBoot-10151.140.19.700.2), J516C",
@@ -156,6 +158,21 @@ pub(crate) const CONFIG: Config = Config {
                 0x1b, 0xf2, 0xfd, 0x34, 0x76, 0xbe, 0xfe, 0x73, 0x6b, 0xc2, 0xc0, 0x70, 0xba,
                 0xd4, 0x5f, 0x8b, 0xe3, 0x6b, 0x68, 0xcd, 0x11, 0xbc, 0xff, 0x16, 0xc9, 0x02,
                 0x9d, 0x6b, 0xcd, 0xa0, 0x26, 0xcf,
+            ],
+        },
+        // Two J516Cs (iBoot2 iBoot-10151.140.19.700.2, OS firmware 14.7; iBoot1 mBoot-20457.1.29
+        // and mBoot-20457.41.3) load this TEXT. On the second, 10 boots, glxinfo on the M3 Max
+        // renderer and a GLES compute job with no mismatches, no GPU faults (#289).
+        FirmwareBuild {
+            name: "J516C stub firmware, TEXT 125f0497 (seen with iBoot-10151.140.19.700.2)",
+            machine: None,
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x12, 0x5f, 0x04, 0x97, 0xc7, 0x90, 0x4f, 0xde, 0x87, 0xb0, 0x5a, 0x92, 0x64,
+                0xa8, 0x8c, 0xf0, 0x3b, 0xdb, 0x35, 0x72, 0xa1, 0x71, 0x5c, 0xec, 0x91, 0xbd,
+                0x0f, 0x9b, 0x78, 0x24, 0x55, 0x44,
             ],
         },
     ],
