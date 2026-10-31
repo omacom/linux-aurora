@@ -215,6 +215,8 @@ pub(crate) struct Config {
     /// Parameter buffer page metrics shared with the firmware; `None` where the firmware graph
     /// places its own (M5).
     pub(crate) pm_metrics: Option<FixedBuffer>,
+    /// M5 board whose HW data the GPU is started with.
+    pub(crate) m5_board: Option<fw::m5::initdata::M5Board>,
     /// Register windows the firmware maps through the hardware data.
     pub(crate) windows: &'static [fw::initdata::RegisterWindow],
     /// Register-map slots that are reserved but have no window.
@@ -1387,14 +1389,22 @@ impl Gpu {
             );
             return Err(ENODEV);
         }
+        let m5 = cfg.profile.is_m5();
+        if m5 {
+            let board = cfg.m5_board.ok_or(EINVAL)?;
+            if id.num_clusters != board.clusters() || id.num_clusters * id.num_cores != board.gpu_cores() {
+                dev_err!(dev.as_ref(), "M5 {:?} expects {} clusters and {} cores, the GPU reports {} x {}\n",
+                    board, board.clusters(), board.gpu_cores(), id.num_clusters, id.num_cores);
+                return Err(ENODEV);
+            }
+        }
 
         let geometry = mmu::UatGeometry {
             ias: cfg.uat_ias,
             oas: cfg.uat_oas,
         };
-        let m5 = cfg.profile.is_m5();
         let max_frequency_khz = if m5 {
-            fw::m5::initdata::J714_GPU_PERF_STATES[13].0 * 1000
+            cfg.m5_board.ok_or(EINVAL)?.perf_states()[13].0 * 1000
         } else {
             Self::max_frequency_khz(dev)?
         };

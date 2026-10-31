@@ -1480,31 +1480,42 @@ const J714_AUX_PERF_STATES: [(u32, u32, u32); 14] = [
     (1470, 900, 900), (1578, 960, 960), (1620, 990, 990),
 ];
 
+// J716c ADT afr-perf-states (identical to cs-perf-states). SRAM is
+// max(775, core), the rule the J714 column follows.
+const J716C_AUX_PERF_STATES: [(u32, u32, u32); 14] = [
+    (24, 125, 775), (338, 590, 775), (486, 625, 775), (636, 640, 775),
+    (796, 690, 775), (888, 700, 775), (988, 740, 775), (1084, 765, 775),
+    (1182, 780, 780), (1278, 830, 830), (1374, 875, 875),
+    (1470, 910, 910), (1578, 975, 975), (1620, 1020, 1020),
+];
+
 // Evaluate the frequency-only curve at compile time; no kernel FPU use.
 // Conversion uses Hz before the single-precision multiply and divide.
-const fn j714_relative_frequency() -> [u32; 16] {
+const fn relative_frequency(states: &[M5PerfState; 14]) -> [u32; 16] {
     let mut values = [0; 16];
-    let base = J714_GPU_PERF_STATES[1].0 as u64 * 1_000_000;
-    let maximum = J714_GPU_PERF_STATES[13].0 as u64 * 1_000_000;
+    let base = states[1].0 as u64 * 1_000_000;
+    let maximum = states[13].0 as u64 * 1_000_000;
     let denominator = (maximum - base) as f32;
     let mut state = 2;
     while state < 14 {
-        let frequency = J714_GPU_PERF_STATES[state].0 as u64 * 1_000_000;
+        let frequency = states[state].0 as u64 * 1_000_000;
         values[state] = (((frequency - base) as f32 * 100.0) / denominator).to_bits();
         state += 1;
     }
     values
 }
 
-const J714_RELATIVE_FREQUENCY: [u32; 16] = j714_relative_frequency();
+const J714_RELATIVE_FREQUENCY: [u32; 16] = relative_frequency(&J714_GPU_PERF_STATES);
 
-fn encode_m5_aux_perf_states(out: &mut [u8]) {
+const J716C_RELATIVE_FREQUENCY: [u32; 16] = relative_frequency(&J716C_GPU_PERF_STATES);
+
+fn encode_m5_aux_perf_states(board: M5Board, out: &mut [u8]) {
     let table = &mut out[M5_HW_AUX_PERF_STATE..
         M5_HW_AUX_PERF_STATE + M5_HW_AUX_PERF_STATE_SIZE];
     table.fill(0);
     put_u32(table, 0, 13);
     put_u32(table, 4, 14);
-    for (state, &(frequency, core, sram)) in J714_AUX_PERF_STATES.iter().enumerate() {
+    for (state, &(frequency, core, sram)) in board.aux_perf_states().iter().enumerate() {
         put_u32(table, 8 + state * 4, frequency);
         put_u32(table, 0x48 + state * 8, core);
         put_u32(table, 0xc8 + state * 8, sram);
@@ -1693,9 +1704,85 @@ pub(crate) const M5_HW_DATA_INSERT: usize = 0x267c;
 
 pub(crate) const M5_HW_DATA_INSERT_LEN: usize = 8;
 
-pub(crate) const J714_CORE_REVISION: (u32, u32) = (0x18, 4);
+/// Board whose HW data the M5 GPU is started with. Both are T6050.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum M5Board {
+    /// M5 Pro: 2 clusters of 10 cores.
+    J714,
+    /// M5 Max: 4 clusters of 10 cores.
+    J716c,
+}
 
-pub(crate) const J714_GPU_CORES: u32 = 20;
+impl M5Board {
+    pub(crate) const fn perf_states(self) -> &'static [M5PerfState; 14] {
+        match self {
+            Self::J714 => &J714_GPU_PERF_STATES,
+            Self::J716c => &J716C_GPU_PERF_STATES,
+        }
+    }
+
+    /// Voltage tables in [`M5Board::perf_states`] (ADT perf-state-table-count).
+    const fn perf_tables(self) -> usize {
+        match self {
+            Self::J714 => 2,
+            Self::J716c => 4,
+        }
+    }
+
+    const fn aux_perf_states(self) -> &'static [(u32, u32, u32); 14] {
+        match self {
+            Self::J714 => &J714_AUX_PERF_STATES,
+            Self::J716c => &J716C_AUX_PERF_STATES,
+        }
+    }
+
+    const fn relative_frequency(self) -> &'static [u32; 16] {
+        match self {
+            Self::J714 => &J714_RELATIVE_FREQUENCY,
+            Self::J716c => &J716C_RELATIVE_FREQUENCY,
+        }
+    }
+
+    /// The core type, which follows the ID variant, and the firmware revision
+    /// the HW data names.
+    const fn core_revision(self) -> (u32, u32) {
+        match self {
+            Self::J714 => (0x18, 4),
+            Self::J716c => (0x19, 4),
+        }
+    }
+
+    /// GPU clusters of the device.
+    pub(crate) const fn clusters(self) -> u32 {
+        match self {
+            Self::J714 => 2,
+            Self::J716c => 4,
+        }
+    }
+
+    /// All cores of the device.
+    pub(crate) const fn gpu_cores(self) -> u32 {
+        match self {
+            Self::J714 => 20,
+            Self::J716c => 40,
+        }
+    }
+
+    /// The minimum parameter-buffer size.
+    pub(crate) const fn min_parameter_buffer(self) -> u32 {
+        match self {
+            Self::J714 => 0x0020_0000,
+            Self::J716c => 0x0030_0000,
+        }
+    }
+
+    pub(crate) const fn register_window_specs(self) -> &'static [M5RegisterWindowSpec; 29] {
+        match self {
+            Self::J714 => &J714_REGISTER_WINDOW_SPECS,
+            Self::J716c => &J716C_REGISTER_WINDOW_SPECS,
+        }
+    }
+}
 
 /// Populate the enabled-USC count from the device's sampled core masks.
 /// This count covers the whole device, not one cluster.
@@ -1725,20 +1812,44 @@ const J714_POWER_POLICY_MINIMUM_ENTRIES: usize = 16 * 32;
 
 pub(crate) const J714_GPU_NUM_PERF_STATES: u32 = 13;
 
-// Frequency in MHz, two core-voltage tables, two SRAM-voltage tables (mV).
-pub(crate) const J714_GPU_PERF_STATES: [(u32, u32, u32, u32, u32); 14] = [
-    (0, 125, 125, 775, 775), (338, 605, 605, 775, 775),
-    (486, 620, 635, 775, 775), (636, 655, 655, 775, 775),
-    (796, 705, 705, 775, 775), (888, 715, 715, 775, 775),
-    (988, 745, 745, 775, 775), (1084, 770, 770, 775, 775),
-    (1182, 800, 800, 800, 800), (1278, 840, 840, 840, 840),
-    (1374, 880, 880, 880, 880), (1470, 925, 925, 925, 925),
-    (1578, 1000, 1000, 1000, 1000), (1620, 1025, 1040, 1025, 1040),
+/// A main-domain performance state: MHz, then core and SRAM mV for each
+/// voltage table. HW perf lane n carries table n; lanes past the board's table
+/// count carry table 0, as J714 does for lanes 0 and 2-15.
+pub(crate) type M5PerfState = (u32, [u32; 4], [u32; 4]);
+
+// J714: two voltage tables.
+pub(crate) const J714_GPU_PERF_STATES: [M5PerfState; 14] = [
+    (0, [125, 125, 0, 0], [775, 775, 0, 0]), (338, [605, 605, 0, 0], [775, 775, 0, 0]),
+    (486, [620, 635, 0, 0], [775, 775, 0, 0]), (636, [655, 655, 0, 0], [775, 775, 0, 0]),
+    (796, [705, 705, 0, 0], [775, 775, 0, 0]), (888, [715, 715, 0, 0], [775, 775, 0, 0]),
+    (988, [745, 745, 0, 0], [775, 775, 0, 0]), (1084, [770, 770, 0, 0], [775, 775, 0, 0]),
+    (1182, [800, 800, 0, 0], [800, 800, 0, 0]), (1278, [840, 840, 0, 0], [840, 840, 0, 0]),
+    (1374, [880, 880, 0, 0], [880, 880, 0, 0]), (1470, [925, 925, 0, 0], [925, 925, 0, 0]),
+    (1578, [1000, 1000, 0, 0], [1000, 1000, 0, 0]),
+    (1620, [1025, 1040, 0, 0], [1025, 1040, 0, 0]),
+];
+
+// J716c ADT perf-states / perf-states-sram: four tables (0 == 3, 1 == 2).
+pub(crate) const J716C_GPU_PERF_STATES: [M5PerfState; 14] = [
+    (0, [125, 125, 125, 125], [775, 775, 775, 775]),
+    (338, [635, 635, 635, 635], [775, 775, 775, 775]),
+    (486, [655, 640, 640, 655], [775, 775, 775, 775]),
+    (636, [680, 665, 665, 680], [775, 775, 775, 775]),
+    (796, [730, 715, 715, 730], [775, 775, 775, 775]),
+    (888, [740, 725, 725, 740], [775, 775, 775, 775]),
+    (988, [775, 760, 760, 775], [775, 775, 775, 775]),
+    (1084, [785, 785, 785, 785], [785, 785, 785, 785]),
+    (1182, [805, 810, 810, 805], [805, 810, 810, 805]),
+    (1278, [840, 840, 840, 840], [840, 840, 840, 840]),
+    (1374, [875, 865, 865, 875], [875, 865, 865, 875]),
+    (1470, [920, 905, 905, 920], [920, 905, 905, 920]),
+    (1578, [995, 980, 980, 995], [995, 980, 980, 995]),
+    (1620, [1015, 1015, 1015, 1015], [1015, 1015, 1015, 1015]),
 ];
 
 pub(crate) const J714_GPU_BASE: u64 = 0x23_0000_0000;
 
-pub(crate) struct J714RegisterWindowSpec {
+pub(crate) struct M5RegisterWindowSpec {
     pub(crate) slot: usize,
 
     pub(crate) instances: &'static [u64],
@@ -1749,13 +1860,13 @@ pub(crate) struct J714RegisterWindowSpec {
 }
 
 const fn jw(slot: usize, instances: &'static [u64], size: u32, unk_18: u64, flag: u32)
-    -> J714RegisterWindowSpec {
-    J714RegisterWindowSpec { slot, instances, size, unk_18, flag }
+    -> M5RegisterWindowSpec {
+    M5RegisterWindowSpec { slot, instances, size, unk_18, flag }
 }
 
 const G: u64 = J714_GPU_BASE;
 
-pub(crate) const J714_REGISTER_WINDOW_SPECS: [J714RegisterWindowSpec; 29] = [
+pub(crate) const J714_REGISTER_WINDOW_SPECS: [M5RegisterWindowSpec; 29] = [
     jw(0, &[0x2_8041_4000], 0x4000, 0, 2),
     jw(3, &[0x22_2010_4000, 0x22_2210_4000, 0x22_2410_4000, 0x22_2610_4000], 0x18000, 0, 2),
     jw(4, &[0x2_8046_8000], 0x4000, 0, 0),
@@ -1787,11 +1898,28 @@ pub(crate) const J714_REGISTER_WINDOW_SPECS: [J714RegisterWindowSpec; 29] = [
     jw(53, &[G + 0x2_3d00], 0x200, 0x2_3d00, 2),
 ];
 
-pub(crate) const J714_REGISTER_WINDOW_58: J714RegisterWindowSpec =
+/// J714 with all eight AMCCs in slot 3 (J716c amcc-enable-mask 0xff, MCC
+/// reg[14..21] + 0x104000) and four instances, one per cluster, in slots 20 and
+/// 24, where J714 has two at the same stride. Slot 44 is a fixed pair on every M5
+/// part.
+pub(crate) const J716C_REGISTER_WINDOW_SPECS: [M5RegisterWindowSpec; 29] = {
+    let mut specs = J714_REGISTER_WINDOW_SPECS;
+    assert!(specs[1].slot == 3 && specs[11].slot == 20 && specs[14].slot == 24);
+    specs[1] = jw(3, &[0x22_2010_4000, 0x22_2210_4000, 0x22_2410_4000, 0x22_2610_4000,
+                       0x22_2810_4000, 0x22_2a10_4000, 0x22_2c10_4000, 0x22_2e10_4000],
+                  0x18000, 0, 2);
+    specs[11] = jw(20, &[0x23_0300_0000, 0x23_0320_0000, 0x23_0340_0000, 0x23_0360_0000],
+                   0x40000, 0, 2);
+    specs[14] = jw(24, &[G + 0xec_0000, G + 0xed_0000, G + 0xee_0000, G + 0xef_0000],
+                   0x10000, 0, 2);
+    specs
+};
+
+pub(crate) const M5_REGISTER_WINDOW_58: M5RegisterWindowSpec =
     jw(58, &[G + 0xe7_3800], 0x4000, 0, 2);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(crate) struct J714RegisterWindow {
+pub(crate) struct M5RegisterWindow {
     pub(crate) slot: usize,
     pub(crate) device_va: u64,
     pub(crate) count: usize,
@@ -1800,22 +1928,24 @@ pub(crate) struct J714RegisterWindow {
     pub(crate) flag: u32,
 }
 
-pub(crate) const J714_REGISTER_WINDOW_COUNT: usize = J714_REGISTER_WINDOW_SPECS.len() + 1;
+pub(crate) const M5_REGISTER_WINDOW_COUNT: usize = J714_REGISTER_WINDOW_SPECS.len() + 1;
 
-pub(crate) fn j714_register_window_spec(index: usize) -> &'static J714RegisterWindowSpec {
-    J714_REGISTER_WINDOW_SPECS.get(index).unwrap_or(&J714_REGISTER_WINDOW_58)
+pub(crate) fn m5_register_window_spec(board: M5Board, index: usize)
+    -> &'static M5RegisterWindowSpec
+{
+    board.register_window_specs().get(index).unwrap_or(&M5_REGISTER_WINDOW_58)
 }
 
-pub(crate) fn j714_register_windows() -> [J714RegisterWindow; J714_REGISTER_WINDOW_COUNT] {
+pub(crate) fn m5_register_windows(board: M5Board) -> [M5RegisterWindow; M5_REGISTER_WINDOW_COUNT] {
     let mask = UAT_PAGE_SIZE as u64 - 1;
-    let mut out = [J714RegisterWindow { slot: 0, device_va: 0, count: 0, size: 0, unk_18: 0, flag: 0 };
-                   J714_REGISTER_WINDOW_COUNT];
+    let mut out = [M5RegisterWindow { slot: 0, device_va: 0, count: 0, size: 0, unk_18: 0, flag: 0 };
+                   M5_REGISTER_WINDOW_COUNT];
     let mut next: u64 = 0;
     for (index, window) in out.iter_mut().enumerate() {
-        let spec = j714_register_window_spec(index);
+        let spec = m5_register_window_spec(board, index);
         let va = next + (spec.instances[0] & mask);
         let span = spec.instances.len() as u64 * ((spec.size as u64 + mask) & !mask);
-        *window = J714RegisterWindow {
+        *window = M5RegisterWindow {
             slot: spec.slot,
             device_va: HW_REGISTER_APERTURE.start + va,
             count: spec.instances.len(),
@@ -1829,8 +1959,9 @@ pub(crate) fn j714_register_windows() -> [J714RegisterWindow; J714_REGISTER_WIND
     out
 }
 
-pub(crate) fn encode_j714_register_map(
-    windows: &[J714RegisterWindow],
+pub(crate) fn encode_m5_register_map(
+    board: M5Board,
+    windows: &[M5RegisterWindow],
     out: &mut [u8],
 ) -> Result<(), InitdataError> {
     if out.len() != COMMON26_HW_REGISTER_MAP_SLOTS * HW_REGISTER_MAP_ENTRY_SIZE {
@@ -1838,7 +1969,7 @@ pub(crate) fn encode_j714_register_map(
     }
     out.fill(0);
     for (index, window) in windows.iter().enumerate() {
-        let spec = j714_register_window_spec(index);
+        let spec = m5_register_window_spec(board, index);
         if window.slot >= COMMON26_HW_REGISTER_MAP_SLOTS
             || !HW_REGISTER_APERTURE.contains(&window.device_va)
         {
@@ -1856,9 +1987,10 @@ pub(crate) fn encode_j714_register_map(
 }
 
 pub(crate) fn encode_m5_hw_data(
+    board: M5Board,
     aliases: [G17PKsmCompletionAliases; M5_25G76_COMPLETION_QUEUE_COUNT],
     qos_high: u64,
-    windows: &[J714RegisterWindow],
+    windows: &[M5RegisterWindow],
     out: &mut [u8],
 ) -> Result<(), InitdataError> {
     if out.len() != M5_HW_DATA_SIZE {
@@ -1880,7 +2012,8 @@ pub(crate) fn encode_m5_hw_data(
     let g18 = &mut out[..COMMON26_HW_DATA_SIZE];
     g18.fill(0);
     write_relocated_words(M5_25G76_HW_PLATFORM_WORDS, 0, COMMON26_HW_DATA_BANDS, g18)?;
-    encode_j714_register_map(windows, &mut g18[HW_REGISTER_MAP_OFFSET..COMMON26_HW_REGISTER_MAP_END])?;
+    encode_m5_register_map(board, windows,
+        &mut g18[HW_REGISTER_MAP_OFFSET..COMMON26_HW_REGISTER_MAP_END])?;
     put_u32(g18, COMMON26_HW_CHIP_ID_OFFSET, 0x6050);
     put_u32(g18, COMMON26_HW_PERF_STATE_COUNT, J714_GPU_NUM_PERF_STATES);
     put_u32(g18, COMMON26_HW_FIXED_WORD_OFFSET, COMMON26_HW_FIXED_WORD_VALUE);
@@ -1889,31 +2022,33 @@ pub(crate) fn encode_m5_hw_data(
     // J714's 26A428 HW data carries 1 here. The firmware copies this
     // header at initialization.
     put_u32(g18, 0x0fb8, 1);
-    put_u32(g18, 0x10d4, J714_CORE_REVISION.0);
-    put_u32(g18, 0x10d8, J714_CORE_REVISION.1);
-    put_u32(g18, 0x10dc, J714_GPU_CORES);
+    let (core_type, revision) = board.core_revision();
+    put_u32(g18, 0x10d4, core_type);
+    put_u32(g18, 0x10d8, revision);
+    put_u32(g18, 0x10dc, board.gpu_cores());
     put_u32(g18, 0x283a, 1);
     put_u32(g18, 0x283e, 1);
-    for (state, &(frequency, core0, core1, sram0, sram1)) in J714_GPU_PERF_STATES.iter().enumerate() {
+    let states = board.perf_states();
+    for (state, &(frequency, core, sram)) in states.iter().enumerate() {
         put_u32(g18, COMMON26_HW_PERF_FREQUENCY + state * 4, frequency);
         put_u32(g18, COMMON26_HW_PERF_SCALE + state * 4, COMMON26_PERF_SCALE_VALUE);
 
-        let relative = frequency * 100 / J714_GPU_PERF_STATES[13].0;
+        let relative = frequency * 100 / states[13].0;
         put_u32(g18, COMMON26_HW_PERF_RELATIVE_A + state * 4, relative);
         for lane in 0..COMMON26_HW_PERF_LANES {
             let row = state * COMMON26_HW_PERF_ROW_STRIDE + lane * 4;
-            put_u32(g18, COMMON26_HW_PERF_CORE_VOLTAGE + row, if lane == 1 { core1 } else { core0 });
-            put_u32(g18, COMMON26_HW_PERF_SRAM_VOLTAGE + row, if lane == 1 { sram1 } else { sram0 });
+            let table = if lane < board.perf_tables() { lane } else { 0 };
+            put_u32(g18, COMMON26_HW_PERF_CORE_VOLTAGE + row, core[table]);
+            put_u32(g18, COMMON26_HW_PERF_SRAM_VOLTAGE + row, sram[table]);
         }
     }
+    let relative = board.relative_frequency();
     for index in 0..COMMON26_HW_PERF_ROWS {
         put_u32(g18, COMMON26_HW_PERF_INDEX_MAP + index * 4, index as u32);
-        put_u32(g18, COMMON26_HW_PERF_RELATIVE_B + index * 4,
-            J714_RELATIVE_FREQUENCY[index]);
-        put_u32(g18, M5_HW_AUX_RELATIVE_FREQUENCY + index * 4,
-            J714_RELATIVE_FREQUENCY[index]);
+        put_u32(g18, COMMON26_HW_PERF_RELATIVE_B + index * 4, relative[index]);
+        put_u32(g18, M5_HW_AUX_RELATIVE_FREQUENCY + index * 4, relative[index]);
     }
-    encode_m5_aux_perf_states(g18);
+    encode_m5_aux_perf_states(board, g18);
     let table = COMMON26_KSM_COMPLETION_TABLE_OFFSET;
     g18[table..table + completion.len()].copy_from_slice(&completion);
     put_u64(g18, COMMON26_QOS_POINTER_OFFSET, qos_high);
@@ -1925,10 +2060,8 @@ pub(crate) fn encode_m5_hw_data(
     put_u32(out, 0x2660, 0);
     put_u32(out, 0x2728, 0);
     put_u32(out, 0x272c, 1);
-    // J714's 26A428 HW data carries this tiling-allocator word. The
-    // firmware copies it at initialization and the tiling allocator shifts
-    // it by 19. The inherited J813 word selected three groups instead of four.
-    put_u32(out, 0x26b0, 0x0020_0000);
+    // The inherited J813 minimum parameter-buffer size is replaced per board.
+    put_u32(out, 0x26b0, board.min_parameter_buffer());
     Ok(())
 }
 

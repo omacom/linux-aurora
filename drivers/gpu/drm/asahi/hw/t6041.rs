@@ -29,6 +29,7 @@ pub(crate) const CONFIG: Config = Config {
         va: 0x10_0008_0000,
         size: 0x8000,
     }),
+    m5_board: None,
     windows: &REGISTER_WINDOWS,
     reserved_slots: &RESERVED_SLOTS,
     perf: Some(&PERF),

@@ -3,6 +3,7 @@
 //!
 //! The M5 firmware builds its HW data, performance tables and region C in its own graph
 //! ([`crate::g17::fw::m5::initdata`]), so the 26A428/25G83 graph tables of [`Config`] are empty.
+use crate::g17::fw::m5::initdata::M5Board;
 use crate::g17::{Config, CoreLayout, CrashBuffers, FirmwareProfile, FixedBuffer, Identity};
 use crate::hw::{GpuGen, GpuVariant};
 
@@ -29,6 +30,7 @@ pub(crate) const CONFIG: Config = Config {
     ]),
     profile: FirmwareProfile::M5NoBareMetalTables,
     pm_metrics: None,
+    m5_board: Some(M5Board::J714),
     windows: &[],
     reserved_slots: &[],
     perf: None,

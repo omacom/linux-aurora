@@ -44,6 +44,7 @@ pub(crate) const CONFIG: Config = Config {
         va: 0x10_0008_0000,
         size: 0x8000,
     }),
+    m5_board: None,
     recovery_slot_keys: Some(recovery::SLOT_KEYS),
     gpu_generation: GpuGen::G17,
     windows: &REGISTER_WINDOWS,
