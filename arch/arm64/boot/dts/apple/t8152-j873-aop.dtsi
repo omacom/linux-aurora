@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Always-on processor and its audio service.
+ *
+ * The AOP firmware is loaded by the bootloader; the CPU is started through
+ * the ASC wrapper and RTKit boots on the primary mailbox (there is no setup
+ * port on this SoC). The audio service has three devices: the speaker, the
+ * 3.5 mm jack output and the jack input. The audio PMGR devices are all
+ * firmware-managed, so none of these nodes has a power domain. Windows,
+ * IRQs and stream ids are from the M6 ADT.
+ */
+
+/ {
+	soc {
+		aop_mbox: mailbox@310740080 {
+			compatible = "apple,t8152-ascwrap-v8-mailbox";
+			reg = <0x3 0x10740080 0x0 0x80>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 627 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 626 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+		};
+
+		aop: aop@310c00000 {
+			compatible = "apple,t8152-aop";
+			reg = <0x3 0x10c00000 0x0 0x300000>,
+			      <0x3 0x10600000 0x0 0x4000>;
+			reg-names = "mmio", "asc";
+			mboxes = <&aop_mbox>;
+			mbox-names = "mbox";
+			iommus = <&dart_sbr 0>;
+			apple,dma-range = /bits/ 64 <0x11000000000 0x1000000000>;
+
+			aop_audio: audio {
+				compatible = "apple,t8152-aop-audio";
+				/* base-ns channels: TX 1 = speaker, TX 5 = jack out, RX 5 = jack in, RX 1 = speaker sense */
+				dmas = <&admac_base_ns 2>, <&admac_base_ns 10>,
+				       <&admac_base_ns 11>, <&admac_base_ns 3>;
+				dma-names = "spkr", "cout", "cin", "spkr-tap";
+				#sound-dai-cells = <1>;
+			};
+		};
+	};
+};
