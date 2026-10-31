@@ -114,7 +114,7 @@ impl InitData {
             self.completion_rings[index] = object;
             self.alias(object, uat.kernel_lower_vm(), pair.low, GPU)?;
         }
-        m::encode_common26_aon_ptd(&mut self.object_mut(aon)?.bytes_mut()[..m::M5_AON_PTD_SIZE])
+        m::encode_common26_aon_ptd(board, &mut self.object_mut(aon)?.bytes_mut()[..m::M5_AON_PTD_SIZE])
             .map_err(|_| EINVAL)?;
         m::encode_m5_region_c(self.object_mut(self.region_c)?.bytes_mut()).map_err(|_| EINVAL)?;
         m::encode_m5_private_cluster(PRIVATE, FWCTL,

@@ -1578,18 +1578,28 @@ pub(crate) fn encode_common26_region_c(out: &mut [u8]) -> Result<(), InitdataErr
     Ok(())
 }
 
-pub(crate) fn encode_common26_aon_ptd(out: &mut [u8]) -> Result<(), InitdataError> {
+pub(crate) fn encode_common26_aon_ptd(board: M5Board, out: &mut [u8]) -> Result<(), InitdataError> {
     if out.len() != M5_AON_PTD_SIZE {
         return Err(InitdataError::BufferSize);
     }
-    // J714 descriptors carry device-specific AON table indices.
-    const RECORDS: [[u32; 3]; 3] = [
+    // The ADT aon-ptd table rows tagged RT0g, RT1g and RT0r; their indices are
+    // device-specific.
+    const J714_RECORDS: [[u32; 3]; 3] = [
         [0x6730_5452, 0x0079_0001, 0x0000_1401],
         [0x6731_5452, 0x00bc_0001, 0x0000_1401],
         [0x7230_5452, 0x00ce_0001, 0x0000_1401],
     ];
+    const J716C_RECORDS: [[u32; 3]; 3] = [
+        [0x6730_5452, 0x0058_0001, 0x0000_1401],
+        [0x6731_5452, 0x00a3_0001, 0x0000_1401],
+        [0x7230_5452, 0x00b8_0001, 0x0000_1401],
+    ];
+    let records = match board {
+        M5Board::J714 => &J714_RECORDS,
+        M5Board::J716c => &J716C_RECORDS,
+    };
     out.fill(0);
-    for (index, record) in RECORDS.iter().enumerate() {
+    for (index, record) in records.iter().enumerate() {
         for (word, value) in record.iter().enumerate() {
             put_u32(out, index * 12 + word * 4, *value);
         }
