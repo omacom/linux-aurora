@@ -18,6 +18,9 @@
 #include <linux/firmware.h>
 #include <linux/iommu.h>
 #include <linux/spinlock.h>
+#include <linux/workqueue.h>
+
+#include "avd-queue.h"
 
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -173,13 +176,18 @@ struct avd_coded_fmt_desc {
 	struct v4l2_frmsize_stepwise frmsize;
 	const struct avd_ctrls *ctrls;
 	const struct avd_coded_fmt_ops *ops;
+	const struct avd_codec_frame_ops *frame_ops;
 	unsigned int num_decoded_fmts;
 	const struct avd_decoded_fmt_desc *decoded_fmts;
 	u32 subsystem_flags;
 	unsigned int capability;
 };
 
+struct avd_apple_hw;
+
 struct avd_variant {
+	const struct avd_apple_hw *apple;
+	size_t fp_size;
 	unsigned int vp_slots[4];
 	unsigned int vp_slot_base[4];
 	unsigned int fifo_slots;
@@ -194,14 +202,6 @@ struct avd_variant {
 	u32 submit_queue_max_offset;
 	u32 submit_queue_status_offset;
 	unsigned int quirks;
-};
-
-/* Lifecycle of the one m2m job the device runs at a time. */
-enum avd_job_state {
-	AVD_JOB_IDLE,
-	AVD_JOB_RUNNING,	/* inside avd_device_run() */
-	AVD_JOB_SUBMITTED,	/* handed to the hardware, watchdog armed */
-	AVD_JOB_FINISHING,	/* claimed by the IRQ handler or the watchdog */
 };
 
 struct avd_dev {
@@ -223,14 +223,23 @@ struct avd_dev {
 
 	struct mutex vdev_lock;
 
-	/* The current job; see avd_device_run(). Protected by job_lock. */
-	spinlock_t job_lock;
-	enum avd_job_state job_state;
-	struct avd_ctx *job_ctx;
-	u64 job_seq;
-	bool job_end_sent;
-	bool job_pending;
-	enum vb2_buffer_state job_pending_result;
+	/* queue_lock protects slot state/tag and job_ready observations. */
+	spinlock_t queue_lock;
+	/* Serializes CPU preparation, submission, retirement and reset. */
+	struct mutex queue_mutex;
+	struct delayed_work queue_work;
+	struct list_head contexts;
+	struct avd_frame frames[AVD_MAX_FRAMES];
+	u64 frame_seq;
+	unsigned int inflight;
+	bool stopping;
+	bool faulted;
+	const struct avd_backend_ops *backend;
+	void *backend_priv;
+	/* Only the open-firmware compatibility path uses these. */
+	struct avd_frame *building;
+	struct avd_frame *compat_active;
+	bool compat_held;
 
 	struct reset_control *rstc;
 
@@ -267,9 +276,11 @@ struct avd_ctx {
 	enum avd_image_fmt image_fmt;
 	bool decomp;
 
-	struct delayed_work watchdog_work;
-	/* job_seq of the job watchdog_work was armed for */
-	u64 wd_seq;
+	struct list_head queue_node;
+	bool draining;
+	bool session_started;
+	enum avd_frame_dep next_dep;
+	u32 client_id;
 
 	void *priv;
 
@@ -330,6 +341,18 @@ static inline struct avd_ctx *file_to_ctx(struct file *filp)
 
 /* hw stuff */
 int avd_boot(struct avd_dev *avd);
+int avd_queue_init(struct avd_dev *avd);
+void avd_queue_cleanup(struct avd_dev *avd);
+void avd_queue_run(void *priv);
+int avd_queue_ready(void *priv);
+void avd_queue_abort(void *priv);
+void avd_queue_drain(struct avd_ctx *ctx);
+void avd_queue_add_ctx(struct avd_ctx *ctx);
+void avd_queue_del_ctx(struct avd_ctx *ctx);
+int avd_open_build_program(struct avd_ctx *ctx);
+extern const struct avd_backend_ops avd_open_backend;
+extern const struct avd_backend_ops avd_apple_backend;
+int avd_backend_select(struct avd_dev *avd);
 void avd_shutdown(struct avd_dev *avd);
 
 void avd_status(struct avd_dev *avd, u32 vp);

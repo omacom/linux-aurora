@@ -50,6 +50,8 @@ struct avd_frame {
 
 	void *codec_priv;		/* per-frame codec state, owned by the codec */
 	unsigned long deadline;		/* jiffies, per-frame watchdog */
+	/* Legacy m2m HOLD_CAPTURE API retains scheduler ownership until retire. */
+	bool scheduler_held;
 };
 
 struct avd_backend_ops {
@@ -66,6 +68,7 @@ struct avd_backend_ops {
 	irqreturn_t (*irq)(struct avd_dev *avd);	/* calls avd_frame_complete() */
 	int  (*suspend)(struct avd_dev *avd);
 	int  (*resume)(struct avd_dev *avd);
+	int  (*set_property)(struct avd_ctx *ctx, u32 property, u32 value);
 };
 
 /* Codec half. Replaces avd_coded_fmt_ops.run/submit/done. CPU only, no MMIO. */
