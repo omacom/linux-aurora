@@ -344,6 +344,12 @@ static void avd_watchdog_func(struct work_struct *work)
 	ret = avd_reset(avd);
 	if (ret)
 		dev_err(avd->dev, "failed to reset: %d", ret);
+	/*
+	 * A stream whose frame failed in hardware usually fails the next one
+	 * too (a reset per frame took the Neo down), so stop it here.
+	 */
+	ctx->broken = true;
+	dev_err(avd->dev, "stream stopped after a failed frame; restart streaming to retry\n");
 
 	avd_job_finish(ctx, VB2_BUF_STATE_ERROR);
 }
@@ -460,6 +466,16 @@ static void avd_device_run(void *priv)
 
 	if (WARN_ON(!desc))
 		return;
+
+	if (READ_ONCE(avd->retired) || ctx->broken) {
+		struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
+
+		/* Complete the request's controls too, or its fd never signals. */
+		if (src && src->vb2_buf.req_obj.req)
+			v4l2_ctrl_request_complete(src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
+		avd_job_finish_no_pm(ctx, VB2_BUF_STATE_ERROR);
+		return;
+	}
 
 	/*
 	 * IRQ completion cannot wait for an already running watchdog. Drain it

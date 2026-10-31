@@ -266,6 +266,8 @@ struct avd_buf {
 struct avd_ctx {
 	struct v4l2_fh fh;
 	struct avd_dev *dev;
+	/* A frame failed in hardware: fail every job until streaming restarts. */
+	bool broken;
 
 	struct v4l2_format coded_fmt;
 	struct v4l2_format decoded_fmt;

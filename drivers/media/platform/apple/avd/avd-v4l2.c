@@ -889,6 +889,10 @@ static void avd_buf_request_complete(struct vb2_buffer *vb)
 static int avd_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct avd_ctx *ctx = vb2_get_drv_priv(q);
+
+	/* A new stream gets a fresh start after a hardware failure. */
+	if (!V4L2_TYPE_IS_CAPTURE(q->type))
+		ctx->broken = false;
 	const struct avd_coded_fmt_desc *desc;
 	struct vb2_v4l2_buffer *vbuf;
 	int ret;
