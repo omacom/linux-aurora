@@ -33,6 +33,8 @@
 	display: display-subsystem {
 		compatible = "apple,t8122-display-subsystem";
 		iommus = <&disp0_dart 0>;
+		/* Keep the inherited scanout alias when adding external streams. */
+		apple,dma-range = /bits/ 64 <0x10000000000 0x1000000000>;
 		status = "disabled";
 	};
 };
