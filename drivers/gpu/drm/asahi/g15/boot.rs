@@ -6,7 +6,8 @@
 //! `apple_pmp_t6030_board`, or the SoC's machine compatible), the PMP supplier on a SoC with
 //! the PMP AGX vote (`apple_pmp_j514s_gpu_prepare`, may return EPROBE_DEFER), the GPU regions and
 //! segments ([`super::adt`]: the ADT export, or the GPU device tree node), exact firmware TEXT
-//! identity ([`super::identity`]), MMIO windows, runtime-PM hold of the GFX domain.
+//! identity ([`super::identity`]), MMIO windows, runtime-PM hold of the GFX domain (on T6031
+//! through system sleep too, the device being left out of it).
 //!
 //! Start: PMP AGX vote (`apple_pmp_j514s_gpu_get`) where the SoC takes one, hardware identity
 //! and core masks (one word, or two above 32 core slots), `sgx_open`
@@ -46,7 +47,7 @@ use super::fw::initdata::runtime;
 use super::hw;
 use super::initdata::{self, InitData};
 use super::object::Objects;
-use super::{identity, regs, uat, Config, Shared};
+use super::{identity, params, regs, uat, Config, Shared};
 use crate::driver::AsahiDrmDevice as AsahiDevice;
 use crate::mmu;
 
@@ -59,7 +60,7 @@ pub(crate) mod glue {
         fn asahi_g15_sha256(data: *const u8, len: usize, out: *mut u8);
         fn asahi_g15_board() -> bool;
         fn asahi_g15_machine(compatible: *const core::ffi::c_char) -> bool;
-        fn asahi_g15_hold_power(dev: *mut core::ffi::c_void);
+        fn asahi_g15_hold_power(dev: *mut core::ffi::c_void, sleep_hold: bool);
         fn asahi_g15_release_power(dev: *mut core::ffi::c_void);
         fn asahi_g15_module_try_get() -> bool;
         fn asahi_g15_module_put();
@@ -105,10 +106,12 @@ pub(crate) mod glue {
         unsafe { asahi_g15_machine(compatible.as_char_ptr()) }
     }
 
-    /// Holds the GFX power domain for the retained session.
-    pub(crate) fn hold_power(dev: &device::Device) {
-        // SAFETY: `dev` is a valid device; runtime-PM accounting on it has no other requirement.
-        unsafe { asahi_g15_hold_power(dev.as_raw().cast()) };
+    /// Holds the GFX power domain for the retained session, and with `sleep_hold` through system
+    /// sleep too: the device is then left out of system sleep (`asahi_g15_hold_power()`).
+    pub(crate) fn hold_power(dev: &device::Device, sleep_hold: bool) {
+        // SAFETY: `dev` is a valid device; runtime-PM accounting and its syscore flag have no
+        // other requirement.
+        unsafe { asahi_g15_hold_power(dev.as_raw().cast(), sleep_hold) };
     }
 
     /// Gives the GFX power domain hold back after a start that touched nothing firmware-visible.
@@ -520,9 +523,26 @@ pub(crate) fn admit(
     }
     let board_images = initdata::prepare_board(dev, cfg, &adt)?;
     let regs = regs::Regs::new(pdev)?;
-    // Keep the GFX domain powered for the whole (retained) session.
-    glue::hold_power(dev);
-    dev_info!(dev, "{} admitted, ASC={:#x}\n", cfg.name, regs.asc_control()?);
+    // Read before the hold: nothing after it may fail before `Gpu::new()` can give it back. The
+    // domain is on already, since the probe attached the device to it.
+    let asc = regs.asc_control()?;
+    // Keep the GFX domain powered for the whole (retained) session; on T6031, whose GPU that
+    // domain alone powers, through system sleep too, unless g15_sleep_hold=0.
+    let t6031 = cfg.platform == hw::Platform::DeviceTree;
+    let sleep_hold = t6031 && params::sleep_hold();
+    glue::hold_power(dev, sleep_hold);
+    dev_info!(dev, "{} admitted, ASC={:#x}\n", cfg.name, asc);
+    if sleep_hold {
+        dev_info!(
+            dev,
+            "G15: the GFX domain stays on through system sleep, as nothing starts the firmware again (g15_sleep_hold=0 lets genpd power it off)\n"
+        );
+    } else if t6031 {
+        dev_warn!(
+            dev,
+            "G15: g15_sleep_hold=0: system sleep may power the GFX domain off under the firmware, which nothing starts again\n"
+        );
+    }
     Ok(Admitted { regs, adt, board_images })
 }
 
