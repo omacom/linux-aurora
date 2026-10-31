@@ -86,6 +86,7 @@ pub(crate) struct Backend {
     core_mask: u64,
     max_frequency_khz: u32,
     soc: &'static crate::m3::m3_soc::Soc,
+    profile: super::m3_profile::Profile,
     _progress: Pin<KBox<kernel::debugfs::File<ProgressView>>>,
     _activity: Pin<KBox<kernel::debugfs::File<ActivityView>>>,
     _memory: Pin<KBox<kernel::debugfs::File<crate::m3::agx_memory_stats::View>>>,
@@ -125,6 +126,7 @@ impl Backend {
         let firmware = crate::m3::m3_firmware::identify_loaded(pdev, soc, resources, experiment)
             .inspect_err(refused("the firmware identity"))?;
         dev_info!(pdev.as_ref(), "M3: firmware identity accepted\n");
+        let profile = firmware.profile();
         // InitData source and contents, before any GPU register access.
         let contents = crate::m3::m3_adt_config::Contents::select(pdev, &firmware, soc, experiment)
             .inspect_err(refused("the InitData contents"))?;
@@ -160,7 +162,7 @@ impl Backend {
         let completion_work = crate::m3::m3_completion::Completion::new(shared.clone())?;
         // From here on every failure drops the backend, which stops the runtime.
         let backend = Arc::new(Self { shared, health, ids: gpu::SequenceIDs::default(),
-            scheduler, core_mask, max_frequency_khz, soc,
+            scheduler, core_mask, max_frequency_khz, soc, profile,
             _progress: progress, _activity: activity, _memory: memory, _timing: timing,
             _completion: completion, _overlap: overlap }, GFP_KERNEL)?;
         // The completion worker services this runtime from now on; the RTKit callbacks and
@@ -208,7 +210,9 @@ impl gpu::Gpu for Backend {
         }
         params.max_frequency_khz = self.max_frequency_khz;
         params.usc_generation = 3;
-        params.gpu_hal_generation = hw::GpuHalGeneration::Legacy as u32;
+        params.gpu_hal_generation = self.profile.hal();
+        params.max_commands_per_submission = super::agx_uapi::UAPI_MAX_HARDWARE_COMMANDS;
+        params.max_attachments = super::agx_uapi::UAPI_MAX_ATTACHMENTS as u32;
         Ok(())
     }
     fn supports_vm_status(&self) -> bool { true }
@@ -217,10 +221,12 @@ impl gpu::Gpu for Backend {
     fn feature_flags(&self) -> u64 {
         let mut flags = uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_VM_STATUS as u64
             | uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SCHEDULED_QUEUES as u64;
-        if self.soc.features.fragment_dependency && crate::m3::m3_params::early_tiling() {
+        if self.profile == super::m3_profile::Profile::Legacy
+            && self.soc.features.fragment_dependency && crate::m3::m3_params::early_tiling() {
             flags |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_DEPENDENCY as u64;
         }
-        if self.soc.features.compute_wide_visibility {
+        if self.profile == super::m3_profile::Profile::Legacy
+            && self.soc.features.compute_wide_visibility {
             flags |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_WIDE_VISIBILITY as u64;
         }
         flags
@@ -233,17 +239,17 @@ impl gpu::Gpu for Backend {
     }
     fn uat_geometry(&self) -> mmu::UatGeometry { mmu::UatGeometry { ias: 42, oas: 42 } }
     fn user_range(&self) -> Range<u64> {
-        mmu::UAT_PGSZ as u64..crate::m3::initdata::RUNTIME_UNKNOWN_PAGE
+        mmu::UAT_PGSZ as u64..self.profile.user_end()
     }
     /// The dummy page sits where InitData tells the firmware it is (unk_30), as on 7.1.12; the
     /// 42-bit geometry's own unk_page() is a different address.
     fn unknown_page(&self) -> u64 {
-        crate::m3::initdata::RUNTIME_UNKNOWN_PAGE
+        self.profile.user_end()
     }
     fn tracked_submission(&self) -> bool { true }
     /// Only M3-aware userspace may create a VM (7.1.12's per-file client gate).
     fn admit_vm(&self, dev: &kernel::device::Device, params_size: u64, flags: u32) -> Result {
-        crate::m3::m3_client::admit_vm(dev, params_size, flags)
+        crate::m3::m3_client::admit_vm_for(dev, self.profile, params_size, flags)
     }
     fn new_vm(&self, range: Range<u64>) -> Result<mmu::Vm> {
         Option::as_mut(&mut *self.shared.lock()).ok_or(ENODEV)?.new_vm(self.ids.vm.next(), range)
