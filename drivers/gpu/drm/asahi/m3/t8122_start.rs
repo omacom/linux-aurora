@@ -16,7 +16,10 @@
 //! | `asahi.t8122_sgx_setup` | `t6030`: SGX+0xd14000 = 0x70001 | `none` |
 //! | `asahi.t8122_unit_mask_a` | `0x700000003` | nonzero, within `0x700000003` |
 //! | `asahi.t8122_unit_mask_b` | `0x7` | nonzero, within `0x7` |
-//! | `asahi.t8122_pstate_cap` | `2` | 1 to 5 |
+//! | `asahi.t8122_pstate_cap` | thermal policy (below) | fixed ceiling 1 to 5 |
+//!
+//! An omitted cap uses the full table with thermal control, starting/falling back at state 2.
+//! With thermal control off it retains a fixed ceiling of 2.
 //!
 //! The defaults are the T8122 table's values. A parameter given with a value it does not accept
 //! refuses the start. Unlisted boards remain refused by the existing backend admission.
@@ -220,9 +223,9 @@ impl Experiment {
         self.0.sgx_setup
     }
 
-    /// The highest performance state the firmware may use (`asahi.t8122_pstate_cap`).
-    pub(crate) fn pstate_cap(&self) -> u32 {
-        self.0.pstate_cap
+    /// T8122 ceiling and startup cap, retaining an explicit `asahi.t8122_pstate_cap`.
+    pub(crate) fn pstate_limits(&self, thermal_enabled: bool) -> knobs::PstateLimits {
+        self.0.pstate_limits(thermal_enabled)
     }
 }
 
@@ -283,7 +286,7 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
     let e = Experiment(v);
     dev_warn!(
         dev,
-        "M3 G15G start: armed (board default or asahi.t8122_start=1, boot loader handoff admitted): initdata_version={:#018x} fender={:#x} clkgen={} sgx_setup={} unit_mask_a={:#x} unit_mask_b={:#x} pstate_cap={}\n",
+        "M3 G15G start: armed (board default or asahi.t8122_start=1, boot loader handoff admitted): initdata_version={:#018x} fender={:#x} clkgen={} sgx_setup={} unit_mask_a={:#x} unit_mask_b={:#x} pstate_cap={} pstate_cap_explicit={}\n",
         v.initdata_version,
         v.fender,
         clkgen_label(v.clock_gen, v.fender),
@@ -293,7 +296,8 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
         },
         v.unit_mask_a,
         v.unit_mask_b,
-        v.pstate_cap
+        v.pstate_cap,
+        v.pstate_cap_explicit
     );
     dev_warn!(
         dev,
@@ -301,19 +305,6 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
         e.mapping_count(),
         storage::IOMAP_BASE
     );
-    // J613/J615 have no SoC die temperature zone yet, so a cap above the no-feedback limit runs
-    // the fanless GPU without any temperature feedback (`m3_thermal` holds the cap but gets no
-    // reading). The runtime cap and the firmware ceiling stay equal, because the cap is at most
-    // the no-feedback limit.
-    if v.pstate_cap > knobs::PSTATE_CAP {
-        dev_warn!(
-            dev,
-            "M3 G15G start: pstate_cap={} is above {}: no SoC die temperature zone on this board, so states up to {} run with no temperature feedback\n",
-            v.pstate_cap,
-            knobs::PSTATE_CAP,
-            v.pstate_cap
-        );
-    }
     Ok(Some(e))
 }
 
