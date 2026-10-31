@@ -331,6 +331,10 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 		/* a vp is done, kick the pp and hope for the best */
 		if(ctx->coded_fmt_desc->ops->submit)
 			ctx->coded_fmt_desc->ops->submit(ctx);
+		spin_lock_irqsave(&avd->job_lock, flags);
+		if (avd->job_ctx == ctx)
+			avd->job_vp_done = true;
+		spin_unlock_irqrestore(&avd->job_lock, flags);
 		goto done;
 	} else {
 		dev_err(avd->dev, "H%d error", status);
@@ -352,7 +356,13 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 	 * let avd_device_run() finish the job when it returns.
 	 */
 	spin_lock_irqsave(&avd->job_lock, flags);
-	if (avd->job_ctx != ctx) {
+	if (avd->job_ctx != ctx || !avd->job_vp_done) {
+		/*
+		 * Only the PP kicked for this job's VP can finish it. A surplus
+		 * PP DONE of a multi-kick picture used to finish the next job
+		 * early, so userspace reused its buffers while the decoder was
+		 * still writing them.
+		 */
 		stale = true;
 	} else if (avd->job_state == AVD_JOB_SUBMITTED) {
 		avd->job_state = AVD_JOB_FINISHING;
@@ -415,6 +425,7 @@ static void avd_device_run(void *priv)
 	avd->job_ctx = ctx;
 	avd->job_state = AVD_JOB_RUNNING;
 	avd->job_end_sent = false;
+	avd->job_vp_done = false;
 	avd->job_pending = false;
 	spin_unlock_irqrestore(&avd->job_lock, flags);
 	dev_dbg(avd->dev, "avd-job: run seq %llu\n", seq);
