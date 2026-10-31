@@ -18,6 +18,8 @@
 #include <linux/firmware.h>
 #include <linux/iommu.h>
 #include <linux/spinlock.h>
+
+#include "avd-pm.h"
 #include <linux/workqueue.h>
 
 #include "avd-queue.h"
@@ -206,6 +208,7 @@ struct avd_variant {
 
 struct avd_dev {
 	struct device *dev;
+	struct avd_pm pm;
 	struct v4l2_device v4l2_dev;
 	struct media_device mdev;
 	struct video_device vdev;
@@ -266,6 +269,7 @@ struct avd_buf {
 	void *cpu;
 	dma_addr_t addr;
 	size_t size;
+	struct avd_dma_release *release;
 };
 
 struct avd_ctx {

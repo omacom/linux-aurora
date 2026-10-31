@@ -58,8 +58,6 @@ static void avd_retire(struct avd_dev *avd)
 				v4l2_m2m_buf_done(f->dst, state);
 				v4l2_m2m_buf_done(f->src, state);
 			}
-			pm_runtime_mark_last_busy(avd->dev);
-			pm_runtime_put_autosuspend(avd->dev);
 			spin_lock_irqsave(&avd->queue_lock, flags);
 			f->ctx = NULL;
 			f->src = NULL;
@@ -67,6 +65,9 @@ static void avd_retire(struct avd_dev *avd)
 			f->state = AVD_FRAME_FREE;
 			avd->inflight--;
 			spin_unlock_irqrestore(&avd->queue_lock, flags);
+			avd_pm_queue_changed(avd);
+			pm_runtime_mark_last_busy(avd->dev);
+			pm_runtime_put_autosuspend(avd->dev);
 			progress = true;
 		}
 	} while (progress);
@@ -323,12 +324,14 @@ static void avd_queue_submit_work(struct work_struct *work)
 			ctx->coded_fmt_desc->ops->done(ctx, f->src, f->dst, VB2_BUF_STATE_DONE);
 		if (ops && f->src->vb2_buf.req_obj.req)
 			v4l2_ctrl_request_complete(f->src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
-		pm_runtime_put_autosuspend(avd->dev);
 		spin_lock_irqsave(&avd->queue_lock, flags);
 		f->state = AVD_FRAME_FREE;
 		f->ctx = NULL;
 		avd->inflight--;
 		spin_unlock_irqrestore(&avd->queue_lock, flags);
+		avd_pm_queue_changed(avd);
+		pm_runtime_mark_last_busy(avd->dev);
+		pm_runtime_put_autosuspend(avd->dev);
 		v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_DONE);
 		goto unlock;
@@ -371,6 +374,7 @@ static void avd_queue_submit_work(struct work_struct *work)
 	f->ctx = NULL;
 	avd->inflight--;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
+	avd_pm_queue_changed(avd);
 	v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
 					 VB2_BUF_STATE_ERROR);
  unlock:
@@ -390,14 +394,18 @@ void avd_queue_drain(struct avd_ctx *ctx)
 	struct avd_dev *avd = ctx->dev;
 	unsigned long flags;
 	unsigned int i;
+	int ret;
 
+	/* Session stop/reset accesses registers even when there are no frames. */
+	ret = pm_runtime_resume_and_get(avd->dev);
+	avd_pm_drain_begin(avd);
 	mutex_lock(&avd->queue_mutex);
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	WRITE_ONCE(ctx->draining, true);
 	if (avd->queued_ctx == ctx)
 		avd->queued_ctx = NULL;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
-	for (i = 0; i < AVD_MAX_FRAMES; i++) {
+	for (i = 0; ret >= 0 && i < AVD_MAX_FRAMES; i++) {
 		if (avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx) {
 			if (avd->backend->abort)
 				avd->backend->abort(ctx);
@@ -406,19 +414,18 @@ void avd_queue_drain(struct avd_ctx *ctx)
 		}
 	}
 	avd_retire(avd);
-	if (ctx->session_started && avd->backend->session_stop) {
-		int ret = pm_runtime_resume_and_get(avd->dev);
-
-		if (ret >= 0) {
-			avd->backend->session_stop(ctx);
-			pm_runtime_mark_last_busy(avd->dev);
-			pm_runtime_put_autosuspend(avd->dev);
-		}
-	}
+	if (ret >= 0 && ctx->session_started && avd->backend->session_stop &&
+	    ctx->session_generation == avd->fw_generation)
+		avd->backend->session_stop(ctx);
 	ctx->session_started = false;
 	if (!avd->stopping)
 		mod_delayed_work(system_wq, &avd->queue_work, 0);
 	mutex_unlock(&avd->queue_mutex);
+	avd_pm_drain_end(avd);
+	if (ret >= 0) {
+		pm_runtime_mark_last_busy(avd->dev);
+		pm_runtime_put_autosuspend(avd->dev);
+	}
 }
 
 void avd_queue_abort(void *priv)

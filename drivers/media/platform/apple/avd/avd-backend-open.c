@@ -146,6 +146,8 @@ const struct avd_backend_ops avd_open_backend = {
 	.max_inflight = avd_open_max_inflight,
 	.submit = avd_open_submit,
 	.irq = avd_open_irq,
+	.suspend = avd_pm_backend_suspend,
+	.resume = avd_pm_backend_resume,
 };
 
 static void avd_open_capabilities(struct avd_dev *avd)

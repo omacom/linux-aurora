@@ -72,31 +72,6 @@ void fill_comp(struct avd_comp *comp, enum avd_image_fmt image_fmt, u32 width,
 	comp->size = y_meta + y + uv_meta + uv;
 }
 
-int avd_buf_alloc(struct avd_dev *avd, struct avd_buf *buf, size_t size)
-{
-	/* Keep size equal to the payload length used by the H.264 slice path. */
-	avd_buf_free(avd, buf);
-
-	if (size <= 0)
-		return -ENOMEM;
-
-	buf->size = size;
-	buf->cpu =
-		dma_alloc_coherent(avd->dev, buf->size, &buf->addr, GFP_KERNEL);
-	if (!buf->cpu) {
-		memset(buf, 0, sizeof(*buf));
-		return -ENOMEM;
-	}
-	return 0;
-}
-
-void avd_buf_free(struct avd_dev *avd, struct avd_buf *buf)
-{
-	if (buf->cpu)
-		dma_free_coherent(avd->dev, buf->size, buf->cpu, buf->addr);
-	memset(buf, 0, sizeof(*buf));
-}
-
 struct avd_decoded_buffer *
 avd_get_ref_buf(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
 {
@@ -602,6 +577,7 @@ static int avd_probe(struct platform_device *pdev)
 	avd->pdev = pdev;
 
 	mutex_init(&avd->vdev_lock);
+	avd_pm_init(avd, NULL, &avd_pm_queue_ops);
 	ret = avd_queue_init(avd);
 	if (ret)
 		return ret;
@@ -659,9 +635,7 @@ static int avd_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	pm_runtime_set_autosuspend_delay(avd->dev, 100);
-	pm_runtime_use_autosuspend(avd->dev);
-	pm_runtime_enable(avd->dev);
+	avd_pm_enable(avd);
 
 	ret = avd_v4l2_init(avd);
 	if (ret)
@@ -678,43 +652,18 @@ err_disable_runtime_pm:
 static void avd_remove(struct platform_device *pdev)
 {
 	struct avd_dev *avd = platform_get_drvdata(pdev);
+	int ret;
 
+	v4l2_m2m_suspend(avd->m2m_dev);
+	ret = avd->pm.queue->drain(avd);
+	if (ret)
+		dev_warn(avd->dev, "queue drain failed, resetting before teardown: %d\n", ret);
 	avd_queue_cleanup(avd);
-
+	avd_pm_disable(avd);
 	avd_v4l2_cleanup(avd);
-
 	if (avd->empty_domain)
 		iommu_domain_free(avd->empty_domain);
-
-	pm_runtime_disable(avd->dev);
-	pm_runtime_dont_use_autosuspend(avd->dev);
 }
-
-static __maybe_unused int avd_runtime_resume(struct device *dev)
-{
-	int ret;
-	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
-
-	ret = avd_backend_boot(avd);
-	if (ret)
-		dev_err(dev, "failed to boot");
-	return ret;
-}
-
-static __maybe_unused int avd_runtime_suspend(struct device *dev)
-{
-	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
-
-	if (READ_ONCE(avd->inflight))
-		return -EBUSY;
-	avd->backend->shutdown(avd);
-	return 0;
-}
-
-static const struct dev_pm_ops avd_pm_ops = { SET_SYSTEM_SLEEP_PM_OPS(
-	pm_runtime_force_suspend,
-	pm_runtime_force_resume) SET_RUNTIME_PM_OPS(avd_runtime_suspend,
-						    avd_runtime_resume, NULL) };
 
 static struct platform_driver avd_driver = {
 	.probe = avd_probe,

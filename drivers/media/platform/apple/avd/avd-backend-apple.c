@@ -134,6 +134,9 @@ static int avd_apple_boot(struct avd_dev *avd)
 		ret = avd_apple_load(avd);
 		if (ret)
 			return ret;
+	} else {
+		/* Suspend stopped the MCPU without clearing the retained image. */
+		writel(hw->itcm_enable_value, apple->regs + hw->itcm_enable);
 	}
 	dev_info(avd->dev, "Apple MCPU firmware %u.%u.%u (%08x)\n",
 		 apple->version >> 8, (apple->version >> 4) & 0xf,
@@ -304,4 +307,6 @@ const struct avd_backend_ops avd_apple_backend = {
 	.abort = avd_apple_abort,
 	.set_property = avd_apple_set_property,
 	.irq = avd_apple_irq,
+	.suspend = avd_pm_backend_suspend,
+	.resume = avd_pm_backend_resume,
 };
