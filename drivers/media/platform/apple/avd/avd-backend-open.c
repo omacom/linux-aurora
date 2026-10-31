@@ -164,7 +164,9 @@ static void avd_open_capabilities(struct avd_dev *avd)
 	const char *info;
 	unsigned int i;
 
-	avd->capabilities = avd->variant->capabilities;
+	/* Without a CODECS trailer, keep codecs that need a newer firmware hidden. */
+	avd->capabilities = avd->variant->capabilities &
+			    ~avd->variant->fw_caps_required;
 	if (!avd->fw || avd->fw->size < 0x40)
 		return;
 	info = (const char *)avd->fw->data + avd->fw->size - 0x40;

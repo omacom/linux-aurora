@@ -490,8 +490,8 @@ static const struct avd_variant avd_t8132_variant = {
  * T6040 (M4 Pro): the T8132 decoder. Its first HEVC job stalled the VP when
  * it was sent the pre-v5 header (no DMA configuration words, no reserved
  * scratch slot); T6040 runs the same v5 firmware generation as T8140, so it
- * gets the v5 header. HEVC stays hidden from V4L2 clients until that is
- * verified on the hardware.
+ * gets the v5 header. HEVC is advertised only when the loaded firmware
+ * names h265 in its CODECS trailer.
  */
 static const struct avd_variant avd_t6040_variant = {
 	.apple = &avd_borage_hw,
@@ -504,9 +504,12 @@ static const struct avd_variant avd_t6040_variant = {
 	},
 	.fifo_slots = 15,
 	.configure_stream = t8122_configure_stream,
-	.capabilities = AVD_CAPABILITY_H264 |
+	.capabilities = AVD_CAPABILITY_HEVC |
+			AVD_CAPABILITY_H264 |
 			AVD_CAPABILITY_VP9 |
 			AVD_CAPABILITY_AV1,
+	/* HEVC only with firmware whose CODECS trailer lists h265. */
+	.fw_caps_required = AVD_CAPABILITY_HEVC,
 	.fw_name = "apple/avd-fw-v5-t1.bin",
 	.revision = 4,
 	.vp_slot_offset = 0xc,

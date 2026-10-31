@@ -194,6 +194,8 @@ struct avd_variant {
 	unsigned int vp_slot_base[4];
 	unsigned int fifo_slots;
 	unsigned int capabilities;
+	/* Codecs advertised only when the firmware CODECS trailer lists them. */
+	unsigned int fw_caps_required;
 	void (*configure_stream)(struct avd_dev *avd, dma_addr_t addr,
 			u8 fifo_idx, u32 vp_slot);
 	const char* fw_name;
