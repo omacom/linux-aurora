@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/usb/apple,t8152-dwc3.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Apple T8152 USB2-only controller
+
+maintainers:
+  - Joshua Warren <816217+joshuaswarren@users.noreply.github.com>
+
+description: |
+  This USB2-only profile starts a fixed role at probe, with or without a
+  physical hub child node: host mode, or — for a debug-cable port — fixed
+  peripheral (gadget) mode selected with dr_mode. The controller never
+  switches roles at runtime.
+  The dr_mode and maximum-speed properties must select host or peripheral and
+  high-speed.
+  Firmware supplies device-specific calibration records as offset, clear-mask,
+  set-value triples. Offsets are relative to each native register bank, not
+  the combined Linux window. The core window ends at 0xcd00. The Apple window
+  starts at 0xcd00 and covers the debug, configuration, and link banks through
+  0x11800. These windows must not overlap.
+
+allOf:
+  - $ref: snps,dwc3-common.yaml#
+
+properties:
+  compatible:
+    const: apple,t8152-dwc3
+
+  reg:
+    items:
+      - description: DWC3 core, offsets 0 through 0xccff
+      - description: Apple registers, offsets 0xcd00 through 0x117ff
+      - description: PIPE handler (native register bank 3)
+      - description: Power control (native register bank 5)
+      - description: Bulk fabric (native register bank 6)
+      - description: AUSBC debug (native register bank 8)
+
+  reg-names:
+    items:
+      - const: dwc3-core
+      - const: dwc3-apple
+      - const: pipe-handler
+      - const: pwr-ctrl
+      - const: bulk-fabric
+      - const: ausbc-debug
+
+  interrupts:
+    maxItems: 1
+
+  iommus:
+    minItems: 4
+    maxItems: 4
+
+  power-domains:
+    maxItems: 1
+
+  phys:
+    maxItems: 1
+
+  phy-names:
+    items:
+      - const: usb2-phy
+
+  dr_mode:
+    enum: [ host, peripheral ]
+
+  maximum-speed:
+    const: high-speed
+
+  '#address-cells':
+    const: 1
+
+  '#size-cells':
+    const: 0
+
+
+patternProperties:
+  '^hub@[1-9a-f][0-9a-f]?$':
+    $ref: /schemas/usb/usb-device.yaml#
+  '^apple,tunable-(bulk-fabric-default|pipe-handler-default|pipe-handler-host|pwr-ctrl-default|drd-usb31-gbl-default|drd-usb31-gbl-host|drd-cio-regs-default|drd-usb31-dbg-default|drd-usb31-cfg-host|link-regs-default|ausbc-debug-default)$':
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description: Native bank-relative offset, clear-mask, set-value triples.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - iommus
+  - power-domains
+  - phys
+  - phy-names
+  - dr_mode
+  - maximum-speed
+
+unevaluatedProperties: false
