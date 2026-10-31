@@ -14,9 +14,11 @@ config VIDEO_APPLE_ISP
 	  Driver for the image signal processor that runs the built-in
 	  camera of Apple silicon machines. The ISP firmware is loaded by
 	  the bootloader. When a stream starts, the driver loads the
-	  calibration file for the detected camera module,
+	  sensor tuning file for the detected camera model,
 	  apple/isp_<module>_<revision>XX.dat, from the firmware search
-	  path; if it is missing, the stream runs without calibration.
+	  path; if it is missing, the stream runs without sensor tuning.
+	  Invalid files and firmware upload errors fail the stream setup.
+	  These setfiles do not contain per-module factory calibration.
 
 config VIDEO_APPLE_ISP_KUNIT_TEST
 	bool "KUnit tests for the Apple ISP driver" if !KUNIT_ALL_TESTS

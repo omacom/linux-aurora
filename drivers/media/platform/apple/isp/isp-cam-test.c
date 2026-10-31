@@ -69,6 +69,8 @@ static const struct isp_test_command isp_test_preview_commands[] = {
 struct isp_test_command_trace {
 	unsigned int count;
 	unsigned int fail_at;
+	int setfile_error;
+	unsigned int setfile_calls;
 };
 
 static int isp_test_send(struct apple_isp *isp, void *args, u32 insize,
@@ -155,6 +157,53 @@ static void isp_test_preview_command_failures(struct kunit *test)
 		trace = (struct isp_test_command_trace){ .fail_at = i };
 		KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), -ETIME);
 		KUNIT_EXPECT_EQ(test, trace.count, i);
+	}
+}
+
+static int isp_test_load_setfile(struct apple_isp *isp, u32 ch)
+{
+	struct kunit *test = kunit_get_current_test();
+	struct isp_test_command_trace *trace = test->priv;
+
+	trace->setfile_calls++;
+	return trace->setfile_error;
+}
+
+static void isp_test_setfile_failure_stops_setup(struct kunit *test)
+{
+	static const int errors[] = { -EINVAL, -EIO, -ETIME, -EINTR, -ENOMEM };
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_test_command_trace trace;
+
+	isp_get_current_format(isp)->pixelformat = V4L2_PIX_FMT_NV12;
+	kunit_activate_static_stub(test, isp_ch_load_setfile, isp_test_load_setfile);
+	test->priv = &trace;
+	for (unsigned int i = 0; i < ARRAY_SIZE(errors); i++) {
+		trace = (struct isp_test_command_trace){ .setfile_error = errors[i] };
+		KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), errors[i]);
+		/* Only the flicker command preceded the rejected tuning. */
+		KUNIT_EXPECT_EQ(test, trace.count, 1);
+		KUNIT_EXPECT_EQ(test, trace.setfile_calls, 1);
+	}
+}
+
+static void isp_test_optional_setfile_continues_setup(struct kunit *test)
+{
+	static const int results[] = { 0, -ENOENT };
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_test_command_trace trace;
+
+	isp_get_current_format(isp)->pixelformat = V4L2_PIX_FMT_NV12;
+	kunit_activate_static_stub(test, isp_ch_load_setfile, isp_test_load_setfile);
+	test->priv = &trace;
+	for (unsigned int i = 0; i < ARRAY_SIZE(results); i++) {
+		trace = (struct isp_test_command_trace){
+			.setfile_error = results[i], .fail_at = 2,
+		};
+		/* The SBS command after tuning, rather than tuning, fails. */
+		KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), -ETIME);
+		KUNIT_EXPECT_EQ(test, trace.count, 2);
+		KUNIT_EXPECT_EQ(test, trace.setfile_calls, 1);
 	}
 }
 
@@ -319,6 +368,8 @@ static void isp_test_command_ack_failure_latches(struct kunit *test)
 }
 
 static struct kunit_case isp_cam_test_cases[] = {
+	KUNIT_CASE(isp_test_setfile_failure_stops_setup),
+	KUNIT_CASE(isp_test_optional_setfile_continues_setup),
 	KUNIT_CASE(isp_test_command_ack_failure_latches),
 	KUNIT_CASE(isp_test_sensor_geometry),
 	KUNIT_CASE(isp_test_sensor_config_list),

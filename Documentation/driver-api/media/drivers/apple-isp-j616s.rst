@@ -41,6 +41,98 @@ firmware-derived output modes still need capture validation on 26.6.2.
 Only our source and synthetic protocol tests are included; no Apple binary,
 setfile contents, calibration table or firmware image is added.
 
+Sensor tuning and noise reduction
+---------------------------------
+
+NV12 setup loads model-wide sensor tuning using ``CH_SET_FILE_LOAD``
+(0x0111). T8140/IMX558 selects ``apple/isp_1925_03XX.dat``; T6040/IMX958
+selects ``apple/isp_2224_01XX.dat``. The T6040 lens-shading fixup is applied
+only to the copied firmware buffer. A missing file allows streaming with a
+warning. An invalid file, interrupted read or failed firmware upload fails
+stream setup instead of silently continuing. A debug message identifies a
+successful upload without dumping its contents.
+
+The NV12 command sequence already sends ``CH_CNR_START`` (0x0a2f),
+``CH_MBNR_ENABLE`` (0x0a3a, use case 0, mode 1, chroma enabled),
+``APPLE_CH_TEMPORAL_FILTER_START`` (0xc100),
+``APPLE_CH_MOTION_HISTORY_START`` (0xc102) and
+``APPLE_CH_TEMPORAL_FILTER_ENABLE`` (0xc113). The temporal-start record has
+one fixed argument of 1 and another supplied by ``apple,temporal-filter``
+(default 0; J700 supplies 1). The latter's meaning is not established here;
+it must not be treated as a boolean enable or an output-pool count.
+Command submission alone does not establish equivalence to a host-side
+motion-compensated filter or measure the firmware's resulting noise reduction.
+
+The P010 preview still uses its qualified minimal sequence, which skips
+these explicit NR commands and setfile upload. An earlier NV12 stream may
+have left tuning in the resident firmware. Compare cold-boot P010 with
+NV12-to-P010 transitions when assessing image quality.
+
+Sensor setfiles are distinct from individual camera-module factory
+calibration (iCCl). The driver has no iCCl parser, serial binding or upload
+command. The installer preserves raw factory records in the local fallback
+archive; this does not mean the ISP consumes them. No factory record or
+vendor payload belongs in the kernel source or a distributed firmware package.
+
+The separate ANE video denoiser is not implemented. The board parameter facts
+are auto mode 2, total-gain entry/exit thresholds 2304/1792 on J700 and
+3584/2816 on J616s, an FPS threshold of 30 and a 30-frame ramp-down. The FPS
+comparison direction, gain units and ANE/ISP interchange need a confirmed
+interface before implementation.
+
+Public source audit
+-------------------
+
+The pinned PR and its discussion were checked again for the RAW layout and
+per-configuration timing. The reusable code establishes the processed path;
+it does not contain a RAW Bayer packing/CFA contract or the 13 reply records:
+
+* ``isp_capture.py`` accepts only 1280x720 and 1920x1080 processed geometry.
+  Its generic pool-3 builder describes a single address, not the pixel packing,
+  CFA order or RAW receiver command sequence. The qualified preview uses pool 9.
+* ``isp_pixels.py`` contains only an MSB-aligned P010 decoder, with no Bayer decoder.
+* ``isp_sensor.py`` reads the sensor ID/count and queries an index at runtime.
+  It has neither saved per-index replies nor a frame-rate decoder.
+* ``isp_profile.py`` and ``fixtures/isp_t6040_25g76.json`` describe boot segments,
+  allocation geometry and channels. The fixture has no camera-info or config replies.
+* ``isp_vid.py`` and ``experiments/isp.py`` use the older fixed 720p NV12 receiver.
+  ``isp_cmd.py`` includes legacy sensor-0x248 examples and a temporary 3.75 FPS
+  AE request (0x3c0), alongside a comment describing the older 30 FPS request.
+  These are not IMX958 per-mode timing records. The qualified T6040 helper instead
+  requests 30/15 FPS AE limits; neither set supplies a measured nominal-rate table.
+* ``isp_command.py`` implements ownership, command/reply and deadline handling.
+  ``src/isp.c`` prepares boot-time power and heap handoff, not a RAW capture client.
+* ``docs/j616s-bringup.md`` lines 752-789 explicitly distinguish a stable RAW
+  snapshot after stop from a completed buffer report and say orchestration remains
+  private. Commit ``743e4e75`` adds that diagnostic RAW evidence as documentation;
+  it does not add a RAW receiver implementation. Lines 832-841 qualify one
+  completed 1080p P010 frame, with measured FPS still unqualified.
+
+These findings do not deny the recorded RAW snapshot. They mean a V4L2 Bayer
+FOURCC, frame-completion contract and per-config rates cannot be derived from
+these files without additional runtime replies or capture evidence. In particular,
+the old 0x103 SIF example must not be treated as an IMX958 Bayer-format declaration.
+
+AOP endpoints and separate audio stream
+-----------------------------------------
+
+The modern ``fw/aop/client.py`` map in PR 20 is 0x20 SPUApp, 0x21 wakehint,
+0x22 audio, 0x23 voice trigger, 0x24 accelerometer, 0x25 gyroscope, 0x26 lid
+angle, 0x27 ALS and four endpoints at 0x28-0x2b with unqualified roles. The
+separate ENDPOINTS13 map assigns different roles and is not the T6040 map.
+
+The documented HQ audio sequence uses the advertised aop-audio service at
+endpoint 0x22, EPIC version 2, checked attachment/property replies and owned
+DART mappings. It first establishes LP readiness using adpx buffer property 300,
+attachments lpai/pdm0/adpx, lpai pw1, lai attachment and lai/lpai runn. HQ then
+attaches hpai, requests pw1, prepares stream-10 NS RX0 DMA and starts DMA before
+requesting hpai pwrd. Matching reports and two full copies precede RX stop and
+return through pw1 to idle. These are audio commands, not camera mode selectors.
+
+The qualified ISP preview helper contains no AOP command. This camera change
+therefore does not replay the AOP audio stream or alter its Linux driver. The
+ISP channel and command maps below describe the camera path independently.
+
 Mode and format selection
 -------------------------
 
