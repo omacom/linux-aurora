@@ -279,22 +279,19 @@ impl IdentityIndex {
         let Some(raw) = store.read(&identity_key())? else {
             return Ok(index);
         };
-        if raw.len() < 4 {
-            return Ok(index);
+        if raw.len() < 8 {
+            return Err(EINVAL);
         }
         if u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) != INDEX_FORMAT {
             return Err(EINVAL);
         }
-        if raw.len() < 8 {
-            return Ok(index);
-        }
         let count = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]) as usize;
         let stride = UUID_LEN + LABEL_LEN;
-        for i in 0..count.min(MAX_IDENTITIES) {
+        if count > MAX_IDENTITIES || raw.len() != 8 + count * stride {
+            return Err(EINVAL);
+        }
+        for i in 0..count {
             let at = 8 + i * stride;
-            if at + stride > raw.len() {
-                break;
-            }
             let mut entry = Identity::ZERO;
             entry.uuid.copy_from_slice(&raw[at..at + UUID_LEN]);
             entry
