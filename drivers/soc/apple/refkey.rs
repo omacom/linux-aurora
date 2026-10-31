@@ -98,6 +98,8 @@ impl SepData {
             profile::KeyStore::Variant5 => (9, 5),
         };
 
+        // A ref-key created this boot belongs to the current boot policy.
+        crate::xart_guard::close_policy_window();
         if self.profile.key_store == profile::KeyStore::Variant5 {
             // On variant 5 the ref-key is bound to the unlocked identity bag.
             if let Some(healthy) = self.sks_health_check(c"ref-key create") {
@@ -280,16 +282,24 @@ impl SepData {
             return Err(ENODEV);
         };
         let (handle, _uuid) = self.sks_recover(&stored).ok_or(EIO)?;
-        if self.profile.key_store == profile::KeyStore::Variant5 {
-            if let Some(healthy) = self.sks_health_check(c"trusted-key unseal") {
-                let _ = self.sks_send(self.sks_req_change_lock_state(
-                    handle,
-                    LockState::Unlocked,
-                    stored.secret(),
-                    healthy,
-                ));
+        // The first unlock under a changed boot policy rewrites one session
+        // record; see crate::xart_guard.
+        let unlocked = crate::xart_guard::policy_window(|| {
+            if self.profile.key_store == profile::KeyStore::Variant5 {
+                if let Some(healthy) = self.sks_health_check(c"trusted-key unseal") {
+                    let _ = self.sks_send(self.sks_req_change_lock_state(
+                        handle,
+                        LockState::Unlocked,
+                        stored.secret(),
+                        healthy,
+                    ));
+                }
+                true
+            } else {
+                self.sks_prepare_identity_refkey(handle, stored.secret())
             }
-        } else if !self.sks_prepare_identity_refkey(handle, stored.secret()) {
+        });
+        if !unlocked {
             let _ = self.sks_send(self.sks_req_unload_keybag(handle));
             return Err(EIO);
         }
@@ -349,14 +359,16 @@ impl SepData {
             return Err(ENODEV);
         };
         let (handle, _uuid) = self.sks_recover(&stored).ok_or(EIO)?;
-        if let Some(healthy) = self.sks_health_check(c"ref-key attest") {
-            let _ = self.sks_send(self.sks_req_change_lock_state(
-                handle,
-                LockState::Unlocked,
-                stored.secret(),
-                healthy,
-            ));
-        }
+        crate::xart_guard::policy_window(|| {
+            if let Some(healthy) = self.sks_health_check(c"ref-key attest") {
+                let _ = self.sks_send(self.sks_req_change_lock_state(
+                    handle,
+                    LockState::Unlocked,
+                    stored.secret(),
+                    healthy,
+                ));
+            }
+        });
         let sig = self.sks_refkey_sign(handle, &blob, challenge);
         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
         Ok((sig.ok_or(EIO)?, pubk))

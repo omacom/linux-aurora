@@ -1,0 +1,215 @@
+#!/usr/bin/python3 -I
+# SPDX-License-Identifier: GPL-2.0-only
+"""Keep Touch ID across a boot policy change.
+
+A new Stage 1, another boot object or a boot mode conversion changes the
+Mac's boot policy for Linux. The first time Linux's identity keybag is
+unlocked under the new policy, the enclave rewrites one session record in
+the shared xART gigalocker. Linux did not create that record, so the
+driver's xART guard refuses the write, the machine ref-key stays down and
+Touch ID is unavailable. The keybag, the ref-key and the enrolled
+fingerprints are all intact: the refused write changed nothing.
+
+This lets the enclave make that one write on the next boot:
+
+  aurora-sep-policy-change            after the change: allow the record the
+                                      guard refused this boot, by its id
+  aurora-sep-policy-change --expect   before a planned change: allow the
+                                      first existing kind-4 record the
+                                      enclave asks to rewrite next boot
+  aurora-sep-policy-change --status   what is armed, and this boot's refusals
+  aurora-sep-policy-change --cancel   remove an allowance not used yet
+
+Before it arms anything it backs up the whole gigalocker extent, the
+driver's host files and the fingerprint store to
+/var/lib/aurora-rollback/sep-policy-change-<time>/, with SHA256SUMS.
+
+The allowance is one record, one rewrite, one boot. The driver empties the
+allowance file when it loads it, never lets it cover a delete or a shared
+root, and never adds the record to Linux's list. See XART-SAFETY.md.
+"""
+
+import hashlib
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import time
+import zlib
+
+ALLOW = "/var/lib/aurora-sep-xart-allow-once.bin"
+CONTAINER = "/dev/disk/by-partlabel/iBootSystemContainer"
+GL_SIZE = 0x600000
+ROLLBACK = "/var/lib/aurora-rollback"
+HOST_FILES = (
+    "/var/lib/aurora-sep-keybag.bin",
+    "/var/lib/aurora-sep-refkey.bin",
+    "/var/lib/aurora-sep-host-state.bin",
+    "/var/lib/aurora-sep-xart-owned.bin",
+)
+FPRINT = "/var/lib/fprint"
+
+REFUSED = re.compile(r"xART guard: refused to rewrite kind-([34]) record ([0-9a-f]{32})")
+BASE = re.compile(r"xART: APFS-resolved \.gl extent \(base (0x[0-9a-f]+)\)")
+
+
+def die(msg):
+    print(f"aurora-sep-policy-change: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def say(msg):
+    print(f"aurora-sep-policy-change: {msg}")
+
+
+def kernel_log():
+    out = subprocess.run(
+        ["journalctl", "-k", "-b", "-o", "cat", "--no-pager", "-g", "apple_sep|xART"],
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout
+
+
+def entry(kind, uuid):
+    head = b"AXGA" + bytes([kind, 0, 0, 0]) + uuid
+    return head + struct.pack("<I", zlib.crc32(head)) + bytes(4)
+
+
+def describe(data):
+    if len(data) != 32 or data[:4] != b"AXGA" or data[5:8] != bytes(3):
+        return "damaged (the driver will ignore it)"
+    if struct.unpack_from("<I", data, 24)[0] != zlib.crc32(data[:24]):
+        return "damaged (the driver will ignore it)"
+    uuid = data[8:24]
+    if uuid == bytes(16):
+        return f"the first existing kind-{data[4]} record the enclave asks to rewrite"
+    return f"kind-{data[4]} record {uuid.hex()}"
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def backup(log):
+    m = BASE.search(log)
+    if not m:
+        die("the driver did not report the gigalocker's location this boot; is apple_sep loaded?")
+    base = int(m.group(1), 16)
+    dest = os.path.join(ROLLBACK, time.strftime("sep-policy-change-%Y%m%d-%H%M%S"))
+    os.makedirs(dest, mode=0o700)
+    # Read the extent twice: the enclave may write between the reads, and a
+    # torn copy is worse than none.
+    fd = os.open(CONTAINER, os.O_RDONLY)
+    try:
+        first = os.pread(fd, GL_SIZE, base)
+        second = os.pread(fd, GL_SIZE, base)
+    finally:
+        os.close(fd)
+    if len(first) != GL_SIZE or first != second:
+        die("the gigalocker changed while it was copied; run this again")
+    with open(os.path.join(dest, "gigalocker.gl"), "wb") as f:
+        f.write(first)
+    with open(os.path.join(dest, "gigalocker.base"), "w") as f:
+        f.write(f"{CONTAINER} byte offset {base:#x}, {GL_SIZE:#x} bytes\n")
+    for path in HOST_FILES:
+        if os.path.exists(path):
+            shutil.copy2(path, dest)
+    if os.path.isdir(FPRINT):
+        shutil.copytree(FPRINT, os.path.join(dest, "fprint"), symlinks=True)
+    sums = []
+    for root, _dirs, files in os.walk(dest):
+        for name in sorted(files):
+            path = os.path.join(root, name)
+            sums.append(f"{sha256(path)}  {os.path.relpath(path, dest)}\n")
+    with open(os.path.join(dest, "SHA256SUMS"), "w") as f:
+        f.writelines(sums)
+    subprocess.run(["sync"], check=False)
+    return dest
+
+
+def arm(data):
+    tmp = ALLOW + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.rename(tmp, ALLOW)
+    fsync_dir(os.path.dirname(ALLOW))
+    subprocess.run(["restorecon", ALLOW], check=False, capture_output=True)
+
+
+def status(log):
+    try:
+        with open(ALLOW, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        data = b""
+    say("armed: " + (describe(data) if data else "nothing"))
+    refused = sorted(set(REFUSED.findall(log)))
+    for kind, uuid in refused:
+        say(f"refused this boot: kind-{kind} record {uuid}")
+    for line in log.splitlines():
+        if "one-time rewrite" in line or "one-time allowance" in line:
+            say("this boot: " + line.split("apple_sep: ")[-1])
+
+
+def main(argv):
+    if argv[1:] in (["-h"], ["--help"]):
+        print(__doc__.strip())
+        return
+    if os.geteuid() != 0:
+        die("run as root")
+    log = kernel_log()
+    if argv[1:] == ["--status"]:
+        status(log)
+        return
+    if argv[1:] == ["--cancel"]:
+        try:
+            os.unlink(ALLOW)
+            fsync_dir(os.path.dirname(ALLOW))
+            say("removed the allowance")
+        except FileNotFoundError:
+            say("nothing was armed")
+        return
+    if argv[1:] == ["--expect"]:
+        data = entry(4, bytes(16))
+        what = "the first existing kind-4 record the enclave asks to rewrite"
+    elif argv[1:] == []:
+        refused = sorted(set(REFUSED.findall(log)))
+        if not refused:
+            die("the xART guard refused nothing this boot, so there is nothing to allow. "
+                "Before a planned boot policy change, use --expect.")
+        if len(refused) > 1:
+            listed = ", ".join(f"kind-{k} {u}" for k, u in refused)
+            die(f"the guard refused more than one record this boot ({listed}); "
+                "a boot policy change accounts for one. Report this instead of allowing them.")
+        kind, uuid = refused[0]
+        data = entry(int(kind), bytes.fromhex(uuid))
+        what = f"kind-{kind} record {uuid}"
+    else:
+        die("usage: aurora-sep-policy-change [--expect | --status | --cancel | --help]")
+    dest = backup(log)
+    say(f"backed up the gigalocker, the driver's host files and the fingerprints to {dest}")
+    arm(data)
+    say(f"armed: the next boot may rewrite {what}, once. Reboot to finish.")
+
+
+if __name__ == "__main__":
+    main(sys.argv)
