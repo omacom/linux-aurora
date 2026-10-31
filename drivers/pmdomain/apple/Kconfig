@@ -25,6 +25,18 @@ config APPLE_PMGR_PWRSTATE_KUNIT_TEST
 	  driver's power callbacks against an emulated power state register
 	  and need no Apple hardware.
 
+config APPLE_PMGR_PSD
+	bool "Apple T8152 PSD service slot power domains"
+	default ARCH_APPLE
+	depends on OF
+	depends on PM
+	select PM_GENERIC_DOMAINS
+	help
+	  The M6 (T8152) power state director gates the ATC USB blocks behind a
+	  per-port service slot request on top of the PMGR power states. This
+	  driver exposes each slot as a power domain whose parents are the PMGR
+	  domains, so consumers (the USB DARTs and controllers) power both in order.
+
 config APPLE_PMP_REPORT
 	bool "Apple PMP report control"
 	depends on OF
