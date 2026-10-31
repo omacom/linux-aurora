@@ -120,6 +120,7 @@ static const struct dcp_v14_board dcp_v14_board_j613 = {
 	.panel_width = 2560,
 	.panel_height = 1664,
 	.promotion = false,
+	.panel_nits = true,
 	.ctm_set = A(421),
 	.ctm_get = A(420),
 };
@@ -1697,7 +1698,7 @@ static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
 {
 	return board && board->panel_nits &&
 		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s") ||
-		 machine_is(ctx, "apple,j516c"));
+		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613"));
 }
 
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
@@ -2527,6 +2528,9 @@ static int dcp_v14_status_show(struct seq_file *m, void *unused)
 		   v14->stride, v14->clock_rate);
 	seq_printf(m, "backlight factor %#x updates %llu\n",
 		   v14->backlight_factor, v14->backlight_factor_updates);
+	seq_printf(m, "backlight nits_enabled %d sent %u presents %llu brightness_only %llu refused %llu\n",
+		   dcp_v14_board_nits(v14), v14->nits_sent, v14->nits_presents,
+		   v14->brightness_presents, v14->nits_refused);
 	seq_printf(m, "ctm valid %d disabled %d calls %llu setter %#x getter %#x\n",
 		   v14->ctm_valid, v14->ctm_disabled, v14->ctm_calls, v14->ctm_status,
 		   v14->ctm_get_status);
