@@ -3,6 +3,7 @@
 #define MT7932_PACKET_H
 
 #include <linux/bits.h>
+#include <net/cfg80211.h>
 
 #include "protocol.h"
 #include "channels.h"
@@ -159,6 +160,20 @@ static inline bool mt7932_rx_beacon(const struct mt7932_rx_frame *frame)
 		offset += 2 + frame->data[offset + 1];
 	}
 	return true;
+}
+
+/* A complete Channel Switch (mode, channel, count) or Extended Channel Switch
+ * (mode, class, channel, count) element, in a frame mt7932_rx_beacon() passed.
+ */
+static inline bool mt7932_rx_switch_announced(const struct mt7932_rx_frame *frame)
+{
+	const u8 *ies = frame->data + 36;
+	size_t length = frame->length - 36;
+	const struct element *csa, *ecsa;
+
+	csa = cfg80211_find_elem(WLAN_EID_CHANNEL_SWITCH, ies, length);
+	ecsa = cfg80211_find_elem(WLAN_EID_EXT_CHANSWITCH_ANN, ies, length);
+	return (csa && csa->datalen >= 3) || (ecsa && ecsa->datalen >= 4);
 }
 
 /* One linear, protected Ethernet packet. Caller owns token, WTBL and buffers. */

@@ -302,6 +302,38 @@ static void mt7932_scan_directed_ssids_test(struct kunit *test)
 	KUNIT_EXPECT_LT(test, mt7932_scan_ssid_slot(body, (const u8 *)"hidden", 6), 0);
 }
 
+/* Only a complete channel switch element announces that the AP is leaving. */
+static void mt7932_rx_switch_announced_test(struct kunit *test)
+{
+	static const struct {
+		u8 ies[8];
+		size_t length;
+		bool announced;
+	} cases[] = {
+		{ {}, 0, false },
+		{ { WLAN_EID_SSID, 0 }, 2, false },
+		{ { WLAN_EID_CHANNEL_SWITCH, 3, 1, 100, 5 }, 5, true },
+		{ { WLAN_EID_CHANNEL_SWITCH, 2, 1, 100 }, 4, false },
+		{ { WLAN_EID_EXT_CHANSWITCH_ANN, 4, 1, 121, 100, 5 }, 6, true },
+		{ { WLAN_EID_EXT_CHANSWITCH_ANN, 3, 1, 121, 100 }, 5, false },
+		{ { WLAN_EID_SSID, 0, WLAN_EID_CHANNEL_SWITCH, 3, 0, 36, 1 }, 7, true },
+	};
+	u8 beacon[36 + 8] = {};
+	struct mt7932_rx_frame frame = {
+		.data = beacon,
+		.frame_control = IEEE80211_STYPE_BEACON,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(cases); i++) {
+		memcpy(beacon + 36, cases[i].ies, cases[i].length);
+		frame.length = 36 + cases[i].length;
+		KUNIT_ASSERT_TRUE_MSG(test, mt7932_rx_beacon(&frame), "case %u", i);
+		KUNIT_EXPECT_EQ_MSG(test, mt7932_rx_switch_announced(&frame),
+				    cases[i].announced, "case %u", i);
+	}
+}
+
 static struct kunit_case mt7932_input_test_cases[] = {
 	KUNIT_CASE(mt7932_rx_decrypted_test),
 	KUNIT_CASE(mt7932_rx_plaintext_test),
@@ -316,6 +348,7 @@ static struct kunit_case mt7932_input_test_cases[] = {
 	KUNIT_CASE(mt7932_rx_sequence_domains_test),
 	KUNIT_CASE(mt7932_rx_open_duplicate_test),
 	KUNIT_CASE(mt7932_scan_directed_ssids_test),
+	KUNIT_CASE(mt7932_rx_switch_announced_test),
 	{}
 };
 

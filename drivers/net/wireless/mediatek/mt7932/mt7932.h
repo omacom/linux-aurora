@@ -145,6 +145,10 @@ struct mt7932 {
 	struct completion discovery_done;
 	struct completion scan_done;
 	struct ieee80211_channel *connect_channel_req, *connect_channel_hint;
+	/* Boot time after which a radar or no-IR candidate must have been
+	 * heard; set when an attempt starts listening, under command_mutex.
+	 */
+	u64 connect_heard_since;
 	u8 connect_bssid_req[ETH_ALEN], connect_bssid_hint[ETH_ALEN];
 	bool discovering, discovery_finished, connect_cancelled;
 	u8 connect_ssid[32], connect_pmk[32], connect_bssid[6];
@@ -250,6 +254,7 @@ int mt_connect(struct wiphy *wiphy, struct net_device *netdev,
 		      struct cfg80211_connect_params *params);
 void mt_disconnect_work(struct work_struct *work);
 int mt_disconnect(struct wiphy *wiphy, struct net_device *netdev, u16 reason);
+void mt_disconnect_local_locked(struct mt7932 *m, u16 reason);
 int mt_deauth(struct wiphy *wiphy, struct net_device *netdev,
 		     struct cfg80211_deauth_request *request);
 int mt_change_interface(struct wiphy *wiphy, struct net_device *netdev,

@@ -240,6 +240,7 @@ int mt_connect_discover(struct mt7932 *m)
 	unsigned int attempt, band, i, count;
 	int ret = 0;
 
+	m->connect_heard_since = ktime_get_boottime_ns();
 	/* A short directed probe can miss a just-restarted AP. One bounded
 	 * passive fallback obtains real beacons, without treating a stale
 	 * userspace candidate as evidence or relaxing association admission.
@@ -653,29 +654,13 @@ int mt_enable_scan(struct mt7932 *m)
 	return 0;
 }
 
-/* A station on a radar channel must stop transmitting when its AP announces a
- * switch away; the firmware's CSA handling is unknown. The beacon's IEs are
- * already bounds-checked by mt7932_rx_beacon().
- */
-static bool mt_radar_switch_announced(const struct ieee80211_channel *channel,
-				      const struct mt7932_rx_frame *frame)
-{
-	const u8 *ies = frame->data + 36;
-	size_t length = frame->length - 36;
-	const struct element *csa, *ecsa;
-
-	if (!(channel->flags & IEEE80211_CHAN_RADAR))
-		return false;
-	csa = cfg80211_find_elem(WLAN_EID_CHANNEL_SWITCH, ies, length);
-	ecsa = cfg80211_find_elem(WLAN_EID_EXT_CHANSWITCH_ANN, ies, length);
-	return (csa && csa->datalen >= 3) || (ecsa && ecsa->datalen >= 4);
-}
-
 void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 {
 	struct mt7932_rx_frame frame;
+	struct cfg80211_inform_bss data = {};
 	struct cfg80211_bss *bss;
 	struct ieee80211_channel *channel;
+	bool leaving = false;
 	unsigned int band;
 	int ret = mt7932_rx_frame(packet, length, &frame);
 
@@ -709,11 +694,15 @@ void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 				frame.data + 36, frame.length - 36);
 		unsigned long flags;
 
+		/* A station on a radar channel must stop transmitting when its AP
+		 * announces a switch away; the firmware's CSA handling is unknown.
+		 */
+		leaving = (channel->flags & IEEE80211_CHAN_RADAR) &&
+			  mt7932_rx_switch_announced(&frame);
 		spin_lock_irqsave(&m->response_lock, flags);
-		if (m->connecting && !m->disconnecting && !m->stopping && !m->connect_error &&
-		    frame.channel == m->connect_channel &&
-		    ether_addr_equal(frame.data + 16, m->connect_bssid) &&
-		    mt_radar_switch_announced(channel, &frame)) {
+		if (leaving && m->connecting && !m->disconnecting && !m->stopping &&
+		    !m->connect_error && frame.channel == m->connect_channel &&
+		    ether_addr_equal(frame.data + 16, m->connect_bssid)) {
 			/* The connect worker owns teardown: fail its attempt and wake it. */
 			m->connect_error = -ECONNRESET;
 			complete(&m->assoc_start);
@@ -725,17 +714,8 @@ void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		    frame.channel == m->connect_channel &&
 		    ether_addr_equal(frame.data + 16, m->connect_bssid)) {
 			mt_cqm_signal(m, mt7932_rx_signal(&frame, m->antenna_mask));
-			if (mt_radar_switch_announced(channel, &frame)) {
-				m->connected = false;
-				m->disconnecting = true;
-				m->disconnect_seen = false;
-				m->disconnect_event_received = false;
-				m->disconnect_local = true;
-				m->disconnect_reason = WLAN_REASON_DISASSOC_STA_HAS_LEFT;
-				netif_carrier_off(m->netdev);
-				netif_stop_queue(m->netdev);
-				reinit_completion(&m->disconnect_done);
-				schedule_work(&m->disconnect_work);
+			if (leaving) {
+				mt_disconnect_local_locked(m, WLAN_REASON_DISASSOC_STA_HAS_LEFT);
 				dev_info(&m->pdev->dev, "RADAR_CHANNEL_SWITCH: AP announced a switch; leaving channel %u\n",
 					 m->connect_channel);
 			} else if (tim && tim->datalen >= 4 && !m->power_tim) {
@@ -745,9 +725,25 @@ void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		}
 		spin_unlock_irqrestore(&m->response_lock, flags);
 	}
-	bss = cfg80211_inform_bss_frame(m->wiphy, channel,
-				      (struct ieee80211_mgmt *)frame.data, frame.length,
-				      mt7932_rx_signal(&frame, m->antenna_mask) * 100, GFP_ATOMIC);
+	/* An AP leaving a radar channel is no candidate there: forget it, or
+	 * userspace rejoins it on that channel and then avoids its BSSID after
+	 * the failure, even once the AP is heard on its new channel.
+	 */
+	if (leaving) {
+		bss = cfg80211_get_bss(m->wiphy, channel, frame.data + 16, NULL, 0,
+				       IEEE80211_BSS_TYPE_ANY, IEEE80211_PRIVACY_ANY);
+		if (bss) {
+			cfg80211_unlink_bss(m->wiphy, bss);
+			cfg80211_put_bss(m->wiphy, bss);
+		}
+		return;
+	}
+	data.chan = channel;
+	data.signal = mt7932_rx_signal(&frame, m->antenna_mask) * 100;
+	data.boottime_ns = ktime_get_boottime_ns();
+	bss = cfg80211_inform_bss_frame_data(m->wiphy, &data,
+					     (struct ieee80211_mgmt *)frame.data,
+					     frame.length, GFP_ATOMIC);
 	if (bss) {
 		m->beacons++;
 		dev_dbg_ratelimited(&m->pdev->dev, "BSS_RECEIVED: channel=%u BSSID=%pM\n", frame.channel, bss->bssid);
