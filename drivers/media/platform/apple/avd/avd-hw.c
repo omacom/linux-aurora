@@ -67,6 +67,28 @@ int avd_boot(struct avd_dev *avd)
 	return 0;
 }
 
+/*
+ * Pop one firmware message. Reading RETRIEVE on an empty mailbox returns the
+ * previous message again, and a repeated PP DONE completes the next frame
+ * before its PP has run. An interrupt can also come just before its message
+ * is readable, so allow 10 us; after that treat the interrupt as spurious.
+ * Always acknowledges the interrupt. Returns false when there is no message.
+ */
+bool avd_mbox_pop(struct avd_dev *avd, u32 *msg)
+{
+	u32 st;
+	int ret;
+
+	ret = readl_poll_timeout_atomic(avd->mbox + AVD_REG_MBOX1_STATUS, st,
+					!(st & AVD_MBOX1_STATUS_EMPTY), 1, 10);
+	if (!ret)
+		*msg = readl(avd->mbox + AVD_REG_MBOX1_RETRIEVE);
+	writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
+	if (ret)
+		dev_dbg_ratelimited(avd->dev, "spurious interrupt, mailbox empty\n");
+	return !ret;
+}
+
 void avd_shutdown(struct avd_dev *avd)
 {
 	writel_relaxed(AVD_RUN_CTRL_UNK_STOP, avd->mbox + AVD_REG_RUN_CTRL);

@@ -387,6 +387,7 @@ void avd_qfw_select(struct avd_dev *avd);
 void avd_qfw_prepare_boot(struct avd_dev *avd);
 bool avd_backend_is_qfw(const struct avd_dev *avd);
 int avd_backend_select(struct avd_dev *avd);
+bool avd_mbox_pop(struct avd_dev *avd, u32 *msg);
 int avd_backend_boot(struct avd_dev *avd);
 void avd_shutdown(struct avd_dev *avd);
 

@@ -132,9 +132,10 @@ static int avd_open_submit(struct avd_dev *avd, struct avd_frame *f)
 static irqreturn_t avd_open_irq(struct avd_dev *avd)
 {
 	struct avd_frame *f = avd->compat_active;
-	u32 status = readl(avd->mbox + AVD_REG_MBOX1_RETRIEVE);
+	u32 status;
 
-	writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
+	if (!avd_mbox_pop(avd, &status))
+		return IRQ_HANDLED;
 	if (!f) {
 		/*
 		 * The old driver kicked PP for every VP DONE. A VP DONE with no

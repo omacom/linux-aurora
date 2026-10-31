@@ -268,13 +268,13 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 static irqreturn_t avd_qfw_irq(struct avd_dev *avd)
 {
 	struct avd_qfw *q = avd->qfw;
-	u32 word = readl(avd->mbox + AVD_REG_MBOX1_RETRIEVE);
 	struct avd_frame *f;
 	void __iomem *d;
-	u32 state, status, ctag;
+	u32 word, state, status, ctag;
 	unsigned int idx;
 
-	writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
+	if (!avd_mbox_pop(avd, &word))
+		return IRQ_HANDLED;
 	if ((word & AVDQ_NOTIFY_MASK) != AVDQ_NOTIFY) {
 		dev_err_ratelimited(avd->dev, "queue: firmware reported %#x, resetting\n", word);
 		avd_qfw_fail_all(avd);
