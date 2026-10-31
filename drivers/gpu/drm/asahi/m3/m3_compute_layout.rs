@@ -71,7 +71,14 @@ impl Command {
     /// Firmware envelopes vary independently of the GPU's CDM stream format.
     pub(crate) fn encode_for(&self, profile: super::m3_profile::Profile,
         asid_generation: u8, event_slot: u8, out: &mut [u8]) -> Result<(), Error> {
+        self.encode_with_usc(profile, asid_generation, event_slot, 0, out)
+    }
+
+    pub(crate) fn encode_with_usc(&self, profile: super::m3_profile::Profile,
+        asid_generation: u8, event_slot: u8, usc_base: u64, out: &mut [u8]) -> Result<(), Error> {
         let extended = profile == super::m3_profile::Profile::Extended;
+        if usc_base & 0xffff_ffff != 0 || usc_base >= 1 << 42
+            || (!extended && usc_base != 0) { return Err(Error::Address); }
         let size = if extended { EXTENDED_SIZE } else { SIZE };
         if out.len() < size { return Err(Error::Size); }
         if extended && (self.register_set != RegisterSet::G15G || event_slot >= 4
@@ -122,6 +129,7 @@ impl Command {
             emit(0x1a540, 1);
             emit(0x014a9, 1);
             emit(0x0a351, 1);
+            if usc_base != 0 { emit(0x10071, usc_base); }
         }
         pointer(bytes, 0x720, registers.get());
         bytes[0x728..0x72a].copy_from_slice(&(count as u16).to_le_bytes());
@@ -232,4 +240,17 @@ mod tests {
         assert_eq!(read64(&b, META), c.stamp.get());
         assert_eq!(&b[SIZE..], &[0xa5; EXTENDED_SIZE - SIZE]);
     }
+    #[test]
+    fn optional_usc_window_is_a_dispatch_register_without_stream_rewriting() {
+        let c = fixture();
+        let mut output = [0xa5; EXTENDED_SIZE];
+        c.encode_with_usc(Profile::Extended, 1, 0, 1 << 32, &mut output).unwrap();
+        assert_eq!(read32(&output, 0x728) & 0xffff, 25);
+        assert_eq!(read32(&output, REGISTERS + 24 * REGISTER_STRIDE), 0x10071);
+        assert_eq!(read64(&output, REGISTERS + 24 * REGISTER_STRIDE + 4), 1 << 32);
+        output.fill(0xa5);
+        assert!(c.encode_with_usc(Profile::Extended, 1, 0, 1, &mut output).is_err());
+        assert_eq!(output, [0xa5; EXTENDED_SIZE]);
+    }
+
 }

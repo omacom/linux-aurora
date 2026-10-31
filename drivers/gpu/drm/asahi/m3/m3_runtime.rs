@@ -1214,6 +1214,9 @@ impl Runtime {
     }
     fn boot_inner(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
         use crate::m3::t8122_start::BootStep;
+        if self.inner.device.firmware().profile() == super::m3_profile::Profile::Extended {
+            return self.boot_extended(pdev);
+        }
         let root = self.inner.config.root();
         dev_info!(pdev.as_ref(), "M3: publishing owned initdata {:#x}\n", root);
         self.inner.boot_step = BootStep::Publish;
@@ -1245,6 +1248,60 @@ impl Runtime {
         dev_info!(pdev.as_ref(), "M3: firmware accepted owned initdata and device controls\n");
         Ok(())
     }
+    fn boot_extended(&mut self, pdev: &platform::Device<Core<'_>>) -> Result {
+        use super::m3_channel_format::Action;
+        use crate::m3::t8122_start::BootStep;
+        // The first control is pending when the root becomes visible. Its
+        // retirement comes from InitData consumption, without a work kick.
+        let first = self.inner.config.control_extended(Action::Initialize)?;
+        self.inner.config.publish_io_table(pdev, self.inner.device.firmware())?;
+        let root = self.inner.config.root();
+        Pin::new(&mut self.inner.transport).send_message(0x20,
+            0x0081_0000_0000_0000 | (root & ((1u64 << 44) - 1)))?;
+        self.inner.boot_step = BootStep::AwaitReady;
+        let deadline = Instant::<Monotonic>::now();
+        while !self.inner.config.ready()? {
+            let inner: &mut Inner = &mut *self.inner;
+            inner.config.drain(&inner.drm)?;
+            if !inner.state.healthy() { return Err(EIO); }
+            if deadline.elapsed() >= Delta::from_secs(2) { return Err(ETIMEDOUT); }
+            fsleep(Delta::from_millis(1));
+        }
+        self.retire_extended_control(first)?;
+        self.inner.boot_step = BootStep::DeviceControl;
+        // Each data master registers its two firmware engine classes.
+        for ordinal in 0..6 {
+            let action = Action::Register { pipe: ordinal / 2, engine: ordinal % 2 + 1 };
+            self.send_extended_control(action)?;
+        }
+        self.inner.boot_step = BootStep::PostReady;
+        self.send_extended_control(Action::Idle { enabled: true })?;
+        let inner: &mut Inner = &mut *self.inner;
+        inner.config.check_pstate(&inner.drm, &inner.device, "after native boot")?;
+        inner.config.log_ready(&inner.drm)?;
+        inner.state.health.set_gpu_pending(false);
+        dev_info!(pdev.as_ref(), "M3: extended firmware ready; native controllers and idle policy admitted\n");
+        Ok(())
+    }
+
+    fn send_extended_control(&mut self, action: super::m3_channel_format::Action) -> Result {
+        let cursor = self.inner.config.control_extended(action)?;
+        Pin::new(&mut self.inner.transport).send_message(0x21, 0x0084_0000_0000_0011)?;
+        self.retire_extended_control(cursor)
+    }
+
+    fn retire_extended_control(&mut self, expected: u32) -> Result {
+        let deadline = Instant::<Monotonic>::now();
+        loop {
+            let inner: &mut Inner = &mut *self.inner;
+            inner.config.drain(&inner.drm)?;
+            if !inner.state.healthy() { return Err(EIO); }
+            if inner.config.control_done(expected)? { return Ok(()); }
+            if deadline.elapsed() >= Delta::from_secs(2) { return Err(ETIMEDOUT); }
+            fsleep(Delta::from_millis(1));
+        }
+    }
+
     fn send_control(&mut self, opcode: u32) -> Result {
         let next = match self.inner.config.control(opcode) {
             Ok(next) => next,

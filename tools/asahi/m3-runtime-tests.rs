@@ -36,3 +36,13 @@ mod m3_compute_layout;
 
 #[path = "../../drivers/gpu/drm/asahi/m3/m3_channel_format.rs"]
 mod m3_channel_format;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_sequence.rs"]
+mod m3_compute_sequence;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_state_layout.rs"]
+mod m3_state_layout;
+
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_storage.rs"]
+mod m3_compute_storage;

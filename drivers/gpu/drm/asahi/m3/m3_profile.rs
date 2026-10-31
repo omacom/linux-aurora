@@ -32,6 +32,13 @@ impl Profile {
         }
     }
 
+    pub(crate) fn gpu_duration_ns(self, elapsed: u64) -> Option<u64> {
+        match self {
+            Self::Legacy => elapsed.checked_mul(1000).map(|value| value / 24),
+            Self::Extended => Some(elapsed),
+        }
+    }
+
     pub(crate) const fn vm_acknowledged(self, params_bytes: u64, flags: u32) -> bool {
         // Both profiles consume G15 records; the existing VM padding stays zero.
         params_bytes >= PARAMS_REQUIRED && flags == 0
@@ -65,5 +72,18 @@ mod tests {
         assert_eq!(Profile::Extended.firmware_compat(), [26, 6, 2]);
         assert_eq!(Profile::Extended.user_end(), 0x3ff_ffff_8000);
         assert_eq!(Profile::Legacy.user_end(), 0x2ff_ffff_8000);
+    }
+    #[test]
+    fn native_nanoseconds_are_never_rescaled_as_legacy_ticks() {
+        assert_eq!(
+            Profile::Extended.gpu_duration_ns(24_000_000),
+            Some(24_000_000)
+        );
+        assert_eq!(
+            Profile::Legacy.gpu_duration_ns(24_000_000),
+            Some(1_000_000_000)
+        );
+        assert_eq!(Profile::Extended.gpu_duration_ns(u64::MAX), Some(u64::MAX));
+        assert_eq!(Profile::Legacy.gpu_duration_ns(u64::MAX), None);
     }
 }

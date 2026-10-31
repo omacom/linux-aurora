@@ -258,7 +258,8 @@ impl gpu::Gpu for Backend {
         _ualloc_priv: Arc<Mutex<alloc::DefaultAllocator>>, priority: u32,
         usc_exec_base: u64) -> Result<KBox<dyn queue::Queue>> {
         Ok(KBox::new(crate::m3::m3_submit::Queue::new(self.shared.clone(),self.scheduler.clone(),vm,priority,usc_exec_base,
-            self.soc.features.fragment_dependency)?,GFP_KERNEL)?)
+            self.feature_flags() & uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_DEPENDENCY as u64 != 0,
+            self.feature_flags() & uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_WIDE_VISIBILITY as u64 != 0)?,GFP_KERNEL)?)
     }
     fn map_timestamp_buffer(&self, bo: gem::ObjectRef, range: Range<usize>) -> Result<crate::timestamp::Buffer> {
         crate::timestamp::Buffer::firmware(
