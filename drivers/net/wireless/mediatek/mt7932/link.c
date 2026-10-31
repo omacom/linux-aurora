@@ -25,7 +25,7 @@ static bool mt_channel_event(struct mt7932 *m, const u8 *body, size_t length)
 		NL80211_CHAN_WIDTH_40 : NL80211_CHAN_WIDTH_20;
 	def.center_freq1 = body[17] <= 13 ? 2407 + 5 * center : 5000 + 5 * center;
 	if (!def.chan || !cfg80211_chandef_valid(&def) ||
-	    !cfg80211_chandef_usable(m->wiphy, &def, IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_RADAR))
+	    !cfg80211_chandef_usable(m->wiphy, &def, IEEE80211_CHAN_DISABLED))
 		return false;
 	if (m->connect_center && (m->connect_center != center || m->connect_chandef.width != def.width))
 		return false;
@@ -421,8 +421,10 @@ static int mt_connect_prepare(struct mt7932 *m, bool *peer_owned)
 		if (ret)
 			return ret;
 	}
-	if (m->connect_bss->channel->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_IR |
-					    IEEE80211_CHAN_NO_20MHZ | IEEE80211_CHAN_RADAR)) {
+	/* A station joins an AP it has heard on a radar or no-IR channel: the AP
+	 * owns radar detection. Leaving on its switch announcement is in RX.
+	 */
+	if (m->connect_bss->channel->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_20MHZ)) {
 		return -EINVAL;
 	}
 	spin_lock_irqsave(&m->response_lock, flags);
