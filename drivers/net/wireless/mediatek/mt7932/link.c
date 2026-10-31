@@ -385,25 +385,39 @@ static int mt_retire_connection(struct mt7932 *m)
 	return ret;
 }
 
+static struct cfg80211_bss *mt_connect_get_bss(struct mt7932 *m,
+					       struct ieee80211_channel *channel,
+					       const u8 *bssid)
+{
+	enum ieee80211_privacy privacy = m->connect_open ?
+		IEEE80211_PRIVACY_OFF : IEEE80211_PRIVACY_ON;
+	struct cfg80211_bss *bss;
+
+	bss = cfg80211_get_bss(m->wiphy, channel, bssid, m->connect_ssid,
+			       m->connect_ssid_length, IEEE80211_BSS_TYPE_ESS, privacy);
+	if (bss && !mt7932_bss_heard(bss->channel->flags, bss->ts_boottime,
+				     m->connect_heard_since)) {
+		cfg80211_put_bss(m->wiphy, bss);
+		return NULL;
+	}
+	return bss;
+}
+
 /* Hints affect preference, not admission. Only real cfg80211 scan entries
- * supply channel/BSSID and the reference passed to connect_done().
+ * supply channel/BSSID and the reference passed to connect_done(). A radar or
+ * no-IR entry not heard during this attempt is not returned, so the connect
+ * worker listens for it again through mt_connect_discover().
  */
 struct cfg80211_bss *mt_connect_find_bss(struct mt7932 *m)
 {
 	const u8 *bssid = is_valid_ether_addr(m->connect_bssid_req) ? m->connect_bssid_req : NULL;
 	struct cfg80211_bss *bss;
-	enum ieee80211_privacy privacy = m->connect_open ?
-		IEEE80211_PRIVACY_OFF : IEEE80211_PRIVACY_ON;
 
-	bss = cfg80211_get_bss(m->wiphy, m->connect_channel_req ?: m->connect_channel_hint,
-			       bssid ?: (is_valid_ether_addr(m->connect_bssid_hint) ?
-					 m->connect_bssid_hint : NULL),
-			       m->connect_ssid, m->connect_ssid_length,
-			       IEEE80211_BSS_TYPE_ESS, privacy);
+	bss = mt_connect_get_bss(m, m->connect_channel_req ?: m->connect_channel_hint,
+				 bssid ?: (is_valid_ether_addr(m->connect_bssid_hint) ?
+					   m->connect_bssid_hint : NULL));
 	if (!bss && (m->connect_channel_hint || is_valid_ether_addr(m->connect_bssid_hint)))
-		bss = cfg80211_get_bss(m->wiphy, m->connect_channel_req, bssid,
-				       m->connect_ssid, m->connect_ssid_length,
-				       IEEE80211_BSS_TYPE_ESS, privacy);
+		bss = mt_connect_get_bss(m, m->connect_channel_req, bssid);
 	return bss;
 }
 
@@ -421,8 +435,9 @@ static int mt_connect_prepare(struct mt7932 *m, bool *peer_owned)
 		if (ret)
 			return ret;
 	}
-	/* A station joins an AP it has heard on a radar or no-IR channel: the AP
-	 * owns radar detection. Leaving on its switch announcement is in RX.
+	/* A station joins an AP it has heard on a radar or no-IR channel during
+	 * this attempt (mt_connect_find_bss): the AP owns radar detection.
+	 * Leaving on its switch announcement is in RX.
 	 */
 	if (m->connect_bss->channel->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_20MHZ)) {
 		return -EINVAL;
@@ -843,6 +858,7 @@ int mt_connect(struct wiphy *wiphy, struct net_device *netdev,
 	m->connection_generation++;
 	m->connect_cancelled = false;
 	m->peer_valid = false;
+	m->connect_heard_since = ktime_get_boottime_ns();
 	m->connecting = true;
 unlock:
 	spin_unlock_irqrestore(&m->response_lock, flags);
@@ -878,6 +894,21 @@ void mt_disconnect_work(struct work_struct *work)
 	dev_dbg(&m->pdev->dev, "DISCONNECTED: teardown=%d local=%u\n", ret, local);
 }
 
+/* response_lock held, connected. The disconnect worker retires the peer. */
+void mt_disconnect_local_locked(struct mt7932 *m, u16 reason)
+{
+	m->connected = false;
+	m->disconnecting = true;
+	m->disconnect_seen = false;
+	m->disconnect_event_received = false;
+	m->disconnect_local = true;
+	m->disconnect_reason = reason;
+	netif_carrier_off(m->netdev);
+	netif_stop_queue(m->netdev);
+	reinit_completion(&m->disconnect_done);
+	schedule_work(&m->disconnect_work);
+}
+
 int mt_disconnect(struct wiphy *wiphy, struct net_device *netdev, u16 reason)
 {
 	struct mt7932 *m = mt_from_wiphy(wiphy);
@@ -900,16 +931,7 @@ int mt_disconnect(struct wiphy *wiphy, struct net_device *netdev, u16 reason)
 		complete(&m->assoc_done);
 		complete(&m->discovery_done);
 	} else if (m->connected) {
-		m->connected = false;
-		m->disconnecting = true;
-		m->disconnect_seen = false;
-		m->disconnect_event_received = false;
-		m->disconnect_local = true;
-		m->disconnect_reason = reason;
-		netif_carrier_off(m->netdev);
-		netif_stop_queue(m->netdev);
-		reinit_completion(&m->disconnect_done);
-		schedule_work(&m->disconnect_work);
+		mt_disconnect_local_locked(m, reason);
 	}
 	spin_unlock_irqrestore(&m->response_lock, flags);
 	/* iwd may issue its next connect as soon as this command is ACKed.

@@ -435,6 +435,17 @@ static void mt_owe_connect_auth_test(struct kunit *test)
 	}
 }
 
+/* A radar or no-IR candidate counts only once heard during this attempt. */
+static void mt_bss_heard_test(struct kunit *test)
+{
+	KUNIT_EXPECT_TRUE(test, mt7932_bss_heard(0, 0, 1000));
+	KUNIT_EXPECT_FALSE(test, mt7932_bss_heard(IEEE80211_CHAN_RADAR, 999, 1000));
+	KUNIT_EXPECT_TRUE(test, mt7932_bss_heard(IEEE80211_CHAN_RADAR, 1000, 1000));
+	KUNIT_EXPECT_FALSE(test, mt7932_bss_heard(IEEE80211_CHAN_NO_IR, 0, 1000));
+	KUNIT_EXPECT_TRUE(test, mt7932_bss_heard(IEEE80211_CHAN_NO_IR | IEEE80211_CHAN_RADAR,
+						 2000, 1000));
+}
+
 static struct kunit_case mt_association_test_cases[] = {
 	KUNIT_CASE(mt_owe_body_bounds_test),
 	KUNIT_CASE(mt_owe_connect_auth_test),
@@ -443,6 +454,7 @@ static struct kunit_case mt_association_test_cases[] = {
 	KUNIT_CASE(mt_connect_body_test),
 	KUNIT_CASE(mt_sae_body_bounds_test),
 	KUNIT_CASE(mt_connect_auth_test),
+	KUNIT_CASE(mt_bss_heard_test),
 	{}
 };
 

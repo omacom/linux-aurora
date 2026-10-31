@@ -12,6 +12,16 @@
 #define MT7932_SAE_PASSWORD_MIN 8
 #define MT7932_SAE_PASSWORD_MAX 63
 
+/* On a radar or no-IR channel the station may transmit only to an AP it has
+ * heard since the current connect attempt began listening; cfg80211 keeps a
+ * BSS for 30 s, long after an AP may have left the channel for radar.
+ */
+static inline bool mt7932_bss_heard(u32 channel_flags, u64 seen_ns, u64 since_ns)
+{
+	return !(channel_flags & (IEEE80211_CHAN_RADAR | IEEE80211_CHAN_NO_IR)) ||
+	       seen_ns >= since_ns;
+}
+
 /* The first AKM is selected by userspace. Credentials for an alternative
  * must never change the selected security arm on a transition BSS.
  */
