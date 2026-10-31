@@ -305,7 +305,8 @@ void avd_queue_run(void *priv)
 	if (ret)
 		goto fail;
 	ctx->next_dep = ops ? f->dep : AVD_DEP_PREV_DONE;
-	if (f->src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF) {
+	if ((ops && (f->src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)) ||
+	    (!ops && avd->compat_held)) {
 		if (ops && ops->retire)
 			ops->retire(ctx, f, VB2_BUF_STATE_DONE);
 		else if (!ops && ctx->coded_fmt_desc->ops->done)

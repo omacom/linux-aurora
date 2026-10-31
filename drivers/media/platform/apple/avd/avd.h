@@ -212,7 +212,7 @@ struct avd_dev {
 	struct v4l2_m2m_dev *m2m_dev;
 	struct platform_device *pdev;
 
-	const struct firmware *fw; /* fw is lost on suspend */
+	const struct firmware *fw; /* separately installed open firmware */
 
 	void __iomem *code;
 	void __iomem *mbox;

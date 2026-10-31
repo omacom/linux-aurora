@@ -3,6 +3,7 @@
 #include <linux/delay.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include "avd.h"
 #include "avd-inst.h"
@@ -163,7 +164,7 @@ static void avd_open_capabilities(struct avd_dev *avd)
 	avd->capabilities = avd->variant->capabilities;
 	if (!avd->fw || avd->fw->size < 0x40)
 		return;
-	info = avd->fw->data + avd->fw->size - 0x40;
+	info = (const char *)avd->fw->data + avd->fw->size - 0x40;
 	if (memcmp(info, "CODECS:", 7))
 		return;
 	avd->capabilities = 0;
