@@ -53,11 +53,17 @@ pub(crate) fn validate_identity_for(
     })
 }
 
+/// Same mutually exclusive board identities and exact string opt-in as m1n1/DCP.
+/// J615 shares the 25G83 GPU/ADT profile, but has no hardware qualification here.
+pub(crate) fn extended_board(j613: bool, j615: bool, optin: Option<&[u8]>) -> bool {
+    (j613 && !j615) || (!j613 && j615 && optin == Some(b"1\0"))
+}
+
 /// Firmware-interface selection is exact and does not change physical GPU encodings.
-pub(crate) fn profile_for(compat:&[u32],j613:bool)->Option<Profile> {
+pub(crate) fn profile_for(compat:&[u32],air:bool)->Option<Profile> {
     match compat {
         [14,8,3]=>Some(Profile::Legacy),
-        [26,6,2] if j613=>Some(Profile::Extended),
+        [26,6,2] if air=>Some(Profile::Extended),
         _=>None,
     }
 }
@@ -69,10 +75,17 @@ pub(crate) fn loaded_profile(pdev:&kernel::platform::Device<kernel::device::Core
     let node=pdev.as_ref().of_node().ok_or(ENODEV)?;
     let compat:KVec<u32>=node.get_property(c_str!("apple,firmware-compat"))?;
     #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
-    let j613 = super::m3_board::board_is(b"apple,j613");
+    let air = {
+        let j613 = super::m3_board::board_is(b"apple,j613");
+        let j615 = super::m3_board::board_is(b"apple,j615");
+        let optin = kernel::of::chosen().and_then(|chosen| {
+            chosen.get_property::<KVec<u8>>(c_str!("asahi,j615-25g83-experimental")).ok()
+        });
+        extended_board(j613, j615, optin.as_deref())
+    };
     #[cfg(not(CONFIG_DRM_ASAHI_M3_T8122))]
-    let j613 = false;
-    profile_for(&compat, j613).ok_or(ENODEV)
+    let air = false;
+    profile_for(&compat, air).ok_or(ENODEV)
 }
 
 /// Shape of the voltage-sorted running-state tables: one entry per distinct millivolt,
@@ -326,7 +339,17 @@ mod tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
-    #[test] fn extended_admission_requires_exact_firmware_and_j613() {
+    #[test]
+    fn j615_requires_exact_optin_and_unambiguous_board() {
+        for optin in [None, Some(&b""[..]), Some(&b"1"[..]), Some(&b"0\0"[..]),
+                      Some(&b"1\0extra"[..]), Some(&[0, 0, 0, 1][..]), Some(&b"1\0"[..])] {
+            assert!(extended_board(true, false, optin));
+            assert!(!extended_board(false, false, optin));
+            assert!(!extended_board(true, true, optin));
+            assert_eq!(extended_board(false, true, optin), optin == Some(&b"1\0"[..]));
+        }
+    }
+    #[test] fn extended_admission_requires_exact_firmware_and_air() {
         for board in [false,true] {
             assert_eq!(profile_for(&[14,8,3],board),Some(Profile::Legacy));
             assert_eq!(profile_for(&[26,6,2],board),if board{Some(Profile::Extended)}else{None});
