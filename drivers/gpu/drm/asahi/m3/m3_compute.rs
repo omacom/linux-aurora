@@ -350,10 +350,12 @@ impl Compute {
         let barriers=self.barriers.as_mut().ok_or(EINVAL)?;
         let offset=self.slot*64;
         let mut bytes=[0;crate::m3::m3_sync_layout::BARRIER_SIZE];
-        crate::m3::m3_sync_layout::Barrier {
+        let barrier=crate::m3::m3_sync_layout::Barrier {
             stamp:dependency.stamp,wait_value:dependency.value,event:dependency.event,
             self_value:value,uuid:0xc10000,dependency:crate::m3::m3_sync_layout::Dependency::PreviousPass,
-        }.encode(&mut bytes).map_err(|_|EINVAL)?;
+        };
+        if self.profile==super::m3_profile::Profile::Extended {barrier.encode_extended(&mut bytes)}
+        else {barrier.encode(&mut bytes)}.map_err(|_|EINVAL)?;
         barriers.write(offset,&bytes)?;
         let address=barriers.va()+offset as u64;
         let (slots,next)=queue::insert_before_last(self.head,queue::QUALIFIED_CAPACITY).map_err(|_|EINVAL)?;
@@ -382,8 +384,8 @@ impl Compute {
     /// Read only after stamps, queues, events and idle state prove retirement.
     pub(crate) fn batch_gpu_span(&mut self)->Result<[u64;2]> {
         if self.batch_count == 0 {return Err(EINVAL);}
-        Ok([self.objects[TIMESTAMPS[0]].read_u64(storage::slot_offset_for(self.profile,TIMESTAMPS[0],0).map_err(|_|EINVAL)?)?,
-            self.objects[TIMESTAMPS[1]].read_u64(storage::slot_offset_for(self.profile,TIMESTAMPS[1],self.batch_count-1).map_err(|_|EINVAL)?)?])
+        Ok([self.profile.profiler_ticks(self.objects[TIMESTAMPS[0]].read_u64(storage::slot_offset_for(self.profile,TIMESTAMPS[0],0).map_err(|_|EINVAL)?)?),
+            self.profile.profiler_ticks(self.objects[TIMESTAMPS[1]].read_u64(storage::slot_offset_for(self.profile,TIMESTAMPS[1],self.batch_count-1).map_err(|_|EINVAL)?)?)])
     }
     pub(crate) fn head(&self) -> u16 { self.head }
     pub(crate) fn ordinal(&self)->u64 {self.sequence}

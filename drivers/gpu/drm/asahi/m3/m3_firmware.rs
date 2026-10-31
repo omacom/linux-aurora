@@ -62,7 +62,7 @@ pub(crate) static KNOWN_IMAGES_T8122: [KnownImage; 1] = [KnownImage {
     initdata_magic: Some(G15_V14_8_3_INITDATA),
 }];
 
-/// Image record for the extended format. The SoC's runtime selection does not use it yet.
+/// Exact normalized image identity for the extended firmware interface.
 pub(crate) static T8122_IMAGES_26: [KnownImage; 1] = [KnownImage {
     name: "T8122 C0 firmware-compat 26.6.2",
     uuid: None,
@@ -164,7 +164,7 @@ pub(crate) static T8122_LAYOUT: Layout = Layout {
 pub(crate) const TEXT_SHA256: [u8; 32] = [
     0x11, 0xe4, 0x9f, 0x75, 0xb, 0x67, 0x1a, 0x2b, 0x13, 0xd0, 0x92, 0xdb, 0x1c, 0xbc, 0xa3, 0xa8, 0x77, 0x55, 0x86, 0xd6, 0xb1, 0xe3, 0xaa, 0xe8, 0xa6, 0xa4, 0x64, 0xa7, 0x80, 0x2, 0x93, 0xd5];
 
-/// T8122 C0, firmware-compat 26.6.2. Selection remains separate from runtime admission.
+/// T8122 C0, firmware-compat 26.6.2 segment and loader-mutable bounds.
 pub(crate) static T8122_LAYOUT_26: Layout = Layout {
     text_size: 393216,
     data_size: 1228800,
@@ -313,7 +313,10 @@ pub(crate) fn identify_loaded(
         prelude::*,
     };
 
-    let layout = soc.firmware.ok_or(ENODEV)?;
+    let extended=crate::m3::t8122_start::is_t8122(soc)
+        && crate::m3::t8122_admission::loaded_profile(pdev)?==super::m3_profile::Profile::Extended;
+    if extended && experiment.is_some() {return Err(EINVAL);}
+    let layout = if extended {&T8122_LAYOUT_26} else {soc.firmware.ok_or(ENODEV)?};
     if !Firmware::matching_layout(layout, &resources) {
         dev_err!(pdev.as_ref(), "M3 {}: unsupported firmware segment layout\n", soc.gpu_name);
         return Err(ENODEV);
@@ -337,6 +340,7 @@ pub(crate) fn identify_loaded(
     // The T8122 start experiment identifies the same image, with its own InitData version.
     let images = match experiment {
         Some(_) => &KNOWN_IMAGES_T8122_EXPERIMENT[..],
+        None if extended => &T8122_IMAGES_26[..],
         None => soc.images,
     };
     let image = crate::m3::m3_board::identify(pdev.as_ref(), bytes, &digest, images).ok_or(ENODEV)?;

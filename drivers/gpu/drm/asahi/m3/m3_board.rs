@@ -13,7 +13,7 @@ use crate::m3::m3_resources::{
 use crate::m3::m3_soc::Soc;
 
 /// Whether the root node's compatible list contains `compatible`.
-fn board_is(compatible: &[u8]) -> bool {
+pub(crate) fn board_is(compatible: &[u8]) -> bool {
     let Some(root) = kernel::of::root() else {
         return false;
     };

@@ -390,7 +390,7 @@ impl Inner {
         if found.is_none() {
             let job=match control {
                 crate::m3::m3_submit::Command::Compute(c)=>NativeJob::Compute(crate::m3::m3_compute::Compute::new(&self.drm,&self.uat,&packet.vm,self.config.stats_region().map_err(early)?,c,self.device.soc().registers,self.device.firmware().profile()).map_err(early)?),
-                crate::m3::m3_submit::Command::Render{..}=>NativeJob::Render(crate::m3::m3_render::Render::new(&self.drm,&self.uat,&packet.vm,self.config.stats_region().map_err(early)?,self.device.soc().clusters,self.device.soc().registers).map_err(early)?),
+                crate::m3::m3_submit::Command::Render{..}=>NativeJob::Render(crate::m3::m3_render::Render::new(&self.drm,&self.uat,&packet.vm,self.config.render_stats().map_err(early)?,self.device.soc().clusters,self.device.soc().registers,self.device.firmware().profile()).map_err(early)?),
             };
             self.jobs.push(job,GFP_KERNEL).map_err(|_|early(ENOMEM))?;
         } else {
@@ -439,6 +439,7 @@ impl Inner {
                     let timed=timestamps.map(|pair|policy::stage_timestamps(internal_timestamps,chip,pair));
                     j.append(command,usc,coalesce,timed)?;
                     j.set_user_timestamps(timestamps)?;
+                    j.set_attachments(&p.render_attachments[*next])?;
                     coalesced_stamps+=u64::from(coalesce);
                 }
                 Ok(())
@@ -563,6 +564,7 @@ impl Inner {
                         let timed=timestamps.map(|pair|policy::stage_timestamps(internal_timestamps,self.device.soc().chip_id,pair));
                         j.append_after(command,usc,false,predecessor,timed)?;
                         j.set_user_timestamps(timestamps)?;
+                        j.set_attachments(&p.render_attachments[*i])?;
                         dependencies+=usize::from(predecessor.is_some());
                         previous=Some((true,j.completion_dependency()?));
                     },
