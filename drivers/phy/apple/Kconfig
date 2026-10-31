@@ -40,3 +40,14 @@ config PHY_APPLE_DPTX
 	  such as the M2.
 	  This driver provides support for DisplayPort and is used on the
 	  Mac mini (M2 and M2 Pro, 2023).
+
+config PHY_APPLE_T8152_USB2
+	tristate "Apple T8152 fixed-host USB2 PHY"
+	default ARCH_APPLE
+	depends on ARCH_APPLE || COMPILE_TEST
+	depends on PM
+	select GENERIC_PHY
+	select APPLE_TUNABLE
+	help
+	  Enable the USB2-only PHY for fixed host ports on Apple T8152.
+	  This does not configure the USB3 or USB4 lanes.
