@@ -1788,7 +1788,8 @@
     "-p",
     "test_xart_locator.py",
     "-v"
-   ]
+   ],
+   "rust": "1.93.1"
   },
   {
    "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-udev-rule.sh",
