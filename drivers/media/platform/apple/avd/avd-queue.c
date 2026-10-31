@@ -21,6 +21,12 @@
 #define AVD_RETRY_DELAY msecs_to_jiffies(1)
 #define AVD_PROGRAM_SIZE SZ_2M
 
+/* PM test fixtures use backends without a transport. */
+static unsigned int avd_max_inflight(struct avd_dev *avd)
+{
+	return avd->backend->max_inflight ? avd->backend->max_inflight(avd) : 1;
+}
+
 bool avd_backend_is_apple(const struct avd_dev *avd)
 {
 	return avd->backend == &avd_apple_backend;
@@ -212,7 +218,7 @@ static void avd_queue_worker(struct work_struct *work)
 	avd_retire(avd);
 	/* Restart a job that found no free slot. */
 	spin_lock_irqsave(&avd->queue_lock, flags);
-	ctx = avd->inflight < avd->backend->max_inflight(avd) ? avd->deferred_ctx : NULL;
+	ctx = avd->inflight < avd_max_inflight(avd) ? avd->deferred_ctx : NULL;
 	if (ctx)
 		avd->deferred_ctx = NULL;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
@@ -316,7 +322,7 @@ static void avd_queue_submit_work(struct work_struct *work)
 						 VB2_BUF_STATE_ERROR);
 		goto unlock;
 	}
-	if (avd->inflight < avd->backend->max_inflight(avd)) {
+	if (avd->inflight < avd_max_inflight(avd)) {
 		for (i = 0; i < AVD_MAX_FRAMES; i++) {
 			if (avd->frames[i].state == AVD_FRAME_FREE) {
 				f = &avd->frames[i];
