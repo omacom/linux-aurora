@@ -348,7 +348,53 @@ static void isp_test_imx958_last_lease_requeue(struct kunit *test)
 	}
 }
 
+/* The exposure report is found through the section table, never past it. */
+static void isp_test_meta_exposure(struct kunit *test)
+{
+	static const struct apple_isp_hw hw = { .meta_exposure = true };
+	static const struct apple_isp_hw hw_none = { };
+	struct apple_isp *isp = isp_test_alloc(test);
+	struct isp_surf meta = { .size = 0x2000 };
+	u8 *virt = kunit_kzalloc(test, meta.size, GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, virt);
+	meta.virt = virt;
+	isp->hw = &hw;
+	isp->frame_gain = 256;
+
+	/* fourth table entry: the section at 0x1870 */
+	put_unaligned_le32(0x1870, virt + 0x1c);
+	put_unaligned_le32(32475, virt + 0x1870);
+	put_unaligned_le16(0x0800, virt + 0x1874);
+	put_unaligned_le16(3253, virt + 0x1876);
+	isp_meta_read_exposure(isp, &meta);
+	KUNIT_EXPECT_EQ(test, isp->frame_exposure_us, 32475);
+	KUNIT_EXPECT_EQ(test, isp->frame_gain, 3253);
+
+	/* a section that would end past the buffer is ignored */
+	put_unaligned_le32(meta.size - 4, virt + 0x1c);
+	put_unaligned_le32(1000, virt + meta.size - 4);
+	isp_meta_read_exposure(isp, &meta);
+	KUNIT_EXPECT_EQ(test, isp->frame_gain, 3253);
+
+	/* so is an unwritten section */
+	put_unaligned_le32(0x1000, virt + 0x1c);
+	isp_meta_read_exposure(isp, &meta);
+	KUNIT_EXPECT_EQ(test, isp->frame_exposure_us, 32475);
+
+	/* and firmware without the report */
+	put_unaligned_le32(0x1870, virt + 0x1c);
+	put_unaligned_le16(600, virt + 0x1876);
+	isp->hw = &hw_none;
+	isp_meta_read_exposure(isp, &meta);
+	KUNIT_EXPECT_EQ(test, isp->frame_gain, 3253);
+	isp->hw = &hw;
+	isp_meta_read_exposure(isp, &meta);
+	KUNIT_EXPECT_EQ(test, isp->frame_gain, 600);
+}
+
 static struct kunit_case isp_v4l2_test_cases[] = {
+	KUNIT_CASE(isp_test_meta_exposure),
 	KUNIT_CASE(isp_test_imx958_last_lease_requeue),
 	KUNIT_CASE(isp_test_p010_report_defers_completion),
 	KUNIT_CASE(isp_test_p010_mode_selection),

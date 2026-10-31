@@ -201,6 +201,9 @@ struct apple_isp_hw {
 	/* size of a capture metadata buffer, 0 for no such pool */
 	u32 capture_meta_size;
 
+	/* metadata buffers carry the frame's exposure report (H17 firmware) */
+	bool meta_exposure;
+
 	/*
 	 * The firmware can be started only once per system boot, so it is
 	 * started at probe and kept running while the driver is bound.
@@ -302,6 +305,12 @@ struct apple_isp {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *exposure_priority;
+	/* read-only exposure report of the last frame, NULL without one */
+	struct v4l2_ctrl *gain;
+	struct v4l2_ctrl *exposure;
+	/* last reported total gain (1/256 steps) and exposure (us) */
+	u32 frame_gain;
+	u32 frame_exposure_us;
 	struct vb2_queue vbq;
 	struct mutex video_lock;
 	unsigned int sequence;

@@ -840,6 +840,7 @@ static const struct apple_isp_hw apple_isp_hw_t8140 = {
 	.boot_mode = 1,
 	.capture_meta_size = ISP_CAPTURE_META_SIZE_T8140,
 	.resident_fw = true,
+	.meta_exposure = true,
 };
 
 /* The same for T6040, from the J616s ADT's DART address filter. */
@@ -898,6 +899,7 @@ static const struct apple_isp_hw apple_isp_hw_t6040 = {
 	.boot_mode = 1,
 	.shared_size = 0xde600000,
 	.resident_fw = true,
+	.meta_exposure = true,
 };
 
 static const struct of_device_id apple_isp_of_match[] = {

@@ -3,6 +3,7 @@
 
 #include <linux/math.h>
 #include <linux/module.h>
+#include <linux/unaligned.h>
 
 #include <media/media-device.h>
 #include <media/v4l2-common.h>
@@ -68,6 +69,45 @@ static bool isp_p010_buffer_matches(const struct isp_format *fmt,
 	       !desc->iovas[2] && !desc->iovas[3] && desc->tag == buf->tag;
 }
 
+/*
+ * A metadata buffer starts with a table of section offsets. On H17 firmware
+ * the fourth section opens with the frame's exposure: the integration time in
+ * microseconds (le32 at 0) and the total sensor gain in 1/256 steps, 256 for
+ * unity (le16 at 6). Observed on T6040 and T8140 with AE converging under a
+ * fixed scene and with the frame rate capping the integration time.
+ */
+#define ISP_META_SECTIONS		0x10
+#define ISP_META_SECTION_EXPOSURE	3
+#define ISP_META_EXPOSURE_TIME		0x0
+#define ISP_META_EXPOSURE_GAIN		0x6
+#define ISP_META_EXPOSURE_SIZE		0x8
+
+static void isp_meta_read_exposure(struct apple_isp *isp,
+				   const struct isp_surf *meta)
+{
+	const u8 *virt = meta->virt;
+	u32 offset, time;
+	u16 gain;
+
+	if (!isp->hw->meta_exposure || !virt)
+		return;
+
+	offset = get_unaligned_le32(virt + ISP_META_SECTIONS +
+				    4 * ISP_META_SECTION_EXPOSURE);
+	if (offset < ISP_META_SECTIONS || offset > meta->size ||
+	    meta->size - offset < ISP_META_EXPOSURE_SIZE)
+		return;
+
+	time = get_unaligned_le32(virt + offset + ISP_META_EXPOSURE_TIME);
+	gain = get_unaligned_le16(virt + offset + ISP_META_EXPOSURE_GAIN);
+	/* An unwritten section or one this layout does not describe */
+	if (!time || !gain)
+		return;
+
+	WRITE_ONCE(isp->frame_exposure_us, time);
+	WRITE_ONCE(isp->frame_gain, gain);
+}
+
 void ipc_bt_complete(struct apple_isp *isp)
 {
 	struct isp_buffer *buf, *tmp;
@@ -128,6 +168,7 @@ int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 				struct isp_surf *meta = isp->meta_surfs[j];
 				if ((u32)bufd->iovas[0] == (u32)meta->iova) {
 					WARN_ON(!meta->submitted);
+					isp_meta_read_exposure(isp, meta);
 					if (isp_is_p010(isp))
 						__set_bit(j, &isp->meta_returned);
 					else
@@ -1062,6 +1103,53 @@ static int isp_vb2_queue_init(struct apple_isp *isp)
 	return vb2_queue_init(vbq);
 }
 
+static int isp_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct apple_isp *isp =
+		container_of(ctrl->handler, struct apple_isp, ctrl_handler);
+
+	switch (ctrl->id) {
+	case V4L2_CID_GAIN:
+		ctrl->val = READ_ONCE(isp->frame_gain);
+		return 0;
+	case V4L2_CID_EXPOSURE_ABSOLUTE:
+		/* in 100 us units */
+		ctrl->val = DIV_ROUND_CLOSEST(READ_ONCE(isp->frame_exposure_us),
+					      100);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static const struct v4l2_ctrl_ops isp_exposure_ctrl_ops = {
+	.g_volatile_ctrl = isp_g_volatile_ctrl,
+};
+
+/*
+ * Auto exposure picks the gain and exposure of each frame. Report the last
+ * frame's values read-only, so that userspace can follow the scene light, for
+ * example to decide when to denoise. The gain is the firmware's total sensor
+ * gain in 1/256 steps.
+ */
+static void isp_init_exposure_ctrls(struct apple_isp *isp)
+{
+	isp->frame_gain = 256;
+	isp->gain = v4l2_ctrl_new_std(&isp->ctrl_handler,
+				      &isp_exposure_ctrl_ops, V4L2_CID_GAIN,
+				      0, U16_MAX, 1, 256);
+	isp->exposure = v4l2_ctrl_new_std(&isp->ctrl_handler,
+					  &isp_exposure_ctrl_ops,
+					  V4L2_CID_EXPOSURE_ABSOLUTE,
+					  0, 10000, 1, 0);
+	if (isp->gain)
+		isp->gain->flags |= V4L2_CTRL_FLAG_READ_ONLY |
+				    V4L2_CTRL_FLAG_VOLATILE;
+	if (isp->exposure)
+		isp->exposure->flags |= V4L2_CTRL_FLAG_READ_ONLY |
+					V4L2_CTRL_FLAG_VOLATILE;
+}
+
 int apple_isp_setup_video(struct apple_isp *isp)
 {
 	struct video_device *vdev = &isp->vdev;
@@ -1116,10 +1204,12 @@ int apple_isp_setup_video(struct apple_isp *isp)
 	 * Auto exposure is always on. By default it holds the frame rate, as
 	 * V4L2 specifies; with exposure priority it may slow down in low light.
 	 */
-	v4l2_ctrl_handler_init(&isp->ctrl_handler, 1);
+	v4l2_ctrl_handler_init(&isp->ctrl_handler, 3);
 	isp->exposure_priority =
 		v4l2_ctrl_new_std(&isp->ctrl_handler, NULL,
 				  V4L2_CID_EXPOSURE_AUTO_PRIORITY, 0, 1, 1, 0);
+	if (isp->hw->meta_exposure)
+		isp_init_exposure_ctrls(isp);
 	if (isp->ctrl_handler.error) {
 		err = isp->ctrl_handler.error;
 		dev_err(isp->dev, "failed to create controls: %d\n", err);
