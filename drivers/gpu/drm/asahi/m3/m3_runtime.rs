@@ -389,7 +389,7 @@ impl Inner {
         let index=found.unwrap_or(self.jobs.len());
         if found.is_none() {
             let job=match control {
-                crate::m3::m3_submit::Command::Compute(c)=>NativeJob::Compute(crate::m3::m3_compute::Compute::new(&self.drm,&self.uat,&packet.vm,self.config.stats_region().map_err(early)?,c,self.device.soc().registers).map_err(early)?),
+                crate::m3::m3_submit::Command::Compute(c)=>NativeJob::Compute(crate::m3::m3_compute::Compute::new(&self.drm,&self.uat,&packet.vm,self.config.stats_region().map_err(early)?,c,self.device.soc().registers,self.device.firmware().profile()).map_err(early)?),
                 crate::m3::m3_submit::Command::Render{..}=>NativeJob::Render(crate::m3::m3_render::Render::new(&self.drm,&self.uat,&packet.vm,self.config.stats_region().map_err(early)?,self.device.soc().clusters,self.device.soc().registers).map_err(early)?),
             };
             self.jobs.push(job,GFP_KERNEL).map_err(|_|early(ENOMEM))?;
@@ -469,6 +469,9 @@ impl Inner {
         crate::mem::sync();
         self.t8122_verdict=false;
         let previous_events=self.config.completed_events;
+        if self.device.firmware().profile() == super::m3_profile::Profile::Extended {
+            packet.vm.mark_binding_published().map_err(early)?;
+        }
         let publication_tick=if crate::debug::debug_enabled(crate::debug::DebugFlags::M3PassTiming) {physical_counter()} else {0};
         self.state.health.set_gpu_pending(true);
         self.gpu_pending = true;
@@ -535,7 +538,7 @@ impl Inner {
             let control=first_compute.ok_or(EINVAL)?;
             if existing.is_none() {
                 let job=crate::m3::m3_compute::Compute::new(&self.drm,&self.uat,&packet.vm,
-                    self.config.stats_region()?,control,self.device.soc().registers)?;
+                    self.config.stats_region()?,control,self.device.soc().registers,self.device.firmware().profile())?;
                 self.jobs.push(NativeJob::Compute(job),GFP_KERNEL)?;
             } else {
                 let NativeJob::Compute(j)=&mut self.jobs[compute_index] else {return Err(EINVAL);};
@@ -1059,7 +1062,7 @@ impl Runtime {
             // TTBAT of the admitted reservations, the firmware kernel root (`pagetables`) as
             // every context's upper half, and the host window (root entry 2) through the
             // shared L2. The RTKit is awake and no initdata or GPU job has been published.
-            let (uat,window)=adopted.insert(adopt_uat(&drm,device.soc(),&device.firmware().resources)?);
+            let (uat,window)=adopted.insert(adopt_uat(&drm,device.soc(),&device.firmware().resources,device.firmware().profile())?);
             let config=Config::new(&drm,uat,device.firmware(),&contents)?;
             // Link every kernel table the configuration created before the firmware sees an
             // address in it, then drop any translation cached before they existed.
@@ -1103,7 +1106,8 @@ impl Runtime {
         // (7.1.12's M3 VM job lifetime, the shared `mmu::lifetime` on 7.2).
         let vm=self.inner.uat.new_vm(id, range)?.with_tracked_status()?;
         let mut reserved=KVec::new();reserved.push(reserved_range,GFP_KERNEL)?;reserved.push(0x100_8000_0000..0x101_0000_0000,GFP_KERNEL)?;reserved.push(0x10_0000_0000..0x10_0800_0000,GFP_KERNEL)?;reserved.push(0x10_7400_0000..0x10_7402_8000,GFP_KERNEL)?;
-        vm.install_driver_mappings(KVec::new(),reserved)?;
+        let mappings = self.inner.config.global_table_views(&vm)?;
+        vm.install_driver_mappings(mappings,reserved)?;
         Ok(vm)
     }
     pub(crate) fn map_timestamp(&mut self,mut bo:crate::gem::ObjectRef,range:core::ops::Range<usize>)->Result<mmu::KernelMapping> {
@@ -1369,13 +1373,15 @@ pub(crate) fn physical_counter() -> u64 {
 /// (ttbs, pagetables, handoff, shared-l2) and the PPL exchange with its startup epoch, as the
 /// G15 backend does it on 7.2 (`g15::uat`).
 fn adopt_uat(drm: &driver::AsahiDrmDevice, soc: &'static crate::m3::m3_soc::Soc,
-    resources: &crate::m3::agx_resources::Resources) -> Result<(mmu::Uat, crate::g15::uat::Window)> {
+    resources: &crate::m3::agx_resources::Resources, profile: super::m3_profile::Profile)
+    -> Result<(mmu::Uat, crate::g15::uat::Window)> {
     let cfg = soc.hwcfg.ok_or(ENODEV)?;
     let [ttbs, tables, handoff, shared_l2, ..] = resources.regions;
     let range = |r: crate::m3::agx_resources::Region| r.base..r.base + r.size;
     let geometry = mmu::UatGeometry { ias: cfg.uat_ias.into(), oas: cfg.uat_oas };
     let regions = mmu::AdoptedRegions { handoff: range(handoff), ttbs: range(ttbs), kernel_root: tables.base };
-    let uat = mmu::Uat::new_adopted(drm, geometry, &regions)?;
+    let uat = mmu::Uat::new_adopted_with_user_upper(drm, geometry, &regions,
+        profile == super::m3_profile::Profile::Legacy)?;
     let mut window = crate::g15::uat::Window::from_regions(handoff.base, ttbs.base, tables.base, shared_l2.base)?;
     window.bootstrap(drm.as_ref().as_ref(), &uat)?;
     // 7.1.12 cleaned every reserved-table write to the point of coherency; these regions may be

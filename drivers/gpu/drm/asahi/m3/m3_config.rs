@@ -177,6 +177,16 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn global_table_views(&mut self, vm: &mmu::Vm) -> Result<KVec<mmu::KernelMapping>> {
+        let mut mappings = KVec::new();
+        if self.profile == super::m3_profile::Profile::Extended {
+            for index in [super::m3_init_26::GLOBAL_POOL, super::m3_init_26::GLOBAL_PARAMETERS] {
+                mappings.push(self.objects[index].map_gpu_view(vm)?, GFP_KERNEL)?;
+            }
+        }
+        Ok(mappings)
+    }
+
     pub(crate) fn root(&self) -> u64 { self.objects[storage::ROOT].va() }
     pub(crate) fn log_globals_debug(&mut self,dev:&driver::AsahiDrmDevice)->Result {
         let value=self.objects[GLOBALS].read_u32(crate::m3::m3_globals_debug::OFFSET)?;

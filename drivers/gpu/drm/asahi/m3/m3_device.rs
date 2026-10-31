@@ -129,6 +129,7 @@ impl Device {
                 }
                 e.sgx_setup()
             }
+            None if device.firmware.profile() == super::m3_profile::Profile::Extended => None,
             None => Some(soc.sgx_setup.ok_or(ENODEV)?),
         };
         if let Some((setup_offset, setup_value)) = setup {
@@ -179,7 +180,6 @@ impl Device {
         if self.firmware.profile() == super::m3_profile::Profile::Extended {
             // Adaptive clock gating can leave individual engine banks inaccessible
             // even while the GPU performance-state register says powered up.
-            dev_info!(self.dev.as_ref(), "M3: adaptive firmware fault evidence uses retained metadata; engine banks may be gated\n");
             return Ok(());
         }
         let sgx_guard = self.sgx.try_access().ok_or(ENODEV)?;
