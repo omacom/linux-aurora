@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Legacy transport split from avd-drv.c; Copyright The Asahi Linux Contributors. */
 #include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/string.h>

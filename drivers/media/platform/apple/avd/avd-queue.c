@@ -84,7 +84,7 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 	ret = reset_control_reset(avd->rstc);
 	if (!ret)
 		ret = avd_backend_boot(avd);
-	avd->faulted = !!ret;
+	WRITE_ONCE(avd->faulted, !!ret);
 	if (ret)
 		dev_err(avd->dev, "queue reset failed: %d\n", ret);
 	avd->compat_active = NULL;
@@ -300,8 +300,11 @@ static void avd_queue_submit_work(struct work_struct *work)
 					goto fail;
 			}
 		}
-		if (f->src->vb2_buf.req_obj.req)
-			v4l2_ctrl_request_setup(f->src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
+		if (f->src->vb2_buf.req_obj.req) {
+			ret = v4l2_ctrl_request_setup(f->src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
+			if (ret)
+				goto fail;
+		}
 		ret = ops->prepare(ctx, f);
 	} else {
 		avd->building = f;
@@ -476,7 +479,7 @@ void avd_queue_cleanup(struct avd_dev *avd)
 	unsigned int i;
 
 	mutex_lock(&avd->queue_mutex);
-	avd->stopping = true;
+	WRITE_ONCE(avd->stopping, true);
 	if (avd->inflight) {
 		avd_reset_queue(avd, -ESHUTDOWN);
 		avd_retire(avd);
