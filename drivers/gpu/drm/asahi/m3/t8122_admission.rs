@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! Read-only T8122 identity admission. Firmware startup remains disabled.
+//! Read-only T8122 identity and firmware-interface admission.
+
+use super::m3_profile::Profile;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct Identity {
@@ -17,11 +19,22 @@ pub(crate) fn validate_identity(
     id_version: u32,
     masks: [u32; 3],
 ) -> Option<Identity> {
+    validate_identity_for(Profile::Legacy, firmware_compat, schema, result, id_version, masks)
+}
+
+pub(crate) fn validate_identity_for(
+    profile: Profile,
+    firmware_compat: &[u32],
+    schema: u32,
+    result: u32,
+    id_version: u32,
+    masks: [u32; 3],
+) -> Option<Identity> {
     let family = id_version >> 24;
     let variant = (id_version >> 16) & 0xff;
     let revision = (id_version >> 8) & 0xff;
     let active_cores = masks[0].count_ones();
-    if firmware_compat != [14, 8, 3]
+    if firmware_compat != profile.firmware_compat()
         || schema != 1
         || result != 1
         || family != 7
@@ -38,6 +51,41 @@ pub(crate) fn validate_identity(
         active_cores,
         core_slots: 10,
     })
+}
+
+/// Same mutually exclusive board identities and exact string opt-in as m1n1/DCP.
+/// J615 shares the 25G83 GPU/ADT profile, but has no hardware qualification here.
+pub(crate) fn extended_board(j613: bool, j615: bool, optin: Option<&[u8]>) -> bool {
+    (j613 && !j615) || (!j613 && j615 && optin == Some(b"1\0"))
+}
+
+/// Firmware-interface selection is exact and does not change physical GPU encodings.
+pub(crate) fn profile_for(compat:&[u32],air:bool)->Option<Profile> {
+    match compat {
+        [14,8,3]=>Some(Profile::Legacy),
+        [26,6,2] if air=>Some(Profile::Extended),
+        _=>None,
+    }
+}
+
+#[cfg(not(test))]
+pub(crate) fn loaded_profile(pdev:&kernel::platform::Device<kernel::device::Core<'_>>)
+    ->kernel::error::Result<Profile> {
+    use kernel::{c_str,prelude::*};
+    let node=pdev.as_ref().of_node().ok_or(ENODEV)?;
+    let compat:KVec<u32>=node.get_property(c_str!("apple,firmware-compat"))?;
+    #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+    let air = {
+        let j613 = super::m3_board::board_is(b"apple,j613");
+        let j615 = super::m3_board::board_is(b"apple,j615");
+        let optin = kernel::of::chosen().and_then(|chosen| {
+            chosen.get_property::<KVec<u8>>(c_str!("asahi,j615-25g83-experimental")).ok()
+        });
+        extended_board(j613, j615, optin.as_deref())
+    };
+    #[cfg(not(CONFIG_DRM_ASAHI_M3_T8122))]
+    let air = false;
+    profile_for(&compat, air).ok_or(ENODEV)
 }
 
 /// Shape of the voltage-sorted running-state tables: one entry per distinct millivolt,
@@ -95,6 +143,14 @@ pub(crate) fn opp_table_shape(opps: impl IntoIterator<Item = (u64, u32)>) -> Opt
 pub(crate) fn read_identity(
     pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
 ) -> kernel::error::Result<Identity> {
+    read_identity_for(pdev, loaded_profile(pdev)?)
+}
+
+#[cfg(not(test))]
+pub(crate) fn read_identity_for(
+    pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
+    profile: Profile,
+) -> kernel::error::Result<Identity> {
     use kernel::{bindings, c_str, prelude::*};
 
     struct NodeRef(*mut bindings::device_node);
@@ -146,7 +202,8 @@ pub(crate) fn read_identity(
         observation.get_u32(c_str!("core-mask-1"))?,
         observation.get_u32(c_str!("core-mask-2"))?,
     ];
-    validate_identity(firmware_compat.as_slice(), schema, result, id_version, masks).ok_or(ENODEV)
+    validate_identity_for(profile, firmware_compat.as_slice(), schema, result, id_version, masks)
+        .ok_or(ENODEV)
 }
 
 #[cfg(test)]
@@ -161,6 +218,29 @@ mod tests {
             let id = validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [mask, 0, 0]).unwrap();
             assert_eq!(id.active_cores, count);
             assert_eq!(id.core_slots, 10);
+        }
+    }
+
+    #[test]
+    fn extended_identity_requires_its_actual_version_and_the_same_g15g_bounds() {
+        for mask in [0xff, 0x3ff] {
+            let good = || validate_identity_for(Profile::Extended, &[26, 6, 2], 1, 1, G15G_C0, [mask, 0, 0]);
+            assert_eq!(good().unwrap().active_cores, mask.count_ones());
+            assert!(validate_identity(&[26, 6, 2], 1, 1, G15G_C0, [mask, 0, 0]).is_none());
+            assert!(validate_identity_for(Profile::Extended, &[14, 8, 3], 1, 1, G15G_C0, [mask, 0, 0]).is_none());
+        }
+        for (schema, result, id, masks) in [
+            (0, 1, G15G_C0, [0xff, 0, 0]),
+            (1, 0, G15G_C0, [0xff, 0, 0]),
+            (1, 1, G15G_C0 ^ (1 << 24), [0xff, 0, 0]),
+            (1, 1, G15G_C0 ^ (1 << 16), [0xff, 0, 0]),
+            (1, 1, G15G_C0 ^ (1 << 8), [0xff, 0, 0]),
+            (1, 1, G15G_C0, [0x1ff, 0, 0]),
+            (1, 1, G15G_C0, [0x7ff, 0, 0]),
+            (1, 1, G15G_C0, [0xff, 1, 0]),
+            (1, 1, G15G_C0, [0xff, 0, 1]),
+        ] {
+            assert!(validate_identity_for(Profile::Extended, &[26, 6, 2], schema, result, id, masks).is_none());
         }
     }
 
@@ -253,5 +333,29 @@ mod tests {
         assert!(validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [0xff, 1, 0]).is_none());
         assert!(validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [0xff, 0, 1]).is_none());
         assert!(validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [0x7f, 0, 0]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    #[test]
+    fn j615_requires_exact_optin_and_unambiguous_board() {
+        for optin in [None, Some(&b""[..]), Some(&b"1"[..]), Some(&b"0\0"[..]),
+                      Some(&b"1\0extra"[..]), Some(&[0, 0, 0, 1][..]), Some(&b"1\0"[..])] {
+            assert!(extended_board(true, false, optin));
+            assert!(!extended_board(false, false, optin));
+            assert!(!extended_board(true, true, optin));
+            assert_eq!(extended_board(false, true, optin), optin == Some(&b"1\0"[..]));
+        }
+    }
+    #[test] fn extended_admission_requires_exact_firmware_and_air() {
+        for board in [false,true] {
+            assert_eq!(profile_for(&[14,8,3],board),Some(Profile::Legacy));
+            assert_eq!(profile_for(&[26,6,2],board),if board{Some(Profile::Extended)}else{None});
+            for wrong in [&[][..],&[26,6][..],&[26,6,1][..],&[26,6,2,0][..],&[14,8,4][..]] {
+                assert_eq!(profile_for(wrong,board),None);
+            }
+        }
     }
 }

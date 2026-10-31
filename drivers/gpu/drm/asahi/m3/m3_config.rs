@@ -49,6 +49,9 @@ impl Records {
 
 pub(crate) struct Config {
     objects: KVec<Buffer>,
+    profile: super::m3_profile::Profile,
+    control_generation: u32,
+    io_descriptors: Option<KVec<u8>>,
     _iomaps: KVec<mmu::KernelMapping>,
     pub(crate) completed_events: u64,
     pstates: crate::m3::m3_adt_config::PstateWatch,
@@ -65,6 +68,17 @@ impl Config {
     pub(crate) fn new(dev: &driver::AsahiDrmDevice, uat: &mmu::Uat, firmware: &crate::m3::m3_firmware::Firmware,
         contents: &crate::m3::m3_adt_config::Contents) -> Result<Self> {
         contents.check_for_upload()?;
+        if let Some(inputs) = &contents.extended {
+            if firmware.profile() != super::m3_profile::Profile::Extended { return Err(EINVAL); }
+            let owners = ExtendedStorage::new(dev, uat, &inputs.power, &inputs.sram_uv, inputs.bases)?;
+            let thermal = crate::m3::m3_thermal::Governor::new(dev.as_ref().as_ref(), &contents.pstates)?;
+            return Ok(Self { objects: owners.objects, _iomaps: owners.iomaps,
+                profile: firmware.profile(), control_generation: 0, completed_events: 0,
+                io_descriptors: Some(owners.descriptors),
+                pstates: crate::m3::m3_adt_config::PstateWatch::new(contents.pstates), thermal,
+                request_top: 8, request_value: 0, request_checked: false, request_check_at: None,
+                request_writes: 0, request_observed: 0 });
+        }
         let mut objects = KVec::new();
         let mut iomaps = KVec::new();
         for index in 0..storage::COUNT {
@@ -140,7 +154,8 @@ impl Config {
         crate::m3::m3_adt_config::check_upload(dev.as_ref().as_ref(), firmware, contents.iomaps, &mut objects)?;
         agx_memory::publish();
         let thermal = crate::m3::m3_thermal::Governor::new(dev.as_ref().as_ref(), &contents.pstates)?;
-        Ok(Self { objects, _iomaps: iomaps, completed_events: 0,
+        Ok(Self { objects, profile: firmware.profile(), control_generation: 0, io_descriptors: None,
+            _iomaps: iomaps, completed_events: 0,
             pstates: crate::m3::m3_adt_config::PstateWatch::new(contents.pstates), thermal,
             request_top:contents.table.0,request_value:0,request_checked:false,
             request_check_at:None,request_writes:0,request_observed:0 })
@@ -153,6 +168,25 @@ impl Config {
         objects[RUNTIME_POINTERS].write(0, &records.runtime)?;
         objects[CONTROL_REGION].write(0, &records.control)
     }
+    pub(crate) fn publish_io_table(&self,
+        pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
+        firmware: &crate::m3::m3_firmware::Firmware) -> Result {
+        if let Some(descriptors) = &self.io_descriptors {
+            firmware.publish_io_table(pdev, descriptors)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn global_table_views(&mut self, vm: &mmu::Vm) -> Result<KVec<mmu::KernelMapping>> {
+        let mut mappings = KVec::new();
+        if self.profile == super::m3_profile::Profile::Extended {
+            for index in [super::m3_init_26::GLOBAL_POOL, super::m3_init_26::GLOBAL_PARAMETERS] {
+                mappings.push(self.objects[index].map_gpu_view(vm)?, GFP_KERNEL)?;
+            }
+        }
+        Ok(mappings)
+    }
+
     pub(crate) fn root(&self) -> u64 { self.objects[storage::ROOT].va() }
     pub(crate) fn log_globals_debug(&mut self,dev:&driver::AsahiDrmDevice)->Result {
         let value=self.objects[GLOBALS].read_u32(crate::m3::m3_globals_debug::OFFSET)?;
@@ -161,6 +195,8 @@ impl Config {
         Ok(())
     }
     pub(crate) fn performance_request(&mut self,chip:u32,busy:bool)->Result {
+        // Native controller inputs supersede the legacy fixed-request interface.
+        if self.profile == super::m3_profile::Profile::Extended { return Ok(()); }
         let Some(value)=crate::m3::m3_consistent_perf::request(chip,
             crate::m3::m3_params::consistent_perf(),busy,self.request_top) else {return Ok(());};
         if value==0 && self.request_value==0 {return Ok(());}
@@ -192,6 +228,14 @@ impl Config {
     /// state the firmware reports against the ceiling and the runtime cap. Called after boot and
     /// after every job, by the job thread.
     pub(crate) fn check_pstate(&mut self, dev: &driver::AsahiDrmDevice, device: &crate::m3::m3_device::Device, what: &str) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended {
+            let state = device.pstate_register()? & 15;
+            if state > self.request_top {
+                dev_err!(dev.as_ref(), "M3: native performance state {} exceeds {} ({})\n", state, self.request_top, what);
+                return Err(ERANGE);
+            }
+            return Ok(());
+        }
         let now = kernel::time::Instant::<kernel::time::Monotonic>::now();
         if let Some(cap) = self.thermal.update(dev.as_ref().as_ref(), now) {
             crate::m3::m3_adt_config::publish_runtime_cap(&mut self.objects[GLOBALS], cap)?;
@@ -202,14 +246,38 @@ impl Config {
         self.thermal.busy(now);
         Ok(())
     }
+    pub(crate) fn render_stats(&self) -> Result<[init::Region;2]> {
+        if self.profile==super::m3_profile::Profile::Legacy {
+            let value=self.stats_region()?;return Ok([value;2]);
+        }
+        let region=|index:usize,offset:usize| {
+            let object=&self.objects[index];
+            init::Region::new(object.va().checked_add(offset as u64).ok_or(EOVERFLOW)?,
+                object.size().checked_sub(offset).ok_or(EINVAL)?).map_err(|_|EINVAL)
+        };
+        Ok([region(UNKNOWN_C0,4)?,region(UNKNOWN_C1,8)?])
+    }
+
     pub(crate) fn stats_region(&self) -> Result<init::Region> {
-        let owner = &self.objects[HARDWARE_DATA];
+        let owner = &self.objects[if self.profile == super::m3_profile::Profile::Extended {
+            UNKNOWN_C3
+        } else { HARDWARE_DATA }];
         init::Region::new(owner.va(), owner.size()).map_err(|_| EINVAL)
     }
 
     pub(crate) fn log_active_power(&mut self, dev: &driver::AsahiDrmDevice,
                                   device: &crate::m3::m3_device::Device,
                                   sequence: u32) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended {
+            let state = device.pstate_register()? & 15;
+            let performance = &mut self.objects[super::m3_init_26::PERFORMANCE_CONTROL];
+            let actual = performance.read_u32(0x2c)?;
+            let target = performance.read_u32(0x30)?;
+            let hardware = performance.read_u32(0x38)?;
+            dev_info!(dev.as_ref(), "M3_NATIVE_POWER sample={} state={} actual={} target={} hardware={}\n",
+                sequence, state, actual, target, hardware);
+            return Ok(());
+        }
         let cap = self.thermal.allowed(kernel::time::Instant::<kernel::time::Monotonic>::now());
         self.pstates.log_active(dev.as_ref().as_ref(), &mut self.objects[HARDWARE_DATA],
                                device.pstate_register()?, cap, sequence)?;
@@ -229,6 +297,7 @@ impl Config {
     }
 
     pub(crate) fn render_pb(&mut self) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended { return Err(EOPNOTSUPP); }
         self.objects[UNKNOWN_C1].write(0,&storage::parameter_buffer(crate::m3::m3_render::PB_PAGES).map_err(|_|EINVAL)?)
     }
     pub(crate) fn submit_queue(&mut self, kind:usize, queue:u64, head:u16,event:u8,new:bool)->Result {
@@ -261,6 +330,9 @@ impl Config {
         Ok(true)
     }
     pub(crate) fn ready(&mut self) -> Result<bool> {
+        if self.profile == super::m3_profile::Profile::Extended {
+            return Ok(self.objects[RUNTIME_FLAGS].read_u32(0x14)? == 1);
+        }
         // NewRegionB+4 is an input initialized to 1, not an acknowledgement.
         // These are firmware-written transitions present in compute-15's
         // pre-submit snapshot; both start at zero in the exported schema.
@@ -268,6 +340,13 @@ impl Config {
             && self.objects[RUNTIME_FLAGS].read_u32(4)? == 1)
     }
     pub(crate) fn log_ready(&mut self, dev: &driver::AsahiDrmDevice) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended {
+            let ready = self.objects[RUNTIME_FLAGS].read_u32(0x14)?;
+            let consumed = self.objects[CONTROL_REGION].read_u32(0xeae8)?;
+            dev_info!(dev.as_ref(), "M3: extended firmware ready={} control-generation={}/{}\n",
+                ready, consumed, self.control_generation);
+            return Ok(());
+        }
         let magic=self.objects[RUNTIME_POINTERS].read_u32(0x314)?;
         let state=self.objects[RUNTIME_POINTERS].read_u32(0x2fc)?;
         let a=self.objects[RUNTIME_FLAGS].read_u32(4)?;
@@ -278,12 +357,14 @@ impl Config {
     }
     /// The firmware's halt counter and its halted and resume flags.
     pub(crate) fn halt_state(&mut self) -> Result<(u64,u32,u32)> {
+        if self.profile == super::m3_profile::Profile::Extended { return Err(EOPNOTSUPP); }
         let control=&mut self.objects[CONTROL_REGION];
         Ok((control.read_u64(0x4580)?,control.read_u32(0x4590)?,control.read_u32(0x45a0)?))
     }
     /// Let a halted firmware continue: clear halted, then set resume. These
     /// words keep the halt/resume layout of earlier Apple GPU firmware.
     pub(crate) fn resume_halted(&mut self) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended { return Err(EOPNOTSUPP); }
         let control=&mut self.objects[CONTROL_REGION];
         control.u32(0x4590,0)?;
         agx_memory::publish();
@@ -297,6 +378,18 @@ impl Config {
     /// at +0x40a0, and the details it leaves for a recovery event at +0x44a0.
     /// Nothing is acknowledged, cleared or resumed here.
     pub(crate) fn log_recovery_state(&mut self, dev: &driver::AsahiDrmDevice, events: u64) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended {
+            for (owner, start, length) in [(super::m3_init_26::RECOVERY_ACTIVITY, 0, 0x60),
+                (CONTROL_REGION, 0x4ebc, 0x100)] {
+                for offset in (start..start + length).step_by(32) {
+                    let mut bytes = [0; 32];
+                    self.objects[owner].read(offset, &mut bytes)?;
+                    dev_err!(dev.as_ref(), "M3: firmware recovery owner={} offset={:#x} bytes={:02x?}\n",
+                        owner, offset, bytes);
+                }
+            }
+            return Ok(());
+        }
         let control=&mut self.objects[CONTROL_REGION];
         let halt_count=control.read_u64(0x4580)?;
         let halted=control.read_u32(0x4590)?;
@@ -312,7 +405,7 @@ impl Config {
     /// index (at most 16), as `drain` reads them. Nothing is consumed or acknowledged, and the
     /// completion count is not changed.
     pub(crate) fn log_event_ring(&mut self, dev: &driver::AsahiDrmDevice) -> Result {
-        const SIZE: usize = 0x38;
+        let size = if self.profile == super::m3_profile::Profile::Extended { 0x48 } else { 0x38 };
         const COUNT: usize = 256;
         let r = self.objects[storage::EVENT*2].read_u32(0)? as usize;
         let w = self.objects[storage::EVENT*2].read_u32(0x20)? as usize;
@@ -321,8 +414,8 @@ impl Config {
         let mut index = r;
         for _ in 0..16 {
             if index == w { break; }
-            let mut raw = [0u8; SIZE];
-            self.objects[storage::EVENT*2+1].read(index * SIZE, &mut raw)?;
+            let mut raw = [0u8; 0x48];
+            self.objects[storage::EVENT*2+1].read(index * size, &mut raw[..size])?;
             dev_info!(dev.as_ref(), "M3 event ring entry {} kind={} bytes={:02x?}\n",
                 index, u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]), raw);
             index = (index + 1) % COUNT;
@@ -343,10 +436,40 @@ impl Config {
         agx_memory::publish();
         Ok(next)
     }
+    /// Publish an extended-format synchronous control. The caller rings the
+    /// doorbell after this method and waits for both retirement cursors.
+    pub(crate) fn control_extended(&mut self, action: super::m3_channel_format::Action) -> Result<u32> {
+        use super::m3_channel_format as format;
+        if self.profile != super::m3_profile::Profile::Extended { return Err(EINVAL); }
+        let state = storage::DEVICE_CONTROL * 2;
+        let cursors = [self.objects[state].read_u32(0)?,
+            self.objects[state].read_u32(0x10)?, self.objects[state].read_u32(0x20)?];
+        let cursor = format::idle_cursor(cursors).map_err(|error| {
+            if error == init::Error::Bounds { EIO } else { EBUSY }
+        })?;
+        let consumed = self.objects[CONTROL_REGION].read_u32(0xeae8)?;
+        let generation = action.generation(self.control_generation, consumed).map_err(|_| EOVERFLOW)?;
+        let mut record = [0; format::CONTROL_BYTES];
+        action.encode(&mut record).map_err(|_| EINVAL)?;
+        self.objects[state + 1].write(cursor as usize * format::CONTROL_BYTES, &record)?;
+        if generation != 0 {
+            self.objects[GLOBALS].write(0xe41, &generation.to_le_bytes())?;
+        }
+        agx_memory::publish();
+        let next = (cursor + 1) % format::SLOTS;
+        self.objects[state].u32(0x20, next)?;
+        agx_memory::publish();
+        self.control_generation = generation;
+        Ok(next)
+    }
+
     pub(crate) fn control_done(&mut self, next: u32) -> Result<bool> {
         Ok(self.objects[storage::DEVICE_CONTROL*2].read_u32(0)? == next && self.objects[storage::DEVICE_CONTROL*2].read_u32(0x10)? == next)
     }
     pub(crate) fn drain(&mut self, dev: &driver::AsahiDrmDevice) -> Result {
+        if self.profile == super::m3_profile::Profile::Extended {
+            return self.drain_extended(dev);
+        }
         // Event, trace, stats and six independent firmware log rings.
         for (state, ring, size, count, channels) in [(storage::EVENT*2,storage::EVENT*2+1,0x38,256,1),
             (storage::TRACE*2,storage::TRACE*2+1,0x38,512,1),
@@ -391,5 +514,148 @@ impl Config {
             }
         }
         Ok(())
+    }
+    fn drain_extended(&mut self, dev: &driver::AsahiDrmDevice) -> Result {
+        use super::m3_channel_format as format;
+        // Snapshot each producer once. New arrivals remain for the next drain;
+        // a corrupt cursor is rejected before reading its ring allocation.
+        for (channel, capacity, threads) in [(storage::FIRMWARE_LOG, 256, 9),
+            (storage::EVENT, 256, 1), (storage::TRACE, 512, 1), (storage::STATS, 256, 1)] {
+            let state = channel * 2;
+            for thread in 0..threads {
+                let at = thread * 0x30;
+                let mut read = self.objects[state].read_u32(at)?;
+                let write = self.objects[state].read_u32(at + 0x20)?;
+                if read >= capacity || write >= capacity { return Err(EIO); }
+                let before = read;
+                while read != write {
+                    let offset = (thread * capacity as usize + read as usize) * format::RECEIVE_BYTES;
+                    let mut record = [0; format::RECEIVE_BYTES];
+                    self.objects[state + 1].read(offset, &mut record)?;
+                    let kind = u32::from_le_bytes(record[..4].try_into().map_err(|_| EIO)?);
+                    if channel == storage::FIRMWARE_LOG {
+                        let slot = u32::from_le_bytes(record[8..12].try_into().map_err(|_| EIO)?);
+                        let payload = format::payload_offset(thread, slot).map_err(|_| EIO)?;
+                        if crate::debug::debug_enabled(crate::debug::DebugFlags::KTraceCh) {
+                            let mut text = [0; 200];
+                            self.objects[FWLOG_PAYLOAD].read(payload + 0x10, &mut text)?;
+                            let len = text.iter().position(|value| *value == 0).unwrap_or(text.len());
+                            dev_info!(dev.as_ref(), "M3 firmware log[{}]: {}\n", thread,
+                                core::str::from_utf8(&text[..len]).unwrap_or("<non-UTF8>"));
+                        }
+                    } else if channel == storage::EVENT {
+                        if kind != 1 {
+                            dev_err!(dev.as_ref(), "M3 firmware event {}: {:02x?}\n", kind, record);
+                            return Err(EIO);
+                        }
+                        let flags = u32::from_le_bytes(record[4..8].try_into().map_err(|_| EIO)?);
+                        self.completed_events = self.completed_events.saturating_add((flags & 7).count_ones().into());
+                    } else if (channel == storage::TRACE && kind != 5)
+                        || (channel == storage::STATS && kind == 0x16) {
+                        dev_err!(dev.as_ref(), "M3 firmware channel {} record {}: {:02x?}\n", channel, kind, record);
+                        return Err(EIO);
+                    }
+                    read = (read + 1) % capacity;
+                }
+                if read != before { self.objects[state].u32(at, read)?; }
+            }
+        }
+        agx_memory::publish();
+        Ok(())
+    }
+
+}
+
+/// All extended initialization owners, retained as one construction transaction.
+/// Nothing is published to RTKit by this constructor. A failed allocation drops
+/// its mappings before backing storage and leaves no root visible to firmware.
+pub(crate) struct ExtendedStorage {
+    pub(crate) objects: KVec<Buffer>,
+    pub(crate) iomaps: KVec<mmu::KernelMapping>,
+    pub(crate) descriptors: KVec<u8>,
+    pub(crate) maximum_khz: u32,
+}
+
+impl ExtendedStorage {
+    pub(crate) fn new(
+        dev: &driver::AsahiDrmDevice,
+        uat: &mmu::Uat,
+        pwr: &super::hw::PwrConfig,
+        sram_uv: &[u32],
+        bases: super::m3_mmio_26::RegisterBases,
+    ) -> Result<Self> {
+        use super::{m3_init_26 as plan, m3_mmio_26 as io};
+        let mut objects = KVec::new();
+        for index in 0..plan::COUNT {
+            let entry = plan::allocation(index).map_err(|_| EINVAL)?;
+            let alias = match index {
+                plan::GLOBAL_POOL => Some((uat.kernel_lower_vm(), 0x70_0000_0000)),
+                plan::GLOBAL_PARAMETERS => Some((uat.kernel_lower_vm(), 0x70_0000_8000)),
+                _ => None,
+            };
+            let object = if plan::cached(index) {
+                Buffer::at_prot(dev, uat.kernel_vm(), alias, Some(entry.address), entry.size,
+                    prot::PROT_FW_PRIV_RW, prot::PROT_GPU_SHARED_RW)?
+            } else {
+                Buffer::at(dev, uat.kernel_vm(), alias, Some(entry.address), entry.size, entry.gpu_shared)?
+            };
+            objects.push(object, GFP_KERNEL)?;
+        }
+        let mut descriptors = KVec::new();
+        descriptors.resize(io::SLOTS * io::RECORD_BYTES, 0, GFP_KERNEL)?;
+        let mut iomaps = KVec::new();
+        for slot in 0..io::SLOTS {
+            let mut region = None;
+            if let Some(area) = io::area(slot, bases).map_err(|_| EINVAL)? {
+                let address = 0xffff_fc23_0000_0000 + slot as u64 * 0x10_0000;
+                let access = if area.writable() { prot::PROT_FW_MMIO_RW } else { prot::PROT_FW_MMIO_RO };
+                for (physical, bytes, offset) in area.banks() {
+                    if bytes == 0 { continue; }
+                    let mapping = uat.kernel_vm().map_io_m3(address + offset as u64,
+                        physical.try_into()?, bytes, access)?;
+                    iomaps.push(mapping, GFP_KERNEL)?;
+                }
+                region = Some(init::Region::new(address, area.mapped_bytes()).map_err(|_| EINVAL)?);
+            }
+            io::encode(slot, bases, region,
+                &mut descriptors[slot * io::RECORD_BYTES..(slot + 1) * io::RECORD_BYTES])
+                .map_err(|_| EINVAL)?;
+        }
+        // Runtime+0x18 references Fender SRAM, rather than anonymous DMA RAM.
+        // Retain its normal shared mapping independently of its MMIO view.
+        let scratch_physical = bases.gpu.checked_add(0xd6_0000).ok_or(EOVERFLOW)?;
+        let scratch = uat.kernel_vm().map_io_m3(0xffff_fc22_0000_0000,
+            scratch_physical.try_into()?, 0x8000, prot::PROT_FW_SHARED_RW)?;
+        let scratch_region = init::Region::new(scratch.iova(), 0x8000).map_err(|_| EINVAL)?;
+        iomaps.push(scratch, GFP_KERNEL)?;
+        let mut regions = [init::Region::new(0xffff_fc21_0000_0000, 1).map_err(|_| EINVAL)?; plan::COUNT];
+        for (index, object) in objects.iter().enumerate() {
+            regions[index] = init::Region::new(object.va(), object.size()).map_err(|_| EINVAL)?;
+        }
+        let graph = plan::PointerGraph { owners: &regions, scratch: scratch_region,
+            pool_alias: objects[plan::GLOBAL_POOL].gpu_va()?,
+            parameter_alias: objects[plan::GLOBAL_PARAMETERS].gpu_va()? };
+        let mut root = [0; 0xc8];
+        let mut runtime = [0; plan::RUNTIME_SIZE];
+        let mut control = KVec::new();
+        control.resize(plan::allocation(CONTROL_REGION).map_err(|_| EINVAL)?.size, 0, GFP_KERNEL)?;
+        graph.root(&mut root).map_err(|_| EINVAL)?;
+        graph.runtime(&mut runtime).map_err(|_| EINVAL)?;
+        graph.firmware_control(&mut control).map_err(|_| EINVAL)?;
+        let images = super::m3_power_26::PowerImages::new(pwr, sram_uv,
+            objects[plan::SENSOR_VALUE].va(), objects[plan::RETENTION_STATE].va(),
+            agx_memory::TIMESTAMP_RANGE.start, &descriptors)?;
+        objects[storage::ROOT].write(0, &root)?;
+        objects[RUNTIME_POINTERS].write(0, &runtime)?;
+        objects[CONTROL_REGION].write(0, &control)?;
+        objects[HARDWARE_DATA].write(0, &images.hardware)?;
+        objects[plan::PERFORMANCE_CONTROL].write(0, &images.performance)?;
+        objects[GLOBALS_POWER].write(0, &images.power)?;
+        objects[GLOBALS].write(0, &images.globals)?;
+        // Fragment scheduler entries start unassigned; these are input sentinels.
+        objects[UNKNOWN_C1].u32(0xc18, u32::MAX)?;
+        objects[UNKNOWN_C1].u32(0xc30, u32::MAX)?;
+        agx_memory::publish();
+        Ok(Self { objects, iomaps, descriptors, maximum_khz: images.maximum_khz })
     }
 }

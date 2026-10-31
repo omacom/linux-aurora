@@ -113,3 +113,44 @@ pub(crate) fn ring_entry(index: u32, capacity: u32, seeds: &[FirmwareVa]) -> Res
     if seeds.is_empty() || seeds.len() > capacity as usize || capacity > 65536 || index >= capacity { return Err(Error::Index); }
     Ok(if (index as usize) < seeds.len() { seeds[index as usize].0.to_le_bytes() } else { [0xcc; 8] })
 }
+
+impl QueueInfo {
+    pub(crate) const EXTENDED_SIZE: usize = 0x24c0;
+
+    /// Scheduler storage belongs to this same retained allocation; it is not
+    /// interchangeable with the legacy GPU scratch object.
+    pub(crate) fn encode_extended(&self, owner: FirmwareVa, output: &mut [u8]) -> Result<(), Error> {
+        let end = owner.get().checked_add(Self::EXTENDED_SIZE as u64).ok_or(Error::Address)?;
+        if end > 0xffff_fc30_0000_0000 { return Err(Error::Address); }
+        let bytes = output.get_mut(..Self::EXTENDED_SIZE).ok_or(Error::Size)?;
+        bytes.fill(0);
+        for (offset, value) in [(0, self.state.get()), (8, self.ring.get()),
+            (16, self.job_list.get()), (24, owner.get() + 0xb0), (0xa4, self.context.get())] {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        for offset in [0x2c, 0x4c] { bytes[offset..offset + 4].fill(0xff); }
+        for offset in [0x30, 0x34, 0x48] {
+            bytes[offset..offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        }
+        bytes[0x38..0x40].copy_from_slice(&0xffff_0000_0000_0000u64.to_le_bytes());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    #[test] fn scheduler_pointer_relocates_with_its_retained_queue_owner() {
+        let fw = |i: u64| FirmwareVa::new(0xffff_fc21_4000_0000 + i * 0x4000).unwrap();
+        let info = QueueInfo { state: fw(1), ring: fw(2), job_list: fw(3),
+            gpu_scratch: fw(4), context: fw(5), uuid: 9 };
+        let mut output = vec![0xa5; QueueInfo::EXTENDED_SIZE + 8];
+        info.encode_extended(fw(0), &mut output).unwrap();
+        assert_eq!(u64::from_le_bytes(output[24..32].try_into().unwrap()), fw(0).get() + 0xb0);
+        assert_eq!(&output[0xb0..QueueInfo::EXTENDED_SIZE], &vec![0; QueueInfo::EXTENDED_SIZE - 0xb0]);
+        assert_eq!(&output[QueueInfo::EXTENDED_SIZE..], &[0xa5; 8]);
+        let mut short = [0xa5; INFO_SIZE];
+        assert!(info.encode_extended(fw(0), &mut short).is_err());
+        assert_eq!(short, [0xa5; INFO_SIZE]);
+    }
+}
