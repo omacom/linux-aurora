@@ -19,6 +19,7 @@
 #include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/pmp-report.h>
+#include <linux/suspend.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
@@ -311,7 +312,13 @@ struct apple_dcp_v14 {
 	enum dcp_v14_bl_gate bl_gate;
 	u32 nits_sent;
 	u64 nits_presents, brightness_presents, nits_refused;
+	/* Panel: its display controller is stopped (A472 hardware power off). */
+	bool panel_off;
 };
+
+static bool panel_hw_off = true;
+module_param(panel_hw_off, bool, 0644);
+MODULE_PARM_DESC(panel_hw_off, "Internal 14.7 panel: stop its display controller on DPMS off, not only blank it [default: true]");
 
 /*
  * The panel's DCP session; one per boot, RTKit is never started twice. The
@@ -1157,6 +1164,24 @@ static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_siz
 	/* Swap information for a completed swap; the link checks its id. */
 	if (tag == D(589) && SHAPE(0x6f0, 0))
 		return 0;
+	/*
+	 * The panel's display-controller power transitions (A472 with the
+	 * hardware selector): will power off and an intent swap, both
+	 * notifications; display DART power and a kernel power assertion, both
+	 * held by the host throughout, so status 0; and the backlight message
+	 * at power on, which the backlight restore after A472(1) answers. Only
+	 * the J514S/J516S panel sends A472 so; elsewhere these stay unhandled.
+	 */
+	if (dcp_v14_board_nits(v14) &&
+	    ((tag == D(2) && SHAPE(0, 0)) || (tag == D(591) && SHAPE(20, 0)) ||
+	     (tag == D(593) && SHAPE(4, 0))))
+		return 0;
+	if (dcp_v14_board_nits(v14) && (tag == D(574) || tag == D(700)) && SHAPE(4, 4)) {
+		if (tag == D(574) && in[0] > 1)
+			return -EINVAL;
+		put_unaligned_le32(0, out);
+		return 0;
+	}
 	if ((tag == D(588) && SHAPE(8, 0)) || (tag == D(598) && SHAPE(0, 0)))
 		return 0;
 	/* Main-display query, answered by asking the firmware. */
@@ -2090,8 +2115,8 @@ bool iomfb_v14_7_external_ready(struct apple_dcp *dcp)
 
 /*
  * What this processor's firmware holds that system sleep would not hand
- * back, or NULL: a start in progress, or a display link or a powered
- * display. The caller also refuses sleep while a display is attached.
+ * back, or NULL: a start in progress, or a powered display. Suspend
+ * releases a dark display's link itself.
  */
 const char *iomfb_v14_7_external_busy(struct apple_dcp *dcp)
 {
@@ -2102,10 +2127,8 @@ const char *iomfb_v14_7_external_busy(struct apple_dcp *dcp)
 		/* A stopped session drives nothing, whatever it held last. */
 		if (dcp->v14 && READ_ONCE(dcp->v14->failed))
 			return NULL;
-		if (READ_ONCE(dcp->dptxport[0].connected) ||
-		    READ_ONCE(dcp->external_link_ready) ||
-		    (dcp->v14 && READ_ONCE(dcp->v14->powered)))
-			return "a display link is up";
+		if (dcp->v14 && READ_ONCE(dcp->v14->powered))
+			return "a display is lit";
 		return NULL;
 	default:
 		return NULL;
@@ -3119,6 +3142,32 @@ static int dcp_v14_set_power(struct apple_dcp_v14 *v14, bool on)
 	return ret;
 }
 
+/*
+ * A472 with the hardware selector (+8) and a null output word (+11): the
+ * panel's display controller off or on. Off stops scanout and the panel once
+ * a blank has been presented, on restarts them; the soft form (+8 clear)
+ * leaves the controller running. The client, the RTKit session and every
+ * mapping are kept.
+ */
+static int dcp_v14_panel_power(struct apple_dcp_v14 *v14, bool on)
+{
+	u8 in[12] = {}, out[8] = {};
+	int ret;
+
+	put_unaligned_le64(on, in);
+	in[8] = 1;
+	in[11] = 1;
+	ret = dcp_v14_call(v14, A(472), in, sizeof(in), out, sizeof(out), 0);
+	if (!ret && get_unaligned_le32(out + 4)) {
+		dev_err(v14->dev, "display controller %s refused: %#x\n", on ? "on" : "off",
+			get_unaligned_le32(out + 4));
+		ret = -EIO;
+	}
+	if (!ret)
+		v14->panel_off = !on;
+	return ret;
+}
+
 /* The display is fully described, and no description is in transfer. */
 static bool dcp_v14_external_described(struct apple_dcp_v14 *v14)
 {
@@ -3366,8 +3415,35 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 		dcp_v14_cancel_event(dcp);
 }
 
+/* A system sleep is in progress, as opposed to a DPMS change. */
+static bool dcp_v14_system_sleep(void)
+{
+	KUNIT_STATIC_STUB_REDIRECT(dcp_v14_system_sleep);
+	return pm_suspend_in_progress();
+}
+
 void iomfb_v14_7_poweron(struct apple_dcp *dcp)
 {
+	struct apple_dcp_v14 *v14 = dcp->v14;
+	bool dark;
+
+	/*
+	 * The display controller first, then the backlight, as at boot. A
+	 * refused power on is tried once more. If the controller stays off,
+	 * so does the backlight, rather than light a dark panel; the next
+	 * power on tries again.
+	 */
+	if (!dcp->external && v14 && v14->panel_off) {
+		mutex_lock(&v14->lock);
+		if (v14->panel_off && dcp_v14_panel_power(v14, true))
+			dcp_v14_panel_power(v14, true);
+		dark = v14->panel_off;
+		mutex_unlock(&v14->lock);
+		if (dark) {
+			dev_err(dcp->dev, "display controller did not power on: backlight left off\n");
+			return;
+		}
+	}
 	/* The next present restores a level only after Linux has set one. */
 	if (dcp->v14 && dcp_v14_bl_dpms_applies(dcp->v14, dcp))
 		dcp_backlight_dpms(dcp, true);
@@ -3391,9 +3467,21 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 		dcp_mode_invalidate(&dcp->mode_state);
 		return;
 	}
-	/* Blank to black; the panel and the DCP stay powered. */
-	if (v14 && v14->started)
-		dcp_v14_blank(v14, dcp);
+	/* Blank to black, then stop the display controller; the DCP stays powered. */
+	if (!v14 || !v14->started)
+		return;
+	dcp_v14_blank(v14, dcp);
+	/*
+	 * Only the J514S/J516S panel, the one this was measured on, and only
+	 * on DPMS off: suspend-to-idle cuts that power itself.
+	 */
+	if (!panel_hw_off || !dcp_v14_board_nits(v14) || dcp_v14_system_sleep())
+		return;
+	mutex_lock(&v14->lock);
+	if (!v14->panel_off && !READ_ONCE(v14->failed) && !READ_ONCE(dcp->crashed) &&
+	    !v14->active_fb && dcp_v14_panel_power(v14, false))
+		dev_err(dcp->dev, "display controller did not power off\n");
+	mutex_unlock(&v14->lock);
 }
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
