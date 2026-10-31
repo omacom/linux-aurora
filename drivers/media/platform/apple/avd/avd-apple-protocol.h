@@ -18,6 +18,39 @@
  */
 #define AVD_APPLE_NOTIFY_BASE AVD_APPLE_INBOX_BASE
 
+/* SPEC 5.1: only these session opcodes have proved builders. */
+static inline int avd_apple_session_command(u32 cmd[24], u32 client, u32 opcode,
+					  u32 property, u32 value)
+{
+	unsigned int i;
+
+	if (client >= 1024 || (opcode != 0 && opcode != 2 && opcode != 5 && opcode != 6))
+		return -EINVAL;
+	for (i = 0; i < 24; i++)
+		cmd[i] = 0;
+	cmd[0] = opcode | (client << 16);
+	if (opcode == 6) {
+		cmd[1] = property;
+		cmd[2] = value;
+	}
+	return 0;
+}
+
+static inline int avd_apple_decode_prefix(struct avd_frame *f, u32 client,
+					  u32 selector, u32 work_sequence)
+{
+	unsigned int i;
+
+	if (f->idx >= AVD_MAX_FRAMES || client >= 1024 || selector >= 16 || work_sequence >= 4)
+		return -EINVAL;
+	for (i = 0; i < 24; i++)
+		f->cmd[i] = 0;
+	f->cmd[0] = 1 | (selector << 10) | (client << 22);
+	f->cmd[1] = f->idx | (work_sequence << 16);
+	f->cmd[3] = f->frame_num;
+	return 0;
+}
+
 struct avd_apple_reply_layout {
 	u8 type_word;
 	u8 type_shift;
@@ -38,9 +71,10 @@ struct avd_apple_reply {
 	int status;
 };
 
-static inline int avd_apple_parse_reply(const u32 *record, size_t words,
-				      const struct avd_apple_reply_layout *layout,
-				      struct avd_apple_reply *reply)
+static inline int
+avd_apple_parse_reply(const u32 *record, size_t words,
+		      const struct avd_apple_reply_layout *layout,
+		      struct avd_apple_reply *reply)
 {
 	if (words != AVD_APPLE_RESULT_WORDS)
 		return -EMSGSIZE;

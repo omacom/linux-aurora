@@ -55,7 +55,8 @@ static int avd_apple_image_present(struct avd_apple *apple)
 	u32 end = readl(apple->regs + hw->itcm_end);
 	u32 version;
 
-	if (end <= start || end - start > hw->imem_size)
+	if (end <= start || end - start < 4 || end - start > hw->imem_size ||
+	    hw->version_offset > end - start - 4)
 		return -ENOENT;
 	version = readl(apple->regs + hw->imem + hw->version_offset);
 	if (!version || version == U32_MAX)
@@ -190,7 +191,8 @@ static int avd_apple_session_start(struct avd_ctx *ctx)
 {
 	u32 cmd[24] = {};
 
-	cmd[0] = ctx->client_id << 16;
+	if (avd_apple_session_command(cmd, ctx->client_id, 0, 0, 0))
+		return -EINVAL;
 	return avd_apple_send(ctx->dev, cmd);
 }
 
@@ -198,7 +200,8 @@ static void avd_apple_session_stop(struct avd_ctx *ctx)
 {
 	u32 cmd[24] = {};
 
-	cmd[0] = 2 | (ctx->client_id << 16);
+	if (avd_apple_session_command(cmd, ctx->client_id, 2, 0, 0))
+		return;
 	if (avd_apple_send(ctx->dev, cmd))
 		dev_warn(ctx->dev->dev, "session stop inbox full\n");
 }
@@ -207,7 +210,8 @@ static void avd_apple_abort(struct avd_ctx *ctx)
 {
 	u32 cmd[24] = {};
 
-	cmd[0] = 5 | (ctx->client_id << 16);
+	if (avd_apple_session_command(cmd, ctx->client_id, 5, 0, 0))
+		return;
 	/* Core follows abort with reset before returning any DMA buffer. */
 	avd_apple_send(ctx->dev, cmd);
 }
@@ -216,9 +220,8 @@ static int avd_apple_set_property(struct avd_ctx *ctx, u32 property, u32 value)
 {
 	u32 cmd[24] = {};
 
-	cmd[0] = 6 | (ctx->client_id << 16);
-	cmd[1] = property;
-	cmd[2] = value;
+	if (avd_apple_session_command(cmd, ctx->client_id, 6, property, value))
+		return -EINVAL;
 	return avd_apple_send(ctx->dev, cmd);
 }
 
@@ -231,11 +234,10 @@ static int avd_apple_submit(struct avd_dev *avd, struct avd_frame *f)
 	if (!ops || !ops->pack_cmd || !f->fp->cpu || f->ctx->client_id >= 1024)
 		return -EOPNOTSUPP;
 	/* SPEC 5.2 prefix precedes the codec-specific builder. */
-	memset(f->cmd, 0, sizeof(f->cmd));
 	selector = get_unaligned_le32(f->fp->cpu + 4) & 0xf;
-	f->cmd[0] = 1 | (selector << 10) | (f->ctx->client_id << 22);
-	f->cmd[1] = f->idx | ((f->seq & 3) << 16);
-	f->cmd[3] = f->frame_num;
+	ret = avd_apple_decode_prefix(f, f->ctx->client_id, selector, f->seq & 3);
+	if (ret)
+		return ret;
 	ret = ops->pack_cmd(f->ctx, f);
 	if (ret)
 		return ret;

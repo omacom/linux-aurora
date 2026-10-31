@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 #include <kunit/test.h>
+#include <linux/unaligned.h>
 
 #include "avd-apple-protocol.h"
 #include "avd-queue-internal.h"
@@ -112,11 +113,40 @@ static void avd_completion_parser(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, avd_apple_parse_reply(record, 20, &layout, &reply), -EOPNOTSUPP);
 }
 
+static void avd_command_builders(struct kunit *test)
+{
+	struct avd_frame f = { .idx = 15, .frame_num = 0x1234 };
+	u32 cmd[24];
+	const u64 config[] = {
+		0, 0x01558000, 0x01558a00, 0x01558e00, 0,
+		0x000000040004000aULL, 0, 0x01100008,
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(config); i++)
+		KUNIT_EXPECT_EQ(test, get_unaligned_le64(avd_borage_config + i * 8), config[i]);
+	KUNIT_ASSERT_EQ(test, avd_apple_decode_prefix(&f, 1023, 15, 3), 0);
+	KUNIT_EXPECT_EQ(test, f.cmd[0], 1U | (15U << 10) | (1023U << 22));
+	KUNIT_EXPECT_EQ(test, f.cmd[1], 15U | (3U << 16));
+	KUNIT_EXPECT_EQ(test, f.cmd[3], 0x1234U);
+	KUNIT_EXPECT_EQ(test, f.cmd[23], 0U);
+	KUNIT_EXPECT_EQ(test, avd_apple_decode_prefix(&f, 1024, 0, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, avd_apple_decode_prefix(&f, 0, 16, 0), -EINVAL);
+	KUNIT_EXPECT_EQ(test, avd_apple_decode_prefix(&f, 0, 0, 4), -EINVAL);
+	KUNIT_ASSERT_EQ(test, avd_apple_session_command(cmd, 2, 6, 17, 42), 0);
+	KUNIT_EXPECT_EQ(test, cmd[0], 6U | (2U << 16));
+	KUNIT_EXPECT_EQ(test, cmd[1], 17U);
+	KUNIT_EXPECT_EQ(test, cmd[2], 42U);
+	KUNIT_EXPECT_EQ(test, cmd[23], 0U);
+	KUNIT_EXPECT_EQ(test, avd_apple_session_command(cmd, 2, 3, 0, 0), -EINVAL);
+}
+
 static struct kunit_case avd_queue_cases[] = {
 	KUNIT_CASE(avd_slots_and_tags),
 	KUNIT_CASE(avd_retirement_order),
 	KUNIT_CASE(avd_watchdog_and_retry),
 	KUNIT_CASE(avd_completion_parser),
+	KUNIT_CASE(avd_command_builders),
 	{}
 };
 

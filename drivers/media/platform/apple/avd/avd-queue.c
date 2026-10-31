@@ -46,7 +46,7 @@ static void avd_retire(struct avd_dev *avd)
 			} else if (ctx->coded_fmt_desc->ops->done) {
 				ctx->coded_fmt_desc->ops->done(ctx, f->src, f->dst, state);
 			}
-			if (f->src->vb2_buf.req_obj.req)
+			if (ctx->coded_fmt_desc->frame_ops && f->src->vb2_buf.req_obj.req)
 				v4l2_ctrl_request_complete(f->src->vb2_buf.req_obj.req,
 							   &ctx->ctrl_hdl);
 			/* CAPTURE first: OUTPUT completion signals the media request. */
@@ -82,7 +82,7 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 	avd->backend->shutdown(avd);
 	ret = reset_control_reset(avd->rstc);
 	if (!ret)
-		ret = avd->backend->boot(avd);
+		ret = avd_backend_boot(avd);
 	avd->faulted = !!ret;
 	if (ret)
 		dev_err(avd->dev, "queue reset failed: %d\n", ret);
@@ -106,11 +106,14 @@ static int avd_send_frame(struct avd_dev *avd, struct avd_frame *f)
 
 	if (f->dep == AVD_DEP_PREV_DONE && !avd_slot_first(avd->frames, f))
 		return -EBUSY;
-	if (!f->ctx->session_started && avd->backend->session_start) {
+	if ((!f->ctx->session_started ||
+	     f->ctx->session_generation != avd->fw_generation) &&
+	    avd->backend->session_start) {
 		ret = avd->backend->session_start(f->ctx);
 		if (ret)
 			return ret;
 		f->ctx->session_started = true;
+		f->ctx->session_generation = avd->fw_generation;
 	}
 	/* Publish ownership before the doorbell; IRQs may arrive in submit(). */
 	spin_lock_irqsave(&avd->queue_lock, flags);
@@ -273,6 +276,8 @@ void avd_queue_run(void *priv)
 			ops->retire(ctx, f, VB2_BUF_STATE_DONE);
 		else if (!ops && ctx->coded_fmt_desc->ops->done)
 			ctx->coded_fmt_desc->ops->done(ctx, f->src, f->dst, VB2_BUF_STATE_DONE);
+		if (ops && f->src->vb2_buf.req_obj.req)
+			v4l2_ctrl_request_complete(f->src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
 		pm_runtime_put_autosuspend(avd->dev);
 		spin_lock_irqsave(&avd->queue_lock, flags);
 		f->state = AVD_FRAME_FREE;
@@ -343,8 +348,15 @@ void avd_queue_drain(struct avd_ctx *ctx)
 		}
 	}
 	avd_retire(avd);
-	if (ctx->session_started && avd->backend->session_stop)
-		avd->backend->session_stop(ctx);
+	if (ctx->session_started && avd->backend->session_stop) {
+		int ret = pm_runtime_resume_and_get(avd->dev);
+
+		if (ret >= 0) {
+			avd->backend->session_stop(ctx);
+			pm_runtime_mark_last_busy(avd->dev);
+			pm_runtime_put_autosuspend(avd->dev);
+		}
+	}
 	ctx->session_started = false;
 	mutex_unlock(&avd->queue_mutex);
 }

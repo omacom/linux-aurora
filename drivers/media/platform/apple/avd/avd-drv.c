@@ -687,7 +687,7 @@ static __maybe_unused int avd_runtime_resume(struct device *dev)
 	int ret;
 	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
 
-	ret = avd->backend->boot(avd);
+	ret = avd_backend_boot(avd);
 	if (ret)
 		dev_err(dev, "failed to boot");
 	return ret;
@@ -697,6 +697,8 @@ static __maybe_unused int avd_runtime_suspend(struct device *dev)
 {
 	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
 
+	if (READ_ONCE(avd->inflight))
+		return -EBUSY;
 	avd->backend->shutdown(avd);
 	return 0;
 }

@@ -234,6 +234,7 @@ struct avd_dev {
 	unsigned int inflight;
 	bool stopping;
 	bool faulted;
+	u64 fw_generation;
 	const struct avd_backend_ops *backend;
 	void *backend_priv;
 	/* Only the open-firmware compatibility path uses these. */
@@ -279,6 +280,7 @@ struct avd_ctx {
 	struct list_head queue_node;
 	bool draining;
 	bool session_started;
+	u64 session_generation;
 	enum avd_frame_dep next_dep;
 	u32 client_id;
 
@@ -353,6 +355,7 @@ int avd_open_build_program(struct avd_ctx *ctx);
 extern const struct avd_backend_ops avd_open_backend;
 extern const struct avd_backend_ops avd_apple_backend;
 int avd_backend_select(struct avd_dev *avd);
+int avd_backend_boot(struct avd_dev *avd);
 void avd_shutdown(struct avd_dev *avd);
 
 void avd_status(struct avd_dev *avd, u32 vp);

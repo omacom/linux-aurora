@@ -4,6 +4,7 @@
 
 #include <linux/errno.h>
 #include <linux/jiffies.h>
+#include <linux/limits.h>
 
 #include "avd-queue.h"
 

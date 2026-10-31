@@ -159,3 +159,19 @@ int avd_backend_select(struct avd_dev *avd)
 	avd->backend = &avd_open_backend;
 	return request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
 }
+
+int avd_backend_boot(struct avd_dev *avd)
+{
+	int ret = avd->backend->boot(avd);
+
+	if (ret == -ENOENT && avd_backend_is_apple(avd)) {
+		ret = request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
+		if (ret)
+			return ret;
+		avd->backend = &avd_open_backend;
+		ret = avd->backend->boot(avd);
+	}
+	if (!ret)
+		avd->fw_generation++;
+	return ret;
+}
