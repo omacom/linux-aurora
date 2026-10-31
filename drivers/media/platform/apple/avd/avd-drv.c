@@ -223,29 +223,88 @@ int avd_submit_job(struct avd_ctx *ctx)
 	return 0;
 }
 
+/* Recover at most twice a minute, never twice within this gap. */
+#define AVD_RECOVER_MAX		2
+#define AVD_RECOVER_WINDOW	msecs_to_jiffies(60000)
+#define AVD_RECOVER_GAP_MS	20
+
+/*
+ * Reset the decoder after a timeout or a VP error. Every reset is a risk
+ * to the whole machine (the J616s hung hard after timeouts and resets
+ * three times in one night, and the Neo after a burst of one reset per
+ * frame), so: stop the interrupt handler and the CM3 first, block the
+ * decoder's DMA at its DART so a transfer still in flight faults instead
+ * of reaching memory that may already be reused, give such transfers time
+ * to drain, and only then assert the pmgr reset. Recover sparingly, and
+ * retire the decoder after a failed or a third recovery within a minute.
+ */
 static int avd_reset(struct avd_dev *avd)
 {
 	int ret = 0;
 
+	if (avd->retired)
+		return -ENODEV;
+	if (!avd->recoveries ||
+	    time_after(jiffies, avd->recover_window_start + AVD_RECOVER_WINDOW)) {
+		avd->recover_window_start = jiffies;
+		avd->recoveries = 0;
+	}
+	if (++avd->recoveries > AVD_RECOVER_MAX) {
+		ret = -EBUSY;
+		goto retire;
+	}
+	if (avd->last_recover &&
+	    time_before(jiffies, avd->last_recover + msecs_to_jiffies(AVD_RECOVER_GAP_MS)))
+		msleep(AVD_RECOVER_GAP_MS);
+
 	ret = pm_runtime_resume_and_get(avd->dev);
 	if (ret < 0)
-		return ret;
+		goto retire;
 
+	/* No handler may touch the mailbox while the block is in reset. */
+	disable_irq(avd->irq);
+	dev_warn(avd->dev, "recover: stop firmware\n");
+	avd_shutdown(avd);
+	if (avd->empty_domain) {
+		dev_warn(avd->dev, "recover: block DMA\n");
+		ret = iommu_attach_device(avd->empty_domain, avd->dev);
+		if (ret) {
+			dev_err(avd->dev, "recover: DART empty attach failed: %d\n", ret);
+			goto put;
+		}
+		usleep_range(5000, 6000);
+	}
+	dev_warn(avd->dev, "recover: reset\n");
 	ret = reset_control_reset(avd->rstc);
 	if (ret)
-		dev_err(avd->dev, "reset: failed: %d", ret);
-
+		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
 	if (avd->empty_domain) {
-		iommu_attach_device(avd->empty_domain, avd->dev);
+		dev_warn(avd->dev, "recover: restore DMA\n");
 		iommu_detach_device(avd->empty_domain, avd->dev);
+		if (avd->domain && iommu_get_domain_for_dev(avd->dev) != avd->domain) {
+			dev_err(avd->dev, "recover: DART domain not restored\n");
+			ret = -EIO;
+		}
 	}
-
-	ret = avd_boot(avd);
-	if (ret)
-		dev_err(avd->dev, "reset: failed to boot");
-
+	if (!ret) {
+		dev_warn(avd->dev, "recover: boot firmware\n");
+		ret = avd_boot(avd);
+		if (ret)
+			dev_err(avd->dev, "recover: boot failed: %d\n", ret);
+	}
+put:
+	avd->last_recover = jiffies ?: 1;
+	if (!ret) {
+		enable_irq(avd->irq);
+		dev_warn(avd->dev, "recover: done\n");
+	}
 	pm_runtime_put_autosuspend(avd->dev);
-
+	if (!ret)
+		return 0;
+retire:
+	avd->retired = true;
+	dev_err(avd->dev, "decoder retired after %s (%d): reload the module to use it again\n",
+		ret == -EBUSY ? "repeated resets" : "a failed reset", ret);
 	return ret;
 }
 
@@ -979,6 +1038,7 @@ static int avd_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 1);
 	if (irq < 0)
 		return irq;
+	avd->irq = irq;
 	ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
 			avd_irq_handler, IRQF_ONESHOT,
 			dev_name(&pdev->dev), avd);

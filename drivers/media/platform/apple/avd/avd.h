@@ -235,6 +235,12 @@ struct avd_dev {
 	enum vb2_buffer_state job_pending_result;
 
 	struct reset_control *rstc;
+	int irq;
+	/* Recovery budget; a retired decoder fails every job until reload. */
+	unsigned long recover_window_start;
+	unsigned int recoveries;
+	unsigned long last_recover;
+	bool retired;
 
 	const struct avd_variant *variant;
 	unsigned int capabilities;
