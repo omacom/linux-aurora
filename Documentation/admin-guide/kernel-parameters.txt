@@ -543,6 +543,13 @@ Kernel parameters
 			apicmaintimer. Useful when your PIT timer is totally
 			broken.
 
+	apple_cpu_context= [ARM64]
+			Enable the root-only, one-shot J314s CPU1 context-loss lab
+			diagnostic when CONFIG_APPLE_CPU_CONTEXT_LAB=y. Default:
+			disabled. Requires the matching AURA lab loader and an
+			external reset recovery plan. See
+			Documentation/arch/arm64/apple-cpu-context-lab.rst.
+
 	autoconf=	[IPV6]
 			See Documentation/networking/ipv6.rst.
 
