@@ -266,7 +266,10 @@ impl platform::Driver for AsahiPlatformDriver {
 
         let cfg = match info.ok_or(ENODEV)? {
             ProbeConfig::Legacy(cfg) => *cfg,
-            ProbeConfig::G17(cfg) => return AsahiPlatformDriver::probe_g17(pdev, cfg),
+            ProbeConfig::G17(cfg) => {
+                return AsahiPlatformDriver::probe_g17(pdev, regs::G17Resources::new(pdev)?, cfg)
+            }
+            ProbeConfig::M5 => return AsahiPlatformDriver::probe_m5(pdev),
             #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
             ProbeConfig::M3(crate::m3::Chip::T8122) => return AsahiPlatformDriver::probe_t8122(pdev),
             ProbeConfig::M3(chip) => return Err(crate::m3::refuse_probe(pdev, *chip)),
@@ -436,16 +439,23 @@ impl AsahiPlatformDriver {
     fn probe_m5<'bound>(
         pdev: &'bound platform::Device<Core<'_>>,
     ) -> Result<AsahiPlatformDriverData<'bound>> {
-        let cfg = &hw::t6050::CONFIG;
+        // Both boards bind gpu,t6050. Let the ID registers choose the configuration.
+        let res = regs::G17Resources::new(pdev)?;
+        let id = res.get_g17_id()?;
+        let cfg = hw::t6050::config(&id).ok_or_else(|| {
+            dev_err!(pdev.as_ref(), "No M5 configuration for GPU variant {:#x}\n", id.variant);
+            ENODEV
+        })?;
         if let g17::FirmwareProfile::M5NoBareMetalTables = cfg.profile {
             dev_err!(pdev.as_ref(), "M5 Pro/Max bare-metal GPU tables not yet available\n");
             return Err(ENODEV);
         }
-        Self::probe_g17(pdev, cfg)
+        Self::probe_g17(pdev, res, cfg)
     }
 
     fn probe_g17<'bound>(
         pdev: &'bound platform::Device<Core<'_>>,
+        res: regs::G17Resources,
         cfg: &'static g17::Config,
     ) -> Result<AsahiPlatformDriverData<'bound>> {
         // The GPU memory limits and RSS attribution apply only to G17 for now.
@@ -453,7 +463,6 @@ impl AsahiPlatformDriver {
         // SAFETY: The GPU performs DMA through a UAT whose output width is part of the SoC config.
         unsafe { pdev.dma_set_mask_and_coherent(DmaMask::try_new(cfg.uat_oas)?)? };
         let resources = regs::Resources::new(pdev)?;
-        let res = regs::G17Resources::new(pdev)?;
         let drm = drm::UnregisteredDevice::<AsahiDrmDriver>::new(pdev, Ok(()))?;
         // SAFETY: Every adapter calls close_binding in unbind before devres;
         // probe errors drop this local owner while the bound callback is live.
