@@ -481,6 +481,21 @@ void avd_queue_run(void *priv)
 	schedule_work(&ctx->submit_work);
 }
 
+/* True while any slot still belongs to @ctx; the caller holds no queue lock. */
+static bool avd_ctx_has_frames(struct avd_dev *avd, struct avd_ctx *ctx)
+{
+	unsigned long flags;
+	unsigned int i;
+	bool busy = false;
+
+	spin_lock_irqsave(&avd->queue_lock, flags);
+	for (i = 0; i < AVD_MAX_FRAMES; i++)
+		if (avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx)
+			busy = true;
+	spin_unlock_irqrestore(&avd->queue_lock, flags);
+	return busy;
+}
+
 void avd_queue_drain(struct avd_ctx *ctx)
 {
 	struct avd_dev *avd = ctx->dev;
@@ -499,13 +514,41 @@ void avd_queue_drain(struct avd_ctx *ctx)
 		avd->deferred_ctx = NULL;
 		finish_deferred = true;
 	}
+	/* Prepared but never handed to the decoder: nothing to wait for. */
+	for (i = 0; i < AVD_MAX_FRAMES; i++) {
+		struct avd_frame *f = &avd->frames[i];
+
+		if (f->ctx == ctx && f->state == AVD_FRAME_RESERVED) {
+			f->status = -ECANCELED;
+			f->state = AVD_FRAME_DONE;
+		}
+	}
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	/* A deferred job is still m2m's running job: end it so abort can wait. */
 	if (finish_deferred)
 		v4l2_m2m_buf_done_and_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx,
 						 VB2_BUF_STATE_ERROR);
+	avd_retire(avd);
+
+	/*
+	 * Frames the decoder already owns finish on their own, or the queue
+	 * worker times them out and recovers. Closing one stream must not reset
+	 * the decoder under every other stream's frames: that reset, with their
+	 * DMA in flight, preceded the J616s hangs. Wait for this context's own
+	 * frames instead, without the queue mutex so the worker can retire them.
+	 */
+	if (ret >= 0 && !avd->stopping && avd_ctx_has_frames(avd, ctx)) {
+		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		mutex_unlock(&avd->queue_mutex);
+		wait_event_timeout(avd->pm.idle_wait, !avd_ctx_has_frames(avd, ctx),
+				   AVD_FRAME_TIMEOUT + msecs_to_jiffies(1000));
+		mutex_lock(&avd->queue_mutex);
+		avd_retire(avd);
+	}
+	/* Last resort (worker stopped or wedged): cancel through a reset. */
 	for (i = 0; ret >= 0 && i < AVD_MAX_FRAMES; i++) {
 		if (avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx) {
+			dev_warn(avd->dev, "stream close: frames still owned by the decoder, resetting\n");
 			if (avd->backend->abort)
 				avd->backend->abort(ctx);
 			avd_reset_queue(avd, -ECANCELED);
