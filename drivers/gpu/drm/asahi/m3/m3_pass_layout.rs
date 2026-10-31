@@ -215,3 +215,39 @@ mod tests {
         }
     }
 }
+
+pub(crate) fn allocation_for(profile: super::m3_profile::Profile, slot:usize, field:Field, clusters:u32)
+    -> Result<Allocation,Error> {
+    let mut owner = board_allocation(slot,field,clusters)?;
+    if profile == super::m3_profile::Profile::Legacy { return Ok(owner); }
+    if owner.space == Space::Firmware {
+        owner.address = 0xffff_fc25_0000_0000 + (slot * COUNT + field as usize) as u64 * 0x10_0000;
+    }
+    match field {
+        Field::Scene => owner.size = 0x400,
+        Field::TilerCommand | Field::FragmentCommand => {
+            let fragment = field == Field::FragmentCommand;
+            owner.size = if fragment {0xca0} else {0x940};
+            owner.gpu_alias = Some(0x72_1000_0000 + slot as u64 * 0x4_0000
+                + u64::from(fragment) * 0x4000);
+        }
+        Field::TilerToFragment | Field::TilerDependency | Field::FragmentDependency => owner.size = 0x40,
+        _ => {}
+    }
+    Ok(owner)
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    #[test] fn extended_command_aliases_keep_whole_disjoint_pages() {
+        for slot in 0..SLOTS {
+            for field in [Field::TilerCommand,Field::FragmentCommand] {
+                let owner = allocation_for(super::super::m3_profile::Profile::Extended,slot,field,1).unwrap();
+                assert_eq!(owner.address & 0x3fff,0);
+                assert_eq!(owner.gpu_alias.unwrap() & 0x3fff,0);
+                assert!(owner.size <= 0x4000);
+            }
+        }
+    }
+}

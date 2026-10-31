@@ -62,6 +62,19 @@ pub(crate) static KNOWN_IMAGES_T8122: [KnownImage; 1] = [KnownImage {
     initdata_magic: Some(G15_V14_8_3_INITDATA),
 }];
 
+/// Exact normalized image identity for the extended firmware interface.
+pub(crate) static T8122_IMAGES_26: [KnownImage; 1] = [KnownImage {
+    name: "T8122 C0 firmware-compat 26.6.2",
+    uuid: None,
+    stkg_sha256: Some([
+        0x3a, 0x6b, 0x8b, 0x5e, 0x83, 0x38, 0x4d, 0x5c,
+        0xc1, 0x92, 0x9d, 0x91, 0xb6, 0x36, 0x40, 0xfe,
+        0xe8, 0xf5, 0x52, 0xb5, 0x10, 0x8c, 0x4e, 0xa6,
+        0x20, 0xbe, 0xdb, 0x7b, 0xbc, 0xa0, 0x31, 0x64,
+    ]),
+    initdata_magic: Some(0x0c89_c357_8392_04b8),
+}];
+
 /// The same T8122 image for the start experiment (`t8122_start`, only with
 /// `asahi.t8122_start=1`), where `asahi.t8122_initdata_version` may replace the version.
 pub(crate) static KNOWN_IMAGES_T8122_EXPERIMENT: [KnownImage; 1] = [KnownImage {
@@ -117,6 +130,10 @@ pub(crate) struct Layout {
     /// Offset of the 8-byte tag that precedes the 8 per-boot bytes zeroed before hashing.
     pub(crate) entropy_tag_offset: usize,
     pub(crate) entropy_tag: [u8; 8],
+    /// An additional independent boot value, when required by this image.
+    extra_boot_value: Option<(usize, [u8; 8])>,
+    /// Expected boot-table location and byte count in the image header.
+    boot_table: Option<(u32, u32)>,
     /// The firmware version, for logs.
     pub(crate) version: &'static str,
 }
@@ -127,6 +144,8 @@ pub(crate) static T6030_LAYOUT: Layout = Layout {
     vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0005_c000],
     entropy_tag_offset: 0x58e88,
     entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    extra_boot_value: None,
+    boot_table: None,
     version: "RTKit-2419.140.12.release",
 };
 
@@ -137,23 +156,73 @@ pub(crate) static T8122_LAYOUT: Layout = Layout {
     vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0006_4000],
     entropy_tag_offset: 0x5d54a,
     entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    extra_boot_value: None,
+    boot_table: None,
     version: "RTKit-2419.140.12.release",
 };
 
 pub(crate) const TEXT_SHA256: [u8; 32] = [
     0x11, 0xe4, 0x9f, 0x75, 0xb, 0x67, 0x1a, 0x2b, 0x13, 0xd0, 0x92, 0xdb, 0x1c, 0xbc, 0xa3, 0xa8, 0x77, 0x55, 0x86, 0xd6, 0xb1, 0xe3, 0xaa, 0xe8, 0xa6, 0xa4, 0x64, 0xa7, 0x80, 0x2, 0x93, 0xd5];
 
+/// T8122 C0, firmware-compat 26.6.2 segment and loader-mutable bounds.
+pub(crate) static T8122_LAYOUT_26: Layout = Layout {
+    text_size: 393216,
+    data_size: 1228800,
+    vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0006_0000],
+    entropy_tag_offset: 380492,
+    entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    extra_boot_value: Some((380719, *b"ECAP\x08\x00\x00\x00")),
+    boot_table: Some((380492, 561)),
+    version: "RTKit-3255.160.4.release",
+};
+
 fn normalize_boot_entropy(layout: &Layout, text: &mut [u8]) -> bool {
-    let tag = layout.entropy_tag_offset;
     if text.len() != layout.text_size as usize {
         return false;
     }
-    let Some(end) = tag.checked_add(16) else { return false; };
-    let Some(entropy) = text.get_mut(tag..end) else { return false; };
-    if entropy[..8] != layout.entropy_tag {
-        return false;
+    if let Some((offset, count)) = layout.boot_table {
+        let Some(header) = text.get(0x22c..0x234) else {
+            return false;
+        };
+        if header[..4] != offset.to_le_bytes() || header[4..] != count.to_le_bytes() {
+            return false;
+        }
+        let Some(end) = (offset as usize).checked_add(count as usize) else {
+            return false;
+        };
+        if text.get(offset as usize..end).is_none() {
+            return false;
+        }
     }
-    entropy[8..].fill(0);
+    let fields = [
+        Some((layout.entropy_tag_offset, layout.entropy_tag)),
+        layout.extra_boot_value,
+    ];
+    // Validate every field before touching even the first boot value.
+    for (offset, tag) in fields.into_iter().flatten() {
+        let Some(end) = offset.checked_add(16) else {
+            return false;
+        };
+        let Some(field) = text.get(offset..end) else {
+            return false;
+        };
+        if field[..8] != tag {
+            return false;
+        }
+        if let Some((base, count)) = layout.boot_table {
+            if offset < base as usize || end > base as usize + count as usize {
+                return false;
+            }
+        }
+    }
+    if let Some((other, _)) = layout.extra_boot_value {
+        if other < layout.entropy_tag_offset + 16 && layout.entropy_tag_offset < other + 16 {
+            return false;
+        }
+    }
+    for (offset, _) in fields.into_iter().flatten() {
+        text[offset + 8..offset + 16].fill(0);
+    }
     true
 }
 
@@ -167,6 +236,14 @@ pub(crate) struct Firmware {
 }
 
 impl Firmware {
+    pub(crate) fn profile(&self) -> super::m3_profile::Profile {
+        if core::ptr::eq(self.layout, &T8122_LAYOUT_26) {
+            super::m3_profile::Profile::Extended
+        } else {
+            super::m3_profile::Profile::Legacy
+        }
+    }
+
     pub(crate) const fn version(&self) -> &'static str {
         self.layout.version
     }
@@ -175,6 +252,51 @@ impl Firmware {
         resources.regions[4].size == layout.text_size
             && resources.regions[5].size == layout.data_size
             && resources.firmware_vas == layout.vas
+    }
+}
+
+/// Only the admitted extended image has this host-owned boot descriptor slot.
+fn loader_span(profile: super::m3_profile::Profile, data_bytes: u64, input_bytes: usize)
+    -> Option<core::ops::Range<usize>> {
+    if profile != super::m3_profile::Profile::Extended || input_bytes != 53 * 40
+        || data_bytes != T8122_LAYOUT_26.data_size { return None; }
+    let start: usize = 0x12_28e0;
+    let end = start.checked_add(input_bytes)?;
+    if end as u64 > data_bytes { return None; }
+    Some(start..end)
+}
+
+#[cfg(not(test))]
+impl Firmware {
+    /// Call after RTKit application startup and before exposing the InitData root.
+    /// The protocol grants the host this slot only during that boot interval.
+    pub(crate) fn publish_io_table(
+        &self,
+        pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
+        descriptors: &[u8],
+    ) -> kernel::error::Result {
+        use kernel::{c_str, io::mem::{Mem, MemFlag}, prelude::*};
+        let data = self.resources.regions[5];
+        let span = loader_span(self.profile(), data.size, descriptors.len()).ok_or(EINVAL)?;
+        let node = pdev.as_ref().of_node().ok_or(ENODEV)?;
+        let resource = agx_resources::reserved_resource(&node, c_str!("fw-data"))?;
+        if resource.start() != data.base || resource.size() != data.size { return Err(EINVAL); }
+        // SAFETY: This exact admitted no-map reservation remains firmware-owned.
+        // Only its bounded host boot slot is accessed, before root publication.
+        let mapping = unsafe { Mem::try_new(resource, MemFlag::WC.into()) }?;
+        if span.end > mapping.size() { return Err(EINVAL); }
+        // Validate the whole slot before changing any byte. Unexpected prior
+        // contents indicate a protocol/ownership mismatch, not a patchable image.
+        for offset in span.clone() {
+            // SAFETY: span is bounded by the retained mapping above.
+            if unsafe { mapping.ptr().add(offset).read_volatile() } != 0 { return Err(EBUSY); }
+        }
+        for (offset, byte) in span.zip(descriptors.iter().copied()) {
+            // SAFETY: same bounded host slot, exclusive under the boot protocol.
+            unsafe { mapping.ptr().add(offset).write_volatile(byte) };
+        }
+        crate::m3::agx_memory::publish();
+        Ok(())
     }
 }
 
@@ -191,7 +313,10 @@ pub(crate) fn identify_loaded(
         prelude::*,
     };
 
-    let layout = soc.firmware.ok_or(ENODEV)?;
+    let extended=crate::m3::t8122_start::is_t8122(soc)
+        && crate::m3::t8122_admission::loaded_profile(pdev)?==super::m3_profile::Profile::Extended;
+    if extended && experiment.is_some() {return Err(EINVAL);}
+    let layout = if extended {&T8122_LAYOUT_26} else {soc.firmware.ok_or(ENODEV)?};
     if !Firmware::matching_layout(layout, &resources) {
         dev_err!(pdev.as_ref(), "M3 {}: unsupported firmware segment layout\n", soc.gpu_name);
         return Err(ENODEV);
@@ -215,6 +340,7 @@ pub(crate) fn identify_loaded(
     // The T8122 start experiment identifies the same image, with its own InitData version.
     let images = match experiment {
         Some(_) => &KNOWN_IMAGES_T8122_EXPERIMENT[..],
+        None if extended => &T8122_IMAGES_26[..],
         None => soc.images,
     };
     let image = crate::m3::m3_board::identify(pdev.as_ref(), bytes, &digest, images).ok_or(ENODEV)?;
@@ -393,4 +519,75 @@ mod tests {
         assert!(!normalize_boot_entropy(&layout, &mut text));
         assert_eq!(text, vec![0xa5; 15]);
     }
+
+    fn image_26() -> Vec<u8> {
+        let mut image = vec![0x5a; 393216];
+        image[0x22c..0x230].copy_from_slice(&380492u32.to_le_bytes());
+        image[0x230..0x234].copy_from_slice(&561u32.to_le_bytes());
+        image[380492..380500].copy_from_slice(b"GKTS\x08\x00\x00\x00");
+        image[380719..380727].copy_from_slice(b"ECAP\x08\x00\x00\x00");
+        image
+    }
+
+    #[test]
+    fn newer_image_masks_only_both_boot_values() {
+        let mut image = image_26();
+        let before = image.clone();
+        assert!(normalize_boot_entropy(&T8122_LAYOUT_26, &mut image));
+        for index in 0..image.len() {
+            let expected = if (380500..380508).contains(&index) || (380727..380735).contains(&index)
+            {
+                0
+            } else {
+                before[index]
+            };
+            assert_eq!(image[index], expected, "byte {index}");
+        }
+    }
+
+    #[test]
+    fn invalid_second_field_or_table_does_not_mask_first_value() {
+        for index in [0x22c, 0x230, 380492, 380496, 380719, 380723] {
+            let mut image = image_26();
+            image[index] ^= 1;
+            let before = image.clone();
+            assert!(!normalize_boot_entropy(&T8122_LAYOUT_26, &mut image));
+            assert_eq!(image, before);
+        }
+        let mut image = image_26();
+        image.pop();
+        let before = image.clone();
+        assert!(!normalize_boot_entropy(&T8122_LAYOUT_26, &mut image));
+        assert_eq!(image, before);
+    }
+
+    #[test]
+    fn extended_record_cannot_replace_legacy_identity() {
+        let newer = &T8122_IMAGES_26[0];
+        let digest = newer.stkg_sha256.unwrap();
+        assert!(newer.accepts_runtime(None, &digest));
+        assert_eq!(newer.initdata_magic, Some(0x0c89_c357_8392_04b8));
+        for index in 0..digest.len() {
+            let mut wrong = digest;
+            wrong[index] ^= 1;
+            assert!(!newer.accepts_runtime(None, &wrong));
+        }
+        assert!(!KNOWN_IMAGES_T8122[0].accepts_runtime(None, &digest));
+        assert!(!newer.accepts_runtime(KNOWN_IMAGES_T8122[0].uuid, &[0; 32]));
+    }
+
+    #[test]
+    fn loader_slot_is_exact_bounded_and_profile_specific() {
+        use super::super::m3_profile::Profile;
+        let length = 53 * 40;
+        assert_eq!(loader_span(Profile::Extended, 0x12c000, length), Some(0x1228e0..0x123128));
+        for size in [0, 0x123127, 0x12bfff, 0x12c001, u64::MAX] {
+            assert!(loader_span(Profile::Extended, size, length).is_none());
+        }
+        for bytes in [0, length - 1, length + 1, usize::MAX] {
+            assert!(loader_span(Profile::Extended, 0x12c000, bytes).is_none());
+        }
+        assert!(loader_span(Profile::Legacy, 0x12c000, length).is_none());
+    }
+
 }

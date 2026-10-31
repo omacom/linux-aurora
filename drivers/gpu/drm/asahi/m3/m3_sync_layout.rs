@@ -91,3 +91,58 @@ impl Barrier {
         Ok(())
     }
 }
+
+impl InitBufferManager {
+    /// The extended rebuild path requires a zero staged-block count. Appending
+    /// already-staged blocks would leave a previous hardware descriptor live.
+    pub(crate) fn encode_extended(&self, output: &mut [u8]) -> Result<(), Error> {
+        if self.context >= 64 || self.slot >= 32 { return Err(Error::Address); }
+        Self { context: self.context, slot: self.slot, block_count: 0,
+            manager: self.manager, stamp: self.stamp }.encode(output)
+    }
+}
+
+impl Barrier {
+    pub(crate) const EXTENDED_SIZE: usize = 0x40;
+
+    pub(crate) fn encode_extended(&self, output: &mut [u8]) -> Result<(), Error> {
+        if self.event >= 128 || self.wait_value == 0 || self.self_value == 0 {
+            return Err(Error::Address);
+        }
+        let bytes = output.get_mut(..Self::EXTENDED_SIZE).ok_or(Error::Size)?;
+        bytes.fill(0);
+        u32_at(bytes, 0, 4);
+        address_at(bytes, 4, self.stamp);
+        address_at(bytes, 12, self.stamp);
+        u32_at(bytes, 0x14, self.wait_value);
+        u32_at(bytes, 0x20, self.event);
+        u32_at(bytes, 0x24, self.self_value);
+        if matches!(self.dependency, Dependency::PreviousPass) { u32_at(bytes, 0x3c, 1); }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    #[test] fn full_rebuild_never_uses_the_legacy_staged_count() {
+        let mut bytes = [0xa5; INIT_BM_SIZE];
+        InitBufferManager { context: 3, slot: 7, block_count: 2048,
+            manager: FirmwareVa::new(0xffff_fc24_0010_0000).unwrap(), stamp: 0x100 }
+            .encode_extended(&mut bytes).unwrap();
+        assert_eq!(&bytes[12..20], &[0; 8]);
+    }
+    #[test] fn extended_dependencies_use_their_native_tail_and_preserve_trailing_storage() {
+        for previous in [false, true] {
+            let mut bytes = [0xa5; Barrier::EXTENDED_SIZE + 8];
+            Barrier { stamp: FirmwareVa::new(0xffff_fc24_0010_0000).unwrap(), wait_value: 0x100,
+                event: 2, self_value: 0x200, uuid: 9,
+                dependency: if previous { Dependency::PreviousPass } else { Dependency::TilerToFragment } }
+                .encode_extended(&mut bytes).unwrap();
+            assert_eq!(&bytes[0x18..0x20], &[0; 8]);
+            assert_eq!(&bytes[0x20..0x24], &[2, 0, 0, 0]);
+            assert_eq!(u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap()), previous.into());
+            assert_eq!(&bytes[Barrier::EXTENDED_SIZE..], &[0xa5; 8]);
+        }
+    }
+}
