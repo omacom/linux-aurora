@@ -246,6 +246,10 @@ pub(crate) struct Guard<F: ListFile = StoreFile> {
     existed: KVec<Key>,
     refused: usize,
     first_setup: FirstSetup,
+    /// Whether a refusal is reported to the diagnostics. Only the live guard does:
+    /// guards that tests build over in-memory files must not leave refusals in
+    /// diag/xart_guard_refusals and diag/matching.
+    report: bool,
 }
 
 impl Guard {
@@ -253,11 +257,13 @@ impl Guard {
     /// holds now. Never fails: a list that cannot be read protects every
     /// existing record.
     pub(crate) fn open(level: u8, existing: KVec<Key>) -> Guard {
-        Guard::with_file(
+        let mut guard = Guard::with_file(
             level,
             existing,
             StoreFile::open_host(OWNED_PATH).map(|(file, _created)| file),
-        )
+        );
+        guard.report = true;
+        guard
     }
 }
 
@@ -272,6 +278,7 @@ impl<F: ListFile> Guard<F> {
             existed: existing,
             refused: 0,
             first_setup: FirstSetup::Closed,
+            report: false,
         };
         // A list created this boot (or by a crashed one) is only safe to adopt
         // into once its name is durable: fsync() of the file alone does not
@@ -406,6 +413,13 @@ impl<F: ListFile> Guard<F> {
         Ok(())
     }
 
+    /// Tells the diagnostics about a refusal, if this guard reports.
+    fn report_refusal(&self) {
+        if self.report {
+            crate::diag::xart_guard_refused();
+        }
+    }
+
     /// Checks one enclave write (`write`) or delete before it reaches the
     /// gigalocker. An error refuses the request.
     pub(crate) fn check(&mut self, key: &Key, write: bool) -> Result<()> {
@@ -415,7 +429,7 @@ impl<F: ListFile> Guard<F> {
             Verdict::Allow => Ok(()),
             Verdict::Adopt if !write => Ok(()),
             Verdict::Adopt => self.adopt(key).inspect_err(|e| {
-                crate::diag::xart_guard_refused();
+                self.report_refusal();
                 pr_warn!(
                     "xART guard: could not list a new kind-{} record as Linux's ({:?}); refusing to write it\n",
                     key.kind,
@@ -431,7 +445,7 @@ impl<F: ListFile> Guard<F> {
                 Ok(())
             }
             Verdict::Refuse => {
-                crate::diag::xart_guard_refused();
+                self.report_refusal();
                 self.refused += 1;
                 if self.refused <= LOGGED_REFUSALS {
                     let action = if write { "rewrite" } else { "delete" };
@@ -647,6 +661,21 @@ mod tests {
         assert_eq!(guard.check(&foreign, false), Err(EPERM));
         // A refusal lists nothing.
         assert_eq!(bytes.borrow().len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_guard_over_a_test_file_does_not_report_to_the_diagnostics() -> Result<()> {
+        // A refusal by the live guard blocks matching in diag/matching. A guard the
+        // suites build over an in-memory file must not leave one there: on a kernel
+        // built with the tests it would block a Mac whose guard refused nothing.
+        let bytes = RefCell::new(KVec::new());
+        let foreign = session(1);
+        let mut guard = Guard::with_file(1, keys(&[foreign])?, Ok(mem(&bytes)));
+        let before = crate::diag::refusals();
+        assert_eq!(guard.check(&foreign, true), Err(EPERM));
+        assert_eq!(guard.check(&foreign, false), Err(EPERM));
+        assert_eq!(crate::diag::refusals(), before);
         Ok(())
     }
 

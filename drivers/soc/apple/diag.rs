@@ -200,6 +200,12 @@ fn matching() -> crate::xart_guard::Matching {
     .matching()
 }
 
+/// How many refusals have been reported since registration (for the KUnit suites).
+#[cfg(CONFIG_APPLE_SEP_KUNIT_TEST)]
+pub(crate) fn refusals() -> u32 {
+    REFUSALS.load(Relaxed)
+}
+
 /// The xART guard refused one of the enclave's writes or deletes.
 pub(crate) fn xart_guard_refused() {
     REFUSALS.fetch_add(1, Relaxed);
