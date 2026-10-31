@@ -7,4 +7,5 @@
 typedef __u8 u8;
 typedef __u32 u32;
 typedef __u64 u64;
+typedef __u64 dma_addr_t;
 #endif
