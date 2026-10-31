@@ -295,6 +295,7 @@ int avd_pm_backend_resume(struct avd_dev *avd)
 
 int avd_pm_recover(struct avd_dev *avd)
 {
+	bool suspended;
 	int ret;
 
 	/*
@@ -302,14 +303,17 @@ int avd_pm_recover(struct avd_dev *avd)
 	 * leave a step-by-step trail in the log before each step, so a failure
 	 * that takes the machine down still shows how far recovery got.
 	 */
-	dev_warn(avd->dev, "recover: start (dart %s, runtime %s, irq %s)\n",
-		 avd->pm.dart_active ? "on" : "off",
-		 pm_runtime_suspended(avd->dev) ? "suspended" : "active",
-		 avd->pm.irq_enabled ? "on" : "off");
-	if (!avd->pm.dart_active)
+	if (!avd->pm.dart_active) {
+		dev_err(avd->dev, "recover: decoder DART inactive, not touching it\n");
 		return -EHOSTDOWN;
+	}
+	/* The PM KUnit fixture has no struct device. */
+	suspended = avd->dev && pm_runtime_suspended(avd->dev);
+	dev_warn(avd->dev, "recover: start (runtime %s, irq %s)\n",
+		 suspended ? "suspended" : "active",
+		 avd->pm.irq_enabled ? "on" : "off");
 	/* Every caller holds a runtime PM reference; anything else is a bug. */
-	if (WARN_ONCE(pm_runtime_suspended(avd->dev),
+	if (WARN_ONCE(suspended,
 		      "avd: recovery with the decoder powered off\n"))
 		return -EHOSTDOWN;
 	avd_pm_disable_irq(avd);
