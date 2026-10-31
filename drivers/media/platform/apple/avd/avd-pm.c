@@ -16,19 +16,49 @@
 
 void avd_pm_enable_irq(struct avd_dev *avd)
 {
+	unsigned long flags;
+
 	if (avd->pm.irq >= 0 && !avd->pm.irq_enabled) {
+		spin_lock_irqsave(&avd->pm.irq_lock, flags);
+		avd->pm.hw_on = true;
+		spin_unlock_irqrestore(&avd->pm.irq_lock, flags);
 		enable_irq(avd->pm.irq);
 		avd->pm.irq_enabled = true;
 	}
 }
 
+/*
+ * Callers may hold queue_mutex, which the threaded handler takes first, so
+ * never wait for the handler here (disable_irq() would deadlock). Instead
+ * close hardware access under irq_lock: a handler already touching the
+ * decoder finishes before this returns, and any later one sees hw_on clear
+ * or a new irq_gen and leaves the hardware alone.
+ */
 static void avd_pm_disable_irq(struct avd_dev *avd)
 {
+	unsigned long flags;
+
 	if (avd->pm.irq >= 0 && avd->pm.irq_enabled) {
-		/* Wait out threaded handlers before the domain can disappear. */
-		disable_irq(avd->pm.irq);
+		spin_lock_irqsave(&avd->pm.irq_lock, flags);
+		avd->pm.hw_on = false;
+		avd->pm.irq_gen++;
+		spin_unlock_irqrestore(&avd->pm.irq_lock, flags);
+		disable_irq_nosync(avd->pm.irq);
 		avd->pm.irq_enabled = false;
 	}
+}
+
+/* Run the backend's interrupt handler only against a live firmware instance. */
+irqreturn_t avd_pm_irq(struct avd_dev *avd, unsigned int gen)
+{
+	irqreturn_t ret = IRQ_HANDLED;
+	unsigned long flags;
+
+	spin_lock_irqsave(&avd->pm.irq_lock, flags);
+	if (avd->pm.hw_on && gen == avd->pm.irq_gen)
+		ret = avd->backend->irq(avd);
+	spin_unlock_irqrestore(&avd->pm.irq_lock, flags);
+	return ret;
 }
 
 struct avd_dma_release {
@@ -164,6 +194,9 @@ void avd_pm_init(struct avd_dev *avd, const struct avd_backend_ops *backend,
 	avd->pm.dart_active = false;
 	avd->pm.irq = -1;
 	avd->pm.irq_enabled = false;
+	spin_lock_init(&avd->pm.irq_lock);
+	avd->pm.hw_on = false;
+	avd->pm.irq_gen = 0;
 	avd->backend = backend;
 	avd->pm.queue = queue;
 }
@@ -218,6 +251,9 @@ void avd_pm_disable(struct avd_dev *avd)
 	pm_runtime_disable(avd->dev);
 	/* Also close the host IRQ if the final hardware transition failed. */
 	avd_pm_disable_irq(avd);
+	/* No queue_mutex is held here: let a woken handler thread finish. */
+	if (avd->pm.irq >= 0)
+		synchronize_irq(avd->pm.irq);
 	pm_runtime_dont_use_autosuspend(avd->dev);
 	/* Resume may have kicked the already-stopped queue. */
 	cancel_delayed_work_sync(&avd->queue_work);

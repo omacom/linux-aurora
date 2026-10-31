@@ -31,6 +31,15 @@ struct avd_pm {
 	bool dart_active;
 	int irq;
 	bool irq_enabled;
+	/*
+	 * irq_lock guards hw_on and irq_gen. The threaded handler touches the
+	 * decoder only under irq_lock with hw_on set and an unchanged irq_gen,
+	 * so turning the IRQ off never has to wait for the handler thread
+	 * (which may itself be waiting for queue_mutex).
+	 */
+	spinlock_t irq_lock;
+	bool hw_on;
+	unsigned int irq_gen;
 	void __iomem *piodma;
 	phys_addr_t sram_phys;
 	wait_queue_head_t idle_wait;
@@ -57,6 +66,7 @@ int avd_pm_power_off(struct avd_dev *avd);
 int avd_pm_recover(struct avd_dev *avd);
 /* After recovery has invalidated every previously firmware-owned slot. */
 void avd_pm_enable_irq(struct avd_dev *avd);
+irqreturn_t avd_pm_irq(struct avd_dev *avd, unsigned int gen);
 void avd_pm_drain_begin(struct avd_dev *avd);
 void avd_pm_drain_end(struct avd_dev *avd);
 void avd_pm_queue_changed(struct avd_dev *avd);

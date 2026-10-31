@@ -113,11 +113,12 @@ int avd_submit_job(struct avd_ctx *ctx)
 static irqreturn_t avd_irq_handler(int irq, void *data)
 {
 	struct avd_dev *avd = data;
-
+	/* An interrupt raised before a reset or power-off belongs to that instance. */
+	unsigned int gen = READ_ONCE(avd->pm.irq_gen);
 	irqreturn_t ret;
 
 	mutex_lock(&avd->queue_mutex);
-	ret = avd->backend->irq(avd);
+	ret = avd_pm_irq(avd, gen);
 	mutex_unlock(&avd->queue_mutex);
 	return ret;
 }
