@@ -57,15 +57,18 @@ struct avd_h264_run {
 	u32 slice_data_off;
 };
 
-/* state */
-struct avd_h264_ctx {
-	bool monochrome;
-	struct avd_h264_reflists {
-		struct v4l2_h264_reference p[V4L2_H264_REF_LIST_LEN];
-		struct v4l2_h264_reference b0[V4L2_H264_REF_LIST_LEN];
-		struct v4l2_h264_reference b1[V4L2_H264_REF_LIST_LEN];
-	} reflists;
+/*
+ * One bank per picture in flight. With the queued transport two pictures of
+ * a stream overlap (VP of one, PP of the other), so everything the hardware
+ * reads or writes while decoding a picture, and the CPU copies of its slices,
+ * exists once per bank. The legacy transport uses a single bank.
+ */
+#define AVD_H264_BANKS	2
 
+struct avd_h264_bank {
+	bool monochrome;
+	bool busy;		/* a picture of this bank is not retired yet */
+	bool submitted;		/* ... and its last slice went to the hardware */
 	struct avd_buf *slices;
 	struct avd_buf *active_slice;
 	size_t slice_num;
@@ -74,6 +77,7 @@ struct avd_h264_ctx {
 	size_t slice_bytes;
 
 	struct avd_h264_bufs {
+		/* VP to PP instruction FIFO for pictures of this bank */
 		struct avd_buf inst;
 		struct avd_buf pipe_state;
 		struct avd_buf above_info;
@@ -82,6 +86,20 @@ struct avd_h264_ctx {
 		struct avd_buf ip_above;
 		struct avd_buf mv_above_info;
 	} bufs;
+};
+
+/* state */
+struct avd_h264_ctx {
+	struct avd_h264_reflists {
+		struct v4l2_h264_reference p[V4L2_H264_REF_LIST_LEN];
+		struct v4l2_h264_reference b0[V4L2_H264_REF_LIST_LEN];
+		struct v4l2_h264_reference b1[V4L2_H264_REF_LIST_LEN];
+	} reflists;
+
+	unsigned int nbanks;
+	struct avd_h264_bank bank[AVD_H264_BANKS];
+	/* bank of the picture being built */
+	struct avd_h264_bank *b;
 };
 
 /* ffmpeg submits wrong timestamp, use first_mb_in_slice as a workaround */
@@ -118,7 +136,7 @@ static void stream_refs(struct avd_ctx *ctx, struct avd_h264_run *run)
 	dst = vb2_to_avd_decoded_buf(&run->base.bufs.dst->vb2_buf);
 
 	push(0, "");
-	pusha(h264_ctx->bufs.mv_above_info.addr, "mv_above_info", 7);
+	pusha(h264_ctx->b->bufs.mv_above_info.addr, "mv_above_info", 7);
 	pusha(run->addresses.mv_color, "mv_color", 0);
 
 	push(0, "");
@@ -272,7 +290,7 @@ static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 	if (avd->variant->revision == 3)
 		push(0, "zero");
 
-	pusha(h264_ctx->bufs.above_info.addr, "hdr_9c_pps_tile_addr_lsb8", 0);
+	pusha(h264_ctx->b->bufs.above_info.addr, "hdr_9c_pps_tile_addr_lsb8", 0);
 
 	push(0, "");
 	push(0, "");
@@ -280,11 +298,11 @@ static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 	if (avd->variant->revision == 3)
 		push(0, "zero");
 	else if (!(avd->variant->quirks & AVD_QUIRK_NO_PIPE_STATE))
-		pusha(h264_ctx->bufs.pipe_state.addr, "pipe_state", 0);
+		pusha(h264_ctx->b->bufs.pipe_state.addr, "pipe_state", 0);
 
-	pusha(h264_ctx->bufs.ip_above.addr, "ip_above", 1);
-	pusha(h264_ctx->bufs.lf_above.addr, "lf_above", 2);
-	pusha(h264_ctx->bufs.lf_above_info.addr, "lf_above_info", 3);
+	pusha(h264_ctx->b->bufs.ip_above.addr, "ip_above", 1);
+	pusha(h264_ctx->b->bufs.lf_above.addr, "lf_above", 2);
+	pusha(h264_ctx->b->bufs.lf_above_info.addr, "lf_above_info", 3);
 	push(0, "");
 
 	push_comp(ctx, run->base.comp_out, ctx->comp.offsets);
@@ -437,12 +455,12 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 	const struct v4l2_ctrl_h264_sps *sps = run->sps;
 	const struct v4l2_ctrl_h264_slice_params *sl = run->slice_params;
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
-	u32 payload_len = h264_ctx->active_slice->size;
+	u32 payload_len = h264_ctx->b->active_slice->size;
 	bool en_mode = (pps->flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE) ==
 		       0;
 	u32 off = run->slice_data_off;
 
-	dma_addr_t slc_a84 = h264_ctx->active_slice->addr + off;
+	dma_addr_t slc_a84 = h264_ctx->b->active_slice->addr + off;
 
 	push(AVD_OP_CODED_DATA |
 		     AVD_OP_CODED_DATA_BIT_OFF(
@@ -538,10 +556,9 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 	}
 }
 
-static int avd_h264_alloc_bufs(struct avd_ctx *ctx)
+static int avd_h264_alloc_bufs(struct avd_ctx *ctx, struct avd_h264_bank *bank)
 {
 	struct avd_dev *dev = ctx->dev;
-	struct avd_h264_ctx *h264_ctx = ctx->priv;
 	int ret, w, bit_depth, mb;
 	w = fmt_width(ctx);
 	bit_depth = (ctx->image_fmt == AVD_IMG_FMT_420_10BIT ||
@@ -549,13 +566,13 @@ static int avd_h264_alloc_bufs(struct avd_ctx *ctx)
 			    10 :
 			    8;
 
-	ret = avd_buf_alloc(dev, &h264_ctx->bufs.inst, fifo_size());
+	ret = avd_buf_alloc(dev, &bank->bufs.inst, fifo_size());
 	if (ret) {
 		return ret;
 	}
 
 	if (!(dev->variant->quirks & AVD_QUIRK_NO_PIPE_STATE)) {
-		ret = avd_buf_alloc(dev, &h264_ctx->bufs.pipe_state, 0x200);
+		ret = avd_buf_alloc(dev, &bank->bufs.pipe_state, 0x200);
 		if (ret) {
 			return ret;
 		}
@@ -563,24 +580,24 @@ static int avd_h264_alloc_bufs(struct avd_ctx *ctx)
 
 	mb = DIV_ROUND_UP(w, 16);
 
-	ret = avd_buf_alloc(dev, &h264_ctx->bufs.above_info, mb * 20);
+	ret = avd_buf_alloc(dev, &bank->bufs.above_info, mb * 20);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(dev, &h264_ctx->bufs.ip_above, bit_depth * 4 * mb);
+	ret = avd_buf_alloc(dev, &bank->bufs.ip_above, bit_depth * 4 * mb);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(dev, &h264_ctx->bufs.lf_above,
+	ret = avd_buf_alloc(dev, &bank->bufs.lf_above,
 			    bit_depth * 4 * 4 * mb);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(dev, &h264_ctx->bufs.lf_above_info, 32 * mb);
+	ret = avd_buf_alloc(dev, &bank->bufs.lf_above_info, 32 * mb);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(dev, &h264_ctx->bufs.mv_above_info, 32 * mb);
+	ret = avd_buf_alloc(dev, &bank->bufs.mv_above_info, 32 * mb);
 	if (ret)
 		return ret;
 
@@ -620,35 +637,46 @@ static int avd_h264_validate_sps(struct avd_ctx *ctx,
 	return 0;
 }
 
-/* Free the slices held for the current picture. */
+/* Free the slices held for one bank's picture. */
+static void avd_h264_drop_bank_slices(struct avd_ctx *ctx, struct avd_h264_bank *bank)
+{
+	for (size_t i = 0; i < bank->slice_num; i++)
+		avd_buf_free(ctx->dev, &bank->slices[i]);
+	bank->slice_num = 0;
+	bank->slice_bytes = 0;
+}
+
+/* Free the slices held for the picture being built. */
 static void avd_h264_drop_slices(struct avd_ctx *ctx)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
 
-	for (size_t i = 0; i < h264_ctx->slice_num; i++)
-		avd_buf_free(ctx->dev, &h264_ctx->slices[i]);
-	h264_ctx->slice_num = 0;
-	h264_ctx->slice_bytes = 0;
+	avd_h264_drop_bank_slices(ctx, h264_ctx->b);
 }
 
 static void avd_h264_stop(struct avd_ctx *ctx)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
 	struct avd_dev *dev = ctx->dev;
+	unsigned int i;
 
+	ctx->max_frames = 1;
 	if (!h264_ctx)
 		return;
 
-	avd_buf_free(dev, &h264_ctx->bufs.pipe_state);
-	avd_buf_free(dev, &h264_ctx->bufs.inst);
-	avd_buf_free(dev, &h264_ctx->bufs.above_info);
-	avd_buf_free(dev, &h264_ctx->bufs.lf_above_info);
-	avd_buf_free(dev, &h264_ctx->bufs.lf_above);
-	avd_buf_free(dev, &h264_ctx->bufs.ip_above);
-	avd_buf_free(dev, &h264_ctx->bufs.mv_above_info);
+	for (i = 0; i < AVD_H264_BANKS; i++) {
+		struct avd_h264_bank *bank = &h264_ctx->bank[i];
 
-	avd_h264_drop_slices(ctx);
-	kfree(h264_ctx->slices);
+		avd_buf_free(dev, &bank->bufs.pipe_state);
+		avd_buf_free(dev, &bank->bufs.inst);
+		avd_buf_free(dev, &bank->bufs.above_info);
+		avd_buf_free(dev, &bank->bufs.lf_above_info);
+		avd_buf_free(dev, &bank->bufs.lf_above);
+		avd_buf_free(dev, &bank->bufs.ip_above);
+		avd_buf_free(dev, &bank->bufs.mv_above_info);
+		avd_h264_drop_bank_slices(ctx, bank);
+		kfree(bank->slices);
+	}
 
 	kfree(h264_ctx);
 	ctx->priv = NULL;
@@ -673,20 +701,28 @@ static int avd_h264_start(struct avd_ctx *ctx)
 		return -ENOMEM;
 
 	ctx->priv = h264_ctx;
+	/* Overlap pictures only where the firmware chains VP to PP itself. */
+	h264_ctx->nbanks = avd_backend_is_qfw(ctx->dev) ? AVD_H264_BANKS : 1;
+	h264_ctx->b = &h264_ctx->bank[0];
 
-	/* assume one slice per row */
-	h264_ctx->alloc_slice_num =
-		ctrl->p_new.p_h264_sps->pic_height_in_map_units_minus1 + 1;
-	h264_ctx->slices = kcalloc(h264_ctx->alloc_slice_num,
-				   sizeof(*h264_ctx->slices), GFP_KERNEL);
-	if (!h264_ctx->slices) {
-		ret = -ENOMEM;
-		goto err_free_ctx;
+	for (unsigned int i = 0; i < h264_ctx->nbanks; i++) {
+		struct avd_h264_bank *bank = &h264_ctx->bank[i];
+
+		/* assume one slice per row */
+		bank->alloc_slice_num =
+			ctrl->p_new.p_h264_sps->pic_height_in_map_units_minus1 + 1;
+		bank->slices = kcalloc(bank->alloc_slice_num,
+				       sizeof(*bank->slices), GFP_KERNEL);
+		if (!bank->slices) {
+			ret = -ENOMEM;
+			goto err_free_ctx;
+		}
+
+		ret = avd_h264_alloc_bufs(ctx, bank);
+		if (ret)
+			goto err_free_ctx;
 	}
-
-	ret = avd_h264_alloc_bufs(ctx);
-	if (ret)
-		goto err_free_ctx;
+	ctx->max_frames = h264_ctx->nbanks;
 
 	return 0;
 
@@ -732,22 +768,22 @@ static int avd_h264_realloc_slices(struct avd_ctx *ctx, size_t max_slices)
 	void *tmp;
 	size_t alloc_slice_num;
 
-	tmp = h264_ctx->slices;
+	tmp = h264_ctx->b->slices;
 	/* grow by half, and by at least one for a one-row picture */
-	alloc_slice_num = h264_ctx->alloc_slice_num +
-			  max_t(size_t, h264_ctx->alloc_slice_num / 2, 1);
+	alloc_slice_num = h264_ctx->b->alloc_slice_num +
+			  max_t(size_t, h264_ctx->b->alloc_slice_num / 2, 1);
 	alloc_slice_num = min(alloc_slice_num, max_slices);
-	h264_ctx->slices = kcalloc(alloc_slice_num, sizeof(*h264_ctx->slices),
+	h264_ctx->b->slices = kcalloc(alloc_slice_num, sizeof(*h264_ctx->b->slices),
 				   GFP_KERNEL);
-	if (!h264_ctx->slices) {
+	if (!h264_ctx->b->slices) {
 		/* make deallocating a little easier */
-		h264_ctx->slices = tmp;
+		h264_ctx->b->slices = tmp;
 		return -ENOMEM;
 	}
 
-	h264_ctx->alloc_slice_num = alloc_slice_num;
-	memcpy(h264_ctx->slices, tmp,
-	       sizeof(*h264_ctx->slices) * h264_ctx->slice_num);
+	h264_ctx->b->alloc_slice_num = alloc_slice_num;
+	memcpy(h264_ctx->b->slices, tmp,
+	       sizeof(*h264_ctx->b->slices) * h264_ctx->b->slice_num);
 	kfree(tmp);
 
 	/* a slice that arrives before the frame's header has no job table yet */
@@ -853,6 +889,33 @@ VISIBLE_IF_KUNIT bool avd_h264_slice_fits(const struct v4l2_ctrl_h264_sps *sps,
 	       avd_h264_slice_budget(decoded_size);
 }
 
+/*
+ * Start a new picture in a bank no unretired picture uses, and remember the
+ * bank in its CAPTURE buffer so retirement frees the right one.
+ */
+static int avd_h264_pick_bank(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
+{
+	struct avd_h264_ctx *h264_ctx = ctx->priv;
+	struct avd_h264_bank *bank = NULL;
+	unsigned int i;
+
+	/* A picture whose last slice never came: start over in its bank. */
+	if (h264_ctx->b->busy && !h264_ctx->b->submitted)
+		bank = h264_ctx->b;
+	for (i = 0; !bank && i < h264_ctx->nbanks; i++)
+		if (!h264_ctx->bank[i].busy)
+			bank = &h264_ctx->bank[i];
+	if (!bank)
+		return -EBUSY;
+	avd_h264_drop_bank_slices(ctx, bank);
+	bank->busy = true;
+	bank->submitted = false;
+	h264_ctx->b = bank;
+	/* 0 means no bank, so a stale or missing value never frees one. */
+	vb2_to_avd_decoded_buf(&dst->vb2_buf)->h264_bank = bank - h264_ctx->bank + 1;
+	return 0;
+}
+
 static int avd_h264_run(struct avd_ctx *ctx)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
@@ -861,6 +924,14 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	int ret;
 
 	avd_h264_run_preamble(ctx, &run);
+
+	if (run.slice_params && is_new_frame(run.slice_params)) {
+		ret = avd_h264_pick_bank(ctx, run.base.bufs.dst);
+		if (ret) {
+			avd_run_postamble(ctx, &run.base);
+			return ret;
+		}
+	}
 
 	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	u32 payload_len = vb2_get_plane_payload(&src->vb2_buf, 0);
@@ -875,8 +946,8 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		return -EINVAL;
 	}
 
-	if (!avd_h264_slice_fits(run.sps, h264_ctx->slice_num,
-				 h264_ctx->slice_bytes, payload_len,
+	if (!avd_h264_slice_fits(run.sps, h264_ctx->b->slice_num,
+				 h264_ctx->b->slice_bytes, payload_len,
 				 ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].sizeimage)) {
 		dev_err_ratelimited(ctx->dev->dev,
 				    "too many slices for one picture, dropping it\n");
@@ -886,20 +957,20 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		goto err_free_jobs;
 	}
 
-	if (h264_ctx->slice_num >= h264_ctx->alloc_slice_num) {
+	if (h264_ctx->b->slice_num >= h264_ctx->b->alloc_slice_num) {
 		ret = avd_h264_realloc_slices(ctx, avd_h264_max_slices(run.sps));
 		if (ret)
 			goto err_free_jobs;
 	}
 
-	h264_ctx->active_slice = &h264_ctx->slices[h264_ctx->slice_num];
-	ret = avd_buf_alloc(ctx->dev, h264_ctx->active_slice, payload_len);
+	h264_ctx->b->active_slice = &h264_ctx->b->slices[h264_ctx->b->slice_num];
+	ret = avd_buf_alloc(ctx->dev, h264_ctx->b->active_slice, payload_len);
 	if (ret)
 		goto err_free_jobs;
-	memcpy(h264_ctx->active_slice->cpu, data, payload_len);
-	h264_ctx->slice_num++;
-	h264_ctx->slice_bytes += PAGE_ALIGN((size_t)payload_len);
-	h264_ctx->monochrome = run.sps->chroma_format_idc == 0;
+	memcpy(h264_ctx->b->active_slice->cpu, data, payload_len);
+	h264_ctx->b->slice_num++;
+	h264_ctx->b->slice_bytes += PAGE_ALIGN((size_t)payload_len);
+	h264_ctx->b->monochrome = run.sps->chroma_format_idc == 0;
 
 	/* Build the P/B{0,1} ref lists. */
 	v4l2_h264_init_reflist_builder(&reflist_builder, run.decode_params,
@@ -923,7 +994,7 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	if (is_new_frame(run.slice_params)) {
 		/* the header segment plus one per slice */
 		ret = avd_init_job(ctx, AVD_CODEC_H264,
-				   h264_ctx->alloc_slice_num + 1);
+				   h264_ctx->b->alloc_slice_num + 1);
 		if (ret)
 			return ret;
 		stream_hdr(ctx, &run);
@@ -940,6 +1011,8 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		return 0;
 	}
 
+	ctx->job_fifo = h264_ctx->b->bufs.inst.addr;
+	h264_ctx->b->submitted = true;
 	return avd_submit_job(ctx);
 
 err_free_jobs:
@@ -954,22 +1027,32 @@ static void avd_h264_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *src_buf,
 			  enum vb2_buffer_state result)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
+	struct avd_decoded_buffer *buf;
+	struct avd_h264_bank *bank;
 
-	if (!(src_buf->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)) {
-		avd_h264_drop_slices(ctx);
+	if (src_buf->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF || !dst_buf)
+		return;
 
-		/* 4:0:0 has no chroma to decode; the picture is grey */
-		if (h264_ctx->monochrome && dst_buf && result == VB2_BUF_STATE_DONE) {
-			const struct v4l2_pix_format_mplane *pix = &ctx->decoded_fmt.fmt.pix_mp;
-			struct avd_decoded_buffer *dst =
-				vb2_to_avd_decoded_buf(&dst_buf->vb2_buf);
+	buf = vb2_to_avd_decoded_buf(&dst_buf->vb2_buf);
+	if (!buf->h264_bank || buf->h264_bank > h264_ctx->nbanks)
+		return;
+	bank = &h264_ctx->bank[buf->h264_bank - 1];
+	buf->h264_bank = 0;
+	avd_h264_drop_bank_slices(ctx, bank);
+	bank->busy = false;
+	bank->submitted = false;
 
-			/* vb2 must return cache ownership before the CPU writes. */
-			dst->grey_chroma_offset =
-				(size_t)pix->plane_fmt[0].bytesperline * pix->height;
-			dst->grey_chroma_10bit =
-				ctx->image_fmt == AVD_IMG_FMT_420_10BIT;
-		}
+	/* 4:0:0 has no chroma to decode; the picture is grey */
+	if (bank->monochrome && result == VB2_BUF_STATE_DONE) {
+		const struct v4l2_pix_format_mplane *pix = &ctx->decoded_fmt.fmt.pix_mp;
+		struct avd_decoded_buffer *dst =
+			vb2_to_avd_decoded_buf(&dst_buf->vb2_buf);
+
+		/* vb2 must return cache ownership before the CPU writes. */
+		dst->grey_chroma_offset =
+			(size_t)pix->plane_fmt[0].bytesperline * pix->height;
+		dst->grey_chroma_10bit =
+			ctx->image_fmt == AVD_IMG_FMT_420_10BIT;
 	}
 }
 

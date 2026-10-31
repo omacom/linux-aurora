@@ -229,7 +229,7 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 					   codec != AVD_CODEC_AV1);
 
 	/* FIFO registers of other live frames are never touched. */
-	avd->variant->configure_stream(avd, ctx->inst.addr, f->idx, vp);
+	avd->variant->configure_stream(avd, f->fifo_iova ?: ctx->inst.addr, f->idx, vp);
 
 	writel(AVDQ_MAGIC, d + D_MAGIC);
 	writel(f->tag, d + D_TAG);

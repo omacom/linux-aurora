@@ -47,6 +47,8 @@ int avd_open_build_program(struct avd_ctx *ctx)
 		AVD_OP_EXEC_FLAG_START_REV3(avd->variant->revision == 3);
 	/* The queued transport gives every frame in flight its own FIFO. */
 	ctx->fifo_idx = avd_backend_is_qfw(avd) ? f->idx : 0;
+	f->fifo_iova = ctx->job_fifo ?: ctx->inst.addr;
+	ctx->job_fifo = 0;
 	words = f->prog->cpu;
 	words[pos++] = AVD_OP_EXEC | mask | start | AVD_OP_EXEC_FIFO_IDX(ctx->fifo_idx);
 	for (i = 0; i <= job->num; i++) {

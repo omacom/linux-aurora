@@ -52,6 +52,8 @@ struct avd_frame {
 	unsigned long deadline;		/* jiffies, per-frame watchdog */
 	/* Legacy m2m HOLD_CAPTURE API retains scheduler ownership until retire. */
 	bool scheduler_held;
+	/* VP to PP instruction FIFO for this frame (open backends). */
+	dma_addr_t fifo_iova;
 };
 
 struct avd_backend_ops {

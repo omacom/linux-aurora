@@ -218,10 +218,17 @@ int avd_queue_ready(void *priv)
 		!READ_ONCE(avd->stopping) &&
 		!READ_ONCE(avd->faulted) &&
 		avd->inflight < avd->backend->max_inflight(avd);
-	for (i = 0; ready && i < AVD_MAX_FRAMES; i++)
-		if (ctx->next_dep == AVD_DEP_PREV_DONE &&
-		    avd->frames[i].state != AVD_FRAME_FREE && avd->frames[i].ctx == ctx)
-			ready = false;
+	if (ready && ctx->next_dep == AVD_DEP_PREV_DONE) {
+		/* Legacy codecs may hold several pictures in separate banks. */
+		unsigned int limit = ctx->coded_fmt_desc && !ctx->coded_fmt_desc->frame_ops ?
+				     max(ctx->max_frames, 1U) : 1, held = 0;
+
+		for (i = 0; i < AVD_MAX_FRAMES; i++)
+			if (avd->frames[i].state != AVD_FRAME_FREE &&
+			    avd->frames[i].ctx == ctx)
+				held++;
+		ready = held < limit;
+	}
 	/* Prevent several queued m2m contexts from observing the same free slot. */
 	if (ready)
 		avd->queued_ctx = ctx;
@@ -269,8 +276,14 @@ static void avd_queue_submit_work(struct work_struct *work)
 		goto fail_no_pm;
 	f->src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	f->dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
-	f->scheduler_held = ctx->fh.m2m_ctx->out_q_ctx.q.subsystem_flags &
-		VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF;
+	/*
+	 * Only a slice that holds its CAPTURE buffer needs the m2m scheduler
+	 * until retirement. The last slice of a picture releases both buffers
+	 * to the slot, so the next picture can be prepared while it decodes.
+	 */
+	f->scheduler_held = (ctx->fh.m2m_ctx->out_q_ctx.q.subsystem_flags &
+			     VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF) &&
+			    (f->src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF);
 	f->frame_num = f->tag;
 	f->deadline = jiffies + AVD_FRAME_TIMEOUT;
 	memset(f->cmd, 0, sizeof(f->cmd));

@@ -128,6 +128,8 @@ struct avd_decoded_buffer {
 	/* Pending CPU fill, retained with the buffer until dequeue. */
 	size_t grey_chroma_offset;
 	bool grey_chroma_10bit;
+	/* H.264: scratch bank + 1 of the picture decoded into this buffer */
+	u8 h264_bank;
 
 	union {
 		struct avd_vp9_decoded_buffer_info vp9;
@@ -304,6 +306,10 @@ struct avd_ctx {
 
 	struct avd_comp comp;
 	int fifo_idx;
+	/* Pictures of this context the queue may hold at once (0 or 1: one). */
+	unsigned int max_frames;
+	/* VP to PP FIFO for the job being built; 0 means ctx->inst. */
+	dma_addr_t job_fifo;
 	struct avd_job job;
 	struct avd_buf inst;
 };
