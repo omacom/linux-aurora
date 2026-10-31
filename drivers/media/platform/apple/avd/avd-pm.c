@@ -297,28 +297,55 @@ int avd_pm_recover(struct avd_dev *avd)
 {
 	int ret;
 
+	/*
+	 * Recovery is rare and touches the decoder, its reset and its DART:
+	 * leave a step-by-step trail in the log before each step, so a failure
+	 * that takes the machine down still shows how far recovery got.
+	 */
+	dev_warn(avd->dev, "recover: start (dart %s, runtime %s, irq %s)\n",
+		 avd->pm.dart_active ? "on" : "off",
+		 pm_runtime_suspended(avd->dev) ? "suspended" : "active",
+		 avd->pm.irq_enabled ? "on" : "off");
 	if (!avd->pm.dart_active)
 		return -EHOSTDOWN;
+	/* Every caller holds a runtime PM reference; anything else is a bug. */
+	if (WARN_ONCE(pm_runtime_suspended(avd->dev),
+		      "avd: recovery with the decoder powered off\n"))
+		return -EHOSTDOWN;
 	avd_pm_disable_irq(avd);
+	dev_warn(avd->dev, "recover: stop firmware\n");
 	avd->backend->shutdown(avd);
+	dev_warn(avd->dev, "recover: reset\n");
 	ret = reset_control_reset(avd->rstc);
-	if (ret)
+	if (ret) {
+		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
 		return ret;
+	}
 	if (avd->domain) {
 		if (!avd->empty_domain)
 			return -ENODEV;
+		dev_warn(avd->dev, "recover: DART flush\n");
 		ret = iommu_attach_device(avd->empty_domain, avd->dev);
-		if (ret)
+		if (ret) {
+			dev_err(avd->dev, "recover: DART empty attach failed: %d\n", ret);
 			return ret;
+		}
 		iommu_detach_device(avd->empty_domain, avd->dev);
 		/* Do not reboot against an empty/blocked domain after a failed restore. */
-		if (iommu_get_domain_for_dev(avd->dev) != avd->domain)
+		if (iommu_get_domain_for_dev(avd->dev) != avd->domain) {
+			dev_err(avd->dev, "recover: DART domain not restored\n");
 			return -EIO;
+		}
 	}
+	dev_warn(avd->dev, "recover: boot firmware\n");
 	ret = avd_pm_backend_resume(avd);
-	if (ret)
+	if (ret) {
+		dev_err(avd->dev, "recover: boot failed: %d\n", ret);
 		avd->backend->shutdown(avd);
-	return ret;
+		return ret;
+	}
+	dev_warn(avd->dev, "recover: done\n");
+	return 0;
 }
 
 int avd_pm_power_on(struct avd_dev *avd)

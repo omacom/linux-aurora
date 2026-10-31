@@ -148,7 +148,11 @@ static void avd_queue_worker(struct work_struct *work)
 		expired = avd_slot_expired(&avd->frames[i], jiffies);
 		spin_unlock_irqrestore(&avd->queue_lock, flags);
 		if (expired) {
-			dev_err(avd->dev, "frame tag %#x timed out\n", avd->frames[i].tag);
+			struct avd_frame *t = &avd->frames[i];
+
+			dev_err(avd->dev, "frame tag %#x timed out (%p4cc, state %d, %u in flight, %s)\n",
+				t->tag, t->ctx ? &t->ctx->coded_fmt_desc->fourcc : &(u32){0},
+				t->state, avd->inflight, avd->backend->name);
 			avd_reset_queue(avd, -ETIMEDOUT);
 			break;
 		}
