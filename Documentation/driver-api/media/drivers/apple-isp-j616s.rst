@@ -51,6 +51,8 @@ only to the copied firmware buffer. A missing file allows streaming with a
 warning. An invalid file, interrupted read or failed firmware upload fails
 stream setup instead of silently continuing. A debug message identifies a
 successful upload without dumping its contents.
+This confirms transport completion only: the NV12 path does not decode the
+setfile reply fields, so it does not prove that every coefficient was applied.
 
 The NV12 command sequence already sends ``CH_CNR_START`` (0x0a2f),
 ``CH_MBNR_ENABLE`` (0x0a3a, use case 0, mode 1, chroma enabled),

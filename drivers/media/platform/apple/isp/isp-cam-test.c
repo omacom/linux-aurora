@@ -79,6 +79,7 @@ static int isp_test_send(struct apple_isp *isp, void *args, u32 insize,
 	struct kunit *test = kunit_get_current_test();
 	struct isp_test_command_trace *trace = test->priv;
 	const struct isp_test_command *expected;
+	u32 expected_outsize;
 
 	if (trace->count >= ARRAY_SIZE(isp_test_preview_commands)) {
 		KUNIT_FAIL(test, "unexpected extra command");
@@ -86,7 +87,9 @@ static int isp_test_send(struct apple_isp *isp, void *args, u32 insize,
 	}
 	expected = &isp_test_preview_commands[trace->count++];
 	KUNIT_EXPECT_EQ(test, insize, expected->size);
-	KUNIT_EXPECT_EQ(test, outsize, expected->words[1] == 0x117 ? insize : 0);
+	expected_outsize = expected->words[1] == 0x117 ||
+		(expected->words[1] == 0x24 && !isp_is_p010(isp)) ? insize : 0;
+	KUNIT_EXPECT_EQ(test, outsize, expected_outsize);
 	if (insize == expected->size)
 		KUNIT_EXPECT_MEMEQ(test, args, expected->words, insize);
 	if (trace->count == trace->fail_at)
