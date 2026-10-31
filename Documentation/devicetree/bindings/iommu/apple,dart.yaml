@@ -28,6 +28,7 @@ properties:
           - apple,t8103-usb4-dart
           - apple,t8110-dart
           - apple,t6000-dart
+          - apple,t8152-dart
       - items:
           - enum:
               - apple,t6000-dart
@@ -42,10 +43,23 @@ properties:
           - const: apple,t8110-dart
 
   reg:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   interrupts:
     maxItems: 1
+
+  apple,static-topology:
+    type: boolean
+    description: |
+      apple,t8152-dart only. Do not touch the DART registers at probe. Use a
+      fixed topology and defer the tunables, parameter read, lock check, reset
+      and fault handling to the first runtime resume (the first consumer). For
+      DARTs behind a power or availability gate that firmware controls.
+
+  apple,num-streams:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description: Stream count assumed by apple,static-topology (default 16).
 
   clocks:
     description:
@@ -114,6 +128,22 @@ properties:
       T8110 stream remaps. A source uses the destination stream's translation
       and filtering state without a separate page-table root. Source and
       destination must differ, and both must exist on the controller.
+
+allOf:
+  # Only apple,t8152-dart has a second register region (the shared TLB invalidate doorbell).
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: apple,t8152-dart
+    then:
+      properties:
+        reg:
+          minItems: 2
+    else:
+      properties:
+        reg:
+          maxItems: 1
 
 required:
   - compatible

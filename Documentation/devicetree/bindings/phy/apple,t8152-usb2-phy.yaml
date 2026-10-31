@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/apple,t8152-usb2-phy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Apple T8152 USB2 PHY
+
+maintainers:
+  - Joshua Warren <816217+joshuaswarren@users.noreply.github.com>
+
+description: |
+  The USB2 and eUSB2 register banks support a fixed host or fixed peripheral
+  connection independently of the ATC USB3 and USB4 lanes. Firmware supplies
+  device-specific calibration. Both independent USB power domains must stay
+  active while the PHY runs.
+
+$defs:
+  tunable:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description: |
+      Register offset, clear mask, and set value triples for the usb2 bank.
+      The bootloader supplies these at boot; they are not part of the board file.
+    items:
+      items:
+        - description: Aligned byte offset within the usb2 register bank
+        - description: Bits to clear
+        - description: Bits to set
+
+properties:
+  compatible:
+    const: apple,t8152-usb2-phy
+
+  reg:
+    items:
+      - description: USB2 PHY register bank
+      - description: eUSB2 PHY register bank
+
+  reg-names:
+    items:
+      - const: usb2
+      - const: eusb2
+
+  '#phy-cells':
+    const: 0
+
+  power-domains:
+    items:
+      - description: USB always-on domain
+      - description: USB controller domain
+
+  power-domain-names:
+    items:
+      - const: usb-aon
+      - const: usb
+
+  apple,tunable-usb2phy-dflt:
+    $ref: '#/$defs/tunable'
+    description: Default calibration, applied before the role calibration.
+
+  apple,tunable-usb2phy-host:
+    $ref: '#/$defs/tunable'
+    description: Host calibration, applied before the PHY leaves reset.
+
+  apple,tunable-usb2phy-dev:
+    $ref: '#/$defs/tunable'
+    description: |
+      Device-mode calibration, applied before the PHY leaves reset in peripheral
+      mode.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - '#phy-cells'
+  - power-domains
+  - power-domain-names
+
+additionalProperties: false
