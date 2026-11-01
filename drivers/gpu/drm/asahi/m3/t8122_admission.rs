@@ -2,6 +2,8 @@
 
 //! Read-only T8122 identity admission. Firmware startup remains disabled.
 
+use super::m3_profile::Profile;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub(crate) active_cores: u32,
@@ -17,11 +19,22 @@ pub(crate) fn validate_identity(
     id_version: u32,
     masks: [u32; 3],
 ) -> Option<Identity> {
+    validate_identity_for(Profile::Legacy, firmware_compat, schema, result, id_version, masks)
+}
+
+pub(crate) fn validate_identity_for(
+    profile: Profile,
+    firmware_compat: &[u32],
+    schema: u32,
+    result: u32,
+    id_version: u32,
+    masks: [u32; 3],
+) -> Option<Identity> {
     let family = id_version >> 24;
     let variant = (id_version >> 16) & 0xff;
     let revision = (id_version >> 8) & 0xff;
     let active_cores = masks[0].count_ones();
-    if firmware_compat != [14, 8, 3]
+    if firmware_compat != profile.firmware_compat()
         || schema != 1
         || result != 1
         || family != 7
@@ -95,6 +108,14 @@ pub(crate) fn opp_table_shape(opps: impl IntoIterator<Item = (u64, u32)>) -> Opt
 pub(crate) fn read_identity(
     pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
 ) -> kernel::error::Result<Identity> {
+    read_identity_for(pdev, Profile::Legacy)
+}
+
+#[cfg(not(test))]
+pub(crate) fn read_identity_for(
+    pdev: &kernel::platform::Device<kernel::device::Core<'_>>,
+    profile: Profile,
+) -> kernel::error::Result<Identity> {
     use kernel::{bindings, c_str, prelude::*};
 
     struct NodeRef(*mut bindings::device_node);
@@ -146,7 +167,8 @@ pub(crate) fn read_identity(
         observation.get_u32(c_str!("core-mask-1"))?,
         observation.get_u32(c_str!("core-mask-2"))?,
     ];
-    validate_identity(firmware_compat.as_slice(), schema, result, id_version, masks).ok_or(ENODEV)
+    validate_identity_for(profile, firmware_compat.as_slice(), schema, result, id_version, masks)
+        .ok_or(ENODEV)
 }
 
 #[cfg(test)]
@@ -161,6 +183,29 @@ mod tests {
             let id = validate_identity(&[14, 8, 3], 1, 1, G15G_C0, [mask, 0, 0]).unwrap();
             assert_eq!(id.active_cores, count);
             assert_eq!(id.core_slots, 10);
+        }
+    }
+
+    #[test]
+    fn extended_identity_requires_its_actual_version_and_the_same_g15g_bounds() {
+        for mask in [0xff, 0x3ff] {
+            let good = || validate_identity_for(Profile::Extended, &[26, 6, 2], 1, 1, G15G_C0, [mask, 0, 0]);
+            assert_eq!(good().unwrap().active_cores, mask.count_ones());
+            assert!(validate_identity(&[26, 6, 2], 1, 1, G15G_C0, [mask, 0, 0]).is_none());
+            assert!(validate_identity_for(Profile::Extended, &[14, 8, 3], 1, 1, G15G_C0, [mask, 0, 0]).is_none());
+        }
+        for (schema, result, id, masks) in [
+            (0, 1, G15G_C0, [0xff, 0, 0]),
+            (1, 0, G15G_C0, [0xff, 0, 0]),
+            (1, 1, G15G_C0 ^ (1 << 24), [0xff, 0, 0]),
+            (1, 1, G15G_C0 ^ (1 << 16), [0xff, 0, 0]),
+            (1, 1, G15G_C0 ^ (1 << 8), [0xff, 0, 0]),
+            (1, 1, G15G_C0, [0x1ff, 0, 0]),
+            (1, 1, G15G_C0, [0x7ff, 0, 0]),
+            (1, 1, G15G_C0, [0xff, 1, 0]),
+            (1, 1, G15G_C0, [0xff, 0, 1]),
+        ] {
+            assert!(validate_identity_for(Profile::Extended, &[26, 6, 2], schema, result, id, masks).is_none());
         }
     }
 
