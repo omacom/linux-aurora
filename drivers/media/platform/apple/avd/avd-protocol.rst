@@ -22,12 +22,15 @@ the old host-side PP kick.  A native frame_ops program must use the queued
 avd-fw transport before it can replace the compatibility path; this backend
 returns EOPNOTSUPP for native programs rather than guessing their wire format.
 
-The V4L2 core currently warns unconditionally when job_finish() is used on a
-queue advertising HOLD_CAPTURE_BUF.  Such queues retain the scheduler until
-retirement and use buf_done_and_job_finish(), including held slice requests.
-Other queues release the scheduler as soon as their buffers belong to a slot.
-Removing this restriction requires a V4L2 core API change outside this driver's
-scope.  It is not safe to toggle subsystem_flags around job_finish().
+Partial HOLD_CAPTURE slice requests use buf_done_and_job_finish(), returning
+the copied OUTPUT slice while CAPTURE remains held on the ready list. Final
+slices use job_finish_detach(): it atomically transfers both ready buffers to
+the frame slot and releases m2m dispatch without completing either buffer.
+The next picture can prepare while the decoder still owns the earlier frame.
+The slot returns those buffers only after its tagged completion or quiesced
+recovery. The queue capability flags are never toggled around job_finish().
+This requires the matching V4L2 m2m detach API; an external-module deployment
+must install the matching m2m module as well as apple-avd.
 
 Apple Borage transport
 ----------------------

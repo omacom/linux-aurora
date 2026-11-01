@@ -503,6 +503,34 @@ void v4l2_m2m_job_finish(struct v4l2_m2m_dev *m2m_dev,
 }
 EXPORT_SYMBOL(v4l2_m2m_job_finish);
 
+void v4l2_m2m_job_finish_detach(struct v4l2_m2m_dev *m2m_dev,
+			      struct v4l2_m2m_ctx *m2m_ctx)
+{
+	struct vb2_v4l2_buffer *src_buf, *dst_buf;
+	bool schedule_next = false;
+	unsigned long flags;
+
+	spin_lock_irqsave(&m2m_dev->job_spinlock, flags);
+	if (WARN_ON(m2m_dev->curr_ctx != m2m_ctx))
+		goto unlock;
+	src_buf = v4l2_m2m_next_src_buf(m2m_ctx);
+	dst_buf = v4l2_m2m_next_dst_buf(m2m_ctx);
+	/* Partial slices must use buf_done_and_job_finish() and keep CAPTURE. */
+	if (WARN_ON(!src_buf || !dst_buf ||
+		    (src_buf->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF)))
+		goto unlock;
+
+	v4l2_m2m_src_buf_remove(m2m_ctx);
+	v4l2_m2m_dst_buf_remove(m2m_ctx);
+	dst_buf->is_held = false;
+	schedule_next = _v4l2_m2m_job_finish(m2m_dev, m2m_ctx);
+ unlock:
+	spin_unlock_irqrestore(&m2m_dev->job_spinlock, flags);
+	if (schedule_next)
+		v4l2_m2m_schedule_next_job(m2m_dev, m2m_ctx);
+}
+EXPORT_SYMBOL_GPL(v4l2_m2m_job_finish_detach);
+
 void v4l2_m2m_buf_done_and_job_finish(struct v4l2_m2m_dev *m2m_dev,
 				      struct v4l2_m2m_ctx *m2m_ctx,
 				      enum vb2_buffer_state state)

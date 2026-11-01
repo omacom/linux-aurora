@@ -50,7 +50,7 @@ struct avd_frame {
 
 	void *codec_priv;		/* per-frame codec state, owned by the codec */
 	unsigned long deadline;		/* jiffies, per-frame watchdog */
-	/* Legacy m2m HOLD_CAPTURE API retains scheduler ownership until retire. */
+	/* True while the buffers still use m2m's held-CAPTURE completion path. */
 	bool scheduler_held;
 	/* VP to PP instruction FIFO for this frame (open backends). */
 	dma_addr_t fifo_iova;

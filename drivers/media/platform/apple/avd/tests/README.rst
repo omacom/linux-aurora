@@ -8,6 +8,7 @@ compiler are required::
 
   sh tests/run-host.sh /tmp/avd-queue-host
   python3 tests/program-test.py /tmp/avd-program
+  python3 tests/dispatch-test.py /tmp/avd-dispatch
 
 The program test runs the H.264 header/slice emitters, open-program builder,
 t8112_configure_stream(), queued descriptor submit and SRAM streaming code.
@@ -24,6 +25,12 @@ FIFO_IDX, and END is 0x2b000400 plus FIFO_IDX. VP programs retain the legacy
 zero low nibble. PP start is 0x2b00020f plus FIFO_IDX: its low nibble carries
 the hardware FIFO mask, 15. Do not replace the VP's low nibble with the PP mask
 or confuse host revision IDs with firmware image versions.
+
+The dispatch test compiles the production submit/retire functions and V4L2
+core detach/held-buffer helpers. It checks early handoff without completing
+DMA-owned buffers, held slices, two contexts, deferred capacity, stale work,
+prepare/PM/abort failures and exactly-once scheduler release. The matching
+V4L2 m2m core source must be present in the kernel checkout.
 
 Routed CM3 test
 --------------

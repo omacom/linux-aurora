@@ -316,6 +316,9 @@ static void avd_queue_submit_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&avd->queue_mutex);
+	/* A queued retry can outlive drain/abort finishing its m2m dispatch. */
+	if (v4l2_m2m_get_curr_priv(avd->m2m_dev) != ctx)
+		goto unlock;
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	if (avd->deferred_ctx == ctx)
 		avd->deferred_ctx = NULL;
@@ -360,9 +363,9 @@ static void avd_queue_submit_work(struct work_struct *work)
 	f->src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	f->dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
 	/*
-	 * Only a slice that holds its CAPTURE buffer needs the m2m scheduler
-	 * until retirement. The last slice of a picture releases both buffers
-	 * to the slot, so the next picture can be prepared while it decodes.
+	 * Partial slices retain CAPTURE through the ordinary m2m HOLD API.
+	 * Final slices detach both buffers and release dispatch atomically;
+	 * neither DMA-owned buffer is completed by that early handoff.
 	 */
 	f->scheduler_held = (ctx->fh.m2m_ctx->out_q_ctx.q.subsystem_flags &
 			     VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF) &&
@@ -432,11 +435,6 @@ static void avd_queue_submit_work(struct work_struct *work)
 		goto unlock;
 	}
 	v4l2_m2m_buf_copy_metadata(f->src, f->dst);
-	if (!f->scheduler_held) {
-		v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
-		v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
-	}
-	f->dst->is_held = false;
 	ret = avd_send_frame(avd, f);
 	if (ret && ret != -EBUSY) {
 		spin_lock_irqsave(&avd->queue_lock, flags);
@@ -444,23 +442,19 @@ static void avd_queue_submit_work(struct work_struct *work)
 		f->state = AVD_FRAME_DONE;
 		spin_unlock_irqrestore(&avd->queue_lock, flags);
 	}
-	/* Buffers now belong to the slot, not to the m2m scheduler. */
+	/* Atomically detach both buffers to the slot and release dispatch. */
 	if (!f->scheduler_held)
-		v4l2_m2m_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx);
+		v4l2_m2m_job_finish_detach(avd->m2m_dev, ctx->fh.m2m_ctx);
 	mod_delayed_work(system_wq, &avd->queue_work, 0);
 	goto unlock;
  fail:
-	/* Detach before retirement, including partially prepared codec state. */
-	if (!f->scheduler_held) {
-		v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
-		v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
-	}
+	/* Failed preparation still transfers its buffers before retirement. */
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	f->status = ret;
 	f->state = AVD_FRAME_DONE;
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	if (!f->scheduler_held)
-		v4l2_m2m_job_finish(avd->m2m_dev, ctx->fh.m2m_ctx);
+		v4l2_m2m_job_finish_detach(avd->m2m_dev, ctx->fh.m2m_ctx);
 	mod_delayed_work(system_wq, &avd->queue_work, 0);
 	goto unlock;
  fail_no_pm:
