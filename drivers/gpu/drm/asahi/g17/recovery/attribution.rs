@@ -4,7 +4,8 @@
 
 pub(super) const SLOTS: usize = 16;
 const STAMP_MASK: u64 = (1 << 40) - 1;
-const PAGE_FAULT: u32 = 3;
+/// Firmware recovery reason for a GPU MMU fault.
+pub(crate) const PAGE_FAULT: u32 = 3;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Source {

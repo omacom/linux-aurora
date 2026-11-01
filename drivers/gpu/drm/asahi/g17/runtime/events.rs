@@ -137,7 +137,30 @@ impl recovery::Memory for Service<'_> {
         self.firmware.init.host_recovery()
     }
     fn fault_sources(&self) -> Result<recovery::Sources> {
-        self.firmware.init.fault_sources()
+        let mut mmu_fault = false;
+        if self.firmware.init.is_m5() {
+            let registers = self.firmware.bridge.regs.m5_fault_registers();
+            pr_err!("asahi: recovery fault registers: {:x?}\n", registers);
+            // MMU fault status: valid (bit 0), reason (1..3, 0 = unmapped), read
+            // (4), level (7..8), requestor (9..16), VM slot (17..22); the address
+            // word holds the faulting address shifted right by 6.
+            if let Ok([_, status, address, ..]) = registers {
+                if status & 1 != 0 {
+                    mmu_fault = true;
+                    let access = if status & 0x10 != 0 { "read" } else { "write" };
+                    pr_err!("asahi: recovery: GPU MMU fault: {} reason {} at {:#x}, level {}, requestor {:#x}, VM slot {}\n",
+                        access, (status >> 1) & 7,
+                        (address & ((1 << 42) - 1)) << 6, (status >> 7) & 3, (status >> 9) & 0xff,
+                        (status >> 17) & 0x3f);
+                }
+            }
+        }
+        let mut sources = self.firmware.init.fault_sources()?;
+        // M5 reads no firmware reason word; a latched MMU fault is reason 3.
+        if mmu_fault && sources.reason.is_none() {
+            sources.reason = Some(recovery::PAGE_FAULT);
+        }
+        Ok(sources)
     }
 
     fn transition(&self, expected: u32, next: u32) -> Result {
