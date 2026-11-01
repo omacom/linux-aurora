@@ -180,8 +180,8 @@ and must retain their single completion per picture.
 Optional queue ABI 2 VP notifications
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Apply ``avd-fw-vp-done.patch`` to the public MIT ``aurora-silicon/avd-fw``
-revision ``a112b70d4b1e437e4ce9c0353b2a0e805ebf41e5`` and rebuild its images.
+The feature is in ``aurora-silicon/avd-fw`` from commit
+``bf49a31b1036c72be5fdc37eb8232f6c953e0626`` (queue feature bit 2).
 This is a backwards-compatible optional ABI 2 feature:
 
 * Info feature bit 2 advertises tagged VP DONE. Without it the host keeps VP9
