@@ -272,3 +272,11 @@ one bank; the queued transport permits two banks.
 
 These are host control/program/ownership regressions. The lead's conformance
 run must still establish decoded pixels and absence of hardware timeouts.
+
+A non-IDR I picture with no VALID DPB entries now uses the existing
+reference-free intra header. The intended changes are the header INTRA bit,
+clearing the H.264 NOT_IDR flag, and omitting the empty reference-table
+preamble. Across all four revision/address variants, weight modes and
+first/continuation slices, its complete program must equal the baseline IDR
+program exactly. Pictures with references retain their original header.
+The baseline comparison retains all 32 before/after empty-DPB cases.

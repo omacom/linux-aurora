@@ -222,9 +222,21 @@ static void stream_scaling(struct avd_ctx *ctx, struct avd_h264_run *run)
 	}
 }
 
+static bool avd_h264_intra_header(const struct avd_h264_run *run)
+{
+	/*
+	 * frame_num gaps can evict every real reference. A non-IDR I picture
+	 * still decodes without references, but an inter header has no way to
+	 * encode an empty reference table: its count lives in the first entry.
+	 * Use the same reference-free header as an IDR picture in that case.
+	 */
+	return (run->decode_params->flags & V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC) ||
+	       (!run->num_valid &&
+		run->slice_params->slice_type == V4L2_H264_SLICE_TYPE_I);
+}
+
 static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 {
-	const struct v4l2_ctrl_h264_decode_params *decode = run->decode_params;
 	const struct v4l2_ctrl_h264_sps *sps = run->sps;
 	const struct v4l2_ctrl_h264_pps *pps = run->pps;
 	struct avd_dev *avd = ctx->dev;
@@ -232,11 +244,10 @@ static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 	u32 bytesperline;
 	u32 width = (sps->pic_width_in_mbs_minus1 + 1) * 16;
 	u32 height = (sps->pic_height_in_map_units_minus1 + 1) * 16;
+	bool intra_header = avd_h264_intra_header(run);
 
 	push(AVD_OP_HDR | AVD_OP_HDR_FLAG_DECOMP(ctx->decomp) |
-		     AVD_OP_HDR_FLAG_INTRA(
-			     decode->flags &
-			     V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC) |
+		     AVD_OP_HDR_FLAG_INTRA(intra_header) |
 		     AVD_OP_HDR_CONST |
 		     AVD_OP_HDR_FLAG_PIPE_STATE(
 			     !(avd->variant->quirks & AVD_QUIRK_NO_PIPE_STATE)),
@@ -269,8 +280,7 @@ static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 
 	push(H264_FLAG_ENTROPY_CODING_MODE(
 		     pps->flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE) |
-		     H264_FLAG_NOT_IDR(!(decode->flags &
-					 V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC)) |
+		     H264_FLAG_NOT_IDR(!intra_header) |
 		     h264_FLAG_CI_PRED(
 			     pps->flags &
 			     V4L2_H264_PPS_FLAG_CONSTRAINED_INTRA_PRED),
@@ -321,7 +331,7 @@ static void stream_hdr(struct avd_ctx *ctx, struct avd_h264_run *run)
 	push(0, "cm3_mark_end_section");
 	push(((height - 1) << 16) | (width - 1), "hdr_54_height_width");
 
-	if (!(decode->flags & V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC))
+	if (!intra_header)
 		stream_refs(ctx, run);
 
 	if (pps->flags & V4L2_H264_PPS_FLAG_SCALING_MATRIX_PRESENT)

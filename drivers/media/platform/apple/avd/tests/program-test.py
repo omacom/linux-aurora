@@ -600,6 +600,19 @@ int main(void)
        for (unsigned int i = 0; i < segments[seg].num; i++)
         printf(" %08x", segments[seg].instructions[i]);
       puts("");
+      if (!count) {
+       dec.flags = 0;
+       ctx->job.num = 0; dma_count = 0;
+       segments[0].num = segments[1].num = 0;
+       stream_hdr(ctx, &run);
+       ctx->job.num = 1;
+       stream_slice(ctx, &run);
+       printf("empty-intra/%u/%u/%u", rev, mode, mb);
+       for (unsigned int seg = 0; seg < 2; seg++)
+        for (unsigned int i = 0; i < segments[seg].num; i++)
+         printf(" %08x", segments[seg].instructions[i]);
+       puts("");
+      }
 
      }
     }
@@ -674,12 +687,19 @@ def conformance(out):
         data = subprocess.check_output([str(exe)], text=True)
         programs[label] = dict(line.split(' ', 1) for line in data.splitlines())
         (out / (label + '.json')).write_text(json.dumps(programs[label], indent=2) + '\n')
-    unchanged = sparse = 0
+    unchanged = sparse = normalized = 0
     for key, program in programs['after'].items():
         if key.startswith('guard/type/'):
             assert program == ('0' if int(key.rsplit('/', 1)[1]) < 3 else '-22'), key
         elif key.startswith('guard/groups/'):
             assert program == ('0' if key.endswith('/0') else '-22'), key
+        elif key.startswith('empty-intra/'):
+            _, revision, mode, mb = key.split('/')
+            idr = f'0/{revision}/2/{mode}/{mb}'
+            assert program == programs['before'][idr], key
+            assert program == programs['after'][idr], key
+            assert program != programs['before'][key], key
+            normalized += 1
         elif not key.startswith('17/') or key.split('/')[2] == '2':
             assert program == programs['before'][key], key
             unchanged += 1
@@ -691,7 +711,7 @@ def conformance(out):
                     assert int(old, 16) >> 20 == 0x2dc, (key, old, new)
                     assert int(old, 16) & ~15 == int(new, 16) & ~15, (key, old, new)
             sparse += 1
-    print(f'PASS: {unchanged} complete legacy programs identical; {sparse} sparse programs change only reference slots; all 65536 DPB maps; syntax guards', flush=True)
+    print(f'PASS: {unchanged} complete legacy programs identical; {sparse} sparse programs change only reference slots; {normalized} empty-DPB non-IDR I programs equal legacy IDR; all 65536 DPB maps; syntax guards', flush=True)
 
 
 def main():
