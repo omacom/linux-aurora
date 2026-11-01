@@ -17,7 +17,14 @@ extern "C" {
     fn sep_store_write(handle: *mut c_void, off: i64, buf: *const c_void, len: usize) -> c_long;
     fn sep_store_sync(handle: *mut c_void) -> c_int;
     fn sep_store_sync_parent(handle: *mut c_void) -> c_int;
+    fn sep_store_unlink(path: *const c_char) -> c_int;
     fn sep_random_bytes(buf: *mut c_void, len: usize) -> c_int;
+}
+
+pub(crate) fn unlink(path: &CStr) -> Result<()> {
+    // SAFETY: `path` is NUL-terminated. The shim unlinks that one directory
+    // entry under init's root and retains no pointer to it.
+    kernel::error::to_result(unsafe { sep_store_unlink(path.as_char_ptr()) })
 }
 
 pub(crate) fn random_bytes(buf: &mut [u8]) -> Result<()> {

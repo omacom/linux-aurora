@@ -240,8 +240,51 @@ pub(crate) fn write_intent(slot: Slot) -> Result<()> {
     write_record(slot, 0, &[], &[0; UUID_LEN], &[])
 }
 
-pub(crate) fn mark_refused(slot: Slot) -> Result<()> {
-    write_record(slot, STATE_REFUSED, &[], &[0; UUID_LEN], &[])
+/// Removes a header-only intent or refused record. A committed bag, or any
+/// file that is not exactly that 52-byte header, is left in place: unlinking
+/// it would hide a bag the enclave may still hold.
+pub(crate) fn discard_uncommitted(slot: Slot) -> Result<()> {
+    let file = match shim::StoreFile::open_readonly(slot.path()) {
+        Ok(file) => file,
+        Err(e) if e == ENOENT => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let size = file.size()?;
+    if size != HEADER as u64 {
+        return Err(EEXIST);
+    }
+    let mut head = [0u8; HEADER];
+    file.read_exact(0, &mut head)?;
+    if head[..MAGIC.len()] != MAGIC {
+        return Err(EINVAL);
+    }
+    let state = u32::from_le_bytes([
+        head[OFF_STATE],
+        head[OFF_STATE + 1],
+        head[OFF_STATE + 2],
+        head[OFF_STATE + 3],
+    ]);
+    let len = u32::from_le_bytes([
+        head[OFF_LEN],
+        head[OFF_LEN + 1],
+        head[OFF_LEN + 2],
+        head[OFF_LEN + 3],
+    ]);
+    let secret_len = u32::from_le_bytes([
+        head[OFF_SECRET_LEN],
+        head[OFF_SECRET_LEN + 1],
+        head[OFF_SECRET_LEN + 2],
+        head[OFF_SECRET_LEN + 3],
+    ]);
+    if (state != 0 && state != STATE_REFUSED) || len != 0 || secret_len != 0 {
+        return Err(EEXIST);
+    }
+    drop(file);
+    match shim::unlink(slot.path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e == ENOENT => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 pub(crate) fn write_bag_uuid(

@@ -383,6 +383,12 @@ int sep_diag_register(struct device *dev, const char *profile,
 	return devm_device_add_group(dev, &sep_diag_group);
 }
 
+/* A store that opens after probe. Does not add the sysfs group again. */
+void sep_diag_set_xart(bool xart)
+{
+	sep_diag.xart = xart;
+}
+
 void sep_diag_set_attach(bool attached)
 {
 	atomic_set(&sep_diag.attach,

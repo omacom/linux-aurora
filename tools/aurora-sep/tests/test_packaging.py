@@ -44,6 +44,33 @@ class PkgbuildTest(unittest.TestCase):
     def test_aurora_sep_sums_match_tree(self):
         self.check(ARCH / "aurora-sep")
 
+    def test_aurora_touchid_sums_match_tree(self):
+        self.check(SEP / "aurora-touchid")
+
+    def test_aurora_sep_ships_the_touchid_option_file(self):
+        text = (ARCH / "aurora-sep" / "PKGBUILD").read_text()
+        self.assertIn("apple-sep.conf", words(text, "source"))
+        self.assertIn("aurora-touchid", words(text, "conflicts"))
+        self.assertIn(
+            '"$pkgdir/usr/lib/modprobe.d/apple-sep.conf"', text
+        )
+        option = "options apple_sep xart_writes=1 provision_keybag=1"
+        packaged = (ARCH / "aurora-sep" / "apple-sep.conf").read_text()
+        touchid = (SEP / "aurora-touchid" / "apple-sep.conf").read_text()
+        self.assertIn(option, packaged)
+        self.assertEqual(packaged, touchid)
+
+    def test_fedora_ships_the_same_option_file(self):
+        text = (FEDORA / "aurora-sep.spec").read_text()
+        sources = re.findall(r"^Source\d+:\s+(\S+)$", text, re.M)
+        self.assertIn("apple-sep.conf", sources)
+        self.assertRegex(text, r"(?m)^Conflicts:\s+aurora-touchid$")
+        self.assertIn("%{_prefix}/lib/modprobe.d/apple-sep.conf", text)
+        self.assertIn(
+            "options apple_sep xart_writes=1 provision_keybag=1",
+            (SEP / "apple-sep.conf").read_text(),
+        )
+
 
 class FedoraSpecTest(unittest.TestCase):
     def test_sources_are_in_tree(self):

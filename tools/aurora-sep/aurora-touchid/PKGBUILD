@@ -1,16 +1,21 @@
 # Maintainer: Chris Kearney <303316+iconidentify@users.noreply.github.com>
 pkgname=aurora-touchid
 pkgver=20261003
-pkgrel=2
+pkgrel=3
 pkgdesc="Touch ID for Omarchy on Apple Silicon (aurora kernel SEP driver)"
 arch=('any')
 url="https://github.com/iconidentify/aurora-linux"
 license=('GPL-2.0-only')
 depends=('fprintd' 'libfprint>=1.94.100-1.1' 'python' 'kmod')
+# Same path as aurora-sep's apple-sep.conf. One owner, or the set-once
+# parameters see two option lines and refuse to load.
+conflicts=('aurora-sep')
+install=aurora-touchid.install
 source=('aurora-touchid-setup'
         'extract-mesa-calibration'
         'apple-sep.service'
         'apple-sep.path'
+        'apple-sep.conf'
         'fprintd-aurora.conf'
         'aurora-touchid.sleep'
         'wait-for-display'
@@ -19,6 +24,7 @@ sha256sums=('406da23baf0127dd5ba116c2f83808fb10d979315a17227a78731c5d3081efe4'
             '15a878dcf382a22c5d807f0f2c754fe70d39baec88f65aea183b1fe56cf69441'
             '4f7b8a97e35e3511afa482ee8aedd019e960b1a67320675bd347f534feab49c3'
             '2f4b265a4c2180a9e0e4926c53ec77c3dbb074ddc3e083d7925d58db10a576b9'
+            'aa3189cea883b24f9f57ee6af6ae7c43673d58355753b8dab63b07ed6cc79b93'
             'e1b1152e576e9588cc134b09291b3a2306ac686d9a47be6f128670608da535fc'
             'a87526383319cc7c1214082196d0d80ad9a6da09b5c30bf215f866e01443c611'
             '062f70bb84e4139baf75d4dbefff21478af28f67e5569ee095692734d764746b'
@@ -29,6 +35,7 @@ package() {
   install -Dm755 extract-mesa-calibration "$pkgdir/usr/lib/aurora-touchid/extract-mesa-calibration"
   install -Dm644 apple-sep.service "$pkgdir/usr/lib/systemd/system/apple-sep.service"
   install -Dm644 apple-sep.path "$pkgdir/usr/lib/systemd/system/apple-sep.path"
+  install -Dm644 apple-sep.conf "$pkgdir/usr/lib/modprobe.d/apple-sep.conf"
   install -Dm644 fprintd-aurora.conf "$pkgdir/usr/lib/systemd/system/fprintd.service.d/aurora.conf"
   install -Dm755 aurora-touchid.sleep "$pkgdir/usr/lib/systemd/system-sleep/aurora-touchid"
   install -Dm755 wait-for-display "$pkgdir/usr/lib/aurora-touchid/wait-for-display"
