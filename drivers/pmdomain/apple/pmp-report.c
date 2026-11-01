@@ -1222,6 +1222,19 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t6031 = {
 	.devices_ordered = true,
 };
 
+/*
+ * T8132 (M4): the T8140 request window, with the acknowledgements at 0x1900.
+ * On a J773g, 7.1.13 with the PMP started: status ready, and request bits
+ * 12 (set) and 18 (cleared) were acknowledged through these offsets. No
+ * fast die-temperature report is qualified on this generation.
+ */
+static const struct apple_pmp_report_offsets apple_pmp_offsets_t8132 = {
+	.tgt_read = 0x1880,
+	.tgt_write = 0x10c40,
+	.actual = 0x1900,
+	.status = 0x10,
+};
+
 /* The fast die-temperature report is the low two bytes of entry 0x1c1. */
 static const struct apple_pmp_report_offsets apple_pmp_offsets_t8140 = {
 	.tgt_read = 0x1880,
@@ -1240,6 +1253,7 @@ static const struct of_device_id apple_pmp_report_of_match[] = {
 	{ .compatible = "apple,t6031-pmp-v2-report", .data = &apple_pmp_offsets_t6031 },
 	{ .compatible = "apple,t8112-pmp-v2-report", .data = &apple_pmp_offsets_t8112 },
 	{ .compatible = "apple,t8122-pmp-v2-report", .data = &apple_pmp_offsets_t8122 },
+	{ .compatible = "apple,t8132-pmp-v2-report", .data = &apple_pmp_offsets_t8132 },
 	{ .compatible = "apple,t8140-pmp-v2-report", .data = &apple_pmp_offsets_t8140 },
 	{}
 };
