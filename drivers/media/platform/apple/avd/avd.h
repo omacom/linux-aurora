@@ -241,6 +241,8 @@ struct avd_dev {
 	unsigned int recoveries;
 	unsigned long last_recover;
 	bool retired;
+	/* Retired with the DART on the empty domain; detached at remove. */
+	bool dma_parked;
 
 	const struct avd_variant *variant;
 	unsigned int capabilities;

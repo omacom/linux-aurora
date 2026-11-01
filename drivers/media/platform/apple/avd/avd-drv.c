@@ -238,6 +238,27 @@ int avd_submit_job(struct avd_ctx *ctx)
  * to drain, and only then assert the pmgr reset. Recover sparingly, and
  * retire the decoder after a failed or a third recovery within a minute.
  */
+/*
+ * Retiring: stop the CM3 and leave the decoder's DMA blocked at its DART
+ * until the module is unloaded, so an engine that is still running (the
+ * frame timed out, after all) can only fault, never write memory whose
+ * buffers are about to go back to userspace.
+ */
+static void avd_park(struct avd_dev *avd)
+{
+	if (pm_runtime_resume_and_get(avd->dev) < 0)
+		return;
+	disable_irq(avd->irq);
+	avd_shutdown(avd);
+	if (avd->empty_domain && !avd->dma_parked) {
+		if (iommu_attach_device(avd->empty_domain, avd->dev))
+			dev_err(avd->dev, "retire: could not block DMA\n");
+		else
+			avd->dma_parked = true;
+	}
+	pm_runtime_put_autosuspend(avd->dev);
+}
+
 static int avd_reset(struct avd_dev *avd)
 {
 	int ret = 0;
@@ -251,6 +272,7 @@ static int avd_reset(struct avd_dev *avd)
 	}
 	if (++avd->recoveries > AVD_RECOVER_MAX) {
 		ret = -EBUSY;
+		avd_park(avd);
 		goto retire;
 	}
 	if (avd->last_recover &&
@@ -278,7 +300,10 @@ static int avd_reset(struct avd_dev *avd)
 	ret = reset_control_reset(avd->rstc);
 	if (ret)
 		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
-	if (avd->empty_domain) {
+	if (avd->empty_domain && ret) {
+		/* A decoder that failed its reset keeps its DMA blocked. */
+		avd->dma_parked = true;
+	} else if (avd->empty_domain) {
 		dev_warn(avd->dev, "recover: restore DMA\n");
 		iommu_detach_device(avd->empty_domain, avd->dev);
 		if (avd->domain && iommu_get_domain_for_dev(avd->dev) != avd->domain) {
@@ -1087,6 +1112,8 @@ static void avd_remove(struct platform_device *pdev)
 
 	avd_v4l2_cleanup(avd);
 
+	if (avd->dma_parked)
+		iommu_detach_device(avd->empty_domain, avd->dev);
 	if (avd->empty_domain)
 		iommu_domain_free(avd->empty_domain);
 
