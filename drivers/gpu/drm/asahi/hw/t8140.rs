@@ -57,6 +57,7 @@ pub(crate) const CONFIG: Config = Config {
     // The layouts the A18 Pro has always run with.
     core_layout: crate::g17::CoreLayout {
         cores: None,
+        alternate_core_masks: None,
         operand_state: crate::g17::fw::compute::OperandState::ONE_BY_SIX,
         deflake: crate::g17::fw::render::Deflake::ONE_CLUSTER,
     },
