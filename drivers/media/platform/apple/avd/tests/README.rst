@@ -199,37 +199,97 @@ This is a backwards-compatible optional ABI 2 feature:
   bank reuse. Only the original tagged PP completion does that. A missing VP
   event remains bounded by the original per-picture watchdog.
 
-AV1 analysis
-~~~~~~~~~~~~
+AV1 conservative picture overlap
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-AV1's current ``avd_av1_set_prob()`` reads the primary reference's CDF tail on
-the CPU, and seeds the current frame's output CDF because hardware leaves it
-untouched when DISABLE_FRAME_END_UPDATE_CDF is set. ``avd_av1_set_seg()`` can
-also copy the primary reference's segmentation map on the CPU. These are
-separate dependencies; removing only the CDF wait is insufficient.
+``av1-test.py`` compiles the production AV1 codec, entropy defaults, open
+program builder and queued descriptor writer with ASan/UBSan. It is also
+called by the registered ``avd-codec-tail-tests.py`` host check. Run::
 
-=================================== =========================================
-Case                                CDF source dependency
-=================================== =========================================
-Intra/error-resilient/PRIMARY_NONE   Defaults; no primary-reference CDF read
-Primary ref with frame-end disabled Its initialized CDF, available at prepare
-Primary ref with frame-end enabled  Its hardware-written CDF tail
-=================================== =========================================
+  AVD_AV1_BASELINE_REF=a1b76856 python3 tests/av1-test.py /tmp/avd-av1
+  python3 tests/unicorn-av1-test.py /path/to/avd-fw \
+      /path/to/avd-fw/build/avd-fw-v5-t2.bin /tmp/avd-av1
 
-``disable_frame_end_update_cdf`` on the *consumer* does not remove its primary
-reference input dependency. It controls that consumer's future CDF output.
-Likewise, a default CDF does not necessarily remove the segmentation-map input
-selected by primary_ref_frame.
+The independent legacy comparison builds before/after executables and compares
+complete emitted programs plus initialized CDF/map tails for eight header cases.
+The flag table covers primary-reference/default CDF cases, both producer and
+consumer disable_frame_end_update_cdf, segmentation enabled/update_map on both
+pictures, and all 256 refresh masks. Pending request p_req values are used for
+readiness; p_cur still describes an earlier picture and must not be used.
 
-The available implementation does not establish whether the CDF tail *and*
-segmentation map are fully visible at VP DONE, or which CPU DMA synchronization
-is required for an in-flight CAPTURE allocation while PP writes another part.
-This differs from VP9's separate coherent count buffer. AV1 therefore retains
-its one-picture path. Enabling it needs evidence for both tail writes and a
-safe visibility/synchronization rule, then two scratch banks and a dependency
-on the actual primary reference (which need not be the preceding picture).
-No AV1 or VP9 pixel correctness or throughput claim follows from these host
-and emulator tests; device qualification remains necessary.
+Visibility evidence and limit
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The public AV1 specification sections 7.7, 7.19 and 7.20 define frame CDF,
+motion-field and segmentation storage semantics:
+https://aomediacodec.github.io/av1-spec/ . They do not define this decoder's
+VP/PP DMA boundary. In our driver ``set_header()`` supplies probs_out, seg and
+w_color output addresses to the VP program; ``avd_av1_set_prob()`` seeds CDF
+output and ``avd_av1_set_seg()`` initializes non-updated maps. The open firmware
+``avdq_vp_done()`` changes VP to PP_READY and ``notify_vp()`` publishes a tag
+with barriers. Neither reads the AV1 output memory nor supplies an AV1-specific
+DMA visibility guarantee. A CM3 DMB orders its descriptor stores; it does not
+prove the decoder's prior external tail writes are CPU-visible.
+
+There is therefore **no evidence here proving that a hardware-written AV1 CDF,
+segmentation map or motion field is visible at VP DONE**. There is also no
+proof that they are written only at PP DONE. Unicorn injects DONE and cannot
+establish either assertion. The implementation keeps those dependencies until
+PP retirement instead of inferring a visibility contract from their operands.
+No CPU DMA sync is attempted on a CAPTURE allocation still owned by PP.
+
+Safe subset
+^^^^^^^^^^^
+
+Queue firmware advertising VP-DONE feature bit 2 enables two scratch banks;
+legacy transport and older queue firmware retain one bank and identical
+programs. The CDF output, segmentation output and motion-field/color output
+already live in each picture's distinct CAPTURE tail. Each scratch bank owns
+its FIFO, CDF input, pipe/filter/tile scratch, a saved initialized map and a
+separate map input snapshot. Only PP retirement releases its bank. VP DONE
+never releases storage or publishes hardware-written tails for AV1.
+
+For a pending consumer, each busy producer is tested by the exact timestamp
+named through ref_frame_idx/primary_ref_frame, rather than the preceding frame
+or a global refresh-context flag. refresh_frame_flags controls which slots
+userspace subsequently names; it does not create a dependency by itself.
+
+=============================== ==============================================
+Consumer / producer condition   Prepare dependency while producer is in flight
+=============================== ==============================================
+PRIMARY_REF_NONE                No primary CDF or map dependency
+Intra or error resilient        Default CDF; map dependency still checked
+Primary slot names retired ref  None on an in-flight picture
+Primary CDF, producer end update Enabled: wait for producer PP retirement
+Primary CDF, producer end update Disabled: use immutable prepared CDF input copy
+Consumer end update disabled    Does not remove its CDF input dependency
+Consumer segmentation disabled  No previous-map read
+Consumer segmentation enabled   Updated producer map: wait for PP (same Mi size)
+Producer map not updated         Copy immutable saved map into consumer bank
+Different reference Mi size      Zero map; no map dependency
+USE_REF_FRAME_MVS                Wait for PP of any named in-flight reference
+refresh_frame_flags 0..255       No additional dependency; named slot decides
+=============================== ==============================================
+
+Both consumer update_map values retain the previous-map input when segmentation
+is enabled, as the existing program supplies it in either case. A disabled
+producer segmentation map is saved as zeroes. Producer map snapshots are copied
+into consumer-owned coherent storage, so producer PP retirement and bank reuse
+cannot invalidate a live successor's VP input. CDF snapshots are similarly
+copied into the consumer's CDF input. No hardware-written tail is sampled by
+these copies. Busy banks publish fully prepared metadata with release/acquire;
+allocation failures and PP error/reset retirement release the saved CAPTURE's
+bank, independent of the current builder.
+
+This subset needs no extra VP token: firmware already waits for VP(N) DONE
+before feeding VP(N+1). AV1 descriptors retain their ordinary completion-only
+flags. The Unicorn run boots the v5-t2 CM3 reset vector, routes AV1 and PP IRQs,
+and checks production AV1 program words/descriptors/configuration. It shows
+VP(1) issued during PP(0), PP serialization and blocked completion mailboxes.
+Host tests poison in-flight CAPTURE tails to ensure snapshot consumers never
+read them. Pixels, physical DMA visibility and throughput remain hardware
+qualification work for the lead. Full CDF/MV dependency release at VP DONE is
+still a separate evidence requirement.
 
 H.264 conformance fixes
 ----------------------
