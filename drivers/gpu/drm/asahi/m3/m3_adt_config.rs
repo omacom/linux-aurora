@@ -260,7 +260,14 @@ impl PstatePolicy {
 
 /// The runtime backend's InitData contents: the generated object images and the
 /// performance-state policy.
+pub(crate) struct ExtendedInputs {
+    pub(crate) power: hw::PwrConfig,
+    pub(crate) sram_uv: KVec<u32>,
+    pub(crate) bases: super::m3_mmio_26::RegisterBases,
+}
+
 pub(crate) struct Contents {
+    pub(crate) extended: Option<ExtendedInputs>,
     /// Generated images, per owner; None for owners that stay zero. Only the three image
     /// owners' images are uploaded; the records' are checked.
     images: KVec<Option<KVVec<u8>>>,
@@ -304,6 +311,10 @@ impl Contents {
         experiment: Option<&Experiment>,
     ) -> Result<Self> {
         let dev = pdev.as_ref();
+        if firmware.profile() == super::m3_profile::Profile::Extended {
+            if experiment.is_some() { return Err(EINVAL); }
+            return Self::extended(dev, soc);
+        }
         let param = m3_params::initdata_param();
         check_version(dev, firmware, experiment)?;
         let iomaps = match experiment {
@@ -370,12 +381,54 @@ impl Contents {
         );
         let read_only_slots = experiment.map(|e| e.read_only_slots()).unwrap_or(0);
         let hwdata_object = soc.hwdata_object;
-        Ok(Contents { images, pstates, iomaps, table, read_only_slots, hwdata_object })
+        Ok(Contents { extended: None, images, pstates, iomaps, table, read_only_slots, hwdata_object })
+    }
+
+    fn extended(dev: &device::Device, soc: &Soc) -> Result<Self> {
+        let cfg = soc.hwcfg.ok_or(ENODEV)?;
+        if soc.chip_id != 0x8122 || cfg.chip_id != 0x8122 { return Err(ENODEV); }
+        let power = hw::PwrConfig::load(dev, cfg)?;
+        let tables = initdata::PStateTables::new(&power, true, None, false)?;
+        if tables.len != 9 || tables.max != 8 || tables.max_frequency_khz(&power) != 1_338_000 {
+            return Err(EINVAL);
+        }
+        let node = dev.of_node().ok_or(ENODEV)?;
+        let opps = node.parse_phandle(c_str!("operating-points-v2"), 0).ok_or(EINVAL)?;
+        let mut sram_uv = KVec::new();
+        for opp in opps.children() {
+            let values: KVec<u32> = opp.get_property(c_str!("opp-microvolt-sram"))?;
+            if values.len() != 1 { return Err(EINVAL); }
+            sram_uv.push(values[0], GFP_KERNEL)?;
+        }
+        if sram_uv.len() != power.perf_states.len() { return Err(EINVAL); }
+        let block = |index: usize| -> Result<u64> {
+            Ok(cfg.io_mappings.get(index).and_then(|value| value.as_ref()).ok_or(EINVAL)?.base as u64)
+        };
+        let bases = super::m3_mmio_26::RegisterBases {
+            gpu: soc.windows.sgx, interrupt: block(2)?,
+            memory: block(11)?.checked_add(0x1c4000).ok_or(EOVERFLOW)?,
+            telemetry_write: block(18)?, telemetry_read: block(19)?,
+            neural: block(25)?, metrology: block(26)?,
+        };
+        let mut freqs = [0; 16];
+        for (index, value) in freqs.iter_mut().enumerate().take(tables.len) {
+            *value = tables.primary_state(&power, index).freq_hz / 1_000_000;
+        }
+        // This profile enables the native firmware's thermal/PID controllers.
+        // The legacy host-only thermal governor must not replace those inputs.
+        let pstates = PstatePolicy { table_max: 8, table_max_mhz: 1338,
+            max: 8, safe: 8, boot: 1, max_mhz: 1338, safe_mhz: 1338,
+            boot_mhz: freqs[1], freqs, thermal: ThermalMode::Off };
+        let mut images = KVec::new();
+        for _ in 0..super::m3_init_26::COUNT { images.push(None, GFP_KERNEL)?; }
+        Ok(Self { extended: Some(ExtendedInputs { power, sram_uv, bases }),
+            images, pstates, iomaps: &[], table: (8, 1338), read_only_slots: 0, hwdata_object: None })
     }
 
     /// Check the contents before they are uploaded.
     pub(crate) fn check_for_upload(&self) -> Result {
-        if self.images.len() == storage::COUNT {
+        let count = if self.extended.is_some() { super::m3_init_26::COUNT } else { storage::COUNT };
+        if self.images.len() == count {
             Ok(())
         } else {
             Err(EINVAL)
