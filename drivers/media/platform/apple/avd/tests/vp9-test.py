@@ -33,6 +33,10 @@ pre = pre.replace('struct vb2_buffer { struct { size_t length; } planes[1]; dma_
 pre = pre.replace('struct avd_comp comp; unsigned int bank;', 'struct avd_comp comp; unsigned int bank; struct { unsigned int width,height,bit_depth; } vp9;')
 pre = pre.replace('struct vb2_v4l2_buffer *dst; } bufs;', 'struct vb2_v4l2_buffer *src,*dst; } bufs;')
 pre = pre.replace('unsigned int fifo_idx, pp_total;', 'unsigned int fifo_idx, pp_total, max_frames; int ctrl_hdl;')
+pre = pre.replace('static int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)',
+                  '#ifdef AVD_TEST_VP_READY\nstatic struct avd_ctx *allocating_ctx;\nstatic int fail_alloc_after;\nstatic bool avd_vp9_ready(struct avd_ctx *);\n#endif\nstatic int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)')
+pre = pre.replace('{ (void)d; free(b->cpu); b->cpu = calloc(1,n);',
+                  '{\n#ifdef AVD_TEST_VP_READY\n if(allocating_ctx){assert(!avd_vp9_ready(allocating_ctx));if(fail_alloc_after&&!--fail_alloc_after)return -ENOMEM;}\n#endif\n (void)d; free(b->cpu); b->cpu = calloc(1,n);')
 pre += r'''
 #define round_up(x,a) (((x)+(a)-1)&~((a)-1))
 #define max_t(t,a,b) ((t)(a)>(t)(b)?(t)(a):(t)(b))
@@ -40,6 +44,8 @@ pre += r'''
 #define clamp(x,l,h) ((x)<(l)?(l):(x)>(h)?(h):(x))
 #define WARN_ON(v) (assert(!(v)),false)
 #define GFP_KERNEL 0
+#define smp_load_acquire(p) (*(p))
+#define smp_store_release(p,v) (*(p)=(v))
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
 #define noinline_for_stack __attribute__((noinline))
@@ -90,7 +96,7 @@ def without_includes(s):
 vp9 = (AVD / 'avd-vp9.c').read_text()
 helper_h = (KERNEL / 'include/media/v4l2-vp9.h').read_text()
 helper_c = (KERNEL / 'drivers/media/v4l2-core/v4l2-vp9.c').read_text()
-source = pre + '\n' + without_includes(helper_h) + '\n' + without_includes(helper_c)
+source = '#define AVD_TEST_VP_READY\n' + pre + '\n' + without_includes(helper_h) + '\n' + without_includes(helper_c)
 source += '\n' + without_includes((AVD / 'avd-inst.h').read_text())
 # Include unchanged codec declarations/functions, excluding only the ops table.
 source += '\n' + without_includes(vp9[vp9.index('#define VP9_Q_IDX'):vp9.index('static enum avd_image_fmt avd_vp9_get_image_fmt')])
@@ -140,7 +146,8 @@ int main(int argc,char **argv) {
  for(unsigned int i=0;i<3;i++)dst[i].base.vb.vb2_buf.dma=0x230000000ULL+i*0x1000000ULL;
  ctx.decoded_fmt.fmt.pix_mp.width=1920;ctx.decoded_fmt.fmt.pix_mp.height=1088;
  ctx.decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline=1920;
- assert(!avd_vp9_start(&ctx));struct avd_vp9_ctx *p=ctx.priv;
+ assert(!avd_vp9_ready(&ctx));allocating_ctx=&ctx;
+ assert(!avd_vp9_start(&ctx));allocating_ctx=NULL;struct avd_vp9_ctx *p=ctx.priv;
  assert(ctx.max_frames==2&&p->nbanks==2);
  assert(p->bank[0].bufs.counts.addr!=p->bank[1].bufs.counts.addr);
  assert(p->bank[0].bufs.probs.addr!=p->bank[1].bufs.probs.addr);
@@ -201,12 +208,15 @@ int main(int argc,char **argv) {
   assert(p->bank[0].busy&&p->bank[1].busy);
   avd_vp9_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);avd_vp9_done(&ctx,&src,&dst[1].base.vb,VB2_BUF_STATE_DONE);
  }
- avd_vp9_stop(&ctx);
+ avd_vp9_stop(&ctx);assert(!avd_vp9_ready(&ctx));
  /* Old firmware and the legacy transport allocate only one bank. */
  for(unsigned int mode=0;mode<2;mode++) {
   dev.queued=mode;vp_feature=false;assert(!avd_vp9_start(&ctx));p=ctx.priv;
   assert(p->nbanks==1&&ctx.max_frames==1);avd_vp9_stop(&ctx);
  }
+ dev.queued=true;vp_feature=true;fail_alloc_after=13;allocating_ctx=&ctx;
+ assert(avd_vp9_start(&ctx)==-ENOMEM);allocating_ctx=NULL;
+ assert(!ctx.priv&&!avd_vp9_ready(&ctx)&&ctx.max_frames==1);
  free(program.cpu);free(queue.sram);free(dev.ctrl);free(dev.mbox);puts("PASS: VP9 dependency table, bank ownership, real adaptation, early release and legacy fallback");
 }
 '''

@@ -216,8 +216,10 @@ static bool avd_vp9_needs_counts(u32 flags)
 
 static bool avd_vp9_ready(struct avd_ctx *ctx)
 {
-	struct avd_vp9_ctx *vp9_ctx = ctx->priv;
+	struct avd_vp9_ctx *vp9_ctx = smp_load_acquire(&ctx->priv);
 
+	if (!vp9_ctx)
+		return false;
 	/* Only a producer doing backward adaptation holds the next prepare. */
 	for (unsigned int i = 0; i < vp9_ctx->nbanks; i++)
 		if (READ_ONCE(vp9_ctx->bank[i].busy) &&
@@ -1086,9 +1088,8 @@ avd_init_v4l2_vp9_count_tbl(struct avd_vp9_bank *bank)
 				}
 }
 
-static void avd_vp9_stop(struct avd_ctx *ctx)
+static void avd_vp9_free(struct avd_ctx *ctx, struct avd_vp9_ctx *vp9_ctx)
 {
-	struct avd_vp9_ctx *vp9_ctx = ctx->priv;
 	struct avd_dev *avd = ctx->dev;
 
 	ctx->max_frames = 1;
@@ -1110,6 +1111,12 @@ static void avd_vp9_stop(struct avd_ctx *ctx)
 	}
 
 	kfree(vp9_ctx);
+}
+
+static void avd_vp9_stop(struct avd_ctx *ctx)
+{
+	/* drain() excludes readiness callbacks before private storage is freed. */
+	avd_vp9_free(ctx, ctx->priv);
 	ctx->priv = NULL;
 }
 
@@ -1122,7 +1129,6 @@ static int avd_vp9_start(struct avd_ctx *ctx)
 	if (!vp9_ctx)
 		return -ENOMEM;
 
-	ctx->priv = vp9_ctx;
 	vp9_ctx->nbanks = avd_qfw_has_vp_done(ctx->dev) ? AVD_VP9_BANKS : 1;
 	vp9_ctx->b = &vp9_ctx->bank[0];
 	for (unsigned int i = 0; i < vp9_ctx->nbanks; i++) {
@@ -1132,11 +1138,13 @@ static int avd_vp9_start(struct avd_ctx *ctx)
 		avd_init_v4l2_vp9_count_tbl(&vp9_ctx->bank[i]);
 	}
 	ctx->max_frames = vp9_ctx->nbanks;
+	/* job_ready can run while STREAMON is still initializing this codec. */
+	smp_store_release(&ctx->priv, vp9_ctx);
 
 	return 0;
 
 err_free_ctx:
-	avd_vp9_stop(ctx);
+	avd_vp9_free(ctx, vp9_ctx);
 	return ret;
 }
 
