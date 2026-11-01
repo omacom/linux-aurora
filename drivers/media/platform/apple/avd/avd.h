@@ -128,7 +128,7 @@ struct avd_decoded_buffer {
 	/* Pending CPU fill, retained with the buffer until dequeue. */
 	size_t grey_chroma_offset;
 	bool grey_chroma_10bit;
-	/* H.264/HEVC: scratch bank + 1 of the picture decoded into this buffer */
+	/* Codec scratch bank + 1 of the picture decoded into this buffer */
 	u8 bank;
 
 	union {
@@ -159,6 +159,10 @@ struct avd_coded_fmt_ops {
 	void (*done)(struct avd_ctx *ctx, struct vb2_v4l2_buffer *src_buf,
 		     struct vb2_v4l2_buffer *dst_buf,
 		     enum vb2_buffer_state result);
+	/* Called under queue_lock: CPU preparation may read prior VP results. */
+	bool (*ready)(struct avd_ctx *ctx);
+	/* queue_mutex held, after a tagged VP DONE; DMA banks remain owned. */
+	void (*vp_done)(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst);
 	int (*try_ctrl)(struct avd_ctx *ctx, struct v4l2_ctrl *ctrl);
 	enum avd_image_fmt (*get_image_fmt)(struct avd_ctx *ctx,
 					    struct v4l2_ctrl *ctrl);
@@ -404,6 +408,7 @@ void avd_qfw_select(struct avd_dev *avd);
 void avd_qfw_prepare_boot(struct avd_dev *avd);
 void avd_qfw_debug(struct avd_dev *avd, struct avd_frame *f, const char *where);
 bool avd_backend_is_qfw(const struct avd_dev *avd);
+bool avd_qfw_has_vp_done(const struct avd_dev *avd);
 int avd_backend_select(struct avd_dev *avd);
 bool avd_mbox_pop(struct avd_dev *avd, u32 *msg);
 int avd_backend_boot(struct avd_dev *avd);

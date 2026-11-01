@@ -116,3 +116,119 @@ The live-VP assertion is a conservative decoder ownership model. It proves the
 software feed ordering and its correction, not the undocumented silicon cause
 of a DART fault. A hardware retest remains necessary to connect this scheduling
 defect to a reported zero-address DMA and to verify pixels and performance.
+
+VP9 probability dependencies and picture banks
+---------------------------------------------
+
+``vp9-test.py`` compiles the production VP9 codec and V4L2 probability helpers.
+It exercises all combinations of the three dependency flags, real backward
+adaptation with synthetic counts, independent forward updates, per-bank count
+pointers, bank exhaustion, PP retirement while another bank is current, and
+old-firmware fallback. It also emits two VP9 programs and their production queue
+descriptors/configure_stream snapshots for ``unicorn-vp9-test.py``::
+
+  python3 tests/vp9-test.py /tmp/avd-vp9
+  python3 tests/unicorn-vp9-test.py /path/to/avd-fw \
+      /path/to/avd-fw/build/avd-fw-v3-t1.bin /tmp/avd-vp9
+
+For the independent legacy comparison, run in a kernel Git checkout containing
+the public pre-change revision::
+
+  AVD_VP9_BASELINE_REF=<pre-change-ref> python3 tests/vp9-test.py /tmp/avd-vp9
+
+This builds separate before/after executables and compares the complete legacy
+programs and saved probability contexts, including key, inter, frame-parallel,
+non-refreshing and error-resilient frames. No firmware capture is used.
+
+The flags below describe whether a picture *produces* a backward-adaptation
+dependency for the next prepare. A non-refreshing successor still consumes the
+saved context of an earlier refreshing picture. No CPU can read that context
+before that producer's counts have been adapted.
+
+================= ============= =============== ============================
+refresh_frame_ctx parallel_mode error_resilient  Release next prepare
+================= ============= =============== ============================
+0                 any           any             During prepare
+1                 1             any             During prepare (forward only)
+1                 0             1               During prepare (no refresh)
+1                 0             0               After tagged VP DONE/adaptation
+================= ============= =============== ============================
+
+Preparation, VP callbacks and PP retirement run under queue_mutex. Readiness
+checks only observe the published dependency state under queue_lock. Counts
+come from coherent allocations and the VP callback uses dma_rmb() before reading
+them. Each bank has its own count-pointer table, forward probabilities, header
+snapshot, previous-frame flags, FIFO and all DMA scratch. Only PP retirement
+releases a bank, and it selects the bank saved with CAPTURE rather than the
+context's current builder. A duplicate VP event cannot adapt twice. Failure and
+reset retirement never adapt partial counts.
+
+The temporal-MV input color address follows the preceding picture across banks;
+the current color output belongs to the new bank. The public MIT VP9 builder at
+https://github.com/eiln/avd/blob/main/avid/vp9/halv3.py alternates these operands
+(``pps2_tile_addrs``); the single-bank legacy driver used one address for both.
+A stream using old queue firmware retains one bank and adapts after full
+completion. The ordinary legacy transport and its instruction builder are
+unchanged.
+
+The Unicorn test boots the real reset vector and routes VP8/PP IRQs. It checks
+that VP(1) is issued while PP(0) owns its FIFO, and that PP(1) waits for PP(0).
+It repeats with a blocked VP notification and holds the outbox across PP DONE.
+The original H.264 routed tests exercise descriptors without the optional flag
+and must retain their single completion per picture.
+
+Optional queue ABI 2 VP notifications
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apply ``avd-fw-vp-done.patch`` to the public MIT ``aurora-silicon/avd-fw``
+revision ``a112b70d4b1e437e4ce9c0353b2a0e805ebf41e5`` and rebuild its images.
+This is a backwards-compatible optional ABI 2 feature:
+
+* Info feature bit 2 advertises tagged VP DONE. Without it the host keeps VP9
+  at one picture per stream. Features 0/1 and the ordinary completion stay as
+  before.
+* Host descriptor flag bit 1 requests one VP event. An old host leaves it zero
+  and receives no additional tokens. Reserved words must still start at zero.
+* After VP DONE, firmware writes the full submitted tag at descriptor +0x38,
+  DMB, writes 1 at +0x3c, DMB, then sends
+  ``0x54540000 | (tag & 0xfff0) | index``. These records live independently of
+  the PP completion_tag. The host validates the prefix, marker, short sequence,
+  full saved tag and submitted ownership before recording the event.
+* Outbox backpressure retains the VP event. A successful opted-in picture's PP
+  completion cannot be notified before its VP event. Errors may finish without
+  a VP event and require the existing reset/ownership handling.
+* Neither the VP token nor its CPU callback permits buffer, descriptor, FIFO or
+  bank reuse. Only the original tagged PP completion does that. A missing VP
+  event remains bounded by the original per-picture watchdog.
+
+AV1 analysis
+~~~~~~~~~~~~
+
+AV1's current ``avd_av1_set_prob()`` reads the primary reference's CDF tail on
+the CPU, and seeds the current frame's output CDF because hardware leaves it
+untouched when DISABLE_FRAME_END_UPDATE_CDF is set. ``avd_av1_set_seg()`` can
+also copy the primary reference's segmentation map on the CPU. These are
+separate dependencies; removing only the CDF wait is insufficient.
+
+=================================== =========================================
+Case                                CDF source dependency
+=================================== =========================================
+Intra/error-resilient/PRIMARY_NONE   Defaults; no primary-reference CDF read
+Primary ref with frame-end disabled Its initialized CDF, available at prepare
+Primary ref with frame-end enabled  Its hardware-written CDF tail
+=================================== =========================================
+
+``disable_frame_end_update_cdf`` on the *consumer* does not remove its primary
+reference input dependency. It controls that consumer's future CDF output.
+Likewise, a default CDF does not necessarily remove the segmentation-map input
+selected by primary_ref_frame.
+
+The available implementation does not establish whether the CDF tail *and*
+segmentation map are fully visible at VP DONE, or which CPU DMA synchronization
+is required for an in-flight CAPTURE allocation while PP writes another part.
+This differs from VP9's separate coherent count buffer. AV1 therefore retains
+its one-picture path. Enabling it needs evidence for both tail writes and a
+safe visibility/synchronization rule, then two scratch banks and a dependency
+on the actual primary reference (which need not be the preceding picture).
+No AV1 or VP9 pixel correctness or throughput claim follows from these host
+and emulator tests; device qualification remains necessary.

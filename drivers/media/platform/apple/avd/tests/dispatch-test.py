@@ -35,12 +35,18 @@ PRELUDE = r'''
 #define VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF 1
 #define V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF 1
 #define AVD_FRAME_TIMEOUT 2000
+#define AVD_RECOVER_GAP_MS 20
+#define msecs_to_jiffies(x) (x)
 #define AVD_CTX_MAX_HW_ERRORS 1
 #define AVD_PROGRAM_SIZE 4096
 #define GFP_KERNEL 0
 #define dma_wmb() ((void)0)
-#define system_wq NULL
+#define dma_rmb() ((void)0)
+#define system_dfl_wq NULL
+#define time_before(a,b) ((long)((a)-(b))<0)
+#define WRITE_ONCE(a,b) ((a)=(b))
 #define READ_ONCE(v) (v)
+#define max(a,b) ((a)>(b)?(a):(b))
 static bool warn_on(bool v) { assert(!v);return v; }
 #define WARN_ON(v) warn_on(!!(v))
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
@@ -50,6 +56,7 @@ static bool warn_on(bool v) { assert(!v);return v; }
 #define mutex_unlock(l) ((void)(l))
 #define dev_err(d,...) ((void)(d))
 static unsigned long jiffies=1;
+static void msleep(unsigned int ms) { assert(ms==20);jiffies+=ms; }
 struct work_struct { int unused; };
 struct vb2_v4l2_buffer { unsigned int flags; bool is_held; int done;
  struct { struct { void *req; } req_obj; } vb2_buf;
@@ -74,6 +81,8 @@ struct avd_codec_frame_ops {
  void (*retire)(struct avd_ctx *,struct avd_frame *,enum vb2_buffer_state);
 };
 struct avd_coded_fmt_ops {
+ bool (*ready)(struct avd_ctx *);
+ void (*vp_done)(struct avd_ctx *,struct vb2_v4l2_buffer *);
  int (*run)(struct avd_ctx *);
  void (*done)(struct avd_ctx *,struct vb2_v4l2_buffer *,struct vb2_v4l2_buffer *,enum vb2_buffer_state);
 };
@@ -81,7 +90,7 @@ struct format { const struct avd_codec_frame_ops *frame_ops; const struct avd_co
 struct avd_ctx {
  struct avd_dev *dev; struct { struct fake_m2m *m2m_ctx; } fh;
  const struct format *coded_fmt_desc; struct work_struct submit_work;
- bool draining,broken; unsigned int hw_errors; enum avd_frame_dep next_dep;
+ bool draining,broken; unsigned int hw_errors,max_frames; enum avd_frame_dep next_dep;
  bool session_started; u64 session_generation;
  int ctrl_hdl;
 };
@@ -96,11 +105,15 @@ struct avd_dev {
  struct avd_frame frames[AVD_MAX_FRAMES]; struct avd_buf *frame_fp[AVD_MAX_FRAMES];
  struct avd_ctx *deferred_ctx; struct avd_frame *building;
  unsigned int inflight; u64 frame_seq; bool compat_held,stopping,faulted;
+ unsigned long rest_until,last_recover; unsigned int storm_count;
  int queue_lock,queue_mutex,queue_work; void *dev,*m2m_dev;
 };
 static struct avd_ctx *running;
 static unsigned int finishes,raw_finishes,pm_refs;
-static int prepare_result,pm_error,send_result;
+static int prepare_result,pm_error,send_result,wake_error;
+static unsigned int wakes,irq_enables;
+static int avd_pm_recover(struct avd_dev *d) { assert(pm_refs);assert(!d->last_recover||jiffies-d->last_recover>=20);wakes++;return wake_error; }
+static void avd_pm_enable_irq(struct avd_dev *d) { (void)d;irq_enables++; }
 static u32 send_tags[64];static unsigned int send_count;
 static unsigned int capacity=1;
 static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(struct fake_m2m *m) { return m->src; }
@@ -164,7 +177,7 @@ int main(void) {
  static const struct avd_coded_fmt_ops ops={.run=codec_run};
  static const struct format fmt={.ops=&ops};
  struct fake_m2m m[2]={};struct avd_ctx c[2]={};
- struct vb2_v4l2_buffer src[20]={},dst[20]={};
+ struct vb2_v4l2_buffer src[24]={},dst[24]={};
  for(unsigned int i=0;i<16;i++){d.frames[i].idx=i;d.frames[i].prog=&programs[i];}
  for(unsigned int i=0;i<2;i++){c[i].dev=&d;c[i].fh.m2m_ctx=&m[i];c[i].coded_fmt_desc=&fmt;m[i].ctx=&c[i];m[i].priv=&c[i];}
  /* Non-HOLD jobs detach once, finish dispatch once, retire buffers later. */
@@ -238,7 +251,48 @@ int main(void) {
  assert(send_tags[sent+1]==first&&send_tags[sent+2]==second);
  complete(&d,&c[1],0);complete(&d,&c[0],0);complete(&d,&c[0],0);
  assert(!running&&!d.inflight&&!pm_refs&&!raw_finishes);
- puts("PASS: production dispatch/retire: final/held slices, two contexts, capacity retry, prepare/PM/abort errors, exactly-once job_finish");
+ /* Rest rejects new frames without taking PM refs or waking hardware. */
+ d.rest_until=jiffies+100;unsigned int old_wakes=wakes;
+ m[0].src=&src[17];m[0].dst=&dst[17];submit(&c[0]);
+ assert(!running&&!d.inflight&&!pm_refs&&wakes==old_wakes&&src[17].done&&dst[17].done);
+ jiffies=d.rest_until;d.storm_count=3;c[0].broken=false;
+ m[0].src=&src[18];m[0].dst=&dst[18];submit(&c[0]);
+ assert(!running&&wakes==old_wakes+1&&irq_enables==1&&!d.rest_until&&!d.storm_count);
+ complete(&d,&c[0],0);assert(!pm_refs);
+ /* A failed wake retires the decoder and never opens IRQs or posts a frame. */
+ d.rest_until=jiffies;wake_error=-EIO;m[0].src=&src[19];m[0].dst=&dst[19];
+ unsigned int old_sent=send_count;submit(&c[0]);assert(d.faulted&&irq_enables==1&&send_count==old_sent);
+ avd_retire(&d);assert(!running&&!pm_refs&&src[19].done&&dst[19].done);
+ puts("PASS: production dispatch/retire: rest/wake, final/held slices, two contexts, capacity retry, prepare/PM/abort errors, exactly-once job_finish");
+}
+'''
+
+VP_MAIN = r'''
+static unsigned int vp_calls;
+static bool dependency_ready;
+static bool fake_ready(struct avd_ctx *c) { (void)c;return dependency_ready; }
+static void vp_callback(struct avd_ctx *c,struct vb2_v4l2_buffer *dst) {
+ (void)c;assert(dst&&!dst->done);vp_calls++;dependency_ready=true;
+}
+static void check_vp_events(void) {
+ struct avd_dev d={};struct avd_ctx c={.dev=&d,.next_dep=AVD_DEP_PREV_DONE,.max_frames=2};
+ struct vb2_v4l2_buffer dst={};
+ const struct avd_coded_fmt_ops ops={.ready=fake_ready,.vp_done=vp_callback};
+ const struct format fmt={.ops=&ops};c.coded_fmt_desc=&fmt;
+ struct avd_frame *f=&d.frames[0];f->idx=0;
+ assert(!avd_slot_reserve(f,&c,1));f->state=AVD_FRAME_SUBMITTED;f->dst=&dst;
+ assert(!avd_queue_ready(&c));
+ avd_frame_vp_complete(&d,0x10010);assert(!f->vp_done&&!vp_calls);
+ avd_frame_vp_complete(&d,0x10);assert(f->vp_done&&!vp_calls&&!f->vp_retired);
+ assert(!avd_queue_ready(&c));avd_retire_vp(&d);
+ assert(vp_calls==1&&f->vp_retired&&avd_queue_ready(&c));
+ assert(f->state==AVD_FRAME_SUBMITTED&&f->dst==&dst&&!dst.done);
+ avd_frame_vp_complete(&d,0x10);avd_retire_vp(&d);assert(vp_calls==1);
+ f->state=AVD_FRAME_FREE;assert(!avd_slot_reserve(f,&c,2));assert(!f->vp_done&&!f->vp_retired);
+ f->state=AVD_FRAME_SUBMITTED;avd_frame_vp_complete(&d,0x10);assert(!f->vp_done);
+ avd_frame_vp_complete(&d,0x20);f->status=-EIO;f->state=AVD_FRAME_DONE;
+ avd_retire_vp(&d);assert(vp_calls==1&&f->vp_retired);
+ puts("PASS: production VP event: stale/duplicate/reset tags, callback dependency and retained PP ownership");
 }
 '''
 
@@ -260,7 +314,9 @@ def main():
                     function(CORE.read_text(), 'v4l2_m2m_buf_done_and_job_finish') +
                     function(legacy, 'avd_job_finish_no_pm') + function(legacy, 'avd_job_finish') +
                     function(source, 'avd_send_frame') +
-                    function(source, 'avd_retire') + function(source, 'avd_queue_submit_work') + MAIN)
+                    function(source, 'avd_retire') + function(source, 'avd_queue_submit_work') +
+                    function(source, 'avd_frame_vp_complete') + function(source, 'avd_retire_vp') +
+                    function(source, 'avd_queue_ready') + VP_MAIN + MAIN.replace(' puts("PASS: production dispatch', ' check_vp_events();\n puts("PASS: production dispatch'))
     exe = out / 'dispatch-test'
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                     '-fsanitize=address,undefined', '-g', '-I' + str(HERE / 'include'),

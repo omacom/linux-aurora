@@ -58,6 +58,8 @@ typedef uint64_t dma_addr_t;
 #define IRQ_HANDLED 1
 #define system_wq NULL
 typedef int irqreturn_t;
+#define dev_info_once(d,...) ((void)(d))
+#define dev_warn_once(d,...) ((void)(d))
 #define dev_warn_ratelimited(d,...) ((void)(d))
 #define __iomem
 #define USEC_PER_MSEC 1000
@@ -98,7 +100,8 @@ struct v4l2_m2m_buffer { struct vb2_v4l2_buffer vb; };
 struct avd_comp { size_t start_offset; u32 offsets[4]; };
 struct avd_decoded_buffer { struct v4l2_m2m_buffer base; struct avd_comp comp; unsigned int bank; };
 struct avd_ctx;
-struct avd_coded_fmt_ops { unsigned int (*pp_kicks)(struct avd_ctx *); };
+struct avd_coded_fmt_ops { unsigned int (*pp_kicks)(struct avd_ctx *);
+ void (*vp_done)(struct avd_ctx *,struct vb2_v4l2_buffer *); };
 struct fmt_desc { void *frame_ops; const struct avd_coded_fmt_ops *ops; };
 struct avd_ctx { struct avd_dev *dev; void *priv; struct avd_job job; unsigned int image_fmt;
  const struct fmt_desc *coded_fmt_desc;
@@ -138,6 +141,8 @@ static u32 messages[16];static unsigned int msg_read,msg_count,completed,reset_r
 static bool avd_mbox_pop(struct avd_dev *d,u32 *word) {
  (void)d;if(msg_read==msg_count)return false;*word=messages[msg_read++];return true;
 }
+static unsigned int vp_completed;
+static void avd_frame_vp_complete(struct avd_dev *d,u32 tag) { assert(d->frames[tag&15].tag==tag);vp_completed++; }
 static void avd_frame_complete(struct avd_dev *d,u32 tag,int status) {
  struct avd_frame *f=&d->frames[tag&15];assert(f->tag==tag&&f->state==AVD_FRAME_SUBMITTED);
  f->state=AVD_FRAME_DONE;f->status=status;completed++;
@@ -162,6 +167,12 @@ int main(int argc, char **argv)
  static const struct fmt_desc fmt={.ops=&ops};
  dev.qfw=&q;dev.ctrl=calloc(1,0x10000);dev.mbox=calloc(1,0x100);dev.capabilities=7;
  ctx.coded_fmt_desc=&fmt;frame.ctx=&ctx;ctx.fh.m2m_ctx=&m2m;
+ /* Optional VP notifications are enabled only by the matching feature bit. */
+ u32 info[16]={AVDQ_MAGIC,2,16,64,0x1090000,0x8000,256,0,9,7,15,3,0,0x1800,0,0};
+ memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(avd_qfw_check(&dev)&&!q.vp_done);
+ info[11]=7;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(avd_qfw_check(&dev)&&q.vp_done);
+ info[1]=3;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(!avd_qfw_check(&dev)&&!q.vp_done);
+ memset(q.sram,0,0x10000);
  struct avd_buf slice = { .size=4096, .addr=0x200800000ULL };
  struct v4l2_ctrl_h264_sps sps = { .pic_width_in_mbs_minus1=119,
   .pic_height_in_map_units_minus1=67, .chroma_format_idc=1,
@@ -307,6 +318,13 @@ int main(int argc, char **argv)
  for(unsigned int idx=0;idx<variant.fifo_slots;idx++) {
   frame.idx=idx;assert(avd_qfw_submit(&dev,&frame)==-EINVAL && q.wp==old_wp);
  }
+ /* VP records have their own full tag, independent of the PP ctag. */
+ q.vp_done=true;dev.frames[0].tag=0x12345020;dev.frames[0].state=AVD_FRAME_SUBMITTED;
+ writel(1,desc+D_RSVD1);writel(0x22345020,desc+D_RSVD0);writel(0x12345020,desc+D_CTAG);
+ messages[0]=0x54545020;msg_count=1;msg_read=0;avd_qfw_irq(&dev);assert(!vp_completed);
+ writel(0x12345020,desc+D_RSVD0);writel(0,desc+D_RSVD1);msg_read=0;avd_qfw_irq(&dev);assert(!vp_completed);
+ writel(1,desc+D_RSVD1);msg_read=0;avd_qfw_irq(&dev);assert(vp_completed==1&&dev.frames[0].state==AVD_FRAME_SUBMITTED);
+ messages[0]=0x54545030;msg_read=0;avd_qfw_irq(&dev);assert(vp_completed==1);
  for(unsigned int c=0;c<8;c++) for(unsigned int b=0;b<AVD_H264_BANKS;b++) {
   struct avd_h264_bufs *buf=&h264[c].bank[b].bufs;
   free(buf->inst.cpu);free(buf->pipe_state.cpu);free(buf->above_info.cpu);
@@ -342,7 +360,7 @@ def main():
     inst = inst.replace('u32 offsets[4])\n{', 'u32 offsets[4])\n{\n assert(addr);')
     inst = inst.replace('push(ctx, (addr + offsets[i]) >> 7);', '{ record_dma(ctx,addr+offsets[i],7,1); push(ctx, (addr + offsets[i]) >> 7); }')
     code.write_text(PRELUDE + inst + h264 + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_alloc_bufs') + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_drop_bank_slices') + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_pick_bank') + builder + wire + regs + config +
-                    function(qfw, 'avd_qfw_stream') + function(qfw, 'avd_qfw_submit') +
+                    function(qfw, 'avd_qfw_check') + function(qfw, 'avd_qfw_stream') + function(qfw, 'avd_qfw_submit') +
                     function(qfw, 'avd_qfw_fail_all') + function(qfw, 'avd_qfw_irq') + MAIN)
     exe = out / 'program-test'
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',

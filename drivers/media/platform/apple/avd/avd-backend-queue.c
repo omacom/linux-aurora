@@ -31,6 +31,9 @@
 #define AVDQ_INFO_WP		(AVDQ_INFO + 0x3c)
 #define AVDQ_FEAT_SRAM_RING	BIT(0)
 #define AVDQ_FEAT_MULTI_KICK	BIT(1)
+#define AVDQ_FEAT_VP_DONE	BIT(2)
+#define AVDQ_FLAG_VP_DONE	BIT(1)
+#define AVDQ_VP_NOTIFY		0x54540000
 #define AVDQ_FLAG_SRAM		BIT(0)
 #define AVDQ_MAX_PP_EXTRA	255
 #define AVDQ_STATE_SUBMITTED	1
@@ -61,6 +64,7 @@ struct avd_qfw {
 	u32 wp;			/* host write count, free-running */
 	u32 fifo_slots;
 	u32 codec_mask;		/* info+0x24, bit n = codec n */
+	bool vp_done;
 	bool usable;		/* last boot found a matching ABI 2 image */
 };
 
@@ -122,6 +126,7 @@ static bool avd_qfw_check(struct avd_dev *avd)
 	for (i = 0; i < ARRAY_SIZE(info); i++)
 		info[i] = readl(q->sram + AVDQ_INFO + 4 * i);
 	q->usable = false;
+	q->vp_done = false;
 	if (info[0] != AVDQ_MAGIC)
 		return false;
 	if (info[1] != AVDQ_VERSION || info[2] != AVDQ_COUNT ||
@@ -143,6 +148,7 @@ static bool avd_qfw_check(struct avd_dev *avd)
 		dev_warn_once(avd->dev, "firmware SRAM ring geometry invalid, using legacy transport\n");
 		return false;
 	}
+	q->vp_done = info[11] & AVDQ_FEAT_VP_DONE;
 	q->ring_off = info[12];
 	q->ring_words = info[13];
 	q->fifo_slots = min_t(u32, info[10], avd->variant->fifo_slots ?: 1);
@@ -274,7 +280,8 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 	writel(kick, d + D_KICK);
 	writel(0, d + D_STATUS);
 	writel(0, d + D_CTAG);
-	writel(AVDQ_FLAG_SRAM, d + D_FLAGS);
+	writel(AVDQ_FLAG_SRAM | (q->vp_done && ctx->coded_fmt_desc->ops->vp_done ?
+				AVDQ_FLAG_VP_DONE : 0), d + D_FLAGS);
 	writel(extra, d + D_PP_EXTRA);
 	writel(extra ? cont : 0, d + D_PP_CONT);
 	writel(0, d + D_RSVD0);
@@ -307,13 +314,25 @@ static irqreturn_t avd_qfw_irq(struct avd_dev *avd)
 	unsigned int n;
 	u32 word;
 
-	/* At most sixteen completions and one fatal token can be outstanding. */
-	for (n = 0; n < AVDQ_COUNT + 1 && avd_mbox_pop(avd, &word); n++) {
+	/* At most one VP and PP token per slot, plus one fatal token. */
+	for (n = 0; n < 2 * AVDQ_COUNT + 1 && avd_mbox_pop(avd, &word); n++) {
 		struct avd_frame *f;
 		void __iomem *d;
 		u32 state, status, ctag;
 		unsigned int idx;
 
+		if ((word & AVDQ_NOTIFY_MASK) == AVDQ_VP_NOTIFY && q->vp_done) {
+			idx = word & 15;
+			d = avd_qfw_desc(q, idx);
+			/* Separate record: PP completion may already have been published. */
+			state = readl(d + D_RSVD1);
+			ctag = readl(d + D_RSVD0);
+			f = &avd->frames[idx];
+			if (state == 1 && !((ctag ^ word) & 0xfff0) &&
+			    f->state == AVD_FRAME_SUBMITTED && ctag == f->tag)
+				avd_frame_vp_complete(avd, ctag);
+			continue;
+		}
 		if ((word & AVDQ_NOTIFY_MASK) != AVDQ_NOTIFY) {
 			dev_err_ratelimited(avd->dev,
 					    "queue: firmware reported %#x, resetting\n", word);
@@ -358,6 +377,11 @@ const struct avd_backend_ops avd_qfw_backend = {
 bool avd_backend_is_qfw(const struct avd_dev *avd)
 {
 	return avd->backend == &avd_qfw_backend;
+}
+
+bool avd_qfw_has_vp_done(const struct avd_dev *avd)
+{
+	return avd_backend_is_qfw(avd) && avd->qfw->vp_done;
 }
 
 /*

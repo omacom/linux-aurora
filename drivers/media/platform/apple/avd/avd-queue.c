@@ -31,6 +31,27 @@ bool avd_backend_is_apple(const struct avd_dev *avd)
 	return avd->backend == &avd_apple_backend;
 }
 
+/* Only the CPU callback releases a probability dependency, never the IRQ. */
+static void avd_retire_vp(struct avd_dev *avd)
+{
+	unsigned int i;
+
+	for (i = 0; i < AVD_MAX_FRAMES; i++) {
+		struct avd_frame *f = &avd->frames[i];
+		const struct avd_coded_fmt_ops *ops;
+
+		if (f->state == AVD_FRAME_FREE || !f->vp_done || f->vp_retired)
+			continue;
+		ops = f->ctx->coded_fmt_desc->ops;
+		/* A reset/error must not publish partial symbol counts. */
+		if (!f->status && ops && ops->vp_done) {
+			dma_rmb();
+			ops->vp_done(f->ctx, f->dst);
+		}
+		f->vp_retired = true;
+	}
+}
+
 /* queue_mutex excludes callbacks and context destruction from retirement. */
 static void avd_retire(struct avd_dev *avd)
 {
@@ -209,6 +230,7 @@ static void avd_queue_worker(struct work_struct *work)
 			break;
 		}
 	}
+	avd_retire_vp(avd);
 	avd_retire(avd);
 	for (i = 0; i < AVD_MAX_FRAMES; i++) {
 		struct avd_frame *f = &avd->frames[i];
@@ -269,6 +291,22 @@ void avd_frame_complete(struct avd_dev *avd, u32 tag, int status)
 		mod_delayed_work(system_wq, &avd->queue_work, 0);
 }
 
+/* No buffer, FIFO or descriptor ownership is released by a VP event. */
+void avd_frame_vp_complete(struct avd_dev *avd, u32 tag)
+{
+	struct avd_frame *f = &avd->frames[tag & (AVD_MAX_FRAMES - 1)];
+	unsigned long flags;
+	bool accepted;
+
+	spin_lock_irqsave(&avd->queue_lock, flags);
+	accepted = f->state == AVD_FRAME_SUBMITTED && f->tag == tag && !f->vp_done;
+	if (accepted)
+		f->vp_done = true;
+	spin_unlock_irqrestore(&avd->queue_lock, flags);
+	if (accepted)
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
+}
+
 int avd_queue_ready(void *priv)
 {
 	struct avd_ctx *ctx = priv;
@@ -301,6 +339,9 @@ int avd_queue_ready(void *priv)
 				held++;
 		ready = held < limit;
 	}
+	if (ready && ctx->coded_fmt_desc && !ctx->coded_fmt_desc->frame_ops &&
+	    ctx->coded_fmt_desc->ops->ready)
+		ready = ctx->coded_fmt_desc->ops->ready(ctx);
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	return ready;
 }

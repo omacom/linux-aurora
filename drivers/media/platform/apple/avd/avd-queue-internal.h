@@ -22,6 +22,8 @@ static inline int avd_slot_reserve(struct avd_frame *f, struct avd_ctx *ctx,
 	f->state = AVD_FRAME_RESERVED;
 	f->dep = AVD_DEP_NONE;
 	f->status = 0;
+	f->vp_done = false;
+	f->vp_retired = false;
 	f->prog_words = 0;
 	f->codec_priv = NULL;
 	return 0;

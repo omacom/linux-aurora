@@ -52,6 +52,9 @@ struct avd_frame {
 	unsigned long deadline;		/* jiffies, per-frame watchdog */
 	/* True while the buffers still use m2m's held-CAPTURE completion path. */
 	bool scheduler_held;
+	/* Tagged VP event and CPU codec callback, independent of PP retirement. */
+	bool vp_done;
+	bool vp_retired;
 	/* VP to PP instruction FIFO for this frame (open backends). */
 	dma_addr_t fifo_iova;
 };
@@ -87,6 +90,7 @@ struct avd_codec_frame_ops {
 
 /* Core API used by backends and codecs. */
 void avd_frame_complete(struct avd_dev *avd, u32 tag, int status); /* any ctx, IRQ-safe */
+void avd_frame_vp_complete(struct avd_dev *avd, u32 tag);
 bool avd_backend_is_apple(const struct avd_dev *avd);
 
 #endif /* AVD_QUEUE_H_ */
