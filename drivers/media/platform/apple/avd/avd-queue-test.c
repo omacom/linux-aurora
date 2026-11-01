@@ -186,6 +186,27 @@ static void avd_dispatch_reservation(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, avd_queue_ready(&ctx[1]), 1);
 }
 
+static void avd_submit_order(struct kunit *test)
+{
+	struct avd_frame *pool;
+	struct avd_ctx *a = (void *)test, *b = (void *)&pool;
+
+	pool = kunit_kcalloc(test, AVD_MAX_FRAMES, sizeof(*pool), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, pool);
+	pool[1].idx = 1;
+	pool[2].idx = 2;
+	KUNIT_ASSERT_EQ(test, avd_slot_reserve(&pool[0], a, 1), 0);
+	KUNIT_ASSERT_EQ(test, avd_slot_reserve(&pool[1], a, 2), 0);
+	KUNIT_ASSERT_EQ(test, avd_slot_reserve(&pool[2], b, 3), 0);
+	KUNIT_EXPECT_TRUE(test, avd_slot_submit_first(pool, &pool[0]));
+	KUNIT_EXPECT_FALSE(test, avd_slot_submit_first(pool, &pool[1]));
+	KUNIT_EXPECT_TRUE(test, avd_slot_submit_first(pool, &pool[2]));
+	pool[0].state = AVD_FRAME_SUBMITTED;
+	KUNIT_EXPECT_TRUE(test, avd_slot_submit_first(pool, &pool[1]));
+	avd_slot_submit_result(&pool[0], -EBUSY);
+	KUNIT_EXPECT_FALSE(test, avd_slot_submit_first(pool, &pool[1]));
+}
+
 static struct kunit_case avd_queue_cases[] = {
 	KUNIT_CASE(avd_slots_and_tags),
 	KUNIT_CASE(avd_retirement_order),
@@ -193,6 +214,7 @@ static struct kunit_case avd_queue_cases[] = {
 	KUNIT_CASE(avd_completion_parser),
 	KUNIT_CASE(avd_command_builders),
 	KUNIT_CASE(avd_dispatch_reservation),
+	KUNIT_CASE(avd_submit_order),
 	{}
 };
 

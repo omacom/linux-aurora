@@ -74,6 +74,25 @@ int main(void)
 		assert(avd_apple_parse_reply(record, 19, &layout, &reply) == -EMSGSIZE);
 	}
 	assert(completed > 1000);
+	{
+		struct avd_frame ordered[AVD_MAX_FRAMES] = {};
+		struct avd_ctx *a = (void *)&clients[0], *b = (void *)&clients[1];
+
+		ordered[1].idx = 1;
+		ordered[2].idx = 2;
+		assert(!avd_slot_reserve(&ordered[0], a, 1));
+		assert(!avd_slot_reserve(&ordered[1], a, 2));
+		assert(!avd_slot_reserve(&ordered[2], b, 3));
+		assert(avd_slot_submit_first(ordered, &ordered[0]));
+		assert(!avd_slot_submit_first(ordered, &ordered[1]));
+		assert(avd_slot_submit_first(ordered, &ordered[2]));
+		ordered[0].state = AVD_FRAME_SUBMITTED;
+		assert(avd_slot_submit_first(ordered, &ordered[1]));
+		avd_slot_submit_result(&ordered[0], -EBUSY);
+		assert(!avd_slot_submit_first(ordered, &ordered[1]));
+		ordered[0].state = AVD_FRAME_DONE;
+		assert(avd_slot_submit_first(ordered, &ordered[1]));
+	}
 	printf("PASS: 100000 shuffled operations, %u ordered retirements\n", completed);
 	return 0;
 }

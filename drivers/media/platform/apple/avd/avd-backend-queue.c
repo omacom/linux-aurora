@@ -41,6 +41,7 @@
 #define AVDQ_CM3_APERTURE(off)	(0x01000000 + (off))
 #define AVD_REG_MBOX0_STATUS	0x50
 #define AVD_REG_MBOX0_SEND	0x54
+#define AVDQ_MBOX_STATUS_EMPTY	BIT(17)
 #define AVDQ_STREAM_TIMEOUT_US	(1000 * USEC_PER_MSEC)
 
 /* Descriptor word offsets (bytes), avd-fw docs/queue.md. */
@@ -66,6 +67,24 @@ struct avd_qfw {
 static void __iomem *avd_qfw_desc(struct avd_qfw *q, unsigned int idx)
 {
 	return q->sram + AVDQ_RING_OFFSET + idx * AVDQ_DESC_BYTES;
+}
+
+/* Arguments of dev_dbg() are evaluated only when dynamic debug is enabled. */
+void avd_qfw_debug(struct avd_dev *avd, struct avd_frame *f, const char *where)
+{
+	struct avd_qfw *q = avd->qfw;
+	void __iomem *d;
+
+	if (!avd_backend_is_qfw(avd))
+		return;
+	d = avd_qfw_desc(q, f->idx);
+	dev_dbg(avd->dev,
+		"queue %s: tag %#x slot %u host %u desc %u status %u ctag %#x rp %#x wp %#x mbox0 %#x mbox1 %#x\n",
+		where, f->tag, f->idx, f->state, readl(d + D_STATE),
+		readl(d + D_STATUS), readl(d + D_CTAG),
+		readl(q->sram + AVDQ_INFO_RP), readl(q->sram + AVDQ_INFO_WP),
+		readl(avd->mbox + AVD_REG_MBOX0_STATUS),
+		readl(avd->mbox + AVD_REG_MBOX1_STATUS));
 }
 
 int avd_qfw_probe(struct avd_dev *avd)
@@ -130,6 +149,8 @@ static bool avd_qfw_check(struct avd_dev *avd)
 	q->codec_mask = info[9];
 	q->wp = 0;
 	q->usable = true;
+	dev_dbg(avd->dev, "queue ABI %u: aperture %#x ring %#x/%u words FIFO slots %u codecs %#x\n",
+		info[1], info[4], q->ring_off, q->ring_words, q->fifo_slots, q->codec_mask);
 	return true;
 }
 
@@ -182,6 +203,8 @@ static int avd_qfw_stream(struct avd_dev *avd, const u32 *words, u32 count)
 		}
 		pos = q->wp % q->ring_words;
 		chunk = min3(space, count - done, q->ring_words - pos);
+		/* The free-running u32 counter can wrap before the word ring does. */
+		chunk = min_t(u64, chunk, (1ULL << 32) - q->wp);
 		/*
 		 * Word stores only: memcpy_toio() would use 64-bit and byte
 		 * stores, and the CM3 data SRAM is only ever accessed with
@@ -201,8 +224,7 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 {
 	struct avd_qfw *q = avd->qfw;
 	struct avd_ctx *ctx = f->ctx;
-	const struct avd_coded_fmt_ops *ops = ctx->coded_fmt_desc->ops;
-	u32 codec = f->cmd[0], vp = 0, kick, cont, mask, extra = 0;
+	u32 codec = f->cmd[0], vp = 0, kick, cont, mask, extra = f->cmd[1];
 	u32 *words = f->prog->cpu;
 	void __iomem *d = avd_qfw_desc(q, f->idx);
 	unsigned int i;
@@ -216,14 +238,15 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 	if (!(avd->capabilities & BIT(codec)))
 		return -EOPNOTSUPP;
 	/* The program's EXEC words name FIFO f->idx; it must be a real FIFO. */
-	if (f->idx >= q->fifo_slots || ctx->fifo_idx != f->idx)
+	if (f->idx >= q->fifo_slots)
 		return -EINVAL;
+	/* A busy inbox owns nothing; retry this same prepared frame later. */
+	if (!(readl(avd->mbox + AVD_REG_MBOX0_STATUS) & AVDQ_MBOX_STATUS_EMPTY))
+		return -EBUSY;
 	for (i = 0; i < codec; i++)
 		vp += avd->variant->vp_slots[i];
 	if (avd->variant->vp_slot_base[codec])
 		vp = avd->variant->vp_slot_base[codec];
-	if (ops->pp_kicks)
-		extra = ops->pp_kicks(ctx) - 1;
 	if (extra > AVDQ_MAX_PP_EXTRA)
 		return -E2BIG;
 
@@ -257,11 +280,15 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 	/* Descriptor before the doorbell that hands it to the firmware. */
 	wmb();
 	(void)readl(d + D_STATE);	/* flush posted aperture writes */
+	avd_qfw_debug(avd, f, "doorbell");
+	dev_dbg(avd->dev, "queue program: tag %#x vp %u words %zu kick %#x start %#x end %#x\n",
+		f->tag, vp, f->prog_words, kick, words[0], words[f->prog_words - 1]);
 	writel(q->aperture + AVDQ_RING_OFFSET + f->idx * AVDQ_DESC_BYTES,
 	       avd->mbox + AVD_REG_MBOX0_SEND);
 
 	/* The firmware may start feeding while the rest of the program streams in. */
 	ret = avd_qfw_stream(avd, words, f->prog_words);
+	avd_qfw_debug(avd, f, "streamed");
 	if (ret) {
 		dev_err_ratelimited(avd->dev, "queue: program stream failed: %d\n", ret);
 		/* The descriptor is already posted: only a reset releases it. */
@@ -273,34 +300,43 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 static irqreturn_t avd_qfw_irq(struct avd_dev *avd)
 {
 	struct avd_qfw *q = avd->qfw;
-	struct avd_frame *f;
-	void __iomem *d;
-	u32 word, state, status, ctag;
-	unsigned int idx;
+	unsigned int n;
+	u32 word;
 
-	if (!avd_mbox_pop(avd, &word))
-		return IRQ_HANDLED;
-	if ((word & AVDQ_NOTIFY_MASK) != AVDQ_NOTIFY) {
-		dev_err_ratelimited(avd->dev, "queue: firmware reported %#x, resetting\n", word);
-		avd_qfw_fail_all(avd);
-		return IRQ_HANDLED;
+	/* At most sixteen completions and one fatal token can be outstanding. */
+	for (n = 0; n < AVDQ_COUNT + 1 && avd_mbox_pop(avd, &word); n++) {
+		struct avd_frame *f;
+		void __iomem *d;
+		u32 state, status, ctag;
+		unsigned int idx;
+
+		if ((word & AVDQ_NOTIFY_MASK) != AVDQ_NOTIFY) {
+			dev_err_ratelimited(avd->dev,
+					    "queue: firmware reported %#x, resetting\n", word);
+			avd_qfw_fail_all(avd);
+			continue;
+		}
+		idx = word & 15;
+		d = avd_qfw_desc(q, idx);
+		state = readl(d + D_STATE);
+		status = readl(d + D_STATUS);
+		ctag = readl(d + D_CTAG);
+		f = &avd->frames[idx];
+		avd_qfw_debug(avd, f, "completion");
+		if (state != AVDQ_STATE_COMPLETE || ((ctag ^ word) & 0xfff0) ||
+		    f->state != AVD_FRAME_SUBMITTED || ctag != f->tag) {
+			dev_warn_ratelimited(avd->dev, "queue: stale completion %#x (state %u tag %#x)\n",
+					     word, state, ctag);
+			continue;
+		}
+		if (status > 1) {
+			/* An I/O error is not proof of quiescence, even for one frame. */
+			avd_qfw_fail_all(avd);
+			continue;
+		}
+		writel(0, d + D_STATE);
+		avd_frame_complete(avd, ctag, status ? -EINVAL : 0);
 	}
-	idx = word & 15;
-	d = avd_qfw_desc(q, idx);
-	state = readl(d + D_STATE);
-	status = readl(d + D_STATUS);
-	ctag = readl(d + D_CTAG);
-	f = &avd->frames[idx];
-	if (state != AVDQ_STATE_COMPLETE || ((ctag ^ word) & 0xfff0) ||
-	    f->state != AVD_FRAME_SUBMITTED || ctag != f->tag) {
-		dev_warn_ratelimited(avd->dev, "queue: stale completion %#x (state %u tag %#x)\n",
-				     word, state, ctag);
-		return IRQ_HANDLED;
-	}
-	writel(0, d + D_STATE);
-	avd_frame_complete(avd, ctag, status == 0 ? 0 : status == 1 ? -EINVAL : -EIO);
-	if (status > 1)
-		avd_qfw_fail_all(avd);
 	return IRQ_HANDLED;
 }
 

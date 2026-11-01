@@ -154,6 +154,8 @@ static int avd_send_frame(struct avd_dev *avd, struct avd_frame *f)
 	unsigned long flags;
 	int ret;
 
+	if (!avd_slot_submit_first(avd->frames, f))
+		return -EBUSY;
 	if (f->dep == AVD_DEP_PREV_DONE && !avd_slot_first(avd->frames, f))
 		return -EBUSY;
 	if ((!f->ctx->session_started ||
@@ -202,6 +204,7 @@ static void avd_queue_worker(struct work_struct *work)
 			dev_err(avd->dev, "frame tag %#x timed out (%p4cc, state %d, %u in flight, %s)\n",
 				t->tag, t->ctx ? &t->ctx->coded_fmt_desc->fourcc : &(u32){0},
 				t->state, avd->inflight, avd->backend->name);
+			avd_qfw_debug(avd, t, "timeout");
 			avd_reset_queue(avd, -ETIMEDOUT);
 			break;
 		}

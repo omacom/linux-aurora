@@ -19,6 +19,11 @@
 #include <linux/iommu.h>
 #include <linux/spinlock.h>
 
+#include "avd-pm.h"
+#include <linux/workqueue.h>
+
+#include "avd-queue.h"
+
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-mem2mem.h>
@@ -123,6 +128,8 @@ struct avd_decoded_buffer {
 	/* Pending CPU fill, retained with the buffer until dequeue. */
 	size_t grey_chroma_offset;
 	bool grey_chroma_10bit;
+	/* H.264/HEVC: scratch bank + 1 of the picture decoded into this buffer */
+	u8 bank;
 
 	union {
 		struct avd_vp9_decoded_buffer_info vp9;
@@ -144,6 +151,8 @@ struct avd_coded_fmt_ops {
 	void (*adjust_decoded_fmt)(struct avd_ctx *ctx,
 			struct v4l2_pix_format_mplane *pix_mp);
 	void (*submit)(struct avd_ctx *ctx);
+	/* PP EXEC commands the last built frame needs (submit's count), >= 1. */
+	unsigned int (*pp_kicks)(struct avd_ctx *ctx);
 	int (*start)(struct avd_ctx *ctx);
 	void (*stop)(struct avd_ctx *ctx);
 	int (*run)(struct avd_ctx *ctx);
@@ -173,20 +182,29 @@ struct avd_coded_fmt_desc {
 	struct v4l2_frmsize_stepwise frmsize;
 	const struct avd_ctrls *ctrls;
 	const struct avd_coded_fmt_ops *ops;
+	const struct avd_codec_frame_ops *frame_ops;
 	unsigned int num_decoded_fmts;
 	const struct avd_decoded_fmt_desc *decoded_fmts;
 	u32 subsystem_flags;
 	unsigned int capability;
 };
 
+struct avd_apple_hw;
+
 struct avd_variant {
+	const struct avd_apple_hw *apple;
+	size_t fp_size;
 	unsigned int vp_slots[4];
 	unsigned int vp_slot_base[4];
 	unsigned int fifo_slots;
 	unsigned int capabilities;
+	/* Codecs advertised only when the firmware CODECS trailer lists them. */
+	unsigned int fw_caps_required;
 	void (*configure_stream)(struct avd_dev *avd, dma_addr_t addr,
 			u8 fifo_idx, u32 vp_slot);
 	const char* fw_name;
+	/* Older image tried when fw_name is not installed (legacy transport). */
+	const char *fw_name_fallback;
 	unsigned char revision; /* the same as the device tree */
 	/* just for convenience */
 	u32 vp_slot_offset;
@@ -196,23 +214,16 @@ struct avd_variant {
 	unsigned int quirks;
 };
 
-/* Lifecycle of the one m2m job the device runs at a time. */
-enum avd_job_state {
-	AVD_JOB_IDLE,
-	AVD_JOB_RUNNING,	/* inside avd_device_run() */
-	AVD_JOB_SUBMITTED,	/* handed to the hardware, watchdog armed */
-	AVD_JOB_FINISHING,	/* claimed by the IRQ handler or the watchdog */
-};
-
 struct avd_dev {
 	struct device *dev;
+	struct avd_pm pm;
 	struct v4l2_device v4l2_dev;
 	struct media_device mdev;
 	struct video_device vdev;
 	struct v4l2_m2m_dev *m2m_dev;
 	struct platform_device *pdev;
 
-	const struct firmware *fw; /* fw is lost on suspend */
+	const struct firmware *fw; /* separately installed open firmware */
 
 	void __iomem *code;
 	void __iomem *mbox;
@@ -223,32 +234,49 @@ struct avd_dev {
 
 	struct mutex vdev_lock;
 
-	/* The current job; see avd_device_run(). Protected by job_lock. */
-	spinlock_t job_lock;
-	enum avd_job_state job_state;
-	struct avd_ctx *job_ctx;
-	u64 job_seq;
-	bool job_end_sent;
-	/* The current job's VP finished and its PP was kicked. */
-	bool job_vp_done;
-	bool job_pending;
-	enum vb2_buffer_state job_pending_result;
+	/* queue_lock protects slot state/tag and job_ready observations. */
+	spinlock_t queue_lock;
+	/* Serializes CPU preparation, submission, retirement and reset. */
+	struct mutex queue_mutex;
+	struct delayed_work queue_work;
+	struct list_head contexts;
+	/* One m2m dispatch reservation; never identifies firmware-owned work. */
+	/*
+	 * m2m runs one device_run at a time until job_finish; a job that finds
+	 * no free slot waits here and is restarted when a frame retires.
+	 */
+	struct avd_ctx *deferred_ctx;
+	struct avd_frame frames[AVD_MAX_FRAMES];
+	struct avd_buf *frame_fp[AVD_MAX_FRAMES];
+	u64 frame_seq;
+	unsigned int inflight;
+	bool stopping;
+	/* Retired after a failed or too frequent recovery, until module reload. */
+	bool faulted;
+	/* Recovery pacing: when the last one ran, and a sliding storm count. */
+	unsigned long last_recover;
+	unsigned long storm_start;
+	unsigned int storm_count;
+	u64 fw_generation;
+	const struct avd_backend_ops *backend;
+	void *backend_priv;
+	/* Only the open-firmware compatibility path uses these. */
+	struct avd_frame *building;
+	/* Open firmware queue ABI 2 state, NULL when the node has no SRAM. */
+	struct avd_qfw *qfw;
+	struct avd_frame *compat_active;
+	/* The active legacy frame's VP finished and its PP was kicked. */
+	bool compat_pp_kicked;
+	/* Context of the last legacy submission, for VP DONE without a frame. */
+	struct avd_ctx *compat_ctx;
+	bool compat_held;
 
 	struct reset_control *rstc;
-	int irq;
-	/* Recovery budget; a retired decoder fails every job until reload. */
-	unsigned long recover_window_start;
-	unsigned int recoveries;
-	unsigned long last_recover;
-	bool retired;
-	/* DMA blocked at the DART (retired or resting); detached at remove. */
-	bool dma_parked;
-	/* Out of recovery budget: frames fail without hardware access until then. */
-	unsigned long rest_until;
-	bool irq_parked;
 
 	const struct avd_variant *variant;
 	unsigned int capabilities;
+	/* What the loaded image's CODECS trailer (or its absence) allows. */
+	unsigned int fw_capabilities;
 };
 
 struct avd_segment {
@@ -266,13 +294,12 @@ struct avd_buf {
 	void *cpu;
 	dma_addr_t addr;
 	size_t size;
+	struct avd_dma_release *release;
 };
 
 struct avd_ctx {
 	struct v4l2_fh fh;
 	struct avd_dev *dev;
-	/* A frame failed in hardware: fail every job until streaming restarts. */
-	bool broken;
 
 	struct v4l2_format coded_fmt;
 	struct v4l2_format decoded_fmt;
@@ -282,14 +309,26 @@ struct avd_ctx {
 	enum avd_image_fmt image_fmt;
 	bool decomp;
 
-	struct delayed_work watchdog_work;
-	/* job_seq of the job watchdog_work was armed for */
-	u64 wd_seq;
+	struct list_head queue_node;
+	struct work_struct submit_work;
+	bool draining;
+	/* Consecutive frames that failed in hardware; reset by a good frame. */
+	unsigned int hw_errors;
+	/* Too many hardware errors: fail every frame until streaming restarts. */
+	bool broken;
+	bool session_started;
+	u64 session_generation;
+	enum avd_frame_dep next_dep;
+	u32 client_id;
 
 	void *priv;
 
 	struct avd_comp comp;
 	int fifo_idx;
+	/* Pictures of this context the queue may hold at once (0 or 1: one). */
+	unsigned int max_frames;
+	/* VP to PP FIFO for the job being built; 0 means ctx->inst. */
+	dma_addr_t job_fifo;
 	struct avd_job job;
 	struct avd_buf inst;
 };
@@ -345,6 +384,27 @@ static inline struct avd_ctx *file_to_ctx(struct file *filp)
 
 /* hw stuff */
 int avd_boot(struct avd_dev *avd);
+int avd_queue_init(struct avd_dev *avd);
+void avd_queue_cleanup(struct avd_dev *avd);
+void avd_queue_run(void *priv);
+int avd_queue_ready(void *priv);
+void avd_queue_abort(void *priv);
+void avd_queue_drain(struct avd_ctx *ctx);
+void avd_queue_add_ctx(struct avd_ctx *ctx);
+void avd_queue_del_ctx(struct avd_ctx *ctx);
+int avd_open_build_program(struct avd_ctx *ctx);
+extern const struct avd_backend_ops avd_open_backend;
+extern const struct avd_backend_ops avd_apple_backend;
+extern const struct avd_backend_ops avd_qfw_backend;
+struct avd_qfw;
+int avd_qfw_probe(struct avd_dev *avd);
+void avd_qfw_select(struct avd_dev *avd);
+void avd_qfw_prepare_boot(struct avd_dev *avd);
+void avd_qfw_debug(struct avd_dev *avd, struct avd_frame *f, const char *where);
+bool avd_backend_is_qfw(const struct avd_dev *avd);
+int avd_backend_select(struct avd_dev *avd);
+bool avd_mbox_pop(struct avd_dev *avd, u32 *msg);
+int avd_backend_boot(struct avd_dev *avd);
 void avd_shutdown(struct avd_dev *avd);
 
 void avd_status(struct avd_dev *avd, u32 vp);

@@ -24,7 +24,7 @@ int avd_open_build_program(struct avd_ctx *ctx)
 	struct avd_frame *f = avd->building;
 	struct avd_job *job = &ctx->job;
 	size_t count = 1, pos = 0, i, j;
-	u32 *words, mask, start;
+	u32 *words, mask, start, fifo;
 	int ret;
 
 	if (!f || !job->segments)
@@ -47,18 +47,23 @@ int avd_open_build_program(struct avd_ctx *ctx)
 		AVD_OP_EXEC_FLAG_START_REV3(avd->variant->revision == 3);
 	/* The queued transport gives every frame in flight its own FIFO. */
 	ctx->fifo_idx = avd_backend_is_qfw(avd) ? f->idx : 0;
+	fifo = AVD_OP_EXEC_FIFO_IDX(ctx->fifo_idx);
 	f->fifo_iova = ctx->job_fifo ?: ctx->inst.addr;
 	ctx->job_fifo = 0;
 	words = f->prog->cpu;
-	words[pos++] = AVD_OP_EXEC | mask | start | AVD_OP_EXEC_FIFO_IDX(ctx->fifo_idx);
+	words[pos++] = AVD_OP_EXEC | mask | start | fifo;
 	for (i = 0; i <= job->num; i++) {
 		for (j = 0; j < job->segments[i].num; j++)
 			words[pos++] = job->segments[i].instructions[j];
 		if (i)
-			words[pos++] = AVD_OP_EXEC | mask | AVD_OP_EXEC_FLAG_END(i == job->num);
+			words[pos++] = AVD_OP_EXEC | mask | fifo |
+				       AVD_OP_EXEC_FLAG_END(i == job->num);
 	}
 	f->prog_words = pos;
 	f->cmd[0] = job->codec;
+	/* A mailbox retry may outlive the next preparation on this context. */
+	f->cmd[1] = avd_backend_is_qfw(avd) && ctx->coded_fmt_desc->ops->pp_kicks ?
+		    ctx->coded_fmt_desc->ops->pp_kicks(ctx) - 1 : 0;
 	kvfree(job->segments);
 	job->segments = NULL;
 	return 0;

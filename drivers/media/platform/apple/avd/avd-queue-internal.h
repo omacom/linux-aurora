@@ -65,6 +65,19 @@ static inline bool avd_slot_expired(const struct avd_frame *f, unsigned long now
 		f->state == AVD_FRAME_RESERVED) && time_after_eq(now, f->deadline);
 }
 
+/* Posted frames may overlap, but never pass an earlier reserved frame. */
+static inline bool avd_slot_submit_first(const struct avd_frame *pool,
+					const struct avd_frame *f)
+{
+	unsigned int i;
+
+	for (i = 0; i < AVD_MAX_FRAMES; i++)
+		if (pool[i].state == AVD_FRAME_RESERVED && pool[i].ctx == f->ctx &&
+		    pool[i].seq < f->seq)
+			return false;
+	return true;
+}
+
 static inline bool avd_inbox_full(unsigned int producer, unsigned int consumer)
 {
 	return ((producer + 1) & 7) == consumer;
