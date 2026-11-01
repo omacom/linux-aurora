@@ -209,6 +209,15 @@ int main(void) {
  assert(!running&&!src[5].done&&!dst[5].done);avd_retire(&d);
  assert(src[5].done&&dst[5].done);
  c[0].broken=false;prepare_result=0;
+ /* A rejected intermediate slice retains CAPTURE until its final/error slice. */
+ struct vb2_v4l2_buffer rejected={.flags=V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF},
+  rejected_dst={},rejected_last={};
+ prepare_result=-EINVAL;m[0].src=&rejected;m[0].dst=&rejected_dst;submit(&c[0]);
+ assert(running==&c[0]&&!rejected.done&&!rejected_dst.done);avd_retire(&d);
+ assert(!running&&rejected.done&&!rejected_dst.done&&rejected_dst.is_held&&!d.inflight);
+ m[0].src=&rejected_last;submit(&c[0]);
+ assert(!running&&rejected_last.done&&rejected_dst.done&&!d.inflight);
+ c[0].broken=false;prepare_result=0;
  /* PM failure and stopped-stream dispatch finish the current job once. */
  pm_error=-EIO;m[0].src=&src[6];m[0].dst=&dst[6];submit(&c[0]);assert(!running&&!d.inflight);
  pm_error=0;c[0].draining=true;m[0].src=&src[7];m[0].dst=&dst[7];submit(&c[0]);
@@ -227,6 +236,23 @@ int main(void) {
  assert(d.inflight==2&&!running&&!src[9].done&&!dst[9].done&&!src[10].done&&!dst[10].done);
  complete(&d,&c[0],0);assert(src[9].done&&dst[9].done&&!src[10].done&&!dst[10].done);
  complete(&d,&c[0],0);assert(src[10].done&&dst[10].done&&!d.inflight&&!pm_refs&&!raw_finishes);
+ /* Each probed multislice picture submits exactly once after its last slice. */
+ const unsigned int pictures[] = {1,3,4,9,10,12,20};
+ for(unsigned int p=0;p<sizeof(pictures)/sizeof(pictures[0]);p++) {
+  struct vb2_v4l2_buffer picture_src[20]={},picture_dst={};
+  unsigned int sent_before=send_count;
+  m[0].dst=&picture_dst;
+  for(unsigned int slice=0;slice<pictures[p];slice++) {
+   bool last=slice+1==pictures[p];
+   picture_src[slice].flags=last?0:V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF;
+   m[0].src=&picture_src[slice];submit(&c[0]);
+   assert(!running&&!picture_dst.done);
+   if(!last) assert(picture_src[slice].done&&picture_dst.is_held&&send_count==sent_before);
+   else assert(!picture_src[slice].done&&!picture_dst.is_held&&send_count==sent_before+1);
+  }
+  complete(&d,&c[0],0);
+  assert(picture_dst.done&&!d.inflight&&!pm_refs);
+ }
  unsigned int before=finishes;
  avd_queue_submit_work(&c[0].submit_work);assert(finishes==before&&!d.inflight);
  capacity=1;c[1].coded_fmt_desc=&fmt;c[1].broken=false;
@@ -297,10 +323,83 @@ static void check_vp_events(void) {
 '''
 
 
+QUEUE_PRELUDE = r'''
+
+#include <assert.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <linux/videodev2.h>
+#define VB2_MMAP 1
+#define VB2_DMABUF 2
+#define VB2_MAX_FRAME 32
+#define VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF 1
+#define max(a, b) ((a) > (b) ? (a) : (b))
+struct vb2_queue {
+ unsigned int type, io_modes, dma_attrs, buf_struct_size, timestamp_flags;
+ unsigned int subsystem_flags, max_num_buffers;
+ void *drv_priv, *lock, *dev;
+ const void *ops, *mem_ops;
+ bool supports_requests, allow_cache_hints, bidirectional;
+};
+struct avd_dev { int vdev_lock; void *dev; struct { void *dev; } v4l2_dev; };
+struct avd_coded_fmt_desc { unsigned int subsystem_flags; };
+struct avd_ctx { struct avd_dev *dev; const struct avd_coded_fmt_desc *coded_fmt_desc; };
+struct v4l2_m2m_buffer { int unused; };
+struct avd_decoded_buffer { int unused; };
+static const int avd_queue_ops, vb2_dma_contig_memops;
+static unsigned int flags_at_init;
+static int vb2_queue_init(struct vb2_queue *q)
+{
+ if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+  flags_at_init = q->subsystem_flags;
+ return 0;
+}
+
+'''
+QUEUE_MAIN = r'''
+
+int main(void)
+{
+ const struct avd_coded_fmt_desc h264 = { 1 }, vp9 = { 0 };
+ struct avd_dev dev = {0};
+ struct avd_ctx ctx = { .dev = &dev, .coded_fmt_desc = &h264 };
+ struct vb2_queue src = {0}, dst = {0};
+ if (avd_m2m_queue_init(&ctx, &src, &dst)) return 1;
+ /* CREATE_BUFS count=0 returns these capabilities. FFmpeg caches them. */
+ unsigned int cached_hold = src.subsystem_flags & 1;
+ select_features(&src, &h264);
+ assert(flags_at_init == 1 && cached_hold == 1);
+ select_features(&src, &vp9);
+ assert(src.subsystem_flags == 0);
+ select_features(&src, &h264);
+ assert(src.subsystem_flags == 1);
+ assert(flags_at_init == 1 && cached_hold == 1 && src.subsystem_flags == 1);
+ puts("PASS: CREATE_BUFS before S_FMT exposes HOLD; format switches clear stale flags");
+ return 0;
+}
+
+'''
+
+def queue_capabilities(out):
+    source = (ROOT / 'avd-v4l2.c').read_text()
+    import re
+    assignment = re.search(r'vq->subsystem_flags\s*\|?=\s*desc->subsystem_flags;', source)[0]
+    code = QUEUE_PRELUDE + function((ROOT / 'avd-drv.c').read_text(), 'avd_m2m_queue_init')
+    code += '\nstatic void select_features(struct vb2_queue *vq, const struct avd_coded_fmt_desc *desc) {\n'
+    code += assignment + '\n}\n' + QUEUE_MAIN
+    dest = out / 'queue-capabilities.c'
+    dest.write_text(code)
+    exe = dest.with_suffix('')
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                    '-fsanitize=address,undefined', '-g', str(dest), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+
+
 def main():
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    names = ['avd-queue.c', 'avd-queue-internal.h', 'avd-queue.h', 'avd-v4l2.c']
+    queue_capabilities(out)
+    names = ['avd-drv.c', 'avd-queue.c', 'avd-queue-internal.h', 'avd-queue.h', 'avd-v4l2.c']
     (out / 'core.sha256').write_text(hashlib.sha256(CORE.read_bytes()).hexdigest()+'  v4l2-mem2mem.c\n')
     (out / 'inputs.sha256').write_text(''.join(hashlib.sha256((ROOT / n).read_bytes()).hexdigest()+'  '+n+'\n' for n in names))
     qh = (ROOT / 'avd-queue.h').read_text()

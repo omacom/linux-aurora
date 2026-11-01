@@ -176,6 +176,13 @@ def main():
                "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
                "defines_sha256": hashlib.sha256(defines.encode()).hexdigest(),
                "cases_per_variant": len(cases), "results": results, "passed": ok}
+    if ok and not args.ref and not args.mutations:
+        tests = ROOT / "drivers/media/platform/apple/avd/tests"
+        for script in ("program-test.py", "dispatch-test.py"):
+            subprocess.run([sys.executable, str(tests / script),
+                            str(args.output / script.removesuffix(".py"))],
+                           check=True)
+        receipt["h264_program_and_dispatch"] = "PASS"
     (args.output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps({"passed": ok, "cases": len(cases),
                       "variants": [{k: x[k] for k in ("name", "failed_cases", "verdict")}

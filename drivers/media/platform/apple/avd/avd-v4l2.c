@@ -250,6 +250,7 @@ static const struct avd_ctrl_desc avd_h264_ctrl_descs[] = {
 	},
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_SLICE_PARAMS,
+		.cfg.ops = &avd_ctrl_ops,
 	},
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_DECODE_MODE,
@@ -687,7 +688,7 @@ static int avd_s_output_fmt(struct file *file, void *priv,
 	cap_fmt->fmt.pix_mp.quantization = f->fmt.pix_mp.quantization;
 
 	/* Enable format specific queue features */
-	vq->subsystem_flags |= desc->subsystem_flags;
+	vq->subsystem_flags = desc->subsystem_flags;
 
 	return 0;
 }

@@ -1055,9 +1055,13 @@ static int avd_hevc_validate_sps(struct avd_ctx *ctx,
 	if (sps->pic_width_in_luma_samples > ctx->coded_fmt.fmt.pix_mp.width ||
 	    sps->pic_height_in_luma_samples > ctx->coded_fmt.fmt.pix_mp.height)
 		return -EINVAL;
-	if (sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8)
-		/* Luma and chroma bit depth mismatch: the firmware faults (H0 error) */
+	if (sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8) {
+		dev_err_ratelimited(ctx->dev->dev,
+				    "HEVC unequal luma/chroma bit depths (%u/%u) are unsupported\n",
+				    sps->bit_depth_luma_minus8 + 8,
+				    sps->bit_depth_chroma_minus8 + 8);
 		return -EINVAL;
+	}
 	if (sps->bit_depth_luma_minus8 != 0 && sps->bit_depth_luma_minus8 != 2)
 		/* Only 8 and 10 bit have capture formats */
 		return -EINVAL;
@@ -1454,6 +1458,11 @@ static int avd_hevc_run(struct avd_ctx *ctx)
 	ret = avd_hevc_run_preamble(ctx, &run);
 	if (ret)
 		return ret;
+
+	/* Also validate controls applied from a queued request before submission. */
+	ret = avd_hevc_validate_sps(ctx, run.sps);
+	if (ret)
+		goto complete;
 
 	avd_hevc_normalize_slices(&run,
 				  vb2_get_plane_payload(&run.base.bufs.src->vb2_buf, 0));

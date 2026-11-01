@@ -652,6 +652,8 @@ static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->dev = ctx->dev->v4l2_dev.dev;
 	src_vq->supports_requests = true;
 	src_vq->allow_cache_hints = true;
+	/* CREATE_BUFS may probe HOLD support before the first S_FMT. */
+	src_vq->subsystem_flags = ctx->coded_fmt_desc->subsystem_flags;
 
 	ret = vb2_queue_init(src_vq);
 	if (ret)

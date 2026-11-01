@@ -230,3 +230,45 @@ safe visibility/synchronization rule, then two scratch banks and a dependency
 on the actual primary reference (which need not be the preceding picture).
 No AV1 or VP9 pixel correctness or throughput claim follows from these host
 and emulator tests; device qualification remains necessary.
+
+H.264 conformance fixes
+----------------------
+
+The H.264 cases live in ``program-test.py`` and ``dispatch-test.py``. The
+program test also compiles the emitters from the pinned merged rewrite,
+``757fc07a6930ee12b04fe034138dc9880dc4ff3f``, with the same synthetic controls
+and addresses. It retains ``before.json``, ``after.json`` and generated C.
+Set ``AVD_H264_BASELINE_ROOT`` to an exported baseline driver directory when
+running outside a Git checkout. ``AVD_H264_BASELINE_REF`` can select another
+Git revision explicitly.
+
+The complete-program matrix covers zero through sixteen dense DPB entries,
+a sparse DPB, I/P/B slices, CAVLC/CABAC, explicit/implicit weights,
+first/continuation slices and both address encodings. Dense programs remain
+byte-identical. Sparse programs may change only the low four-bit packed DPB
+slot operand of reference-list commands. All 65536 DPB occupancy maps are
+checked, including VALID entries without ACTIVE. The reference-header count
+now counts all VALID entries, matching the headers actually emitted; an
+inactive VALID entry can therefore change the count field in each header.
+
+The production prepare function is exercised with two banks: picture 0 stays
+submitted while picture 1 holds slices, rejects syntax or malformed data,
+and is restarted. Rejection drops only picture 1's unsubmitted slices and
+job table. The saved CAPTURE bank selects PP retirement even when the other
+bank is the current builder. SP/SI switching slices, FMO, non-increasing
+macroblock positions and unequal luma/chroma bit depths are rejected. A repeated first slice before the previous picture
+finishes is rejected before bank selection can discard its held slices. Both H.264 and HEVC applied SPS validation is tested.
+
+The dispatch test compiles the production queue initializer, probes
+CREATE_BUFS capabilities before S_FMT, and checks format switches remove
+stale HOLD support. Pictures with 1, 3, 4, 9, 10, 12 and 20 slices each reach
+the transport exactly once. Intermediate slices use the core HOLD helper:
+only OUTPUT completes, CAPTURE and its bank remain owned by the builder.
+The final slice uses ``v4l2_m2m_job_finish_detach()``: both buffers leave the
+scheduler atomically, neither completes early, and the bank remains owned
+until tagged PP retirement. Advertising HOLD does not prevent that final
+handoff. The legacy transport follows the same slice collection path with
+one bank; the queued transport permits two banks.
+
+These are host control/program/ownership regressions. The lead's conformance
+run must still establish decoded pixels and absence of hardware timeouts.

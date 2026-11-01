@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: GPL-2.0-only OR MIT
+# SPDX-License-Identifier: GPL-2.0-only
 """Compile the production H.264 emitters and open-program builder on a host.
 
 Only allocation, controls, and buffer addresses are fixtures. No copied hardware
@@ -8,6 +8,7 @@ The output is a codec-generated 1920x1088 IDR with two I slices, not a
 pixel decoder. Run in a build slot: program-test.py OUTPUT_DIRECTORY.
 """
 import os
+import json
 import hashlib
 from pathlib import Path
 import re
@@ -336,11 +337,370 @@ int main(int argc, char **argv)
 '''
 
 
+
+def h264_prelude():
+    # Keep the shared MMIO/allocation boundary stable for the VP9 suite.
+    pre = PRELUDE.replace('static struct avd_decoded_buffer reference;',
+                          'static struct avd_decoded_buffer references[16];\n#define reference references[0]')
+    pre = pre.replace('return &reference;', 'return &references[t % 16];')
+    return '#include <linux/videodev2.h>\n' + pre + '#define dev_err(d,...) ((void)(d))\n'
+
+
+RUN_FIXTURE = r'''
+#define dev_dbg_ratelimited(d,...) ((void)(d))
+#define PAGE_SIZE 4096
+#define PAGE_ALIGN(n) (((n)+4095)&~4095UL)
+struct v4l2_h264_reflist_builder { unsigned int num_valid; s32 cur_pic_order_count; };
+static void v4l2_h264_init_reflist_builder(struct v4l2_h264_reflist_builder *b,
+ const struct v4l2_ctrl_h264_decode_params *d,const struct v4l2_ctrl_h264_sps *s,
+ const struct v4l2_h264_dpb_entry *dpb) {
+ (void)d;(void)s;b->num_valid=0;b->cur_pic_order_count=40;
+ for(unsigned int i=0;i<16;i++) if(dpb[i].flags&V4L2_H264_DPB_ENTRY_FLAG_ACTIVE)b->num_valid++;
+}
+static void v4l2_h264_build_p_ref_list(void *b,void *r) { (void)b;(void)r; }
+static void v4l2_h264_build_b_ref_lists(void *b,void *r,void *s) { (void)b;(void)r;(void)s; }
+static struct avd_h264_run fixture_run;
+static unsigned int postambles,held_finishes,submissions;
+static bool valid_data=true;
+static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(void *m) { (void)m;return fixture_run.base.bufs.src; }
+static size_t vb2_get_plane_payload(struct vb2_buffer *b,int p) { (void)b;(void)p;return valid_data?16:2; }
+static void *vb2_plane_vaddr(struct vb2_buffer *b,int p) { (void)b;(void)p;static u8 data[16];return data; }
+static void avd_h264_run_preamble(struct avd_ctx *ctx,struct avd_h264_run *r) { (void)ctx;*r=fixture_run; }
+static void avd_run_postamble(struct avd_ctx *ctx,struct avd_run *r) { (void)ctx;(void)r;postambles++; }
+static bool avd_h264_slice_fits(const struct v4l2_ctrl_h264_sps *s,size_t n,size_t b,u32 l,size_t z)
+{ (void)s;(void)b;(void)l;(void)z;return n<20; }
+static size_t avd_h264_max_slices(const struct v4l2_ctrl_h264_sps *s) { (void)s;return 20; }
+static int avd_h264_realloc_slices(struct avd_ctx *c,size_t n) { (void)c;(void)n;abort(); }
+static int avd_init_job(struct avd_ctx *c,unsigned int codec,size_t n) {
+ free(c->job.segments);c->job.codec=codec;c->job.num=0;
+ c->job.segments=calloc(n,sizeof(*c->job.segments));return c->job.segments?0:-ENOMEM;
+}
+static void avd_job_finish(struct avd_ctx *c,enum vb2_buffer_state s) { (void)c;assert(s==VB2_BUF_STATE_DONE);held_finishes++; }
+static int avd_submit_job(struct avd_ctx *c) { submissions++;return avd_open_build_program(c); }
+'''
+
+RUN_MAIN = r'''
+int main(void) {
+ struct avd_variant variant={.revision=4,.quirks=AVD_QUIRK_LSR,.fifo_slots=15};
+ struct avd_buf programs[2]={};
+ struct avd_frame frames[2]={{.idx=0,.prog=&programs[0]},{.idx=1,.prog=&programs[1]}};
+ struct avd_dev dev={.variant=&variant,.queued=true,.building=&frames[0]};
+ static const struct avd_coded_fmt_ops ops={0};static const struct fmt_desc fmt={.ops=&ops};
+ struct avd_h264_ctx hc={.nbanks=2};hc.b=&hc.bank[0];
+ struct avd_ctx ctx={.dev=&dev,.priv=&hc,.coded_fmt_desc=&fmt};
+ struct avd_decoded_buffer dst[2]={};struct vb2_v4l2_buffer src={0};
+ struct v4l2_ctrl_h264_sps sps={.chroma_format_idc=1,.pic_width_in_mbs_minus1=119,
+  .pic_height_in_map_units_minus1=67,.flags=V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY};
+ struct v4l2_ctrl_h264_pps pps={0};struct v4l2_ctrl_h264_slice_params sl={.slice_type=V4L2_H264_SLICE_TYPE_I,.header_bit_size=32};
+ struct v4l2_ctrl_h264_decode_params decode={0};struct v4l2_ctrl_h264_pred_weights weights={0};
+ fixture_run=(struct avd_h264_run){.sps=&sps,.pps=&pps,.slice_params=&sl,.decode_params=&decode,
+  .pred_weights=&weights,.base={.bufs={.src=&src,.dst=&dst[0].base.vb},
+  .y_out=0x220000000,.uv_out=0x220100000,.comp_out=0x220200000},.addresses.mv_color=0x220300000};
+ ctx.decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline=1920;
+ reference.base.vb.vb2_buf.dma=0x240000000;
+ for(unsigned int b=0;b<2;b++) {
+  assert(!avd_h264_alloc_bufs(&ctx,&hc.bank[b]));
+  hc.bank[b].alloc_slice_num=20;hc.bank[b].slices=calloc(20,sizeof(struct avd_buf));
+ }
+ /* Applied SPS controls reject unequal depths for both codecs. */
+ struct v4l2_ctrl_hevc_sps hevc={.chroma_format_idc=1,
+  .pic_width_in_luma_samples=1920,.pic_height_in_luma_samples=1088};
+ ctx.coded_fmt.fmt.pix_mp.width=1920;ctx.coded_fmt.fmt.pix_mp.height=1088;
+ for(unsigned int luma=0;luma<5;luma++) for(unsigned int chroma=0;chroma<5;chroma++) {
+  sps.bit_depth_luma_minus8=hevc.bit_depth_luma_minus8=luma;
+  sps.bit_depth_chroma_minus8=hevc.bit_depth_chroma_minus8=chroma;
+  int expected=luma==chroma&&(luma==0||luma==2)?0:-EINVAL;
+  assert(avd_h264_validate_sps(&ctx,&sps)==expected);
+  assert(avd_hevc_validate_sps(&ctx,&hevc)==expected);
+ }
+ sps.bit_depth_luma_minus8=sps.bit_depth_chroma_minus8=0;
+ /* A VALID but inactive DPB entry must be included in the header's count. */
+ decode.dpb[0].flags=V4L2_H264_DPB_ENTRY_FLAG_VALID|V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+ decode.dpb[7].flags=V4L2_H264_DPB_ENTRY_FLAG_VALID;
+ decode.dpb[7].reference_ts=0;
+ for(unsigned int i=0;i<16;i++)references[i].base.vb.vb2_buf.dma=0x240000000+i*0x100000;
+ assert(!avd_h264_run(&ctx));assert(submissions==1&&hc.bank[0].submitted&&dst[0].bank==1);
+ /* Compare the complete header to one built with the emitted VALID count. */
+ struct avd_segment expected={0};struct avd_job saved=ctx.job;
+ ctx.job=(struct avd_job){.segments=&expected};fixture_run.num_valid=2;fixture_run.cur_poc=40;
+ stream_hdr(&ctx,&fixture_run);
+ assert(!memcmp((u32 *)programs[0].cpu+1,expected.instructions,expected.num*sizeof(u32)));
+ ctx.job=saved;
+ /* Keep picture 0 DMA-owned while picture 1 holds and rejects a slice. */
+ dev.building=&frames[1];fixture_run.base.bufs.dst=&dst[1].base.vb;
+ src.flags=V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF;sl.first_mb_in_slice=0;dma_count=0;
+ assert(!avd_h264_run(&ctx));assert(held_finishes==1&&hc.bank[1].busy&&!hc.bank[1].submitted);
+ assert(hc.bank[0].busy&&hc.bank[0].submitted&&dst[0].bank==1);
+ sl.first_mb_in_slice=33;sl.slice_type=V4L2_H264_SLICE_TYPE_SP;
+ assert(avd_h264_run(&ctx)==-EINVAL);assert(!hc.bank[1].busy&&!hc.bank[1].slice_num&&!dst[1].bank&&!ctx.job.segments);
+ assert(hc.bank[0].busy&&hc.bank[0].submitted&&hc.bank[0].slice_num==1);
+ /* A missing-first continuation cannot borrow the submitted picture's bank. */
+ sl.slice_type=V4L2_H264_SLICE_TYPE_I;assert(avd_h264_run(&ctx)==-EINVAL);
+ /* Repeated/decreasing macroblock positions, FMO, unequal depths and bad data abort only the builder. */
+ for(unsigned int failure=0;failure<7;failure++) {
+  sl.first_mb_in_slice=0;dma_count=0;assert(!avd_h264_run(&ctx));
+  sl.first_mb_in_slice=33;dma_count=0;assert(!avd_h264_run(&ctx));
+  sl.first_mb_in_slice=failure==0?33:failure==1?16:failure==6?0:66;
+  if(failure==2)pps.num_slice_groups_minus1=1;
+  if(failure==3)sps.bit_depth_chroma_minus8=2;
+  if(failure==4)valid_data=false;
+  if(failure==5)sl.slice_type=V4L2_H264_SLICE_TYPE_SI;
+  assert(avd_h264_run(&ctx)==-EINVAL);
+  assert(!hc.bank[1].busy&&!hc.bank[1].slice_num&&!ctx.job.segments&&!dst[1].bank);
+  assert(hc.bank[0].busy&&hc.bank[0].submitted&&dst[0].bank==1);
+  pps.num_slice_groups_minus1=0;sps.bit_depth_chroma_minus8=0;valid_data=true;sl.slice_type=V4L2_H264_SLICE_TYPE_I;
+ }
+ /* Final slice submits once; retirement selects CAPTURE's bank, not hc.b. */
+ sl.first_mb_in_slice=0;dma_count=0;assert(!avd_h264_run(&ctx));
+ sl.first_mb_in_slice=33;src.flags=0;dma_count=0;assert(!avd_h264_run(&ctx));
+ assert(submissions==2&&hc.bank[0].submitted&&hc.bank[1].submitted);
+ assert(avd_h264_pick_bank(&ctx,&dst[1].base.vb)==-EBUSY);
+ avd_h264_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);
+ assert(!hc.bank[0].busy&&hc.bank[1].busy&&hc.b==&hc.bank[1]);
+ avd_h264_done(&ctx,&src,&dst[1].base.vb,VB2_BUF_STATE_DONE);assert(!hc.bank[1].busy);
+ assert(postambles==27&&held_finishes==16&&submissions==2);
+ /* The legacy transport collects the same held slices in its single bank. */
+ dev.queued=false;hc.nbanks=1;dev.building=&frames[0];fixture_run.base.bufs.dst=&dst[0].base.vb;
+ src.flags=V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF;sl.first_mb_in_slice=0;dma_count=0;
+ assert(!avd_h264_run(&ctx));assert(hc.b==&hc.bank[0]&&!hc.bank[0].submitted);
+ sl.first_mb_in_slice=33;dma_count=0;assert(!avd_h264_run(&ctx));assert(submissions==2);
+ sl.first_mb_in_slice=66;src.flags=0;dma_count=0;assert(!avd_h264_run(&ctx));
+ assert(submissions==3&&frames[0].fifo_iova==hc.bank[0].bufs.inst.addr&&!ctx.fifo_idx);
+ avd_h264_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);assert(!hc.bank[0].busy);
+ for(unsigned int b=0;b<2;b++) {
+  struct avd_h264_bufs *buf=&hc.bank[b].bufs;
+  free(buf->inst.cpu);free(buf->pipe_state.cpu);free(buf->above_info.cpu);free(buf->ip_above.cpu);
+  free(buf->lf_above.cpu);free(buf->lf_above_info.cpu);free(buf->mv_above_info.cpu);free(hc.bank[b].slices);free(programs[b].cpu);
+ }
+ puts("PASS: production H.264 prepare: VALID/inactive count, two-bank HOLD/rejection/final submission, PP retirement ownership");
+}
+'''
+
+def prepare_regressions(out):
+    source = (ROOT / 'avd-h264.c').read_text()
+    h264 = re.sub(r'^#include.*\n', '', source.split('static int avd_h264_alloc_bufs(')[0], flags=re.M)
+    inst = re.sub(r'^#include.*\n', '', (ROOT / 'avd-inst.h').read_text(), flags=re.M)
+    helpers = re.sub(r'^#include.*\n', '', (ROOT / 'avd-h264-params.h').read_text(), flags=re.M)
+    pre = h264_prelude().replace('struct vb2_v4l2_buffer *dst; } bufs;', 'struct vb2_v4l2_buffer *src,*dst; } bufs;')
+    pre = pre.replace('struct { struct { struct { struct { u32 bytesperline; } plane_fmt[1]; } pix_mp; } fmt; } decoded_fmt;',
+                      'struct { struct { struct v4l2_pix_format_mplane pix_mp; } fmt; } decoded_fmt,coded_fmt;')
+    pre = pre.replace('struct vb2_buffer vb2_buf; };', 'struct vb2_buffer vb2_buf; unsigned int flags; };')
+    pre = pre.replace('unsigned int bank; };', 'unsigned int bank; size_t grey_chroma_offset; bool grey_chroma_10bit; };')
+    pre += 'enum vb2_buffer_state { VB2_BUF_STATE_DONE, VB2_BUF_STATE_ERROR };\n'
+    code = pre + helpers + inst + h264
+    for name in ('avd_h264_alloc_bufs', 'avd_h264_validate_sps', 'avd_h264_validate_pps',
+                 'avd_h264_validate_slice', 'avd_h264_drop_bank_slices', 'avd_h264_pick_bank',
+                 'avd_h264_abort_picture', 'avd_h264_refs_valid', 'avd_h264_done'):
+        code += function(source, name)
+    code += function((ROOT / 'avd-backend-open.c').read_text(), 'avd_open_build_program')
+    code += function((ROOT / 'avd-hevc.c').read_text(), 'avd_hevc_validate_sps')
+    code += RUN_FIXTURE + function(source, 'avd_h264_run') + RUN_MAIN
+    dest = out / 'prepare.c'
+    dest.write_text(code)
+    exe = dest.with_suffix('')
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                    '-Wno-sign-compare', '-Wno-unused-function', '-fsanitize=address,undefined',
+                    '-g', str(dest), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+
+
+CONFORMANCE_MAIN = r'''
+
+int main(void)
+{
+ struct avd_variant variant = { .revision = 4 };
+ struct avd_dev dev = { .variant = &variant };
+ struct avd_h264_ctx hc = {0};
+ typeof(*((struct avd_ctx *)0)->fh.m2m_ctx) m2m = {0};
+ struct avd_decoded_buffer destination = {0};
+ struct avd_segment segments[2];
+ struct avd_ctx ctx_storage = { .priv = &hc, .dev = &dev,
+  .fh.m2m_ctx = &m2m, .job.segments = segments, .decomp = true };
+ struct avd_ctx *ctx = &ctx_storage;
+ struct v4l2_ctrl_h264_decode_params dec = {0};
+ struct v4l2_ctrl_h264_sps sps = { .chroma_format_idc = 1,
+  .pic_width_in_mbs_minus1 = 11, .pic_height_in_map_units_minus1 = 8,
+  .flags = V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY };
+ struct v4l2_ctrl_h264_pps pps = {0};
+ struct v4l2_ctrl_h264_slice_params sl = {0};
+ struct v4l2_ctrl_h264_scaling_matrix scaling = {0};
+ struct v4l2_ctrl_h264_pred_weights weights = {0};
+ struct avd_buf coded = { .addr = 0x123456780ULL, .size = 256 };
+ struct avd_h264_run run = { .decode_params = &dec, .sps = &sps,
+  .pps = &pps, .slice_params = &sl, .scaling_matrix = &scaling,
+  .pred_weights = &weights, .cur_poc = 40, .slice_data_off = 7,
+  .base.bufs.dst = &destination.base.vb,
+  .base.y_out = 0x20000000, .base.uv_out = 0x20006c00,
+  .base.comp_out = 0x20010000, .addresses.mv_color = 0x20020000 };
+ hc.nbanks = 2; hc.b = &hc.bank[0]; hc.b->active_slice = &coded;
+ hc.b->bufs.pipe_state.addr=0x10000000;
+ hc.b->bufs.above_info.addr=0x10010000;
+ hc.b->bufs.ip_above.addr=0x10020000;
+ hc.b->bufs.lf_above.addr=0x10030000;
+ hc.b->bufs.lf_above_info.addr=0x10040000;
+ hc.b->bufs.mv_above_info.addr=0x10050000;
+ ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline = 192;
+ for (unsigned int i = 0; i < 16; i++) {
+  references[i].base.vb.vb2_buf.dma = 0x30000000 + i * 0x100000;
+  references[i].base.vb.vb2_buf.planes[0].length = 0x30000;
+  references[i].comp.start_offset = 0x10000;
+  for (unsigned int j = 0; j < 4; j++)
+   references[i].comp.offsets[j] = ctx->comp.offsets[j] = j * 0x1000;
+ }
+ /* Dense DPBs cover every reference-count, slice type and weight mode.
+  * Sparse DPBs deliberately place references on either side of holes. */
+ for (unsigned int mask_case = 0; mask_case < 18; mask_case++) {
+  unsigned int mask = mask_case <= 16 ? (1U << mask_case) - 1 : 0x8429;
+  unsigned int count = __builtin_popcount(mask), ids[16], n = 0;
+  for (unsigned int i = 0; i < 16; i++) {
+   dec.dpb[i].flags = mask & BIT(i) ?
+    V4L2_H264_DPB_ENTRY_FLAG_VALID | V4L2_H264_DPB_ENTRY_FLAG_ACTIVE : 0;
+   dec.dpb[i].reference_ts = i;
+   dec.dpb[i].top_field_order_cnt = 2 * i;
+   if (mask & BIT(i)) ids[n++] = i;
+  }
+  for (unsigned int rev = 0; rev < 4; rev++) {
+   variant.revision = rev ? 4 : 3;
+   variant.quirks = rev < 2 ? AVD_QUIRK_LSR | AVD_QUIRK_NO_PIPE_STATE :
+                    rev == 2 ? AVD_QUIRK_LSR : 0;
+   for (unsigned int type = 0; type < 3; type++) {
+    if (type != V4L2_H264_SLICE_TYPE_I && !count) continue;
+    for (unsigned int mode = 0; mode < 4; mode++) {
+     for (unsigned int mb = 0; mb < 2; mb++) {
+      pps.flags = mode & 1 ? V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE : 0;
+      if (mode == 2) pps.flags |= V4L2_H264_PPS_FLAG_WEIGHTED_PRED;
+      pps.weighted_bipred_idc = mode == 3 ? 2 : 0;
+      sl.slice_type = type;
+      sl.first_mb_in_slice = mb ? 33 : 0;
+      sl.header_bit_size = 53;
+      sl.cabac_init_idc = mode % 3;
+      sl.slice_qp_delta = mode ? -2 : 3;
+      sl.flags = mode & 1 ? V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED : 0;
+      sl.num_ref_idx_l0_active_minus1 = count ? count - 1 : 0;
+      sl.num_ref_idx_l1_active_minus1 = count > 1 ? 1 : 0;
+      for (unsigned int i = 0; i < count; i++) {
+       sl.ref_pic_list0[i].index = ids[i];
+       sl.ref_pic_list1[i].index = ids[count - 1 - i];
+       for (unsigned int j = 0; j < 2; j++) {
+        weights.weight_factors[j].luma_weight[i] = i % 2 ? -1 : 1;
+        weights.weight_factors[j].luma_offset[i] = i % 3;
+        weights.weight_factors[j].chroma_weight[i][0] = 1;
+        weights.weight_factors[j].chroma_weight[i][1] = 1;
+       }
+      }
+      run.num_valid = count;
+      dec.flags = count ? 0 : V4L2_H264_DECODE_PARAM_FLAG_IDR_PIC;
+      ctx->job.num = 0; dma_count = 0;
+      segments[0].num = segments[1].num = 0;
+      stream_hdr(ctx, &run);
+      ctx->job.num = 1;
+      stream_slice(ctx, &run);
+      printf("%u/%u/%u/%u/%u", mask_case, rev, type, mode, mb);
+      for (unsigned int seg = 0; seg < 2; seg++)
+       for (unsigned int i = 0; i < segments[seg].num; i++)
+        printf(" %08x", segments[seg].instructions[i]);
+      puts("");
+
+     }
+    }
+   }
+  }
+ }
+ for (unsigned int type = 0; type < 10; type++) {
+  sl.slice_type = type;
+  printf("guard/type/%u %d\n", type, VALIDATE_SLICE(ctx, &sl));
+ }
+ for (unsigned int groups = 0; groups < 8; groups++) {
+  pps.num_slice_groups_minus1 = groups;
+  printf("guard/groups/%u %d\n", groups, avd_h264_validate_pps(ctx, &pps));
+ }
+ if (!avd_h264_slice_order_supported(0, 0, 0) ||
+     !avd_h264_slice_order_supported(1, 0, 33) ||
+     !avd_h264_slice_order_supported(2, 33, 66) ||
+     avd_h264_slice_order_supported(0, 0, 33) ||
+     avd_h264_slice_order_supported(1, 33, 33) ||
+     avd_h264_slice_order_supported(2, 66, 33) ||
+     avd_h264_slice_order_supported(2, 66, 0)) return 4;
+ /* Every possible DPB occupancy must map to dense header slots. */
+ for (unsigned int mask = 0; mask < 65536; mask++) {
+  unsigned int count = 0;
+  for (unsigned int i = 0; i < 16; i++) {
+   dec.dpb[i].flags = mask & BIT(i) ? V4L2_H264_DPB_ENTRY_FLAG_VALID : 0;
+   if (mask & BIT(i)) {
+    if (avd_h264_ref_slot(&dec, i) != count++) return 2;
+   }
+  }
+  if (avd_h264_num_refs(&dec) != count) return 3;
+ }
+ return 0;
+}
+
+'''
+
+def conformance(out):
+    if os.environ.get('AVD_H264_BASELINE_ROOT'):
+        baseline = Path(os.environ['AVD_H264_BASELINE_ROOT']).resolve()
+    else:
+        baseline = out / 'baseline'
+        baseline.mkdir(exist_ok=True)
+        ref = os.environ.get('AVD_H264_BASELINE_REF', '757fc07a6930ee12b04fe034138dc9880dc4ff3f')
+        for name in ('avd-h264.c', 'avd-inst.h'):
+            data = subprocess.check_output(['git', '-C', str(ROOT), 'show',
+                                            f'{ref}:drivers/media/platform/apple/avd/{name}'])
+            (baseline / name).write_bytes(data)
+    (out / 'baseline-inputs.sha256').write_text(''.join(
+        hashlib.sha256((baseline / name).read_bytes()).hexdigest() + '  ' + name + '\n'
+        for name in ('avd-h264.c', 'avd-inst.h')))
+    programs = {}
+    for label, root in (('before', baseline), ('after', ROOT)):
+        source = (root / 'avd-h264.c').read_text()
+        h264 = source.split('static int avd_h264_alloc_bufs(')[0]
+        h264 = re.sub(r'^#include.*\n', '', h264, flags=re.M)
+        inst = re.sub(r'^#include.*\n', '', (root / 'avd-inst.h').read_text(), flags=re.M)
+        # Helpers are exercised separately; the baseline emitters do not use them.
+        helpers = re.sub(r'^#include.*\n', '', (ROOT / 'avd-h264-params.h').read_text(), flags=re.M)
+        checks = function(source, 'avd_h264_validate_pps')
+        if 'static int avd_h264_validate_slice(' in source:
+            checks += function(source, 'avd_h264_validate_slice')
+            checks += '#define VALIDATE_SLICE avd_h264_validate_slice\n'
+        else:
+            checks += '#define VALIDATE_SLICE(ctx, sl) 0\n'
+        dest = out / ('conformance-' + label + '.c')
+        dest.write_text(h264_prelude() + helpers + inst + h264 + checks + CONFORMANCE_MAIN)
+        exe = dest.with_suffix('')
+        subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-Wall', '-Wextra',
+                        '-Werror', '-Wno-unused-function', '-Wno-unused-parameter', '-Wno-sign-compare',
+                        '-fsanitize=address,undefined', '-g', str(dest), '-o', str(exe)], check=True)
+        data = subprocess.check_output([str(exe)], text=True)
+        programs[label] = dict(line.split(' ', 1) for line in data.splitlines())
+        (out / (label + '.json')).write_text(json.dumps(programs[label], indent=2) + '\n')
+    unchanged = sparse = 0
+    for key, program in programs['after'].items():
+        if key.startswith('guard/type/'):
+            assert program == ('0' if int(key.rsplit('/', 1)[1]) < 3 else '-22'), key
+        elif key.startswith('guard/groups/'):
+            assert program == ('0' if key.endswith('/0') else '-22'), key
+        elif not key.startswith('17/') or key.split('/')[2] == '2':
+            assert program == programs['before'][key], key
+            unchanged += 1
+        else:
+            before, after = programs['before'][key].split(), program.split()
+            assert len(before) == len(after) and before != after, key
+            for old, new in zip(before, after):
+                if old != new:
+                    assert int(old, 16) >> 20 == 0x2dc, (key, old, new)
+                    assert int(old, 16) & ~15 == int(new, 16) & ~15, (key, old, new)
+            sparse += 1
+    print(f'PASS: {unchanged} complete legacy programs identical; {sparse} sparse programs change only reference slots; all 65536 DPB maps; syntax guards', flush=True)
+
+
 def main():
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
-    names = ['avd-h264.c', 'avd-inst.h', 'avd-backend-open.c', 'avd-backend-queue.c', 'avd-hw.c']
+    names = ['avd-h264-params.h', 'avd-h264.c', 'avd-hevc.c', 'avd-inst.h', 'avd-backend-open.c', 'avd-backend-queue.c', 'avd-hw.c']
     (out / 'inputs.sha256').write_text(''.join(hashlib.sha256((ROOT / n).read_bytes()).hexdigest()+'  '+n+'\n' for n in names))
+    prepare_regressions(out)
+    conformance(out)
     h264 = (ROOT / 'avd-h264.c').read_text().split('static int avd_h264_alloc_bufs(')[0]
     h264 = re.sub(r'^#include.*\n', '', h264, flags=re.M)
     inst = (ROOT / 'avd-inst.h').read_text()
@@ -359,7 +719,8 @@ def main():
                         'static inline void push_address(struct avd_ctx *ctx, dma_addr_t addr)\n{\n record_dma(ctx,addr,(ctx->dev->variant->quirks&AVD_QUIRK_LSR)?8:0,(ctx->dev->variant->quirks&AVD_QUIRK_LSR)?1:2);')
     inst = inst.replace('u32 offsets[4])\n{', 'u32 offsets[4])\n{\n assert(addr);')
     inst = inst.replace('push(ctx, (addr + offsets[i]) >> 7);', '{ record_dma(ctx,addr+offsets[i],7,1); push(ctx, (addr + offsets[i]) >> 7); }')
-    code.write_text(PRELUDE + inst + h264 + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_alloc_bufs') + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_drop_bank_slices') + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_pick_bank') + builder + wire + regs + config +
+    helpers = re.sub(r'^#include.*\n', '', (ROOT / 'avd-h264-params.h').read_text(), flags=re.M)
+    code.write_text(PRELUDE + helpers + inst + h264 + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_alloc_bufs') + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_drop_bank_slices') + function((ROOT / 'avd-h264.c').read_text(), 'avd_h264_pick_bank') + builder + wire + regs + config +
                     function(qfw, 'avd_qfw_check') + function(qfw, 'avd_qfw_stream') + function(qfw, 'avd_qfw_submit') +
                     function(qfw, 'avd_qfw_fail_all') + function(qfw, 'avd_qfw_irq') + MAIN)
     exe = out / 'program-test'
