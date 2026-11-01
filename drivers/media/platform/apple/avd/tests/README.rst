@@ -46,12 +46,10 @@ transport-test.py harness::
 The baseline must reproduce both missing CM3 decoder interrupt routing and,
 when those routes are repaired in the fixture, the incorrect mailbox status
 EMPTY test. A firmware fix must program the queue's CM3 IRQ router and use
-FIFO status bit 17, rather than IRQ-source bit 2, for outbox EMPTY. With that
-firmware and its status-bit-corrected transport harness::
+FIFO status bit 17, rather than IRQ-source bit 2, for outbox EMPTY. Both fixes
+are in ``aurora-silicon/avd-fw`` from commit ``50d7f869``. With that firmware
+built::
 
-  git -C /path/to/fixed-avd-fw apply --unidiff-zero \
-      /path/to/linux/drivers/media/platform/apple/avd/tests/avd-fw-queue-fixes.patch
-  # Rebuild the firmware images, then:
   python3 tests/unicorn-queue-test.py /path/to/fixed-avd-fw \
       /path/to/fixed-avd-fw/build/avd-fw-v3-t1.bin /tmp/avd-program
 
