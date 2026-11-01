@@ -255,8 +255,8 @@ RUN_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || RUN_ID=""
 
 # The kernel package version and the release tag move independently: a release
 # that only changes m1n1 reuses the previous kernel packages unchanged.
-VERSION=7.1.12.aurora2-12.4
-TAG=sep-7.1.12.aurora2-12.4
+VERSION=7.1.12.aurora2-12.6
+TAG=sep-7.1.12.aurora2-12.6-stable
 # Packages are fetched from this script's own tag, never from "latest": the
 # checksums below belong to this release and nothing else.
 PUBLIC_RELEASE_URL=https://github.com/omacom/linux-aurora/releases/download/$TAG
@@ -272,20 +272,20 @@ RELEASES_API=${AURORA_RELEASES_API:-$PUBLIC_RELEASES_API}
 # Where to always get the current script, whatever this copy turns out to be.
 LATEST_URL=https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh
 PACKAGES=(
-  "linux-aurora-$VERSION-aarch64.pkg.tar.zst fded7d73e13dbe7f82722b925a257835761584203c5189337a251abab298bbde"
-  "linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst a8da8cd00a40010ebe6096ae50c53b1ae461ae6570aa437f5b79a02f10b80cca"
+  "linux-aurora-$VERSION-aarch64.pkg.tar.zst d954e8c90f57b33d19d4a166d6f70225d7377abed59b35f3e20ac6d20427a39f"
+  "linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst 758c469c2eab45f87ced3f44a59d86539b1b7b53aa1040dcbe1ef52f5c36c156"
   "libfprint-1.94.100-1.1-aarch64.pkg.tar.zst bc7d9762db6644f2cfb58ddb209602c1d513845eb1498c098e01f12600fcbdf9"
   "aurora-touchid-20261003-3-any.pkg.tar.zst 6cadb78378f0fb7fe068b2efd9e33896eccf5a07b19905ee9c44aac9a3b3170a"
 )
 # The one m1n1 for every Mac, as "file sha256": M1 and M2, an M3 on the handoff
 # path (see m3_plan), and the MacBook Neo once NEO_AURORA_M1N1 is 1. Macs differ
 # only in the switches /etc/m1n1.conf arms (m3_switches), never in the binary.
-M1N1_PACKAGE="m1n1-aurora-1.6.1.aurora13-1-aarch64.pkg.tar.zst 23c7aff0f7b2da5ce272bce0eab7893e01091ce4d9350e4e650af1e9195208fa"
+M1N1_PACKAGE="m1n1-aurora-1.6.1.aurora14-1-aarch64.pkg.tar.zst 4b4304a3f6e41e738e4003903084ee759fae2677162d960b6be65ccdf99de991"
 # The sha256 of the m1n1.bin in M1N1_PACKAGE: the bytes update-m1n1 puts at
 # the start of boot.bin. The script tells m1n1 builds apart by these bytes,
 # never by the version string they report: aurora8.5-1 and 8.5-2 both reported
 # v1.6.1-omarchy.aurora8.5.
-M1N1_BIN_SHA=bf7b74a4648216432ac36171d896b11fa0584da19b242b16a11aa055963091de
+M1N1_BIN_SHA=78b10efa89dcdc4aa9dfe8922e839b71ab1321ba19897ccc888b5e57eef5a6b9
 # 0: a MacBook Neo keeps its own m1n1 (its M1N1= and U_BOOT= in
 # /etc/default/update-m1n1), as before 12.0. 1: it gets M1N1_PACKAGE like every
 # other Mac, and update-m1n1 builds its boot.bin from that m1n1 and the Neo's
