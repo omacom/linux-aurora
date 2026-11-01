@@ -1782,9 +1782,16 @@ impl Queue {
         self.needs_fresh_backing
     }
     /// The firmware acknowledged the kill of this queue's closed owner (`ContextKilled`)
-    /// and every killed command was settled: return the QID to service. The item
-    /// ring is reset to empty at the firmware's consumer cursor; the USC pool and
-    /// descriptor ring are vacated and re-armed fresh before the next owner binds.
+    /// and every killed command was settled. The QID stays killed in the firmware
+    /// until a queue configuration with its QoS update set binds it to a scheduler
+    /// page other than the one the firmware has for it. A new owner's first
+    /// publication carries such a configuration, but its command is retired
+    /// unexecuted on the still-killed queue, with a zero-duration record.
+    ///
+    /// On M5 the queue is installed again instead: the next owner's first
+    /// publication sends the configuration alone and waits until the firmware
+    /// consumed it (`install_m5`), so the kill is cleared before any command. The
+    /// USC pool and descriptor ring are vacated and re-armed fresh as before.
     pub(crate) fn recycle_killed(&mut self) -> Result<bool> {
         if self.configuration.is_some() || !self.installed
             || !self.exit.as_ref().is_some_and(|exit| exit.released())
@@ -1795,6 +1802,15 @@ impl Queue {
             return Ok(false);
         }
         self.recycle_settled()?;
+        if self.graph.m5 {
+            // Start over as a fresh install: no published configuration and kick
+            // count zero, so the next publication installs the queue first. Kick
+            // timestamps keep counting, so its stamps stay ordered.
+            self.m5_install = None;
+            self.published_config = None;
+            self.outer_started = 0;
+            self.ordinal = 0;
+        }
         Ok(true)
     }
     /// A quarantined queue whose owner closed and whose every retained command was
@@ -2752,11 +2768,14 @@ impl Queue {
             qos_update: true, owner_pid: context.owner_pid(), context_update: false,
         })?;
         if self.configuration.is_some() { return Err(EBUSY); }
-        self.configuration = Some(configuration::Configuration::new(context, 1, epoch)?);
+        // A queue reinstalled after a kill restarts at the firmware's consumer.
+        let start = self.graph.cursors()?.producer;
+        self.configuration = Some(configuration::Configuration::new(
+            context, (start + 1) % ITEM_RING_ENTRIES, epoch)?);
         let result = (|| {
             let va = self.graph.record(None, CONFIG, 0xc0, config)?;
             let configuration = self.configuration.as_mut().ok_or(EIO)?;
-            let producer = self.graph.append(0, va, || configuration.mark_visible())?;
+            let producer = self.graph.append(start, va, || configuration.mark_visible())?;
             self.m5_install = Some(producer);
             self.installed = true;
             host.publish_qid(self.kick.id())?;
