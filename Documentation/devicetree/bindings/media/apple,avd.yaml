@@ -51,7 +51,16 @@ properties:
     maxItems: 3
 
   power-domains:
-    maxItems: 1
+    minItems: 1
+    items:
+      - description: decoder power state
+      - description: performance floor (PMC rail or PMP device level) held while decoding
+
+  power-domain-names:
+    minItems: 1
+    items:
+      - const: core
+      - const: perf
 
   resets:
     maxItems: 1
