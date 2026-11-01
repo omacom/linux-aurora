@@ -162,6 +162,7 @@ struct mt7932 {
 	 * sets connect_lost for the worker to report. Under response_lock.
 	 */
 	bool connect_publishing, connect_lost;
+	bool roam_moving, roam_landed;
 	u16 disconnect_reason;
 	int connect_error;
 	u32 event_cipher;
@@ -249,6 +250,7 @@ void mt_connect_work(struct work_struct *work);
 int mt_connect(struct wiphy *wiphy, struct net_device *netdev,
 		      struct cfg80211_connect_params *params);
 void mt_disconnect_work(struct work_struct *work);
+void mt_report_disconnected(struct mt7932 *m, u16 reason, bool local, gfp_t gfp);
 int mt_disconnect(struct wiphy *wiphy, struct net_device *netdev, u16 reason);
 int mt_deauth(struct wiphy *wiphy, struct net_device *netdev,
 		     struct cfg80211_deauth_request *request);
