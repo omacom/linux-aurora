@@ -129,9 +129,10 @@ probability dependency is removed by choosing another engine.
 
 VP9 retains its two banks and producer-side backward-adaptation barrier from
 the VP-DONE implementation. Its tagged VP callback remains separate from full
-PP retirement. AV1 retains its single-picture CDF/segmentation dependency path.
-The advertised pools may select different engines across independent contexts;
-neither codec's dependency rules are relaxed.
+PP retirement. AV1 publishes per-bank coherent CDF output after its tagged VP callback,
+while updated segmentation maps and reference motion fields retain their PP
+barriers. Only PP retirement releases banks and saves CDFs into CAPTURE tails.
+See tests/README.rst for the dependency matrix and hardware qualification limit.
 
 Pool counts live in the firmware image, not an additional host SoC table.
 The avd-fw v5-t2 T6040 counts (HEVC 4, H.264 4, VP9 1, AV1 3) are inferred from

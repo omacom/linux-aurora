@@ -231,6 +231,7 @@ struct avd_av1_ctx {
 		struct avd_buf inst;
 		struct avd_buf pipe_state;
 		struct avd_buf probs;
+		struct avd_buf probs_out;
 		struct avd_buf no_prev_seg;
 		struct avd_buf saved_seg;
 		struct avd_buf prev_seg;
@@ -296,10 +297,9 @@ static bool avd_av1_writes_seg(u8 flags)
 }
 
 /*
- * No available hardware contract proves AV1 tails CPU-visible at VP DONE.
- * Only preparation's immutable CDF/map snapshots can be consumed before PP
- * retirement. The consumer's disable_frame_end_update_cdf does not remove
- * its CDF input dependency. Slot timestamps, not refresh order, select it.
+ * Queued CDF output is private coherent VP storage, published by the tagged
+ * VP callback after the queue's dma_rmb(). CAPTURE maps and motion fields
+ * retain their PP boundary. Slot timestamps, not refresh order, select inputs.
  */
 static bool avd_av1_depends(const struct v4l2_ctrl_av1_frame *frame,
 			   const struct avd_av1_bank *bank)
@@ -315,9 +315,6 @@ static bool avd_av1_depends(const struct v4l2_ctrl_av1_frame *frame,
 	    avd_av1_ref_ts(frame, frame->ref_frame_idx[frame->primary_ref_frame]) !=
 			bank->timestamp)
 		return false;
-	if (!avd_av1_default_cdf(frame) &&
-	    !(bank->flags & V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF))
-		return true;
 	return (frame->segmentation.flags & V4L2_AV1_SEGMENTATION_FLAG_ENABLED) &&
 	       avd_av1_writes_seg(bank->seg_flags) &&
 	       DIV_ROUND_UP(bank->dst->av1.width + 1, 8) ==
@@ -1289,7 +1286,7 @@ static void avd_av1_set_seg(struct avd_ctx *ctx, struct avd_av1_run *run)
 		memcpy(seg, prev_seg, dst->av1.seg_size);
 }
 
-/* Preserve the legacy tail preparation; only queued immutable inputs differ. */
+/* A live producer owns coherent CDF output until PP retirement, even after VP. */
 static void avd_av1_prepare_prob(struct avd_ctx *ctx, struct avd_av1_run *run)
 {
 	struct avd_av1_ctx *codec = ctx->priv;
@@ -1306,13 +1303,19 @@ static void avd_av1_prepare_prob(struct avd_ctx *ctx, struct avd_av1_run *run)
 	}
 	if (!bank) {
 		avd_av1_set_prob(ctx, run);
-		return;
+	} else {
+		memcpy(codec->bufs.probs.cpu, bank->codec.bufs.probs_out.cpu,
+		       AVD_CDFS_SIZE);
+		memcpy(vb2_plane_vaddr(&dst->base.vb.vb2_buf, 0) +
+			AVD_AV1_CDFS_OFFSET(dst->base.vb.vb2_buf.planes[0].length,
+					    dst->av1.color_size),
+			codec->bufs.probs.cpu, AVD_CDFS_SIZE);
 	}
-	memcpy(codec->bufs.probs.cpu, bank->codec.bufs.probs.cpu, AVD_CDFS_SIZE);
-	memcpy(vb2_plane_vaddr(&dst->base.vb.vb2_buf, 0) +
-		AVD_AV1_CDFS_OFFSET(dst->base.vb.vb2_buf.planes[0].length,
-				    dst->av1.color_size),
-		codec->bufs.probs.cpu, AVD_CDFS_SIZE);
+	if (stream->nbanks > 1) {
+		/* No VP write when frame-end update is disabled: preserve its input. */
+		memcpy(codec->bufs.probs_out.cpu, codec->bufs.probs.cpu, AVD_CDFS_SIZE);
+		run->addresses.probs_out = codec->bufs.probs_out.addr;
+	}
 }
 
 static void avd_av1_prepare_seg(struct avd_ctx *ctx, struct avd_av1_run *run)
@@ -1458,9 +1461,22 @@ static int avd_av1_run_preamble(struct avd_ctx *ctx, struct avd_av1_run *run)
 	return 0;
 }
 
+/* run() has selected a free bank; retain its mappings for unchanged geometry. */
+static int avd_av1_alloc_work_buf(struct avd_ctx *ctx, struct avd_buf *buf,
+				size_t size)
+{
+	struct avd_av1_ctx *codec = ctx->priv;
+
+	if (codec->stream->nbanks > 1 && buf->cpu && buf->size == size) {
+		/* Preserve fresh-allocation contents, including hardware scratch. */
+		memset(buf->cpu, 0, size);
+		return 0;
+	}
+	return avd_buf_alloc(ctx->dev, buf, size);
+}
+
 static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 {
-	struct avd_dev *avd = ctx->dev;
 	struct avd_av1_ctx *av1_ctx = ctx->priv;
 	const struct v4l2_ctrl_av1_frame *frame = run->frame;
 	const struct v4l2_ctrl_av1_sequence *seq = run->seq;
@@ -1475,11 +1491,11 @@ static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 	int bit_depth = seq->bit_depth;
 
 	if (av1_ctx->stream->nbanks > 1) {
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.saved_seg,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.saved_seg,
 				    avd_av1_seg_size(w, h));
 		if (ret)
 			return ret;
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.prev_seg,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.prev_seg,
 				    avd_av1_seg_size(w, h));
 		if (ret)
 			return ret;
@@ -1495,38 +1511,38 @@ static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 
 	max_sb_col <<= sb_shift;
 
-	ret = avd_buf_alloc(avd, &av1_ctx->bufs.mv_above_info, max_sb_col * 80);
+	ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.mv_above_info, max_sb_col * 80);
 	if (ret)
 		return ret;
 
 	/* first frame this is always much smaller */
-	ret = avd_buf_alloc(avd, &av1_ctx->bufs.above_info, max_sb_col * 400);
+	ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.above_info, max_sb_col * 400);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &av1_ctx->bufs.lf_above_info, sb_cols1);
+	ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.lf_above_info, sb_cols1);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &av1_ctx->bufs.ip_above,
+	ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.ip_above,
 			    max_sb_col * bit_depth * 22);
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &av1_ctx->bufs.lf_above,
+	ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.lf_above,
 			    ALIGN(ALIGN(w, 8) * bit_depth * 2 +
 					  tile_info->tile_cols * bit_depth * 16,
 				  128));
 	if (ret)
 		return ret;
 
-	ret = avd_buf_alloc(avd, &av1_ctx->bufs.rf_above_info, sb_cols2);
+	ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.rf_above_info, sb_cols2);
 	if (ret)
 		return ret;
 
 	/* zeroes, read as the previous segment ids when no reference has them */
 	if (av1_ctx->bufs.no_prev_seg.size != avd_av1_seg_size(w, h)) {
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.no_prev_seg,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.no_prev_seg,
 				    avd_av1_seg_size(w, h));
 		if (ret)
 			return ret;
@@ -1541,7 +1557,7 @@ static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 
 		max_sb_row = max_sb_row << sb_shift;
 
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.lf_left_info,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.lf_left_info,
 				    max_sb_row * 72);
 		if (ret)
 			return ret;
@@ -1556,24 +1572,24 @@ static int avd_av1_alloc_work_bufs(struct avd_ctx *ctx, struct avd_av1_run *run)
 		 * I counted blocks as luma or chroma with padding until it
 		 * changes to the other
 		 */
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.lf_left,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.lf_left,
 				    (max_sb_row * 72 + 1) * 2 * bit_depth);
 		if (ret)
 			return ret;
 
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.sr_left,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.sr_left,
 				    max_sb_row * bit_depth * (53 + 52));
 		if (ret)
 			return ret;
 
-		ret = avd_buf_alloc(
-			avd, &av1_ctx->bufs.rf_left,
+		ret = avd_av1_alloc_work_buf(
+			ctx, &av1_ctx->bufs.rf_left,
 			max_sb_row * bit_depth *
 				(192 + 96 + (bit_depth > 8 ? 12 : 0)));
 		if (ret)
 			return ret;
 
-		ret = avd_buf_alloc(avd, &av1_ctx->bufs.rf_left_info,
+		ret = avd_av1_alloc_work_buf(ctx, &av1_ctx->bufs.rf_left_info,
 				    max_sb_row * 24);
 		if (ret)
 			return ret;
@@ -1665,7 +1681,11 @@ static int avd_av1_run(struct avd_ctx *ctx)
 }
 
 
-/* Tagged engine completion releases ordering, never CAPTURE tail visibility. */
+/*
+ * VP writes probs_out, independently of PP reconstruction. The queue executes
+ * dma_rmb() before this callback. Publish coherent output, never read a live
+ * CAPTURE tail. PP still owns the bank and all buffer/request lifetimes.
+ */
 static void avd_av1_vp_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
 {
 	struct avd_av1_stream *stream = ((struct avd_av1_ctx *)ctx->priv)->stream;
@@ -1685,8 +1705,16 @@ static void avd_av1_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *src,
 	if (buf->bank && buf->bank <= av1_ctx->nbanks) {
 		struct avd_av1_bank *bank = &av1_ctx->bank[buf->bank - 1];
 
-		if (bank->dst == buf)
+		if (bank->dst == buf) {
+			if (av1_ctx->nbanks > 1 && result == VB2_BUF_STATE_DONE) {
+				/* Retired references keep the same CAPTURE-tail ABI. */
+				memcpy(vb2_plane_vaddr(&dst->vb2_buf, 0) +
+					AVD_AV1_CDFS_OFFSET(dst->vb2_buf.planes[0].length,
+							    buf->av1.color_size),
+					bank->codec.bufs.probs_out.cpu, AVD_CDFS_SIZE);
+			}
 			WRITE_ONCE(bank->busy, false);
+		}
 		buf->bank = 0;
 	}
 }
@@ -1709,6 +1737,12 @@ static int avd_av1_alloc_bufs(struct avd_ctx *ctx, struct avd_av1_bank *bank)
 			    sizeof(struct avd_av1_cdfs));
 	if (ret)
 		return ret;
+
+	if (bank->codec.stream->nbanks > 1) {
+		ret = avd_buf_alloc(avd, &bank->codec.bufs.probs_out, AVD_CDFS_SIZE);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
@@ -1737,6 +1771,7 @@ static void avd_av1_free(struct avd_ctx *ctx, struct avd_av1_stream *av1_ctx)
 		avd_buf_free(avd, &bank->codec.bufs.pipe_state);
 		avd_buf_free(avd, &bank->codec.bufs.inst);
 		avd_buf_free(avd, &bank->codec.bufs.probs);
+		avd_buf_free(avd, &bank->codec.bufs.probs_out);
 		avd_buf_free(avd, &bank->codec.bufs.saved_seg);
 		avd_buf_free(avd, &bank->codec.bufs.prev_seg);
 	}

@@ -41,9 +41,9 @@ pre = pre.replace('struct { u32 bytesperline; } plane_fmt[1];', 'u32 width,heigh
 pre = pre.replace('static struct avd_decoded_buffer reference;', 'static struct avd_decoded_buffer reference; static struct avd_decoded_buffer *refs[5];')
 pre = pre.replace('(void)c; (void)b; (void)t; return &reference;', '(void)c;for(unsigned int i=0;i<5;i++)if(refs[i]&&refs[i]->base.vb.vb2_buf.timestamp==t)return refs[i];return (void *)b;')
 pre = pre.replace('static int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)',
-                  'static struct avd_ctx *allocating_ctx;\nstatic int fail_alloc_after;\nstatic bool avd_av1_ready(struct avd_ctx *);\nstatic int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)')
+                  'static struct avd_ctx *allocating_ctx;\nstatic unsigned int allocations;\nstatic int fail_alloc_after;\nstatic bool avd_av1_ready(struct avd_ctx *);\nstatic int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)')
 pre = pre.replace('{ (void)d; free(b->cpu); b->cpu = calloc(1,n);',
-                  '{ if(allocating_ctx){assert(!avd_av1_ready(allocating_ctx));if(fail_alloc_after&&!--fail_alloc_after)return -ENOMEM;} (void)d; free(b->cpu); b->cpu = calloc(1,n);')
+                  '{ allocations++; if(allocating_ctx){assert(!avd_av1_ready(allocating_ctx));if(fail_alloc_after&&!--fail_alloc_after)return -ENOMEM;} (void)d; free(b->cpu); b->cpu = calloc(1,n);')
 pre += r'''
 #define AVD_ALIGN 256
 #define S16_MIN INT16_MIN
@@ -173,12 +173,13 @@ static void flag_table(struct avd_av1_bank *b){
   b->flags=input_disabled?V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF:0;
   b->seg_flags=(producer_seg&1?V4L2_AV1_SEGMENTATION_FLAG_ENABLED:0)|
    (producer_seg&2?V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP:0);
-  bool expect=defaults!=1&&((!defaults&&!input_disabled)||((consumer_seg&1)&&producer_seg==3));
+  bool expect=defaults!=1&&(consumer_seg&1)&&producer_seg==3;
   assert(avd_av1_depends(&f,b)==expect);
  }
  for(unsigned int primary=0;primary<7;primary++){
   f.primary_ref_frame=primary;f.flags=0;f.frame_type=V4L2_AV1_INTER_FRAME;f.segmentation.flags=0;
-  b->flags=0;f.ref_frame_idx[primary]=5;assert(avd_av1_depends(&f,b));
+  b->flags=0;f.ref_frame_idx[primary]=5;assert(!avd_av1_depends(&f,b));
+  b->vp_done=false;assert(avd_av1_depends(&f,b));b->vp_done=true;
   f.reference_frame_ts[5]++;assert(!avd_av1_depends(&f,b));f.reference_frame_ts[5]--;
  }
  f.primary_ref_frame=2;f.flags=V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS;f.reference_frame_ts[5]=b->timestamp;
@@ -207,14 +208,28 @@ int main(int argc,char **argv){
  assert(!avd_av1_ready(&ctx));allocating_ctx=&ctx;assert(!avd_av1_start(&ctx));allocating_ctx=NULL;
  struct avd_av1_stream *p=((struct avd_av1_ctx *)ctx.priv)->stream;assert(p->nbanks==2&&ctx.max_frames==2);
  assert(p->bank[0].codec.bufs.probs.addr!=p->bank[1].codec.bufs.probs.addr);
+ /* Equal-sized idle-bank scratch reuses its mapping but starts zeroed. */
+ struct avd_buf scratch={};
+ assert(!avd_av1_alloc_work_buf(&ctx,&scratch,256));
+ unsigned int before=allocations;dma_addr_t saved_addr=scratch.addr;
+ memset(scratch.cpu,0x5a,256);
+ assert(!avd_av1_alloc_work_buf(&ctx,&scratch,256));
+ assert(allocations==before&&scratch.addr==saved_addr&&scratch.size==256);
+ for(unsigned int i=0;i<256;i++)assert(!((u8 *)scratch.cpu)[i]);
+ assert(!avd_av1_alloc_work_buf(&ctx,&scratch,512));assert(allocations==before+1&&scratch.size==512);
+ avd_buf_free(&dev,&scratch);
  seq=(struct v4l2_ctrl_av1_sequence){.bit_depth=8,.flags=V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X|V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y};
  params=(struct v4l2_ctrl_av1_frame){.frame_type=V4L2_AV1_KEY_FRAME,.primary_ref_frame=7,
-  .flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF,.frame_width_minus_1=1919,.frame_height_minus_1=1087,.upscaled_width=1920};
+  .flags=0,.frame_width_minus_1=1919,.frame_height_minus_1=1087,.upscaled_width=1920};
  params.tile_info.tile_cols=params.tile_info.tile_rows=1;params.tile_info.width_in_sbs_minus_1[0]=29;params.tile_info.height_in_sbs_minus_1[0]=16;
  tile.tile_size=512;tile.tile_col=tile.tile_row=0;
  current_dst=&dst[0].base.vb;frame.idx=0;assert(avd_av1_ready(&ctx));assert(!avd_av1_run(&ctx));
  assert(dst[0].bank==1&&p->bank[0].busy&&p->bank[0].prepared);
  assert(frame.fifo_iova==p->bank[0].codec.bufs.inst.addr);
+ struct avd_av1_run prob_probe={.frame=&params};prob_probe.base.bufs.dst=current_dst;
+ avd_av1_prepare_prob(&ctx,&prob_probe);
+ assert(prob_probe.addresses.probs_out==p->bank[0].codec.bufs.probs_out.addr);
+ assert(!memcmp(p->bank[0].codec.bufs.probs.cpu,p->bank[0].codec.bufs.probs_out.cpu,AVD_CDFS_SIZE));
  write_program(argv[1],"av1-overlap-0",&frame);flag_table(&p->bank[0]);
  p->bank[0].flags=params.flags;p->bank[0].seg_flags=0;
  params.frame_type=V4L2_AV1_INTER_FRAME;params.primary_ref_frame=0;params.ref_frame_idx[0]=0;params.reference_frame_ts[0]=1000;
@@ -225,29 +240,39 @@ int main(int argc,char **argv){
  p->bank[0].vp_done=false;assert(!avd_av1_ready(&ctx));
  avd_av1_vp_done(&ctx,&dst[0].base.vb);assert(p->bank[0].busy&&avd_av1_ready(&ctx));
  avd_av1_vp_done(&ctx,&dst[0].base.vb);assert(p->bank[0].busy);
- p->bank[0].flags=0;assert(!avd_av1_ready(&ctx));p->bank[0].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
+ p->bank[0].flags=0;assert(avd_av1_ready(&ctx));p->bank[0].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
  p->bank[0].seg_flags=V4L2_AV1_SEGMENTATION_FLAG_ENABLED|V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP;
  assert(!avd_av1_ready(&ctx));p->bank[0].seg_flags=0;
  request_params.flags|=V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS;assert(!avd_av1_ready(&ctx));request_params.flags&=~V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS;
  assert(avd_av1_ready(&ctx));params=request_params;
- /* CAPTURE tails are poisoned: successor must consume preparation snapshots. */
+ /* Model adaptive VP output distinct from input and poisoned CAPTURE. */
+ assert(p->bank[0].codec.bufs.probs_out.addr!=p->bank[0].codec.bufs.probs.addr);
+ memset(p->bank[0].codec.bufs.probs_out.cpu,0x6c,AVD_CDFS_SIZE);
  size_t tail=AVD_AV1_CDFS_OFFSET(0x800000,dst[0].av1.color_size);
  memset((u8 *)dst[0].base.vb.vb2_buf.cpu+tail,0xee,sizeof(struct avd_av1_cdfs));
  memset(p->bank[0].codec.bufs.saved_seg.cpu,0x35,dst[0].av1.seg_size);
  current_dst=&dst[1].base.vb;src.vb2_buf.timestamp=1001;frame.idx=1;
  assert(!avd_av1_run(&ctx));assert(dst[1].bank==2&&p->bank[0].busy&&p->bank[1].busy);
- assert(!memcmp(p->bank[0].codec.bufs.probs.cpu,p->bank[1].codec.bufs.probs.cpu,sizeof(struct avd_av1_cdfs)));
+ assert(!memcmp(p->bank[0].codec.bufs.probs_out.cpu,p->bank[1].codec.bufs.probs.cpu,AVD_CDFS_SIZE));
+ assert(!memcmp(p->bank[1].codec.bufs.probs.cpu,p->bank[1].codec.bufs.probs_out.cpu,AVD_CDFS_SIZE));
+ assert(((u8 *)p->bank[1].codec.bufs.probs.cpu)[0]==0x6c);
  assert(!memcmp(p->bank[0].codec.bufs.saved_seg.cpu,p->bank[1].codec.bufs.prev_seg.cpu,dst[1].av1.seg_size));
  assert(p->bank[1].codec.bufs.prev_seg.addr!=p->bank[0].codec.bufs.saved_seg.addr);
  write_program(argv[1],"av1-overlap-1",&frame);assert(!avd_av1_ready(&ctx));
  current_dst=&dst[2].base.vb;assert(avd_av1_run(&ctx)==-EBUSY);assert(!dst[2].bank);
  avd_av1_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);
  assert(!p->bank[0].busy&&p->bank[1].busy&&dst[1].bank==2);
+ assert(!memcmp((u8 *)dst[0].base.vb.vb2_buf.cpu+tail,p->bank[0].codec.bufs.probs_out.cpu,AVD_CDFS_SIZE));
  /* Producer bank reuse must not invalidate the consumer's VP map input. */
  memset(p->bank[0].codec.bufs.saved_seg.cpu,0x98,dst[0].av1.seg_size);
+ memset(p->bank[0].codec.bufs.probs_out.cpu,0x98,AVD_CDFS_SIZE);
+ assert(((u8 *)p->bank[1].codec.bufs.probs.cpu)[0]==0x6c);
  assert(((u8 *)p->bank[1].codec.bufs.prev_seg.cpu)[0]==0x35);
  avd_av1_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);assert(p->bank[1].busy);
+ size_t tail1=AVD_AV1_CDFS_OFFSET(0x800000,dst[1].av1.color_size);
+ memset((u8 *)dst[1].base.vb.vb2_buf.cpu+tail1,0xa7,AVD_CDFS_SIZE);
  avd_av1_done(&ctx,&src,&dst[1].base.vb,VB2_BUF_STATE_ERROR);assert(!p->bank[1].busy&&avd_av1_ready(&ctx));
+ assert(((u8 *)dst[1].base.vb.vb2_buf.cpu)[tail1]==0xa7);
  assert(request_gets==request_puts);
  avd_av1_stop(&ctx);assert(!avd_av1_ready(&ctx));
  for(unsigned int mode=0;mode<2;mode++){
@@ -255,7 +280,7 @@ int main(int argc,char **argv){
   assert(p->nbanks==1&&ctx.max_frames==1);avd_av1_stop(&ctx);
  }
  dev.queued=true;vp_feature=true;
- for(int n=1;n<=6;n++){
+ for(int n=1;n<=8;n++){
   fail_alloc_after=n;allocating_ctx=&ctx;assert(avd_av1_start(&ctx)==-ENOMEM);allocating_ctx=NULL;
   assert(!ctx.priv&&!avd_av1_ready(&ctx));
  }
@@ -297,7 +322,7 @@ int main(int argc,char **argv){
   p->bank[n].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
   assert(!avd_av1_ready(&ctx));avd_av1_vp_done(&ctx,&dst[n].base.vb);
   assert(p->bank[n].busy&&p->bank[n].vp_done&&avd_av1_ready(&ctx));
-  p->bank[n].flags=0;assert(!avd_av1_ready(&ctx));
+  p->bank[n].flags=0;assert(avd_av1_ready(&ctx));
   p->bank[n].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
   assert(avd_av1_ready(&ctx));
   p->bank[n].seg_flags=V4L2_AV1_SEGMENTATION_FLAG_ENABLED|V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP;
@@ -317,14 +342,14 @@ int main(int argc,char **argv){
  assert(dst[0].bank==1&&p->bank[0].busy);
  avd_av1_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);avd_av1_stop(&ctx);
  /* Fail allocation in every bank, including after earlier banks succeeded. */
- for(int n=1;n<=12;n++){
+ for(int n=1;n<=16;n++){
   fail_alloc_after=n;allocating_ctx=&ctx;assert(avd_av1_start(&ctx)==-ENOMEM);allocating_ctx=NULL;
   assert(!ctx.priv&&!avd_av1_ready(&ctx));
  }
  puts("PASS: AV1 firmware pool sizes, sparse masks, FIFO bounds, per-engine dispatch, all producer barriers, exhaustion, reset/error and reuse");
  for(unsigned int i=0;i<5;i++)free(dst[i].base.vb.vb2_buf.cpu);
  free(program.cpu);free(queue.sram);free(dev.ctrl);free(dev.mbox);
- puts("PASS: AV1 snapshot inheritance, poisoned CAPTURE, request lookahead, banks, PP retirement, exhaustion, failures and legacy fallback");
+ puts("PASS: AV1 coherent adaptive CDF inheritance, PP CDF persistence, error discard, poisoned CAPTURE, request lookahead, banks, PP retirement, exhaustion, failures and legacy fallback");
 }
 '''
 
@@ -398,7 +423,7 @@ int main(int argc,char **argv){
 }
 '''
     for name, body in [('legacy-before', old), ('legacy-after', av1)]:
-        shim = 'static bool avd_av1_ready(struct avd_ctx *ctx){(void)ctx;return false;}\n' if name == 'legacy-before' else ''
+        shim = 'static bool avd_av1_ready(struct avd_ctx *ctx){(void)ctx;return false;}\n' if name == 'legacy-before' and 'static bool avd_av1_ready(' not in old else ''
         build_run(name, common + codec(body) + shim + post + legacy.replace('@NAME@', name))
     for mode in range(12):
         assert (OUT / f'legacy-before-{mode}.bin').read_bytes() == (OUT / f'legacy-after-{mode}.bin').read_bytes(), mode

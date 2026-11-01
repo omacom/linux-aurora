@@ -217,47 +217,45 @@ consumer disable_frame_end_update_cdf, segmentation enabled/update_map on both
 pictures, and all 256 refresh masks. Pending request p_req values are used for
 readiness; p_cur still describes an earlier picture and must not be used.
 
-Visibility evidence and limit
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Coherent CDF output and completion boundary
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The public AV1 specification sections 7.7, 7.19 and 7.20 define frame CDF,
-motion-field and segmentation storage semantics:
-https://aomediacodec.github.io/av1-spec/ . They do not define this decoder's
-VP/PP DMA boundary. In our driver ``set_header()`` supplies probs_out, seg and
-w_color output addresses to the VP program; ``avd_av1_set_prob()`` seeds CDF
-output and ``avd_av1_set_seg()`` initializes non-updated maps. The open firmware
-``avdq_vp_done()`` changes VP to PP_READY and ``notify_vp()`` publishes a tag
-with barriers. Neither reads the AV1 output memory nor supplies an AV1-specific
-DMA visibility guarantee. A CM3 DMB orders its descriptor stores; it does not
-prove the decoder's prior external tail writes are CPU-visible.
+The public AV1 specification section 7.7 updates frame CDFs from the saved
+context-update tile; sections 7.19 and 7.20 save motion fields and segmentation:
+https://aomediacodec.github.io/av1-spec/ . CDF adaptation depends on entropy
+parsing, independently of pixel reconstruction. The driver supplies probs_out
+to the VP program, while the open firmware starts ordered PP reconstruction
+after VP DONE. These are the implementation grounds for using VP completion
+for CDF output; they are not hardware measurements of memory visibility.
 
-There is therefore **no evidence here proving that a hardware-written AV1 CDF,
-segmentation map or motion field is visible at VP DONE**. There is also no
-proof that they are written only at PP DONE. Unicorn injects DONE and cannot
-establish either assertion. The implementation keeps those dependencies until
-PP retirement instead of inferring a visibility contract from their operands.
-No CPU DMA sync is attempted on a CAPTURE allocation still owned by PP.
+Queued AV1 now directs probs_out to a separate dma_alloc_coherent allocation
+in each bank. Input probabilities and output probabilities remain distinct.
+Preparation seeds output with input, preserving frames with frame-end update
+disabled. A named live producer blocks until its full-tag VP callback, invoked
+by the queue after dma_rmb(). The consumer copies the coherent output into its
+own input and seeded output. It never samples a PP-owned CAPTURE CDF tail.
+This follows the existing coherent VP9 count-output completion boundary.
+The firmware descriptor DMB alone is not a substitute for DMA coherence or
+proof of the silicon's completion semantics. Physical CDF completion timing,
+pixel hashes and performance must still be qualified on hardware.
 
-Safe subset
-^^^^^^^^^^^
+Only successful PP retirement copies coherent CDF output into the producer's
+CAPTURE tail, retaining the saved-reference ABI for subsequent pictures after
+bank reuse. Error/reset retirement discards output. Banks, FIFOs, CAPTURE and
+requests remain owned through PP; VP completion only publishes readiness.
+The existing CPU-mappable CAPTURE requirement is retained. No CPU DMA sync is
+attempted on a CAPTURE allocation still owned by PP.
 
 Queue firmware advertising VP-DONE feature bit 2 enables two scratch banks;
-with a validated codec pool (feature bit 3), AV1 instead allocates one bank per
-advertised AV1 VP plus one retained by PP, bounded by physical FIFO slots.
-There are no host SoC counts. VP9 retains its existing two-bank limit.
-Legacy transport and queue firmware without tagged VP DONE retain one bank and identical
-programs. The CDF output, segmentation output and motion-field/color output
-already live in each picture's distinct CAPTURE tail. Each scratch bank owns
-its FIFO, CDF input, pipe/filter/tile scratch, a saved initialized map and a
-separate map input snapshot. Only PP retirement releases its bank. VP DONE
-never releases storage or publishes hardware-written tails for AV1. It releases
-only the producer VP ordering barrier for a named reference. Each saved CAPTURE
-bank records its own tagged VP event, independently of the current builder.
+with a validated codec pool (feature bit 3), AV1 uses one bank per advertised
+AV1 VP plus one retained by PP, bounded by physical FIFO slots. Legacy
+transport and queue firmware without tagged VP DONE retain one bank and
+identical programs and initialized tails. No firmware change is required.
 
-For a pending consumer, each busy producer is tested by the exact timestamp
-named through ref_frame_idx/primary_ref_frame, rather than the preceding frame
-or a global refresh-context flag. refresh_frame_flags controls which slots
-userspace subsequently names; it does not create a dependency by itself.
+Each pending request uses exact ref_frame_idx/primary_ref_frame timestamps,
+independently of refresh order. The consumer's disable_frame_end_update_cdf
+does not remove its input dependency. refresh_frame_flags only changes which
+slots userspace subsequently names, not the dependency of this picture.
 
 =============================== ==============================================
 Consumer / producer condition   Prepare dependency while producer is in flight
@@ -265,10 +263,10 @@ Consumer / producer condition   Prepare dependency while producer is in flight
 Named live reference            Wait for its tagged VP DONE on any engine
 PRIMARY_REF_NONE                No primary CDF or map dependency
 Intra or error resilient        Default CDF; map dependency still checked
-Primary slot names retired ref  None on an in-flight picture
-Primary CDF, producer end update Enabled: wait for producer PP retirement
-Primary CDF, producer end update Disabled: use immutable prepared CDF input copy
-Consumer end update disabled    Does not remove its CDF input dependency
+Primary slot names retired ref  Read saved CAPTURE CDF
+Primary CDF, producer end update Enabled: coherent output after tagged VP DONE
+Primary CDF, producer end update Disabled: seeded coherent output after VP DONE
+Consumer end update disabled    Still consumes selected primary CDF
 Consumer segmentation disabled  No previous-map read
 Consumer segmentation enabled   Updated producer map: wait for PP (same Mi size)
 Producer map not updated         Copy immutable saved map into consumer bank
@@ -277,37 +275,29 @@ USE_REF_FRAME_MVS                Wait for PP of any named in-flight reference
 refresh_frame_flags 0..255       No additional dependency; named slot decides
 =============================== ==============================================
 
-Both consumer update_map values retain the previous-map input when segmentation
-is enabled, as the existing program supplies it in either case. A disabled
-producer segmentation map is saved as zeroes. Producer map snapshots are copied
-into consumer-owned coherent storage, so producer PP retirement and bank reuse
-cannot invalidate a live successor's VP input. CDF snapshots are similarly
-copied into the consumer's CDF input. No hardware-written tail is sampled by
-these copies. Busy banks publish fully prepared metadata with release/acquire;
-allocation failures and PP error/reset retirement release the saved CAPTURE's
-bank, independent of the current builder.
+Segmentation and motion-field outputs remain in CAPTURE and retain their PP
+barriers. Both consumer update_map values retain previous-map input when
+segmentation is enabled. Saved maps and CDFs are copied into consumer-owned
+storage, so producer bank reuse cannot invalidate a live consumer's input.
+Busy banks publish fully prepared metadata with release/acquire; allocation
+failures and PP error/reset retirement select the saved CAPTURE bank.
 
-The former single-engine subset relied on firmware waiting for VP(N) DONE
-before feeding VP(N+1) on the same engine. Across engines that ordering is
-explicit: a consumer naming any live reference waits for that producer's tagged
-VP event. The callback publishes only ordering, without sampling CAPTURE tails.
-The CDF/map snapshot exception then applies; hardware-written CDF/map/MV inputs
-still wait for PP retirement. Independent pictures can start on different VPs
-before either completes. PP consumes reference reconstruction in submission
-order, as in the multi-VP H.264/HEVC path.
+For unchanged geometry, a free queued bank reuses scratch allocations and
+zeroes their contents, preserving fresh-allocation semantics without repeated
+DMA mapping and deferred unmapping in prepare. Size changes reallocate; the
+single-bank legacy path retains its original allocation behavior. The zero
+previous-segment map retains its existing size-based reuse.
 
 The Unicorn run boots the v5-t2 CM3 reset vector, routes AV1 and PP IRQs,
 and checks production AV1 program words/descriptors/configuration. It shows
 VP(1) issued during PP(0), concurrent VPs 9/10/11, a fourth picture waiting for
-VP9 DONE, reverse engine completion, per-picture VP tokens, ordered PP and
-blocked completion mailboxes. A routed error on each AV1 engine drains every
-owner; reset boots all engines again. Host tests cover pool sizes, sparse masks,
-FIFO bounds, each producer's CDF/map/MV and VP barriers, duplicate VP callbacks,
-all-bank allocation failures, exhaustion and saved-bank error retirement.
-Host tests poison in-flight CAPTURE tails to ensure snapshot consumers never
-read them. Pixels, physical DMA visibility and throughput remain hardware
-qualification work for the lead. Full CDF/MV dependency release at VP DONE is
-still a separate evidence requirement.
+VP9 DONE, reverse engine completion, full-tag events, ordered PP and blocked
+mailboxes. Routed errors on each AV1 engine drain every owner and reset.
+Host tests cover all producer VP/map/MV barriers, all refresh masks, adaptive
+CDF output distinct from input, poisoned CAPTURE tails, PP CDF persistence,
+error discard, private consumer copies after producer bank reuse, duplicate
+callbacks, allocation failures and scratch reuse/zeroing/resize. These tests
+model DMA completion; they do not decode pixels or prove physical visibility.
 
 H.264 conformance fixes
 ----------------------
