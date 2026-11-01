@@ -13,6 +13,18 @@
 #include "isp-ipc.h"
 #include "isp-regs.h"
 
+/*
+ * How the ISP's own temporal noise filter is set up for a sensor. macOS
+ * picks this per sensor on the H17 interface: the IMX558 (J700) runs
+ * without it and the IMX958 (J616s) runs it with explicit strength
+ * controls. Everything else keeps the original start sequence.
+ */
+enum isp_temporal_filter {
+	ISP_TEMPORAL_FILTER_START,
+	ISP_TEMPORAL_FILTER_OFF,
+	ISP_TEMPORAL_FILTER_BAND0,
+};
+
 struct isp_setfile {
 	u32 version;
 	u32 magic;
@@ -20,6 +32,7 @@ struct isp_setfile {
 	size_t size;
 	/* bytes present in the file if fewer than size; the rest is zero */
 	size_t file_size;
+	enum isp_temporal_filter temporal_filter;
 };
 
 // clang-format off
@@ -49,7 +62,8 @@ static const struct isp_setfile isp_setfiles[] = {
 	[ISP_IMX514_2820_04] = {0x514, 0x28200405, "apple/isp_2820_04XX.dat", 0xa198},
 	[ISP_IMX558_1921_01] = {0x558, 0x19210106, "apple/isp_1921_01XX.dat", 0xad40},
 	[ISP_IMX558_1922_02] = {0x558, 0x19220201, "apple/isp_1922_02XX.dat", 0xad40},
-	[ISP_IMX558_1925_03] = {0x558, 0x19250306, "apple/isp_1925_03XX.dat", 0xcbc0, 0xcba6},
+	[ISP_IMX558_1925_03] = {0x558, 0x19250306, "apple/isp_1925_03XX.dat", 0xcbc0, 0xcba6,
+				ISP_TEMPORAL_FILTER_OFF},
 	[ISP_IMX603_7920_01] = {0x603, 0x79200109, "apple/isp_7920_01XX.dat", 0xad2c},
 	[ISP_IMX603_7920_02] = {0x603, 0x79200205, "apple/isp_7920_02XX.dat", 0xad2c},
 	[ISP_IMX603_7921_01] = {0x603, 0x79210104, "apple/isp_7921_01XX.dat", 0xad90},
@@ -71,7 +85,8 @@ static const struct isp_setfile isp_setfiles[] = {
 	[ISP_IMX814_2123_01] = {0x814, 0x21230101, "apple/isp_2123_01XX.dat", 0xed54},
 	[ISP_IMX853_7622_01] = {0x853, 0x76220112, "apple/isp_7622_01XX.dat", 0x247f8},
 	[ISP_IMX913_7523_01] = {0x913, 0x75230107, "apple/isp_7523_01XX.dat", 0x247f8},
-	[ISP_IMX958_2224_01] = {0x958, 0x22240106, "apple/isp_2224_01XX.dat", 0x6ff4},
+	[ISP_IMX958_2224_01] = {0x958, 0x22240106, "apple/isp_2224_01XX.dat", 0x6ff4, 0,
+				ISP_TEMPORAL_FILTER_BAND0},
 	[ISP_VD56G0_6221_01] = {0xd56, 0x62210102, "apple/isp_6221_01XX.dat", 0x1b80},
 	[ISP_VD56G0_6222_01] = {0xd56, 0x62220102, "apple/isp_6222_01XX.dat", 0x1b80},
 };
@@ -689,6 +704,59 @@ static int isp_ch_configure_frame_rate(struct apple_isp *isp, u32 ch)
 	return isp_cmd_ch_ae_frame_rate_min_set(isp, ch, min_rate);
 }
 
+static int isp_ch_configure_temporal_filter(struct apple_isp *isp, u32 ch)
+{
+	struct isp_format *fmt = isp_get_format(isp, ch);
+	int err;
+
+	switch (isp_setfiles[fmt->id].temporal_filter) {
+	case ISP_TEMPORAL_FILTER_OFF:
+		/* The firmware keeps its state between streams; stop it. */
+		err = isp_cmd_apple_ch_temporal_filter_disable(isp, ch);
+		if (err)
+			return err;
+
+		err = isp_cmd_apple_ch_motion_history_stop(isp, ch);
+		if (err)
+			return err;
+
+		return isp_cmd_apple_ch_temporal_filter_stop(isp, ch);
+
+	case ISP_TEMPORAL_FILTER_BAND0:
+		err = isp_cmd_apple_ch_tnr_start_h17(isp, ch);
+		if (err)
+			return err;
+
+		err = isp_cmd_apple_ch_tnr_high_strength_set(isp, ch, 0);
+		if (err)
+			return err;
+
+		err = isp_cmd_apple_ch_tnr_band0_mod_set(isp, ch, 0);
+		if (err)
+			return err;
+
+		/* 120 and 100, in 1/256 steps */
+		err = isp_cmd_apple_ch_tnr_band0_threshold_set(isp, ch, 120 << 8,
+							       100 << 8);
+		if (err)
+			return err;
+		break;
+
+	default:
+		err = isp_cmd_apple_ch_temporal_filter_start(isp, ch,
+							     isp->temporal_filter);
+		if (err)
+			return err;
+		break;
+	}
+
+	err = isp_cmd_apple_ch_motion_history_start(isp, ch);
+	if (err)
+		return err;
+
+	return isp_cmd_apple_ch_temporal_filter_enable(isp, ch);
+}
+
 static int isp_ch_configure_pools(struct apple_isp *isp, u32 ch)
 {
 	struct isp_format *fmt = isp_get_format(isp, ch);
@@ -845,15 +913,7 @@ select_config:
 			return err;
 	}
 
-	err = isp_cmd_apple_ch_temporal_filter_start(isp, ch, isp->temporal_filter);
-	if (err)
-		return err;
-
-	err = isp_cmd_apple_ch_motion_history_start(isp, ch);
-	if (err)
-		return err;
-
-	err = isp_cmd_apple_ch_temporal_filter_enable(isp, ch);
+	err = isp_ch_configure_temporal_filter(isp, ch);
 	if (err)
 		return err;
 

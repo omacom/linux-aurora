@@ -607,6 +607,49 @@ int isp_cmd_apple_ch_temporal_filter_disable(struct apple_isp *isp, u32 chan)
 	return CISP_SEND_IN(isp, args);
 }
 
+int isp_cmd_apple_ch_tnr_start_h17(struct apple_isp *isp, u32 chan)
+{
+	struct cmd_apple_ch_temporal_filter_start_h17 args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_START),
+		.chan = chan,
+		.unk_c = 1,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_high_strength_set(struct apple_isp *isp, u32 chan,
+					   u32 enable)
+{
+	struct cmd_apple_ch_temporal_filter_enable_set args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_HIGH_STRENGTH),
+		.chan = chan,
+		.enable = enable,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_band0_mod_set(struct apple_isp *isp, u32 chan,
+				       u32 enable)
+{
+	struct cmd_apple_ch_temporal_filter_enable_set args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_BAND0_MODULATION),
+		.chan = chan,
+		.enable = enable,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_band0_threshold_set(struct apple_isp *isp, u32 chan,
+					     u32 first, u32 second)
+{
+	struct cmd_apple_ch_temporal_filter_band0_threshold args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_BAND0_THRESHOLD),
+		.chan = chan,
+		.threshold = { first, second },
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
 int isp_cmd_ch_ae_stability_set(struct apple_isp *isp, u32 chan, u32 stability)
 {
 	struct cmd_ch_ae_stability_set args = {

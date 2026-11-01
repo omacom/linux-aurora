@@ -210,6 +210,121 @@ static void isp_test_optional_setfile_continues_setup(struct kunit *test)
 	}
 }
 
+struct isp_test_nv12_trace {
+	unsigned int count;
+	u32 opcode[64];
+	u32 size[64];
+	u32 word[64][3];
+};
+
+/* Accept every NV12 setup command and record its opcode and first fields. */
+static int isp_test_record(struct apple_isp *isp, void *args, u32 insize,
+			   u32 outsize, int timeout)
+{
+	struct kunit *test = kunit_get_current_test();
+	struct isp_test_nv12_trace *trace = test->priv;
+	const u32 *words = args;
+	unsigned int i = trace->count;
+
+	if (i >= ARRAY_SIZE(trace->opcode)) {
+		KUNIT_FAIL(test, "unexpected extra command");
+		return -EIO;
+	}
+	trace->opcode[i] = words[1];
+	trace->size[i] = insize;
+	for (unsigned int j = 0; j < 3 && 12 + 4 * j < insize; j++)
+		trace->word[i][j] = words[3 + j];
+	trace->count++;
+	return 0;
+}
+
+static int isp_test_find(const struct isp_test_nv12_trace *trace, u32 opcode)
+{
+	for (unsigned int i = 0; i < trace->count; i++)
+		if (trace->opcode[i] == opcode)
+			return i;
+	return -1;
+}
+
+static int isp_test_no_setfile(struct apple_isp *isp, u32 ch)
+{
+	return 0;
+}
+
+static struct apple_isp *isp_test_nv12_alloc(struct kunit *test,
+					     enum isp_sensor_id id)
+{
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_format *fmt = isp_get_current_format(isp);
+
+	fmt->pixelformat = V4L2_PIX_FMT_NV12;
+	fmt->id = id;
+	fmt->version = isp_setfiles[id].version;
+	isp->temporal_filter = 1;
+	kunit_activate_static_stub(test, isp_ch_load_setfile, isp_test_no_setfile);
+	kunit_activate_static_stub(test, isp_cmd_send, isp_test_record);
+	return isp;
+}
+
+/* Expect exactly @n commands, in this order, from the first of them on. */
+static void isp_test_expect_run(struct kunit *test,
+				const struct isp_test_nv12_trace *trace,
+				const u32 (*run)[2], unsigned int n)
+{
+	int first = isp_test_find(trace, run[0][0]);
+
+	KUNIT_ASSERT_GE(test, first, 0);
+	KUNIT_ASSERT_LE(test, first + n, trace->count);
+	for (unsigned int i = 0; i < n; i++) {
+		KUNIT_EXPECT_EQ(test, trace->opcode[first + i], run[i][0]);
+		KUNIT_EXPECT_EQ(test, trace->size[first + i], run[i][1]);
+	}
+}
+
+static void isp_test_temporal_filter_band0(struct kunit *test)
+{
+	static const u32 run[][2] = {
+		{ 0xc100, 0x18 }, { 0xc120, 0x10 }, { 0xc11c, 0x10 },
+		{ 0xc11d, 0x14 }, { 0xc102, 0x0c }, { 0xc113, 0x0c },
+	};
+	struct apple_isp *isp = isp_test_nv12_alloc(test, ISP_IMX958_2224_01);
+	struct isp_test_nv12_trace *trace;
+	int i;
+
+	trace = kunit_kzalloc(test, sizeof(*trace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, trace);
+	test->priv = trace;
+	KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), 0);
+	isp_test_expect_run(test, trace, run, ARRAY_SIZE(run));
+	/* The start record is (1, 0, 0) whatever the DT property says. */
+	i = isp_test_find(trace, 0xc100);
+	KUNIT_EXPECT_EQ(test, trace->word[i][0], 1);
+	KUNIT_EXPECT_EQ(test, trace->word[i][1], 0);
+	KUNIT_EXPECT_EQ(test, trace->word[i][2], 0);
+	i = isp_test_find(trace, 0xc11d);
+	KUNIT_EXPECT_EQ(test, trace->word[i][0], 0x7800);
+	KUNIT_EXPECT_EQ(test, trace->word[i][1], 0x6400);
+	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc114), 0);
+}
+
+static void isp_test_temporal_filter_off(struct kunit *test)
+{
+	static const u32 run[][2] = {
+		{ 0xc114, 0x0c }, { 0xc103, 0x0c }, { 0xc101, 0x0c },
+	};
+	struct apple_isp *isp = isp_test_nv12_alloc(test, ISP_IMX558_1925_03);
+	struct isp_test_nv12_trace *trace;
+
+	trace = kunit_kzalloc(test, sizeof(*trace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, trace);
+	test->priv = trace;
+	KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), 0);
+	isp_test_expect_run(test, trace, run, ARRAY_SIZE(run));
+	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc100), 0);
+	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc102), 0);
+	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc113), 0);
+}
+
 static int isp_test_config_reply(struct apple_isp *isp, void *args, u32 insize,
 				 u32 outsize, int timeout)
 {
@@ -500,6 +615,8 @@ static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_sensor_config_failure),
 	KUNIT_CASE(isp_test_preview_stream),
 	KUNIT_CASE(isp_test_preview_command_failures),
+	KUNIT_CASE(isp_test_temporal_filter_band0),
+	KUNIT_CASE(isp_test_temporal_filter_off),
 	{}
 };
 
