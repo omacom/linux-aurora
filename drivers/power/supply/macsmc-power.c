@@ -19,6 +19,7 @@
 #include <linux/notifier.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeup.h>
 #include <linux/power_supply.h>
 #include <linux/reboot.h>
 #include <linux/workqueue.h>
@@ -110,6 +111,8 @@ struct macsmc_power {
 	int nominal_voltage_mv;
 
 	struct notifier_block nb;
+	/* Set between .prepare and .complete: connector insertion wakes the system */
+	bool wakeup_mode;
 	struct work_struct critical_work;
 	bool emergency_shutdown_triggered;
 	bool orderly_shutdown_triggered;
@@ -938,6 +941,18 @@ static void macsmc_power_critical_work(struct work_struct *wrk)
 	}
 }
 
+/*
+ * Connector events are 0x7113PPSS: PP is the port, SS 0x05 on insertion and
+ * 0x02 on removal (observed on J316C). Only an insertion during suspend wakes;
+ * whether it may wake at all is the device's power/wakeup policy, which
+ * pm_wakeup_dev_event() applies.
+ */
+static bool macsmc_power_event_wakes(const struct macsmc_power *power,
+				     unsigned long event)
+{
+	return (event & 0xffff00ff) == 0x71130005 && READ_ONCE(power->wakeup_mode);
+}
+
 static int macsmc_power_event(struct notifier_block *nb, unsigned long event, void *data)
 {
 	struct macsmc_power *power = container_of(nb, struct macsmc_power, nb);
@@ -950,6 +965,12 @@ static int macsmc_power_event(struct notifier_block *nb, unsigned long event, vo
 	if ((event & 0xffffff00) == 0x71010100 || /* Charger status change */
 	    (event & 0xffff0000) == 0x71060000 || /* Port charge state change */
 	    (event & 0xffff0000) == 0x71130000) { /* Connector insert/remove event */
+		/*
+		 * While suspended the PD controllers stay quiet and this mailbox
+		 * event is the only sign of a new connection.
+		 */
+		if (macsmc_power_event_wakes(power, event))
+			pm_wakeup_dev_event(power->dev, 0, true);
 		if (power->batt)
 			power_supply_changed(power->batt);
 		if (power->ac)
@@ -1206,6 +1227,9 @@ static int macsmc_power_probe(struct platform_device *pdev)
 	if (!power->batt && !power->ac)
 		return -ENODEV;
 
+	/* Wake on connector insertion is opt-in: capable, disabled by default */
+	device_set_wakeup_capable(&pdev->dev, true);
+
 	power->nb.notifier_call = macsmc_power_event;
 	blocking_notifier_chain_register(&smc->event_handlers, &power->nb);
 
@@ -1232,6 +1256,26 @@ static void macsmc_power_remove(struct platform_device *pdev)
 	blocking_notifier_chain_unregister(&power->smc->event_handlers, &power->nb);
 }
 
+static int macsmc_power_pm_prepare(struct device *dev)
+{
+	struct macsmc_power *power = dev_get_drvdata(dev);
+
+	WRITE_ONCE(power->wakeup_mode, true);
+	return 0;
+}
+
+static void macsmc_power_pm_complete(struct device *dev)
+{
+	struct macsmc_power *power = dev_get_drvdata(dev);
+
+	WRITE_ONCE(power->wakeup_mode, false);
+}
+
+static const struct dev_pm_ops macsmc_power_pm_ops = {
+	.prepare = macsmc_power_pm_prepare,
+	.complete = macsmc_power_pm_complete,
+};
+
 static const struct platform_device_id macsmc_power_id[] = {
 	{ .name = "macsmc-power" },
 	{ /* sentinel */ }
@@ -1241,6 +1285,7 @@ MODULE_DEVICE_TABLE(platform, macsmc_power_id);
 static struct platform_driver macsmc_power_driver = {
 	.driver = {
 		.name = "macsmc-power",
+		.pm = pm_sleep_ptr(&macsmc_power_pm_ops),
 	},
 	.id_table = macsmc_power_id,
 	.probe = macsmc_power_probe,
