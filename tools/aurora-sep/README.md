@@ -50,7 +50,9 @@ Environment=AURORA_SEP_READY_TIMEOUT=180
 ```
 
 The driver exports its module alias, so udev loads it where the device tree
-already enables the SEP node. That is the M1 family and J700. On the M1
+already enables the SEP node. That is the M1 family and J700 (MacBook Neo,
+T8140), whose device tree enables the SEP node, so it should work there too,
+but J700 has not been tested with this change. On the M1
 laptops the Secure Enclave sits in the path of the microphone data lines, and
 the microphones only work once it runs. There the service above remains
 harmless and is no longer required to load the driver. The M2, M2 Pro/Max,
