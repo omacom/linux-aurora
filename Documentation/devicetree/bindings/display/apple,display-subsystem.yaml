@@ -15,11 +15,22 @@ description:
 
 properties:
   compatible:
-    const: apple,display-subsystem
+    enum:
+      - apple,display-subsystem
+      - apple,t8122-display-subsystem
 
   iommus:
     minItems: 1
     maxItems: 8
+
+  apple,dma-range:
+    $ref: /schemas/types.yaml#/definitions/uint64-array
+    minItems: 2
+    maxItems: 2
+    description:
+      Common scanout DMA aperture, encoded as a base and nonzero size. This
+      overrides the default aperture of each referenced DART stream. Other
+      consumers of the same DART retain their own apertures.
 
 required:
   - compatible
