@@ -249,12 +249,13 @@ struct avd_av1_ctx {
 	} bufs;
 };
 
-#define AVD_AV1_BANKS 2
+#define AVD_AV1_BANKS AVD_MAX_FRAMES
 
 struct avd_av1_bank {
 	struct avd_av1_ctx codec;
 	bool busy;
 	bool prepared;
+	bool vp_done;
 	struct avd_decoded_buffer *dst;
 	u64 timestamp;
 	u32 flags;
@@ -303,10 +304,12 @@ static bool avd_av1_writes_seg(u8 flags)
 static bool avd_av1_depends(const struct v4l2_ctrl_av1_frame *frame,
 			   const struct avd_av1_bank *bank)
 {
-	if (frame->flags & V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS)
-		for (unsigned int i = 0; i < V4L2_AV1_REFS_PER_FRAME; i++)
-			if (avd_av1_ref_ts(frame, frame->ref_frame_idx[i]) == bank->timestamp)
-				return true;
+	/* Preserve same-VP ordering for named references when engines differ. */
+	for (unsigned int i = 0; i < V4L2_AV1_REFS_PER_FRAME; i++)
+		if (avd_av1_ref_ts(frame, frame->ref_frame_idx[i]) == bank->timestamp &&
+		    (!smp_load_acquire(&bank->vp_done) ||
+		     (frame->flags & V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS)))
+			return true;
 
 	if (frame->primary_ref_frame >= AV1_PRIMARY_REF_NONE ||
 	    avd_av1_ref_ts(frame, frame->ref_frame_idx[frame->primary_ref_frame]) !=
@@ -1620,6 +1623,7 @@ static int avd_av1_run(struct avd_ctx *ctx)
 		av1_ctx->b = bank;
 		smp_store_release(&ctx->priv, &bank->codec);
 		WRITE_ONCE(bank->prepared, false);
+		WRITE_ONCE(bank->vp_done, false);
 		WRITE_ONCE(bank->busy, true);
 		bank->dst = dst;
 		bank->timestamp = run.base.bufs.src->vb2_buf.timestamp;
@@ -1658,6 +1662,18 @@ static int avd_av1_run(struct avd_ctx *ctx)
 	avd_run_postamble(ctx, &run.base);
 
 	return avd_submit_job(ctx);
+}
+
+
+/* Tagged engine completion releases ordering, never CAPTURE tail visibility. */
+static void avd_av1_vp_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst)
+{
+	struct avd_av1_stream *stream = ((struct avd_av1_ctx *)ctx->priv)->stream;
+	struct avd_decoded_buffer *buf = vb2_to_avd_decoded_buf(&dst->vb2_buf);
+	struct avd_av1_bank *bank = avd_av1_ref_bank(stream, buf);
+
+	if (bank)
+		smp_store_release(&bank->vp_done, true);
 }
 
 static void avd_av1_done(struct avd_ctx *ctx, struct vb2_v4l2_buffer *src,
@@ -1731,6 +1747,7 @@ static void avd_av1_stop(struct avd_ctx *ctx)
 {
 	avd_av1_free(ctx, ((struct avd_av1_ctx *)ctx->priv)->stream);
 	ctx->priv = NULL;
+	ctx->max_frames = 1;
 }
 
 static int avd_av1_start(struct avd_ctx *ctx)
@@ -1742,7 +1759,8 @@ static int avd_av1_start(struct avd_ctx *ctx)
 	if (!av1_ctx)
 		return -ENOMEM;
 
-	av1_ctx->nbanks = avd_qfw_has_vp_done(ctx->dev) ? AVD_AV1_BANKS : 1;
+	av1_ctx->nbanks = avd_qfw_has_vp_done(ctx->dev) ?
+		avd_qfw_picture_banks(ctx->dev, AVD_CODEC_AV1) : 1;
 	av1_ctx->b = &av1_ctx->bank[0];
 	for (unsigned int i = 0; i < av1_ctx->nbanks; i++) {
 		av1_ctx->bank[i].codec.stream = av1_ctx;
@@ -1845,6 +1863,7 @@ const struct avd_coded_fmt_ops avd_av1_fmt_ops = {
 	.stop = avd_av1_stop,
 	.run = avd_av1_run,
 	.done = avd_av1_done,
+	.vp_done = avd_av1_vp_done,
 	.ready = avd_av1_ready,
 	.submit = avd_av1_submit,
 	.pp_kicks = avd_av1_pp_kicks,

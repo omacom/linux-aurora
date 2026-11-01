@@ -38,8 +38,8 @@ pre = pre.replace('struct vb2_v4l2_buffer *dst; } bufs;', 'struct vb2_v4l2_buffe
 pre = pre.replace('unsigned int fifo_idx, pp_total;', 'unsigned int fifo_idx, pp_total, max_frames; int ctrl_hdl;')
 pre = pre.replace('dma_addr_t comp_out, y_out, uv_out;', 'dma_addr_t comp_out, y_out, uv_out, coded_in;')
 pre = pre.replace('struct { u32 bytesperline; } plane_fmt[1];', 'u32 width,height; struct { u32 bytesperline; } plane_fmt[1];')
-pre = pre.replace('static struct avd_decoded_buffer reference;', 'static struct avd_decoded_buffer reference; static struct avd_decoded_buffer *refs[3];')
-pre = pre.replace('(void)c; (void)b; (void)t; return &reference;', '(void)c;for(unsigned int i=0;i<3;i++)if(refs[i]&&refs[i]->base.vb.vb2_buf.timestamp==t)return refs[i];return (void *)b;')
+pre = pre.replace('static struct avd_decoded_buffer reference;', 'static struct avd_decoded_buffer reference; static struct avd_decoded_buffer *refs[5];')
+pre = pre.replace('(void)c; (void)b; (void)t; return &reference;', '(void)c;for(unsigned int i=0;i<5;i++)if(refs[i]&&refs[i]->base.vb.vb2_buf.timestamp==t)return refs[i];return (void *)b;')
 pre = pre.replace('static int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)',
                   'static struct avd_ctx *allocating_ctx;\nstatic int fail_alloc_after;\nstatic bool avd_av1_ready(struct avd_ctx *);\nstatic int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)')
 pre = pre.replace('{ (void)d; free(b->cpu); b->cpu = calloc(1,n);',
@@ -69,6 +69,7 @@ pre += r'''
 enum vb2_buffer_state { STATE_DUMMY };
 #define kzalloc(n,f) calloc(1,n)
 #define kfree free
+static unsigned int avd_qfw_picture_banks(const struct avd_dev *, unsigned int);
 static bool vp_feature=true;
 static bool avd_qfw_has_vp_done(const struct avd_dev *d){return d->queued&&vp_feature;}
 static void *vb2_plane_vaddr(struct vb2_buffer *b,int p){(void)p;return b->cpu;}
@@ -124,6 +125,7 @@ post += qfw[qfw.index('#define AVDQ_MAGIC'):qfw.index('/* Arguments of dev_dbg()
 post += hw[hw.index('#define AVD_V3_'):hw.index('int avd_boot(')]
 post += '#define w32(r,v) writel((v),avd->ctrl+(r))\n#define m32(r,v) w32(r,(v)|readl(avd->ctrl+(r)))\n'
 post += function(hw, 't8112_configure_stream') + function(hw, 't8122_configure_stream')
+post += function(qfw, 'avd_qfw_picture_banks')
 post += function(qfw, 'avd_qfw_stream') + function(qfw, 'avd_qfw_submit')
 post += '\nstatic int avd_submit_job(struct avd_ctx *ctx){return avd_open_build_program(ctx);}\n'
 
@@ -149,6 +151,7 @@ static void queue_request(struct vb2_v4l2_buffer *src){
  request_hdl.ctrl_refs=&request_ref;src->vb2_buf.req_obj.req=&request_hdl;
 }
 static void flag_table(struct avd_av1_bank *b){
+ b->vp_done=true;
  /* Actual producer timestamp is slot 5, not the immediately prior slot 0. */
  struct v4l2_ctrl_av1_frame f={.frame_type=V4L2_AV1_INTER_FRAME,.primary_ref_frame=2,
   .frame_width_minus_1=1919,.frame_height_minus_1=1087};
@@ -190,13 +193,13 @@ int main(int argc,char **argv){
  struct avd_qfw queue={.sram=calloc(1,0x10000),.aperture=0x1094000,.ring_words=0x1800,.fifo_slots=15,.vp_done=true};
  dev.qfw=&queue;dev.ctrl=calloc(1,0x10000);dev.mbox=calloc(1,0x100);variant.configure_stream=t8122_configure_stream;
  writel(0x20001,dev.mbox+0x50);
- static const struct avd_coded_fmt_ops ops={.pp_kicks=avd_av1_pp_kicks};
+ static const struct avd_coded_fmt_ops ops={.pp_kicks=avd_av1_pp_kicks,.vp_done=avd_av1_vp_done};
  static const struct fmt_desc fmt={.ops=&ops};
  struct avd_ctx ctx={.dev=&dev,.coded_fmt_desc=&fmt,.pp_total=1};
  struct avd_buf program={};struct avd_frame frame={.prog=&program,.ctx=&ctx};dev.building=&frame;
- struct avd_decoded_buffer dst[3]={};struct vb2_v4l2_buffer src={};u8 coded[512]={};
+ struct avd_decoded_buffer dst[5]={};struct vb2_v4l2_buffer src={};u8 coded[512]={};
  src.vb2_buf=(struct vb2_buffer){.dma=0x220000000ULL,.cpu=coded,.payload=512,.timestamp=1000};current_src=&src;
- for(unsigned int i=0;i<3;i++){
+ for(unsigned int i=0;i<5;i++){
   dst[i].base.vb.vb2_buf=(struct vb2_buffer){.dma=0x230000000ULL+i*0x1000000ULL,.cpu=calloc(1,0x800000),.planes[0].length=0x800000,.timestamp=1000+i};refs[i]=&dst[i];
  }
  ctx.decoded_fmt.fmt.pix_mp.width=1920;ctx.decoded_fmt.fmt.pix_mp.height=1088;
@@ -219,7 +222,9 @@ int main(int argc,char **argv){
  queue_request(&src);
  /* p_cur is deliberately stale and different from the pending request. */
  params.flags=0;request_params.flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
- assert(avd_av1_ready(&ctx));
+ p->bank[0].vp_done=false;assert(!avd_av1_ready(&ctx));
+ avd_av1_vp_done(&ctx,&dst[0].base.vb);assert(p->bank[0].busy&&avd_av1_ready(&ctx));
+ avd_av1_vp_done(&ctx,&dst[0].base.vb);assert(p->bank[0].busy);
  p->bank[0].flags=0;assert(!avd_av1_ready(&ctx));p->bank[0].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
  p->bank[0].seg_flags=V4L2_AV1_SEGMENTATION_FLAG_ENABLED|V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP;
  assert(!avd_av1_ready(&ctx));p->bank[0].seg_flags=0;
@@ -254,7 +259,70 @@ int main(int argc,char **argv){
   fail_alloc_after=n;allocating_ctx=&ctx;assert(avd_av1_start(&ctx)==-ENOMEM);allocating_ctx=NULL;
   assert(!ctx.priv&&!avd_av1_ready(&ctx));
  }
- for(unsigned int i=0;i<3;i++)free(dst[i].base.vb.vb2_buf.cpu);
+
+ /* AV1 pool size is firmware-owned, including sparse masks and FIFO bounds. */
+ for(unsigned int count=1;count<=3;count++){
+  queue.multi_vp=true;queue.vp_pool[3]=((1u<<count)-1)<<9;
+  assert(!avd_av1_start(&ctx));p=((struct avd_av1_ctx *)ctx.priv)->stream;
+  assert(p->nbanks==count+1&&ctx.max_frames==count+1);
+  avd_av1_stop(&ctx);assert(ctx.max_frames==1);
+ }
+ queue.vp_pool[3]=BIT(9)|BIT(11);queue.fifo_slots=2;
+ assert(!avd_av1_start(&ctx));p=((struct avd_av1_ctx *)ctx.priv)->stream;
+ assert(p->nbanks==2);avd_av1_stop(&ctx);
+ queue.fifo_slots=15;queue.vp_pool[3]=BIT(9)|BIT(10)|BIT(11);queue.next_vp[3]=0;
+ assert(!avd_av1_start(&ctx));p=((struct avd_av1_ctx *)ctx.priv)->stream;
+ assert(p->nbanks==4&&ctx.max_frames==4);
+ params.primary_ref_frame=7;params.flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
+ params.segmentation.flags=0;
+ for(unsigned int i=0;i<7;i++)params.ref_frame_idx[i]=-1;
+ for(unsigned int n=0;n<4;n++){
+  src.vb2_buf.timestamp=1000+n;current_dst=&dst[n].base.vb;frame.idx=n;
+  queue_request(&src);assert(avd_av1_ready(&ctx));assert(!avd_av1_run(&ctx));
+  char stem[64];snprintf(stem,sizeof(stem),"av1-multi-%u",n);write_program(argv[1],stem,&frame);
+  assert(dst[n].bank==n+1&&p->bank[n].busy&&p->bank[n].prepared);
+  assert(readl(queue.sram+0x8000+n*64+D_VP)==9+n%3);
+  for(unsigned int prev=0;prev<n;prev++){
+   assert(p->bank[prev].codec.bufs.inst.addr!=p->bank[n].codec.bufs.inst.addr);
+   assert(p->bank[prev].codec.bufs.probs.addr!=p->bank[n].codec.bufs.probs.addr);
+  }
+ }
+ assert(!avd_av1_ready(&ctx));current_dst=&dst[4].base.vb;
+ assert(avd_av1_run(&ctx)==-EBUSY&&!dst[4].bank);
+ /* Free a bank, then reference each of the other engines' live producers. */
+ avd_av1_done(&ctx,&src,&dst[3].base.vb,VB2_BUF_STATE_DONE);
+ for(unsigned int n=0;n<3;n++){
+  request_params.primary_ref_frame=0;request_params.ref_frame_idx[0]=n;
+  request_params.reference_frame_ts[n]=1000+n;
+  p->bank[n].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
+  assert(!avd_av1_ready(&ctx));avd_av1_vp_done(&ctx,&dst[n].base.vb);
+  assert(p->bank[n].busy&&p->bank[n].vp_done&&avd_av1_ready(&ctx));
+  p->bank[n].flags=0;assert(!avd_av1_ready(&ctx));
+  p->bank[n].flags=V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF;
+  assert(avd_av1_ready(&ctx));
+  p->bank[n].seg_flags=V4L2_AV1_SEGMENTATION_FLAG_ENABLED|V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP;
+  request_params.segmentation.flags=V4L2_AV1_SEGMENTATION_FLAG_ENABLED;
+  assert(!avd_av1_ready(&ctx));request_params.segmentation.flags=0;p->bank[n].seg_flags=0;
+  request_params.flags|=V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS;
+  assert(!avd_av1_ready(&ctx));request_params.flags&=~V4L2_AV1_FRAME_FLAG_USE_REF_FRAME_MVS;
+ }
+ /* Reset/error retirement must release the saved bank, irrespective of builder. */
+ for(unsigned int n=3;n>0;n--){
+  avd_av1_done(&ctx,&src,&dst[n-1].base.vb,VB2_BUF_STATE_ERROR);
+  assert(!p->bank[n-1].busy&&!dst[n-1].bank);
+ }
+ assert(avd_av1_ready(&ctx));
+ params.primary_ref_frame=7;params.segmentation.flags=0;
+ current_dst=&dst[0].base.vb;frame.idx=0;assert(!avd_av1_run(&ctx));
+ assert(dst[0].bank==1&&p->bank[0].busy);
+ avd_av1_done(&ctx,&src,&dst[0].base.vb,VB2_BUF_STATE_DONE);avd_av1_stop(&ctx);
+ /* Fail allocation in every bank, including after earlier banks succeeded. */
+ for(int n=1;n<=12;n++){
+  fail_alloc_after=n;allocating_ctx=&ctx;assert(avd_av1_start(&ctx)==-ENOMEM);allocating_ctx=NULL;
+  assert(!ctx.priv&&!avd_av1_ready(&ctx));
+ }
+ puts("PASS: AV1 firmware pool sizes, sparse masks, FIFO bounds, per-engine dispatch, all producer barriers, exhaustion, reset/error and reuse");
+ for(unsigned int i=0;i<5;i++)free(dst[i].base.vb.vb2_buf.cpu);
  free(program.cpu);free(queue.sram);free(dev.ctrl);free(dev.mbox);
  puts("PASS: AV1 snapshot inheritance, poisoned CAPTURE, request lookahead, banks, PP retirement, exhaustion, failures and legacy fallback");
 }
@@ -299,12 +367,19 @@ int main(int argc,char **argv){
   .frame_width_minus_1=1919,.frame_height_minus_1=1087,.upscaled_width=1920};
  params.tile_info.tile_cols=params.tile_info.tile_rows=1;params.tile_info.width_in_sbs_minus_1[0]=29;params.tile_info.height_in_sbs_minus_1[0]=16;tile.tile_size=512;
  assert(!avd_av1_start(&ctx));
- for(unsigned int mode=0;mode<8;mode++){
+ for(unsigned int mode=0;mode<12;mode++){
   current_dst=&dst[!!mode].base.vb;
   params.frame_type=mode==0?V4L2_AV1_KEY_FRAME:mode==2?V4L2_AV1_INTRA_ONLY_FRAME:V4L2_AV1_INTER_FRAME;
   params.primary_ref_frame=mode==0||mode==4?7:0;
   params.ref_frame_idx[0]=0;params.reference_frame_ts[0]=1000;
   params.flags=(mode==3?V4L2_AV1_FRAME_FLAG_ERROR_RESILIENT_MODE:0)|(mode==5?V4L2_AV1_FRAME_FLAG_DISABLE_FRAME_END_UPDATE_CDF:0);
+  seq.bit_depth=mode>=10?10:8;
+  if(mode>=8){
+   seq.flags|=V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT;
+   grain.flags=V4L2_AV1_FILM_GRAIN_FLAG_APPLY_GRAIN|V4L2_AV1_FILM_GRAIN_FLAG_UPDATE_GRAIN;
+   grain.grain_seed=1234+mode;
+   params.flags|=mode&1?V4L2_AV1_FRAME_FLAG_SHOW_FRAME:V4L2_AV1_FRAME_FLAG_SHOWABLE_FRAME;
+  }
   params.segmentation.flags=mode>=6?V4L2_AV1_SEGMENTATION_FLAG_ENABLED:0;
   if(mode==7)params.segmentation.flags|=V4L2_AV1_SEGMENTATION_FLAG_UPDATE_MAP;
   assert(!avd_av1_run(&ctx));
@@ -325,6 +400,6 @@ int main(int argc,char **argv){
     for name, body in [('legacy-before', old), ('legacy-after', av1)]:
         shim = 'static bool avd_av1_ready(struct avd_ctx *ctx){(void)ctx;return false;}\n' if name == 'legacy-before' else ''
         build_run(name, common + codec(body) + shim + post + legacy.replace('@NAME@', name))
-    for mode in range(8):
+    for mode in range(12):
         assert (OUT / f'legacy-before-{mode}.bin').read_bytes() == (OUT / f'legacy-after-{mode}.bin').read_bytes(), mode
-    print('PASS: separate baseline/current executables emit byte-identical legacy AV1 programs and CDF/map tails for eight header cases')
+    print('PASS: separate baseline/current executables emit byte-identical legacy AV1 programs and CDF/map tails for twelve header cases including film grain/show flags at 8/10 bits')

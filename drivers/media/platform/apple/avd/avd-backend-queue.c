@@ -117,8 +117,8 @@ static unsigned int avd_qfw_bank_limit(struct avd_qfw *q, unsigned int codec)
 	unsigned int banks = 1;
 	u32 pool;
 
-	/* k4m keeps two banks with old queue firmware. */
-	if (!q->multi_vp || codec > AVD_CODEC_H264)
+	/* Old queue firmware and VP9 retain the two-bank overlap path. */
+	if (!q->multi_vp || codec == AVD_CODEC_VP9 || codec > AVD_CODEC_AV1)
 		return 2;
 	/* One bank per VP plus one retained by PP. No SoC counts in the host. */
 	for (pool = q->vp_pool[codec]; pool; pool &= pool - 1)

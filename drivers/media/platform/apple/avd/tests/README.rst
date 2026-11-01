@@ -199,19 +199,19 @@ This is a backwards-compatible optional ABI 2 feature:
   bank reuse. Only the original tagged PP completion does that. A missing VP
   event remains bounded by the original per-picture watchdog.
 
-AV1 conservative picture overlap
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+AV1 picture overlap and codec VP pools
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``av1-test.py`` compiles the production AV1 codec, entropy defaults, open
 program builder and queued descriptor writer with ASan/UBSan. It is also
 called by the registered ``avd-codec-tail-tests.py`` host check. Run::
 
-  AVD_AV1_BASELINE_REF=a1b76856 python3 tests/av1-test.py /tmp/avd-av1
+  AVD_AV1_BASELINE_REF=d62b4894 python3 tests/av1-test.py /tmp/avd-av1
   python3 tests/unicorn-av1-test.py /path/to/avd-fw \
       /path/to/avd-fw/build/avd-fw-v5-t2.bin /tmp/avd-av1
 
 The independent legacy comparison builds before/after executables and compares
-complete emitted programs plus initialized CDF/map tails for eight header cases.
+complete emitted programs plus initialized CDF/map tails for twelve header cases.
 The flag table covers primary-reference/default CDF cases, both producer and
 consumer disable_frame_end_update_cdf, segmentation enabled/update_map on both
 pictures, and all 256 refresh masks. Pending request p_req values are used for
@@ -242,12 +242,17 @@ Safe subset
 ^^^^^^^^^^^
 
 Queue firmware advertising VP-DONE feature bit 2 enables two scratch banks;
-legacy transport and older queue firmware retain one bank and identical
+with a validated codec pool (feature bit 3), AV1 instead allocates one bank per
+advertised AV1 VP plus one retained by PP, bounded by physical FIFO slots.
+There are no host SoC counts. VP9 retains its existing two-bank limit.
+Legacy transport and queue firmware without tagged VP DONE retain one bank and identical
 programs. The CDF output, segmentation output and motion-field/color output
 already live in each picture's distinct CAPTURE tail. Each scratch bank owns
 its FIFO, CDF input, pipe/filter/tile scratch, a saved initialized map and a
 separate map input snapshot. Only PP retirement releases its bank. VP DONE
-never releases storage or publishes hardware-written tails for AV1.
+never releases storage or publishes hardware-written tails for AV1. It releases
+only the producer VP ordering barrier for a named reference. Each saved CAPTURE
+bank records its own tagged VP event, independently of the current builder.
 
 For a pending consumer, each busy producer is tested by the exact timestamp
 named through ref_frame_idx/primary_ref_frame, rather than the preceding frame
@@ -257,6 +262,7 @@ userspace subsequently names; it does not create a dependency by itself.
 =============================== ==============================================
 Consumer / producer condition   Prepare dependency while producer is in flight
 =============================== ==============================================
+Named live reference            Wait for its tagged VP DONE on any engine
 PRIMARY_REF_NONE                No primary CDF or map dependency
 Intra or error resilient        Default CDF; map dependency still checked
 Primary slot names retired ref  None on an in-flight picture
@@ -281,11 +287,23 @@ these copies. Busy banks publish fully prepared metadata with release/acquire;
 allocation failures and PP error/reset retirement release the saved CAPTURE's
 bank, independent of the current builder.
 
-This subset needs no extra VP token: firmware already waits for VP(N) DONE
-before feeding VP(N+1). AV1 descriptors retain their ordinary completion-only
-flags. The Unicorn run boots the v5-t2 CM3 reset vector, routes AV1 and PP IRQs,
+The former single-engine subset relied on firmware waiting for VP(N) DONE
+before feeding VP(N+1) on the same engine. Across engines that ordering is
+explicit: a consumer naming any live reference waits for that producer's tagged
+VP event. The callback publishes only ordering, without sampling CAPTURE tails.
+The CDF/map snapshot exception then applies; hardware-written CDF/map/MV inputs
+still wait for PP retirement. Independent pictures can start on different VPs
+before either completes. PP consumes reference reconstruction in submission
+order, as in the multi-VP H.264/HEVC path.
+
+The Unicorn run boots the v5-t2 CM3 reset vector, routes AV1 and PP IRQs,
 and checks production AV1 program words/descriptors/configuration. It shows
-VP(1) issued during PP(0), PP serialization and blocked completion mailboxes.
+VP(1) issued during PP(0), concurrent VPs 9/10/11, a fourth picture waiting for
+VP9 DONE, reverse engine completion, per-picture VP tokens, ordered PP and
+blocked completion mailboxes. A routed error on each AV1 engine drains every
+owner; reset boots all engines again. Host tests cover pool sizes, sparse masks,
+FIFO bounds, each producer's CDF/map/MV and VP barriers, duplicate VP callbacks,
+all-bank allocation failures, exhaustion and saved-bank error retirement.
 Host tests poison in-flight CAPTURE tails to ensure snapshot consumers never
 read them. Pixels, physical DMA visibility and throughput remain hardware
 qualification work for the lead. Full CDF/MV dependency release at VP DONE is
@@ -340,3 +358,12 @@ preamble. Across all four revision/address variants, weight modes and
 first/continuation slices, its complete program must equal the baseline IDR
 program exactly. Pictures with references retain their original header.
 The baseline comparison retains all 32 before/after empty-DPB cases.
+
+Film grain controls, frame flags and the legacy syntax/program emitters are
+unchanged. The independent baseline comparison includes film grain control
+values and SHOW_FRAME/SHOWABLE_FRAME combinations at 8 and 10 bits. It checks
+program/tail parity, not grain synthesis. The stateless AV1 frame UAPI has no
+show_existing_frame decode control: userspace presents the existing CAPTURE
+buffer without a new tile decode. No VP event retires that CAPTURE buffer or
+its media request early. Hardware qualification must include those presentation
+paths as well as pixel hashes; this change makes no new grain-support claim.
