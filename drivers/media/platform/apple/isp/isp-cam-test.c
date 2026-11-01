@@ -71,6 +71,7 @@ struct isp_test_command_trace {
 	unsigned int fail_at;
 	int setfile_error;
 	unsigned int setfile_calls;
+	u32 last_opcode;
 };
 
 static int isp_test_send(struct apple_isp *isp, void *args, u32 insize,
@@ -190,6 +191,19 @@ static void isp_test_setfile_failure_stops_setup(struct kunit *test)
 	}
 }
 
+/* Count NV12 setup commands and fail the chosen one, without a fixture. */
+static int isp_test_count_send(struct apple_isp *isp, void *args, u32 insize,
+			       u32 outsize, int timeout)
+{
+	struct kunit *test = kunit_get_current_test();
+	struct isp_test_command_trace *trace = test->priv;
+
+	trace->last_opcode = ((const u32 *)args)[1];
+	if (++trace->count == trace->fail_at)
+		return -ETIME;
+	return 0;
+}
+
 static void isp_test_optional_setfile_continues_setup(struct kunit *test)
 {
 	static const int results[] = { 0, -ENOENT };
@@ -198,14 +212,16 @@ static void isp_test_optional_setfile_continues_setup(struct kunit *test)
 
 	isp_get_current_format(isp)->pixelformat = V4L2_PIX_FMT_NV12;
 	kunit_activate_static_stub(test, isp_ch_load_setfile, isp_test_load_setfile);
+	kunit_activate_static_stub(test, isp_cmd_send, isp_test_count_send);
 	test->priv = &trace;
 	for (unsigned int i = 0; i < ARRAY_SIZE(results); i++) {
 		trace = (struct isp_test_command_trace){
 			.setfile_error = results[i], .fail_at = 2,
 		};
-		/* The SBS command after tuning, rather than tuning, fails. */
+		/* The mains frequency after tuning, rather than tuning, fails. */
 		KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), -ETIME);
 		KUNIT_EXPECT_EQ(test, trace.count, 2);
+		KUNIT_EXPECT_EQ(test, trace.last_opcode, 0x8212);
 		KUNIT_EXPECT_EQ(test, trace.setfile_calls, 1);
 	}
 }
@@ -323,6 +339,41 @@ static void isp_test_temporal_filter_off(struct kunit *test)
 	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc100), 0);
 	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc102), 0);
 	KUNIT_EXPECT_LT(test, isp_test_find(trace, 0xc113), 0);
+}
+
+static void isp_test_power_line_frequency(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_nv12_alloc(test, ISP_IMX958_2224_01);
+	struct isp_test_nv12_trace *trace;
+	int i;
+
+	trace = kunit_kzalloc(test, sizeof(*trace), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, trace);
+	test->priv = trace;
+
+	/* No control: 50 Hz, in Hz 16.16 */
+	KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), 0);
+	i = isp_test_find(trace, 0x8212);
+	KUNIT_ASSERT_GE(test, i, 0);
+	KUNIT_EXPECT_EQ(test, trace->size[i], 0x10);
+	KUNIT_EXPECT_EQ(test, trace->word[i][0], 0x00320000);
+	/* After the tuning, before the sensor configuration is selected */
+	KUNIT_EXPECT_LT(test, i, isp_test_find(trace, 0x107));
+
+	isp->power_line_frequency =
+		v4l2_ctrl_new_std_menu(&isp->ctrl_handler, NULL,
+				       V4L2_CID_POWER_LINE_FREQUENCY,
+				       V4L2_CID_POWER_LINE_FREQUENCY_60HZ,
+				       BIT(V4L2_CID_POWER_LINE_FREQUENCY_DISABLED),
+				       V4L2_CID_POWER_LINE_FREQUENCY_50HZ);
+	KUNIT_ASSERT_NOT_NULL(test, isp->power_line_frequency);
+	KUNIT_ASSERT_EQ(test, v4l2_ctrl_s_ctrl(isp->power_line_frequency,
+					       V4L2_CID_POWER_LINE_FREQUENCY_60HZ), 0);
+	memset(trace, 0, sizeof(*trace));
+	KUNIT_EXPECT_EQ(test, isp_ch_configure_capture(isp, 0), 0);
+	i = isp_test_find(trace, 0x8212);
+	KUNIT_ASSERT_GE(test, i, 0);
+	KUNIT_EXPECT_EQ(test, trace->word[i][0], 0x003c0000);
 }
 
 static int isp_test_config_reply(struct apple_isp *isp, void *args, u32 insize,
@@ -617,6 +668,7 @@ static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_preview_command_failures),
 	KUNIT_CASE(isp_test_temporal_filter_band0),
 	KUNIT_CASE(isp_test_temporal_filter_off),
+	KUNIT_CASE(isp_test_power_line_frequency),
 	{}
 };
 

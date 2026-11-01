@@ -592,12 +592,14 @@ static int isp_vb2_start_streaming(struct vb2_queue *q, unsigned int count)
 
 	isp->sequence = 0;
 
-	/* The exposure priority is applied when the stream starts. */
+	/* The exposure controls are applied when the stream starts. */
 	v4l2_ctrl_grab(isp->exposure_priority, true);
+	v4l2_ctrl_grab(isp->power_line_frequency, true);
 
 	err = apple_isp_start_streaming(isp);
 	if (err) {
 		v4l2_ctrl_grab(isp->exposure_priority, false);
+		v4l2_ctrl_grab(isp->power_line_frequency, false);
 		isp_vb2_release_buffers(isp, VB2_BUF_STATE_QUEUED);
 	}
 
@@ -611,6 +613,7 @@ static void isp_vb2_stop_streaming(struct vb2_queue *q)
 	apple_isp_stop_streaming(isp);
 	isp_vb2_release_buffers(isp, VB2_BUF_STATE_ERROR);
 	v4l2_ctrl_grab(isp->exposure_priority, false);
+	v4l2_ctrl_grab(isp->power_line_frequency, false);
 }
 
 int apple_isp_video_suspend(struct apple_isp *isp)
@@ -1218,10 +1221,22 @@ int apple_isp_setup_video(struct apple_isp *isp)
 	 * Auto exposure is always on. By default it holds the frame rate, as
 	 * V4L2 specifies; with exposure priority it may slow down in low light.
 	 */
-	v4l2_ctrl_handler_init(&isp->ctrl_handler, 3);
+	v4l2_ctrl_handler_init(&isp->ctrl_handler, 4);
 	isp->exposure_priority =
 		v4l2_ctrl_new_std(&isp->ctrl_handler, NULL,
 				  V4L2_CID_EXPOSURE_AUTO_PRIORITY, 0, 1, 1, 0);
+	/*
+	 * The H17 firmware's auto exposure avoids mains flicker at the given
+	 * frequency. 50 Hz is the default, as on macOS when it does not know
+	 * the country; userspace sets 60 Hz where the mains runs at 60 Hz.
+	 */
+	if (isp->hw->fw_abi == ISP_FW_ABI_H17)
+		isp->power_line_frequency =
+			v4l2_ctrl_new_std_menu(&isp->ctrl_handler, NULL,
+					       V4L2_CID_POWER_LINE_FREQUENCY,
+					       V4L2_CID_POWER_LINE_FREQUENCY_60HZ,
+					       BIT(V4L2_CID_POWER_LINE_FREQUENCY_DISABLED),
+					       V4L2_CID_POWER_LINE_FREQUENCY_50HZ);
 	if (isp->hw->meta_exposure)
 		isp_init_exposure_ctrls(isp);
 	if (isp->ctrl_handler.error) {

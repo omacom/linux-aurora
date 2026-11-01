@@ -704,6 +704,27 @@ static int isp_ch_configure_frame_rate(struct apple_isp *isp, u32 ch)
 	return isp_cmd_ch_ae_frame_rate_min_set(isp, ch, min_rate);
 }
 
+/*
+ * Tell auto exposure the mains frequency, so that it picks exposure times
+ * that do not beat with lights on that supply. The firmware takes it in Hz,
+ * 16.16 fixed point. macOS sends it on the H17 interface for every camera.
+ */
+static int isp_ch_configure_power_line(struct apple_isp *isp, u32 ch)
+{
+	u32 hz = 50;
+
+	if (isp->hw->fw_abi != ISP_FW_ABI_H17)
+		return 0;
+
+	if (isp->power_line_frequency &&
+	    v4l2_ctrl_g_ctrl(isp->power_line_frequency) ==
+		    V4L2_CID_POWER_LINE_FREQUENCY_60HZ)
+		hz = 60;
+
+	return isp_cmd_apple_ch_ae_flicker_freq_update_current_set(isp, ch,
+								    hz << 16);
+}
+
 static int isp_ch_configure_temporal_filter(struct apple_isp *isp, u32 ch)
 {
 	struct isp_format *fmt = isp_get_format(isp, ch);
@@ -814,6 +835,10 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 		if (err)
 			return err;
 	}
+
+	err = isp_ch_configure_power_line(isp, ch);
+	if (err)
+		return err;
 
 select_config:
 	err = isp_cmd_ch_sbs_enable(isp, ch, 1);

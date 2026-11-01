@@ -305,6 +305,7 @@ struct apple_isp {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *exposure_priority;
+	struct v4l2_ctrl *power_line_frequency;
 	/* read-only exposure report of the last frame, NULL without one */
 	struct v4l2_ctrl *gain;
 	struct v4l2_ctrl *exposure;
