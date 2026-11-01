@@ -483,7 +483,7 @@ static irqreturn_t avd_irq_handler(int irq, void *data)
 		 * timeout: it resets the AVD and fails only this frame, and it
 		 * ignores a job the hardware does not own yet.
 		 */
-		mod_delayed_work(system_wq, &ctx->watchdog_work, 0);
+		mod_delayed_work(system_dfl_wq, &ctx->watchdog_work, 0);
 		goto done;
 	}
 
@@ -608,7 +608,7 @@ static void avd_device_run(void *priv)
 		} else {
 			avd->job_state = AVD_JOB_SUBMITTED;
 			ctx->wd_seq = seq;
-			schedule_delayed_work(&ctx->watchdog_work, msecs_to_jiffies(2000));
+			queue_delayed_work(system_dfl_wq, &ctx->watchdog_work, msecs_to_jiffies(2000));
 			outcome = "submitted";
 		}
 	}
