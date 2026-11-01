@@ -240,6 +240,9 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 	/* The program's EXEC words name FIFO f->idx; it must be a real FIFO. */
 	if (f->idx >= q->fifo_slots)
 		return -EINVAL;
+	/* The prepared picture owns this FIFO, including across inbox retries. */
+	if (!f->fifo_iova)
+		return -EINVAL;
 	/* A busy inbox owns nothing; retry this same prepared frame later. */
 	if (!(readl(avd->mbox + AVD_REG_MBOX0_STATUS) & AVDQ_MBOX_STATUS_EMPTY))
 		return -EBUSY;
@@ -259,7 +262,7 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 					   codec != AVD_CODEC_AV1);
 
 	/* FIFO registers of other live frames are never touched. */
-	avd->variant->configure_stream(avd, f->fifo_iova ?: ctx->inst.addr, f->idx, vp);
+	avd->variant->configure_stream(avd, f->fifo_iova, f->idx, vp);
 
 	writel(AVDQ_MAGIC, d + D_MAGIC);
 	writel(f->tag, d + D_TAG);
@@ -281,8 +284,9 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 	wmb();
 	(void)readl(d + D_STATE);	/* flush posted aperture writes */
 	avd_qfw_debug(avd, f, "doorbell");
-	dev_dbg(avd->dev, "queue program: tag %#x vp %u words %zu kick %#x start %#x end %#x\n",
-		f->tag, vp, f->prog_words, kick, words[0], words[f->prog_words - 1]);
+	dev_dbg(avd->dev, "queue program: tag %#x vp %u fifo %pad words %zu kick %#x start %#x end %#x\n",
+		f->tag, vp, &f->fifo_iova, f->prog_words, kick, words[0],
+		words[f->prog_words - 1]);
 	writel(q->aperture + AVDQ_RING_OFFSET + f->idx * AVDQ_DESC_BYTES,
 	       avd->mbox + AVD_REG_MBOX0_SEND);
 

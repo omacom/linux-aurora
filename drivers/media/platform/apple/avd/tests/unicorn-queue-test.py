@@ -19,6 +19,8 @@ from unicorn.arm_const import UC_ARM_REG_SP
 firmware = Path(sys.argv[1]).resolve()
 image = Path(sys.argv[2]).resolve()
 programs = Path(sys.argv[3]).resolve()
+if (programs / 'v3-t1').is_dir():
+    programs /= 'v3-t1'
 broken = '--broken' in sys.argv[4:]
 spec = importlib.util.spec_from_file_location('transport', firmware / 'tests/transport-test.py')
 module = importlib.util.module_from_spec(spec)
