@@ -18,6 +18,46 @@ use crate::module_parameters;
 /// updates); this bounds the kernel's staging allocation.
 pub(crate) const MAX_BINDS: u32 = 1 << 20;
 
+/// Render ordinal the TA/FS stamps start from. Only for testing the stamp wrap without hours of
+/// drawing; 0 keeps the stamps exactly as before.
+pub(crate) fn stamp_base() -> u64 {
+    (*module_parameters::g15_stamp_base.value() as u64) % super::encode::STAMP_PERIOD
+}
+
+/// Renders before the TA stamp wrap within which the TA/FS stamps are renumbered from their seeds,
+/// at the first moment with nothing in flight (0: never). At least one prefix of renders, so
+/// that the last prefix published outside the margin cannot cross the wrap; at most half the
+/// stamp range.
+pub(crate) fn stamp_reseed_margin() -> u64 {
+    match *module_parameters::g15_stamp_reseed_margin.value() as u64 {
+        0 => 0,
+        m => m.clamp(
+            hw::tuning::PREFIX_RENDERS as u64,
+            super::encode::RENDER_WRAP / 2,
+        ),
+    }
+}
+
+/// Compute ordinal the compute stamp starts from. Only for testing the stamp wrap without
+/// millions of computes; 0 keeps the stamp exactly as before.
+pub(crate) fn compute_stamp_base() -> u64 {
+    (*module_parameters::g15_compute_stamp_base.value() as u64) % super::encode::STAMP_PERIOD
+}
+
+/// Computes before the compute stamp wrap within which the compute stamp is renumbered from its
+/// seed, at the first moment with nothing in flight (0: never). At least one prefix of computes,
+/// so that the last prefix published outside the margin cannot cross the wrap; at most half the
+/// stamp range.
+pub(crate) fn compute_reseed_margin() -> u64 {
+    match *module_parameters::g15_compute_reseed_margin.value() as u64 {
+        0 => 0,
+        m => m.clamp(
+            hw::sizes::COMPUTE_SLOTS as u64,
+            super::encode::COMPUTE_WRAP / 2,
+        ),
+    }
+}
+
 /// Host deadline of a published prefix without progress, ms (at least 100).
 pub(crate) fn deadline_ms() -> u32 {
     (*module_parameters::g15_deadline_ms.value()).max(100)

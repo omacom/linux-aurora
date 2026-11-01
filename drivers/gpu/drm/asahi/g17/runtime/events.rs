@@ -248,26 +248,6 @@ impl recovery::Queues for Service<'_> {
         let result = self.firmware.release_compute_witnesses(self.deferred);
         self.settlement_error = self.settlement_error.or(result.err());
     }
-    fn announce_withheld(&mut self) {
-        let mut doorbells = [0u64; 4];
-        for mut queue in self
-            .firmware
-            .queues
-            .compute
-            .iter_mut()
-            .flatten()
-            .filter_map(|entry| entry.queue.as_deref_mut())
-        {
-            if let Some(doorbell) = queue.take_withheld_doorbell() {
-                doorbells[((doorbell >> 2) & 3) as usize] = doorbell;
-            }
-        }
-        // One doorbell per priority class announces every queue's work slots on that ring.
-        for doorbell in doorbells.into_iter().filter(|doorbell| *doorbell != 0) {
-            let result = self.firmware.port.notify_compute(((doorbell >> 2) & 3) as u8, doorbell);
-            self.settlement_error = self.settlement_error.or(result.err());
-        }
-    }
 }
 
 impl Firmware {

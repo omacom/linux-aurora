@@ -369,6 +369,53 @@ enum drm_asahi_feature {
 	 */
 	DRM_ASAHI_FEATURE_BOUNDED_AS_BUILD = (1UL) << 16,
 
+	/*
+	 * Bits 17 to 28 belong to the M5 (G17G/G17S) runtime, which reports
+	 * them; this kernel never does. They are listed so that the numbers are
+	 * not given to anything else, and userspace reads every kernel's
+	 * features the same way. Bits 25 and 27 are also reserved for that
+	 * runtime.
+	 */
+
+	/** @DRM_ASAHI_FEATURE_RENDER_RESOURCES: M5: per-program render storage. */
+	DRM_ASAHI_FEATURE_RENDER_RESOURCES = (1UL) << 17,
+
+	/** @DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2: M5: versioned render storage. */
+	DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2 = (1UL) << 18,
+
+	/** @DRM_ASAHI_FEATURE_SPARSE_TILES: M5: DRM_ASAHI_BIND_SPARSE_TILE. */
+	DRM_ASAHI_FEATURE_SPARSE_TILES = (1UL) << 19,
+
+	/** @DRM_ASAHI_FEATURE_COMPUTE_MATRIX: M5: compute matrix instructions. */
+	DRM_ASAHI_FEATURE_COMPUTE_MATRIX = (1UL) << 20,
+
+	/** @DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: M5: task and mesh storage. */
+	DRM_ASAHI_FEATURE_TASK_MESH_STORAGE = (1UL) << 21,
+
+	/** @DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES: M5: per-render shader writes. */
+	DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES = (1UL) << 22,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION: M5: compressed
+	 * multisample depth.
+	 */
+	DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION = (1UL) << 23,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS: M5: a compute prefix for a
+	 * render's tiling half.
+	 */
+	DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS = (1UL) << 24,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: M5: compressed
+	 * multisample stencil.
+	 */
+	DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION = (1UL) << 26,
+
+	/** @DRM_ASAHI_FEATURE_COMPUTE_RESOURCES: M5: per-dispatch storage. */
+	DRM_ASAHI_FEATURE_COMPUTE_RESOURCES = (1UL) << 28,
+
 	/**
 	 * @DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS: SUBMIT accepts one
 	 * DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ_CUMULATIVE output. All outputs
@@ -653,6 +700,12 @@ enum drm_asahi_bind_flags {
 	 * It is intended as a mechanism to accelerate sparse.
 	 */
 	DRM_ASAHI_BIND_SINGLE_PAGE = (1L << 3),
+
+	/**
+	 * @DRM_ASAHI_BIND_SPARSE_TILE: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_SPARSE_TILES). This kernel rejects it.
+	 */
+	DRM_ASAHI_BIND_SPARSE_TILE = (1L << 4),
 };
 
 /**
@@ -814,6 +867,24 @@ enum drm_asahi_cmd_type {
 	 * Followed by (possibly multiple) @drm_asahi_attachment payloads.
 	 */
 	DRM_ASAHI_SET_COMPUTE_ATTACHMENTS = 4,
+
+	/**
+	 * @DRM_ASAHI_SET_RENDER_RESOURCES: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_RENDER_RESOURCES). This kernel rejects it.
+	 */
+	DRM_ASAHI_SET_RENDER_RESOURCES = 5,
+
+	/**
+	 * @DRM_ASAHI_SET_COMPUTE_RESOURCES: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_COMPUTE_RESOURCES). This kernel rejects it.
+	 */
+	DRM_ASAHI_SET_COMPUTE_RESOURCES = 6,
+
+	/**
+	 * @DRM_ASAHI_SET_RENDER_RESOURCES_V2: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2). This kernel rejects it.
+	 */
+	DRM_ASAHI_SET_RENDER_RESOURCES_V2 = 7,
 };
 
 /**

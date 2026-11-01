@@ -120,6 +120,7 @@ static const struct dcp_v14_board dcp_v14_board_j613 = {
 	.panel_width = 2560,
 	.panel_height = 1664,
 	.promotion = false,
+	.panel_nits = true,
 	.ctm_set = A(421),
 	.ctm_get = A(420),
 };
@@ -163,6 +164,12 @@ static const struct dcp_v14_board dcp_v14_board_j516c = {
 	.log_bringup = true,
 	.base_edid = true,
 	.swap_timestamps = true,
+	/*
+	 * The J516S panel and this image's swap carry the level block the
+	 * T6030 record uses (present byte +0x354, binary64 nits +0x35c, 500 nits
+	 * at most), as the e272b67 path on this J516C presented it.
+	 */
+	.panel_nits = true,
 };
 
 /*
@@ -292,7 +299,7 @@ struct apple_dcp_v14 {
 	u64 swaps;
 	u64 swap_ns_max;
 
-	/* Immutable probe admission: only the J514S/J516S internal panel. */
+	/* Immutable probe admission: only the J514S/J516S/J516C internal panel. */
 	bool panel_nits;
 	/* Copy of the last accepted surface; active_fb pins its DMA under lock. */
 	u8 shown_surface[DCP_V14_SURFACE_SIZE];
@@ -1690,7 +1697,8 @@ static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
 				     dcp_v14_compat_fn machine_is, const void *ctx)
 {
 	return board && board->panel_nits &&
-		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s"));
+		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s") ||
+		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613"));
 }
 
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
@@ -2520,6 +2528,9 @@ static int dcp_v14_status_show(struct seq_file *m, void *unused)
 		   v14->stride, v14->clock_rate);
 	seq_printf(m, "backlight factor %#x updates %llu\n",
 		   v14->backlight_factor, v14->backlight_factor_updates);
+	seq_printf(m, "backlight nits_enabled %d sent %u presents %llu brightness_only %llu refused %llu\n",
+		   dcp_v14_board_nits(v14), v14->nits_sent, v14->nits_presents,
+		   v14->brightness_presents, v14->nits_refused);
 	seq_printf(m, "ctm valid %d disabled %d calls %llu setter %#x getter %#x\n",
 		   v14->ctm_valid, v14->ctm_disabled, v14->ctm_calls, v14->ctm_status,
 		   v14->ctm_get_status);
@@ -3264,6 +3275,17 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
 		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
 	if (!ret)
 		ret = dcp_v14_set_power(v14, true);
+	/*
+	 * The mode was set with the pipe off. A mode that needs DSC is then
+	 * reset again ("pipe not enabled"), and the power-on only configures
+	 * DSC: the firmware starts the timings in a mode set of its own, after
+	 * the hotplug notification it sends itself, and drops a swap that
+	 * reaches it before then without completing it, so A407 times out.
+	 * Setting the mode once more with the pipe on starts the timings
+	 * before the first swap.
+	 */
+	if (!ret)
+		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
 	if (!ret) {
 		v14->panel_width = mode.mode.hdisplay;
 		v14->panel_height = mode.mode.vdisplay;
@@ -3376,6 +3398,7 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
 #include "iomfb_v14_7_external_audio_test.c"
+#include "iomfb_v14_7_external_modeset_test.c"
 #include "iomfb_v14_7_backlight_test.c"
 #include "iomfb_v14_7_backlight_lifetime_test.c"
 #endif

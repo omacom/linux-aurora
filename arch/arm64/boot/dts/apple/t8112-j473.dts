@@ -175,6 +175,7 @@
 		local-mac-address = [00 10 18 00 00 10];
 		apple,antenna-sku = "XX";
 		brcm,board-type = "apple,miyake";
+		brcm,ccode-map-trivial;
 	};
 
 	bluetooth0: bluetooth@0,1 {

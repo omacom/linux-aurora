@@ -655,12 +655,12 @@ struct snd_pcm_ops dcp_playback_ops = {
  * service itself is open while the PCM is, or while its link is held.
  */
 /*
- * The sink behind the J514S HDMI port (PS190 converter and TV) mutes the
- * audio of a link that stops and starts again with an unchanged format,
- * until the DP link trains again: only a different channel layout brings
- * it back. So a stereo link, once started, is held between streams, as
- * macOS holds it: silence follows the stopped stream's DMA and the link
- * keeps running until the format changes or the display goes off
+ * The sinks behind the J514S HDMI port (PS190 converter and TV) and its
+ * Type-C ports mute the audio of a link that stops and starts again with an
+ * unchanged format, until the DP link trains again: only a different channel
+ * layout brings it back. So a stereo link, once started, is held between
+ * streams, as macOS holds it: silence follows the stopped stream's DMA and
+ * the link keeps running until the format changes or the display goes off
  * (dcpaud_release_link()).
  *
  * The link must not run dry either: a gap of 20 ms in its samples mutes the
@@ -668,26 +668,6 @@ struct snd_pcm_ops dcp_playback_ops = {
  * the channel issues whenever no stream's DMA does, in descriptor order:
  * a stream's DMA takes over from it and hands back to it without a gap.
  */
-/*
- * Read-only at runtime: a stream opened while it was lower keeps periods
- * longer than a held link's synchronize allows for.
- */
-static int hold_link = 1;
-module_param(hold_link, int, 0444);
-MODULE_PARM_DESC(hold_link,
-		 "Hold started audio links between streams (silence): 0 never, 1 on the HDMI port (default), 2 also on USB-C");
-
-/*
- * The mute was measured behind the HDMI port. USB-C sinks keep one link per
- * stream unless hold_link=2, until they have been qualified with this.
- */
-static bool dcpaud_holds(struct dcp_audio *dcpaud)
-{
-	int hold = READ_ONCE(hold_link);
-
-	return hold >= 2 || (hold == 1 && !dcp_audiosrv_typec(dcpaud->dcp_dev));
-}
-
 /*
  * A change of sample rate or sample size with an unchanged channel layout
  * replaces the link with a new one, which this sink mutes just as it does a
@@ -879,7 +859,7 @@ static int dcp_pcm_native_open(struct snd_pcm_substream *substream)
 	}
 
 	ret = dcp_pcm_open(substream);
-	if (!ret && live && !dcpaud->open_unplugged && dcpaud_holds(dcpaud)) {
+	if (!ret && live && !dcpaud->open_unplugged) {
 		ret = dcpaud_pin_rate_format(dcpaud, substream->runtime);
 		if (!ret)
 			ret = snd_pcm_hw_constraint_minmax(substream->runtime,
@@ -1043,8 +1023,8 @@ static int dcp_pcm_native_start(struct snd_pcm_substream *substream, int cmd)
 	/* The first link of the connection waits for the sink to settle. */
 	scoped_guard(mutex, &dcpaud->data_lock)
 		up_ms = ktime_ms_delta(ktime_get(), dcpaud->connected_at);
-	if (dcpaud_holds(dcpaud) && !READ_ONCE(dcpaud->link_started) &&
-	    up_ms >= 0 && up_ms < DCPAUD_SINK_SETTLE_MS) {
+	if (!READ_ONCE(dcpaud->link_started) && up_ms >= 0 &&
+	    up_ms < DCPAUD_SINK_SETTLE_MS) {
 		dev_dbg(dcpaud->dev, "sink up %lld ms, link waits\n", up_ms);
 		msleep(DCPAUD_SINK_SETTLE_MS - up_ms);
 	}
@@ -1117,8 +1097,8 @@ static int dcp_pcm_native_trigger(struct snd_pcm_substream *substream, int cmd)
 		 * reference, until sync_stop hands over to the held link's
 		 * silence: the link must not run dry meanwhile.
 		 */
-		if (dcpaud_holds(dcpaud) && READ_ONCE(dcpaud->stream_dma) &&
-		    substream->runtime->channels == 2 && substream->runtime->dma_area) {
+		if (READ_ONCE(dcpaud->stream_dma) && substream->runtime->channels == 2 &&
+		    substream->runtime->dma_area) {
 			memset(substream->runtime->dma_area, 0, substream->runtime->dma_bytes);
 			WRITE_ONCE(dcpaud->dma_cleared, true);
 			return 0;

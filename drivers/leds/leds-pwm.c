@@ -108,6 +108,19 @@ static int led_pwm_add(struct device *dev, struct led_pwm_priv *priv,
 		pwm_get_state(led_data->pwm, &led_data->pwmstate);
 		if (led_data->pwmstate.period)
 			break;
+		/*
+		 * Cycle registers at reset are zero, so pwm-apple reports period
+		 * 0. The pwms specifier still has a period. Use that for later
+		 * brightness updates, but do not apply duty 0: that is what forces
+		 * the LED off at probe.
+		 */
+		pwm_init_state(led_data->pwm, &led_data->pwmstate);
+		if (led_data->pwmstate.period) {
+			dev_info(dev,
+				 "no PWM period read back for %s; using %llu ns and leaving the output unchanged\n",
+				 led->name, led_data->pwmstate.period);
+			break;
+		}
 		led->default_state = LEDS_DEFSTATE_OFF;
 		dev_warn(dev,
 			"failed to read period for %s, default to off",

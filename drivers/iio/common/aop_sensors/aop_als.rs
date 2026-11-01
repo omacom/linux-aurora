@@ -8,7 +8,7 @@ use kernel::{
     bindings, c_str,
     device::Core,
     firmware::Firmware,
-    iio::common::aop_sensors::{AopSensorData, IIORegistration, MessageProcessor, MICRO},
+    iio::common::aop_sensors::{AopSensorData, IIORegistration, MessageProcessor, MICRO, MAX_CHANS},
     module_platform_driver, of, platform,
     prelude::*,
     soc::apple::aop::{EPICService, FakehidRegistration, AOP},
@@ -46,6 +46,35 @@ const LUX_OFFSET_VD6286: usize = 0x28;
  * parts do not share a layout.
  */
 const LUX_OFFSET_CT817: usize = 0x1c;
+
+/// Slots in a CT720 decode. Slot 0 is the lux channel the driver already published.
+const CH_LUX: usize = 0;
+const CH_RED: usize = 1;
+const CH_GREEN: usize = 2;
+const CH_BLUE: usize = 3;
+const CH_CLEAR: usize = 4;
+const CH_CCT: usize = 5;
+const CT720_CHANS: usize = 6;
+
+// FireFish2 / CT720 report, 55 bytes, lux float at +0x1d. The four counts are
+// red, green, blue, clear. Clear is the wideband count (largest in room light;
+// the calibration gains are 8, 8, 8, 4). Under the ~5460 K light captured on
+// this J313 the first three ranked green, red, blue. Byte +0x2a is non-zero
+// when the color temperature at +0x2b is valid. The integration time is stored
+// twice at +0x2f (the AOP logs 197380 µs when it arms this sensor); disagreeing
+// copies mean this is not that layout, and color is left unpublished.
+const CT720_LEN: usize = 55;
+const CT720_COUNT_OFF: [usize; 4] = [0x0d, 0x11, 0x15, 0x19];
+const CT720_CCT_FLAG: usize = 0x2a;
+const CT720_CCT_OFF: usize = 0x2b;
+const CT720_INTEG_OFF: usize = 0x2f;
+const CT720_INTEG_MAX: u32 = 10_000_000;
+/// Clear counts at or below 11 on a covered J313 still had the firmware CCT
+/// byte set, and the published temperatures were 788 K, 1288 K, 2904 K and
+/// 6781 K. Publish CCT only when clear is at least this. Not hardware-tested.
+const CT720_CCT_MIN_CLEAR: u32 = 12;
+
+const _: () = assert!(CT720_CHANS <= MAX_CHANS);
 
 fn get_lux_offset(aop: &dyn AOP, dev: &platform::Device, svc: &EPICService) -> Result<usize> {
     let name = get_aop_property(aop, svc, 0xf, 16)?.1;
@@ -153,12 +182,157 @@ fn f32_to_micro(f: u32) -> Option<u64> {
     })
 }
 
+fn u32_at(message: &[u8], off: usize) -> Option<u32> {
+    let b = message.get(off..off + 4)?;
+    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+/// Color slots of a CT720 report. Lux is filled by [`MsgProc::process`].
+fn ct720_color(message: &[u8], out: &mut [u64]) -> u32 {
+    if message.len() < CT720_LEN {
+        return 0;
+    }
+    let Some(integ) = u32_at(message, CT720_INTEG_OFF) else {
+        return 0;
+    };
+    let Some(again) = u32_at(message, CT720_INTEG_OFF + 4) else {
+        return 0;
+    };
+    if integ == 0 || integ != again || integ > CT720_INTEG_MAX {
+        return 0;
+    }
+    let mut mask = 0u32;
+    let mut clear = 0u32;
+    let mut slot = CH_RED;
+    for off in CT720_COUNT_OFF {
+        if let Some(count) = u32_at(message, off) {
+            if slot == CH_CLEAR {
+                clear = count;
+            }
+            if let Some(dest) = out.get_mut(slot) {
+                *dest = u64::from(count).saturating_mul(MICRO);
+                mask |= 1u32 << slot;
+            }
+        }
+        slot += 1;
+    }
+    if message.get(CT720_CCT_FLAG).copied() == Some(0) || clear < CT720_CCT_MIN_CLEAR {
+        return mask;
+    }
+    if let Some(bits) = u32_at(message, CT720_CCT_OFF) {
+        if bits & 0x8000_0000 == 0 {
+            if let Some(cct) = f32_to_micro(bits) {
+                if cct > 0 {
+                    if let Some(dest) = out.get_mut(CH_CCT) {
+                        *dest = cct;
+                        mask |= 1u32 << CH_CCT;
+                    }
+                }
+            }
+        }
+    }
+    mask
+}
+
+fn chan_spec(
+    ty: u32,
+    channel2: i32,
+    modified: u32,
+    info_mask: usize,
+    index: usize,
+) -> bindings::iio_chan_spec {
+    let mut spec = bindings::iio_chan_spec {
+        type_: ty,
+        channel2,
+        address: index,
+        // Polled sysfs channels. A negative scan index keeps them out of a buffer.
+        scan_index: -1,
+        __bindgen_anon_1: bindings::iio_chan_spec__bindgen_ty_1 {
+            scan_type: bindings::iio_scan_type {
+                __bindgen_anon_1: bindings::iio_scan_type__bindgen_ty_1 {
+                    format: b'u' as _,
+                },
+                realbits: 32,
+                storagebits: 32,
+                ..Default::default()
+            },
+        },
+        info_mask_separate: info_mask,
+        ..Default::default()
+    };
+    spec.set_modified(modified);
+    spec
+}
+
+fn ct720_channels() -> [bindings::iio_chan_spec; CT720_CHANS] {
+    let raw: usize = 1 << bindings::BINDINGS_IIO_CHAN_INFO_RAW;
+    let processed: usize = 1 << bindings::BINDINGS_IIO_CHAN_INFO_PROCESSED;
+    [
+        chan_spec(
+            bindings::iio_chan_type_IIO_LIGHT,
+            0,
+            0,
+            processed,
+            CH_LUX,
+        ),
+        chan_spec(
+            bindings::iio_chan_type_IIO_INTENSITY,
+            bindings::iio_modifier_IIO_MOD_LIGHT_RED as i32,
+            1,
+            raw,
+            CH_RED,
+        ),
+        chan_spec(
+            bindings::iio_chan_type_IIO_INTENSITY,
+            bindings::iio_modifier_IIO_MOD_LIGHT_GREEN as i32,
+            1,
+            raw,
+            CH_GREEN,
+        ),
+        chan_spec(
+            bindings::iio_chan_type_IIO_INTENSITY,
+            bindings::iio_modifier_IIO_MOD_LIGHT_BLUE as i32,
+            1,
+            raw,
+            CH_BLUE,
+        ),
+        chan_spec(
+            bindings::iio_chan_type_IIO_INTENSITY,
+            bindings::iio_modifier_IIO_MOD_LIGHT_CLEAR as i32,
+            1,
+            raw,
+            CH_CLEAR,
+        ),
+        chan_spec(
+            bindings::iio_chan_type_IIO_COLORTEMP,
+            0,
+            0,
+            processed,
+            CH_CCT,
+        ),
+    ]
+}
+
 struct MsgProc(usize);
 
 impl MessageProcessor for MsgProc {
     fn process(&self, message: &[u8]) -> Option<u64> {
         let raw = message.get(self.0..self.0 + 4)?;
         f32_to_micro(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+    }
+
+    fn decode(&self, message: &[u8], out: &mut [u64]) -> u32 {
+        let mut mask = 0u32;
+        if let Some(lux) = self.process(message) {
+            if let Some(dest) = out.get_mut(CH_LUX) {
+                *dest = lux;
+                mask |= 1u32 << CH_LUX;
+            }
+        }
+        if self.0 == LUX_OFFSET_CT720 {
+            mask |= ct720_color(message, out);
+        }
+        mask
     }
 }
 
@@ -203,8 +377,23 @@ impl platform::Driver for IIOAopAlsDriver {
         let listener = FakehidRegistration::new(adata.clone(), service, data.clone())?;
         enable_als(adata.as_ref(), pdev, &service, offset)?;
         let info_mask = 1 << bindings::BINDINGS_IIO_CHAN_INFO_PROCESSED;
-        let iio =
-            IIORegistration::<MsgProc>::new(data, c"aop-sensors-als", ty, info_mask, &THIS_MODULE)?;
+        let iio = if offset == LUX_OFFSET_CT720 {
+            let channels = ct720_channels();
+            IIORegistration::<MsgProc>::with_channels(
+                data,
+                c"aop-sensors-als",
+                &channels,
+                &THIS_MODULE,
+            )?
+        } else {
+            IIORegistration::<MsgProc>::new(
+                data,
+                c"aop-sensors-als",
+                ty,
+                info_mask,
+                &THIS_MODULE,
+            )?
+        };
         Ok(IIOAopAlsDriver {
             listener,
             _iio: iio,

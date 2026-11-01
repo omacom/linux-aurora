@@ -158,10 +158,10 @@ impl Backend {
         // case takes no domain lock and no return between check and wait is lost.
         let work = packet.completion.work_state().ok()?;
         loop {
-            match work.acquire() {
+            match work.acquire(crate::g17::job::Engine::Render) {
                 Err(error) if error == EBUSY => {
                     let states = work.returns().observe();
-                    match work.acquire() {
+                    match work.acquire(crate::g17::job::Engine::Render) {
                         Err(error) if error == EBUSY => match work.returns().wait(states) {
                             Ok(Some(fence)) => return Some(fence),
                             Ok(None) => continue,
@@ -389,7 +389,7 @@ impl Backend {
                 } else {
                     self.enter_preparation(false)?
                 };
-                let result = packet.completion.work_state().and_then(|state| state.acquire());
+                let result = packet.completion.work_state().and_then(|state| state.acquire(crate::g17::job::Engine::Render));
                 if preparation.is_current() {
                     result
                 } else {

@@ -12,7 +12,6 @@
 struct dcpaud_link_test {
 	bool link_on;
 	bool link_live;
-	bool typec;
 	/* The error removing the idle transfer returns */
 	int idle_remove_err;
 	u64 asked;
@@ -38,11 +37,6 @@ static void dcpaud_link_record(char step)
 static bool dcpaud_link_test_live(struct device *dev)
 {
 	return dcpaud_link_current->link_live;
-}
-
-static bool dcpaud_link_test_typec(struct device *dev)
-{
-	return dcpaud_link_current->typec;
 }
 
 static int dcpaud_link_test_terminate(struct dma_chan *chan)
@@ -147,7 +141,6 @@ static struct dcp_audio *dcpaud_link_setup(struct kunit *test, struct platform_d
 	kunit_activate_static_stub(test, dcp_audiosrv_link_on, dcpaud_link_test_on);
 	kunit_activate_static_stub(test, dcp_audiosrv_link_live, dcpaud_link_test_live);
 	kunit_activate_static_stub(test, dcp_audiosrv_link, dcpaud_link_test_call);
-	kunit_activate_static_stub(test, dcp_audiosrv_typec, dcpaud_link_test_typec);
 	return dcpaud;
 }
 
@@ -451,42 +444,6 @@ static void dcpaud_close_keeps_held_silence(struct kunit *test)
 	pm_runtime_put_noidle(audio->dev);
 }
 
-static void dcpaud_link_test_hold_default(void *data)
-{
-	WRITE_ONCE(hold_link, 1);
-}
-
-static void dcpaud_typec_stop_ends_stream(struct kunit *test)
-{
-	struct platform_device *pdev;
-	struct dcp_audio *audio = dcpaud_link_setup(test, &pdev);
-	struct snd_pcm_substream *sub = dcpaud_link_test_open(test, audio);
-
-	KUNIT_ASSERT_EQ(test,
-			kunit_add_action_or_reset(test, dcpaud_link_test_hold_default, NULL), 0);
-	sub->runtime->channels = 2;
-	sub->runtime->dma_area = kunit_kzalloc(test, 64, GFP_KERNEL);
-	KUNIT_ASSERT_NOT_NULL(test, sub->runtime->dma_area);
-	sub->runtime->dma_bytes = 64;
-	dcpaud_link_current->typec = true;
-
-	/* USB-C by default: STOP ends the stream's DMA, no link is held */
-	audio->stream_dma = true;
-	pm_runtime_get_noresume(audio->dev);
-	KUNIT_ASSERT_EQ(test, dcp_pcm_native_trigger(sub, SNDRV_PCM_TRIGGER_STOP), 0);
-	KUNIT_EXPECT_STREQ(test, dcpaud_link_current->sequence, "X");
-	KUNIT_EXPECT_FALSE(test, audio->dma_cleared);
-	KUNIT_EXPECT_EQ(test, atomic_read(&audio->dev->power.usage_count), 0);
-
-	/* hold_link=2: the DMA plays the cleared buffer on for the held link */
-	WRITE_ONCE(hold_link, 2);
-	pm_runtime_get_noresume(audio->dev);
-	KUNIT_ASSERT_EQ(test, dcp_pcm_native_trigger(sub, SNDRV_PCM_TRIGGER_STOP), 0);
-	KUNIT_EXPECT_STREQ(test, dcpaud_link_current->sequence, "X");
-	KUNIT_EXPECT_TRUE(test, audio->dma_cleared);
-	pm_runtime_put_noidle(audio->dev);
-}
-
 static struct kunit_case dcpaud_link_cases[] = {
 	KUNIT_CASE(dcpaud_link_release_instance),
 	KUNIT_CASE(dcpaud_disconnect_sync_completes_live_owner),
@@ -499,7 +456,6 @@ static struct kunit_case dcpaud_link_cases[] = {
 	KUNIT_CASE(dcpaud_start_after_held_link_went),
 	KUNIT_CASE(dcpaud_failed_start_keeps_held_link),
 	KUNIT_CASE(dcpaud_close_keeps_held_silence),
-	KUNIT_CASE(dcpaud_typec_stop_ends_stream),
 	{}
 };
 

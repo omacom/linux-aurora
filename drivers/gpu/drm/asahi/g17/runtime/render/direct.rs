@@ -281,7 +281,7 @@ impl Backend {
         if !port.note_submission() {
             return None;
         }
-        match packet.completion.work_state().ok()?.acquire() {
+        match packet.completion.work_state().ok()?.acquire(crate::g17::job::Engine::Render) {
             Ok(_) => {}
             Err(error) if error == EBUSY => return None,
             Err(error) => return Some(Err(error)),

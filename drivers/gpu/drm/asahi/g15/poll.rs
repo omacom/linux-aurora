@@ -724,6 +724,16 @@ impl Firmware {
             s.hz_ahead
         )?;
         self.pools.write_stats(f)?;
+        // What is left before the stamps wrap, and the renumbering margins (0: off).
+        let (compute_left, render_left) = self.stamps_left();
+        writeln!(
+            f,
+            "stamps: compute_left {} compute_margin {} render_left {} render_margin {}",
+            compute_left,
+            params::compute_reseed_margin(),
+            render_left,
+            params::stamp_reseed_margin()
+        )?;
         writeln!(
             f,
             "stage: ta_us {} fs_us {} cdm_us {} span_us {}",

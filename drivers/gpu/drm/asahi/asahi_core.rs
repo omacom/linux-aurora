@@ -35,6 +35,7 @@ mod queue;
 mod regs;
 mod slotalloc;
 mod stats;
+mod stats_raw;
 mod sysfs_exports;
 mod timestamp;
 mod util;
@@ -160,6 +161,22 @@ module! {
         g15_pb_reclaim_blocks: u32 {
             default: 1024,
             description: "G15: PB blocks posted above which an idle engine reclaims the PB",
+        },
+        g15_stamp_base: u32 {
+            default: 0,
+            description: "G15 (testing): render ordinal the TA/FS stamps start from; 0 = unchanged",
+        },
+        g15_stamp_reseed_margin: u32 {
+            default: 0,
+            description: "G15: renders before the TA stamp wrap within which TA/FS are renumbered while idle; 0 = off",
+        },
+        g15_compute_stamp_base: u32 {
+            default: 0,
+            description: "G15 (testing): compute ordinal the compute stamp starts from; 0 = unchanged",
+        },
+        g15_compute_reseed_margin: u32 {
+            default: 0,
+            description: "G15: computes before the compute stamp wrap within which it is renumbered while idle; 0 = off",
         },
         g15_early_tiling: u32 {
             default: 0,

@@ -42,10 +42,28 @@ int apple_taptic_send(struct hid_device *haptic_hdev, u16 effect_type, u8 streng
 }
 EXPORT_SYMBOL_GPL(apple_taptic_send);
 
+static bool apple_taptic_has_report(struct hid_device *hdev, unsigned int type,
+				    unsigned int id)
+{
+	return hdev->report_enum[type].report_id_hash[id] != NULL;
+}
+
 int apple_taptic_switch_modes(struct hid_device *haptic_hdev, bool enable_host_controlled)
 {
 	u8 msg[] = { 0x21, enable_host_controlled };
 	int ret;
+
+	/*
+	 * Report 0x21 is the MTP host actuator mode switch. The J313
+	 * SPI actuator descriptor has input 0x3f and output 0x53 only.
+	 * Sending 0x21 makes the controller return status 9c 17 e5 f8
+	 * instead of the write-ok status. The part powers up
+	 * device-controlled, which is what a false argument asks for.
+	 * A true argument has no 0x21 report to send either.
+	 */
+	if (!apple_taptic_has_report(haptic_hdev, HID_FEATURE_REPORT, 0x21) &&
+	    !apple_taptic_has_report(haptic_hdev, HID_OUTPUT_REPORT, 0x21))
+		return 0;
 
 	ret = hid_hw_raw_request(haptic_hdev, msg[0], msg, sizeof(msg),
 				 HID_FEATURE_REPORT, HID_REQ_SET_REPORT);

@@ -107,9 +107,6 @@ pub(super) trait Queues {
     fn settle_cancelled_renders(&mut self, qids: u128);
     fn rescan_compute(&mut self) -> Result;
     fn release_retired_compute(&mut self);
-    /// Ring every compute doorbell still withheld: a restart is a departure from ordinary
-    /// retirement, after which the firmware must see every published command.
-    fn announce_withheld(&mut self);
 }
 
 /// Live shared-memory operations. The handshake word uses aligned 32-bit accesses; transitions
@@ -299,7 +296,6 @@ pub(super) fn service<H: Host>(
     }
     let scan_error = host.rescan_compute().err();
     host.release_retired_compute();
-    host.announce_withheld();
     Ok(ServiceResult { scan_error, target_error })
 }
 

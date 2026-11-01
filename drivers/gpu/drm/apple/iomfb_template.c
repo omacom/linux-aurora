@@ -488,7 +488,7 @@ static void iomfb_cb_pr_publish(struct apple_dcp *dcp, struct iomfb_property *pr
 		if (dcp_has_panel(dcp)) {
 			u32 nits = prop->value / dcp->brightness.scale;
 
-			/* A report just above the ceiling is still the brightest level. */
+			/* Firmware can report the old 420-nit scale above the cap. */
 			if (dcp->brightness.maximum && nits > dcp->brightness.maximum)
 				nits = dcp->brightness.maximum;
 			dcp->brightness.nits = nits;
@@ -2095,19 +2095,16 @@ dcpep_cb_get_tiling_state(struct apple_dcp *dcp,
 
 static u8 dcpep_cb_create_backlight_service(struct apple_dcp *dcp)
 {
-#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
 	/*
-	 * H17P asks during start_ios_gated, before any mode is known, but
-	 * dcp_has_panel() only becomes true once the panel dimensions have been
-	 * parsed.  An internal panel always has a backlight, so answer for the
-	 * connector; answering false makes the firmware report that it could
-	 * not find the backlight service.
+	 * Firmware asks during start_ios_gated. On J313 the panel node is
+	 * read first, so width_mm is already set and dcp_has_panel() is
+	 * already true. Answering eDP as well does not change this return
+	 * value. DCP 13.5 still logs that it could not find the backlight
+	 * service, and writes still apply only after a modeset.
+	 * External displays are not eDP.
 	 */
 	return dcp_has_panel(dcp) ||
 	       dcp->connector_type == DRM_MODE_CONNECTOR_eDP;
-#else
-	return dcp_has_panel(dcp);
-#endif
 }
 
 TRAMPOLINE_VOID(trampoline_nop, dcpep_cb_nop);

@@ -69,6 +69,18 @@ pub(crate) const fn stamp_seed(seed: u32, n: u64) -> u32 {
     seed.wrapping_add((n as u32).wrapping_mul(0x100))
 }
 
+/// Ordinals after which [`stamp_seed`] repeats: 2^32 / 0x100.
+pub(crate) const STAMP_PERIOD: u64 = 1 << 24;
+
+/// Effective render ordinal at which the TA stamp wraps (0xffffff00 -> 0): 0x860000 with the TA
+/// seed. A wrap that skipped zero stopped the firmware ("DAG: Non Sequential Stamp Updates");
+/// the renumbering keeps the stamps away from it. The FS stamp wraps later (0xc30000).
+pub(crate) const RENDER_WRAP: u64 = 0xffffff - (hw::engine::TA_SEED / 0x100) as u64 + 1;
+
+/// Compute ordinal at which the compute stamp wraps (0xffffff00 -> 0): 0x3f0000 (4128768
+/// computes) with the compute seed, where the firmware may stop as at the TA stamp wrap.
+pub(crate) const COMPUTE_WRAP: u64 = STAMP_PERIOD - (hw::engine::COMPUTE_SEED / 0x100) as u64;
+
 /// Compute stamp of ordinal `n`.
 pub(crate) const fn stamp(n: u64) -> u32 {
     stamp_seed(hw::engine::COMPUTE_SEED, n)
@@ -101,8 +113,9 @@ pub(crate) struct ComputeRefs {
     pub(crate) scratch: [u64; 5],
 }
 
-/// Encodes compute command `c` as ordinal `n`. The engine copies the result into the slot
-/// after zeroing the slot's images.
+/// Encodes compute command `c` as ordinal `n` with stamp `t` (the engine's renumbering moves
+/// the stamp off [`stamp`]`(n)`). The engine copies the result into the slot after zeroing the
+/// slot's images.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_compute(
     r: &ComputeRefs,
@@ -112,12 +125,12 @@ pub(crate) fn encode_compute(
     ts_va: &[u64; 2],
     ctx: u32,
     n: u64,
+    t: u32,
     fault_mask: u32,
     w: &mut [u8; compute::WORK_SIZE],
     q: &mut [u8; compute::SEQ_SIZE],
 ) {
     let (wv, qv, h, pre) = (r.work, r.qinfo, r.hwdata, r.preempt_gva);
-    let t = stamp(n);
     let att_count = att.len().min(hw::sizes::MAX_ATTACHMENTS);
     // The saved-state pointers into the preemption buffer and the two 0x1c words; a SoC
     // encoded "fresh" carries zero in all six, as a first command does.

@@ -112,7 +112,7 @@ static int powerlog_report(struct apple_epic_service *service, enum epic_subtype
 	}
 
 	nits = mnits.millinits / 1000;
-	/* A report just above the ceiling is still the brightest level. */
+	/* Firmware can report the old 420-nit scale above the cap. */
 	if (dcp->brightness.maximum && nits > dcp->brightness.maximum)
 		nits = dcp->brightness.maximum;
 	dcp->brightness.nits = nits;

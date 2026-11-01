@@ -93,10 +93,11 @@ static u64 compare(u64*p,u64 old,u64 next){u64 before=*p;if(before==old)*p=next;
 #define devm_memunmap(d,p) ((void)(p))
 #define devm_kfree(d,p) ((void)(p))
 #define to_dart_domain(d) ((struct apple_dart_domain*)(void*)(d))
-static int pm_gets,pm_puts,errors_logged,pgtable_frees;
+static int pm_gets,pm_puts,errors_logged,pgtable_frees,warnings_logged;
 static int pm_runtime_resume_and_get(struct device*d){pm_gets++;return 0;}
 static void pm_runtime_put(struct device*d){pm_puts++;}
 #define dev_err_ratelimited(d,...) (errors_logged++,fprintf(stderr,__VA_ARGS__))
+#define dev_warn(d,...) (warnings_logged++,fprintf(stderr,__VA_ARGS__))
 static void free_io_pgtable_ops(void*ops){assert(ops);pgtable_frees++;}
 /* PRODUCTION */
 #define IOMMU_RESV_DIRECT 1
@@ -234,6 +235,15 @@ int main(int argc,char**argv){
   }else if(!strcmp(c,"retire-rollback-timeout")){
    struct apple_dart_stream_map stream={.dart=&d,.sidmap={1}};
    assert(apple_dart_hw_unmap_locked_ttbr(&stream,0)==-ETIMEDOUT);
+  }else if(!strcmp(c,"retire-repeat-timeout")){
+   /* A second failed retire on the same stream keeps the first error and
+    * does not warn again. */
+   struct apple_dart_stream_map stream={.dart=&d,.sidmap={1}};
+   assert(apple_dart_hw_unmap_locked_ttbr(&stream,0)==-ETIMEDOUT&&warnings_logged==1);
+   d.locked_ttbr[0][0]=root;d.locked_owned[0][0]=shadow;root[1]=shadow[1]=0x801;commands=0;command_error=-EIO;
+   assert(apple_dart_hw_unmap_locked_ttbr(&stream,0)==-EIO);
+   assert(d.locked_retire_err[0]==-ETIMEDOUT&&warnings_logged==1);
+   command_error=-ETIMEDOUT;
   }else assert(!strcmp(c,"retire-free")||!strcmp(c,"retire-free-timeout"));
   if(strncmp(c,"retire-free",11)){
    /* Retired first: the free sees no root left and issues no command. */
@@ -244,7 +254,7 @@ int main(int argc,char**argv){
   assert(!d.locked_ttbr[0][0]&&root[0]==0x1401&&!root[1]&&!shadow[1]);
   assert(commands==1&&command_start[0]==(1ULL<<40)+(1ULL<<25)&&command_end[0]==(1ULL<<40)+(1ULL<<36)-1);
   assert(d.locked_retire_err[0]==(timeout?-ETIMEDOUT:0));
-  assert(pgtable_frees==!timeout&&errors_logged==timeout);
+  assert(pgtable_frees==!timeout&&errors_logged==timeout&&warnings_logged==timeout);
  }
  else if(!strcmp(c,"mirror")){assert(!apple_dart_publish_root(&d,live,owned,ours,&fw,2));assert(live[0]==0x1401&&owned[0]==0);}
  else if(!strcmp(c,"changed-leaf")){assert(!apple_dart_publish_root(&d,live,owned,ours,&fw,2));firmware_leaf[0]=leaf(0xc000);assert(apple_dart_publish_root(&d,live,owned,ours,&fw,2)==-EBUSY);}

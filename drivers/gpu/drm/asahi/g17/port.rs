@@ -98,11 +98,6 @@ pub(super) struct Port {
     generation: AtomicU64,
     /// Device publication order shared by compute and render commands.
     publications: AtomicU64,
-    /// Compute work slots written per priority class.
-    compute_written: [AtomicU64; PRIORITIES],
-    /// `compute_written` as read before the latest compute doorbell of each class: every slot
-    /// counted there was in its ring when the firmware handled that doorbell.
-    compute_announced: [AtomicU64; PRIORITIES],
     /// Full firmware effort is applied; cleared before an idle clear rechecks `submissions`.
     effort_full: AtomicBool,
     submissions: AtomicU64,
@@ -152,8 +147,6 @@ impl Port {
                 render <- new_mutex!((), "g17::Port::render"),
                 generation: AtomicU64::new(0),
                 publications: AtomicU64::new(0),
-                compute_written: [const { AtomicU64::new(0) }; PRIORITIES],
-                compute_announced: [const { AtomicU64::new(0) }; PRIORITIES],
                 effort_full: AtomicBool::new(false),
                 submissions: AtomicU64::new(0),
             }),
@@ -230,33 +223,8 @@ impl Port {
         unsafe { (*ring.producer).store(next, Ordering::Relaxed) };
         fence(Ordering::SeqCst);
         reserved[claim.priority] = reserved[claim.priority].saturating_sub(1);
-        self.compute_written[claim.priority].fetch_add(1, Ordering::AcqRel);
         claim.armed = false;
         Ok(next)
-    }
-
-    /// Compute work slots written at `priority` so far.
-    pub(super) fn compute_written(&self, priority: u8) -> u64 {
-        self.compute_written
-            .get(usize::from(priority))
-            .map_or(u64::MAX, |written| written.load(Ordering::Acquire))
-    }
-
-    /// Compute work slots at `priority` that a doorbell has announced.
-    pub(super) fn compute_announced(&self, priority: u8) -> u64 {
-        self.compute_announced
-            .get(usize::from(priority))
-            .map_or(0, |announced| announced.load(Ordering::Acquire))
-    }
-
-    /// Rings the compute doorbell `message` of `priority`, after noting which slots it
-    /// announces.
-    pub(super) fn notify_compute(&self, priority: u8, message: u64) -> Result {
-        let index = usize::from(priority);
-        let written = self.compute_written.get(index).ok_or(EINVAL)?.load(Ordering::Acquire);
-        self.notify(message)?;
-        self.compute_announced[index].fetch_max(written, Ordering::AcqRel);
-        Ok(())
     }
 
     /// Taken around every render publication; see `render`.

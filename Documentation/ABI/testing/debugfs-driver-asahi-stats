@@ -1,0 +1,47 @@
+What:		/sys/kernel/debug/dri/<N>/asahi_stats
+Date:		October 2026
+Contact:	Omarchy M GPU driver maintainers
+Description:
+		Read-only, root-only dump of the raw AGX firmware statistics
+		that the drm/asahi driver receives on its statistics channel.
+		The driver stores the latest message of each kind and prints
+		it unchanged. It does not compute utilization or any other
+		derived value.
+
+		The file is created in the debugfs directory of the DRM
+		device when the device is registered. It also appears under
+		the other names of that directory (dri/128 and the platform
+		device name, for example dri/406400000.gpu).
+
+		The format is ASCII text, one line per record:
+
+		- line 1: asahi_stats_v1, the format tag. A reader must check it.
+		- line 2: device=<platform device name>
+		- line 3: now_ns=<monotonic time of the read, nanoseconds>
+		- line 4: messages count=<number of statistics messages received>
+		- then one line per message kind, in this order: power,
+		  power_on, power_off, utilization, avg_power, temperature,
+		  power_state, fw_busy, pstate, temp_sensor.
+
+		A kind line is "<kind> count=<n>" followed, when n is not 0,
+		by " captured_ns=<ns of the last message>" and the fields of
+		that kind as key=value pairs:
+
+		- power: power
+		- power_on: off_time
+		- power_off: on_time
+		- utilization: timestamp, util1, util2, util3, util4
+		- avg_power: active_cs, unk2, unk3, unk4, avg_power
+		- temperature: raw_value, scale, tmin, tmax
+		- power_state: timestamp, last_busy_ts, active, poweroff,
+		  unk1, pstate, unk2, unk3
+		- fw_busy: timestamp, busy
+		- pstate: ps_min, unk1, ps_max, unk2
+		- temp_sensor: sensor_id, raw_value, scale, tmin, tmax
+
+		All counts are cumulative since the driver bound the device. A rate needs two reads.
+		The values are the raw firmware values. Their units and the
+		meaning of the util*, unk* fields are not established. A kind
+		that was never received prints count=0 and no payload. Keys
+		may be added in later versions of the format tag; readers
+		must ignore keys they do not know.

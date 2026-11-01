@@ -754,7 +754,16 @@ impl Backend {
         let owner_pid =
             u32::try_from(kernel::current!().group_leader().pid()).map_err(|_| EOVERFLOW)?;
         let context = Arc::new(
-            Context::new(&alloc, &pool, &qos, execution, owner_pid, policy, shared.renders.clone())?,
+            Context::new(
+                &alloc,
+                &pool,
+                &qos,
+                execution,
+                owner_pid,
+                policy,
+                shared.renders.clone(),
+                shared.progress.clone(),
+            )?,
             GFP_KERNEL,
         )?;
         let state = shared.state.lock();
@@ -1393,14 +1402,8 @@ impl compute::Host for ComputeHost<'_> {
     fn publish_outer(&mut self, _priority: u8, slot: &super::fw::channels::WorkSlot) -> Result {
         self.port.publish_compute(self.outer.take().ok_or(EIO)?, slot).map(|_| ())
     }
-    fn notify_compute(&mut self, priority: u8, message: u64) -> Result {
-        self.port.notify_compute(priority, message)
-    }
-    fn compute_written(&self, priority: u8) -> u64 {
-        self.port.compute_written(priority)
-    }
-    fn compute_announced(&self, priority: u8) -> u64 {
-        self.port.compute_announced(priority)
+    fn notify(&mut self, message: u64) -> Result {
+        self.port.notify(message)
     }
     fn note_submission(&mut self) -> Result {
         self.effort.submit();
@@ -1443,14 +1446,8 @@ impl compute::Host for DirectHost<'_> {
     fn publish_outer(&mut self, _priority: u8, slot: &super::fw::channels::WorkSlot) -> Result {
         self.port.publish_compute(self.outer.take().ok_or(EIO)?, slot).map(|_| ())
     }
-    fn notify_compute(&mut self, priority: u8, message: u64) -> Result {
-        self.port.notify_compute(priority, message)
-    }
-    fn compute_written(&self, priority: u8) -> u64 {
-        self.port.compute_written(priority)
-    }
-    fn compute_announced(&self, priority: u8) -> u64 {
-        self.port.compute_announced(priority)
+    fn notify(&mut self, message: u64) -> Result {
+        self.port.notify(message)
     }
     fn note_submission(&mut self) -> Result {
         Ok(())
@@ -1675,7 +1672,6 @@ impl super::Firmware {
         let port = &self.port;
         let retired = deferred.pending();
         let mut freed = false;
-        let mut doorbells = [0u64; 4];
         for mut queue in registry
             .compute
             .iter_mut()
@@ -1692,15 +1688,6 @@ impl super::Firmware {
                 &mut |event| deferred.push(event),
             )?;
             freed |= busy && queue.channel_free();
-            // Withheld doorbells are rung once their command is next but one; one per
-            // priority class announces every queue's work slots on that ring.
-            if let Some(doorbell) = queue.due_doorbell(|class| port.compute_announced(class)) {
-                let class = ((doorbell >> 2) & 3) as usize;
-                doorbells[class] = doorbell;
-            }
-        }
-        for doorbell in doorbells.into_iter().filter(|doorbell| *doorbell != 0) {
-            self.port.notify_compute(((doorbell >> 2) & 3) as u8, doorbell)?;
         }
         // All compute observations in this batch are latched before a VM
         // failure can settle its render peers. Exact successes win first.
@@ -1804,7 +1791,7 @@ impl Backend {
         if !port.note_submission() {
             return None;
         }
-        match packet.completion.work_state().ok()?.acquire() {
+        match packet.completion.work_state().ok()?.acquire(crate::g17::job::Engine::Compute) {
             Ok(_) => {}
             Err(error) if error == EBUSY => return None,
             Err(error) => return Some(Err(error)),
@@ -1863,7 +1850,7 @@ impl Backend {
     }
 
     fn compute_readiness(&self, packet: &Arc<super::job::Packet>, required: usize) -> Readiness {
-        match packet.completion.work_state().and_then(|work| work.acquire()) {
+        match packet.completion.work_state().and_then(|work| work.acquire(crate::g17::job::Engine::Compute)) {
             Err(error) if error == EBUSY => return Readiness::Progress,
             Err(_) => return Readiness::Ready,
             Ok(_) => {}
@@ -2007,7 +1994,7 @@ impl Backend {
             return Err(render::FALLBACK);
         }
         let lease = self.enter_preparation(false)?;
-        match packet.completion.work_state()?.acquire() {
+        match packet.completion.work_state()?.acquire(crate::g17::job::Engine::Compute) {
             Err(error) if error == EBUSY => return Err(render::FALLBACK),
             result => {
                 result?;
@@ -2117,7 +2104,7 @@ impl Backend {
             }
             let lease = self.shared.preparations.enter_until(&admission)?;
             // Work states free as this context's earlier commands retire.
-            match packet.completion.work_state()?.acquire() {
+            match packet.completion.work_state()?.acquire(crate::g17::job::Engine::Compute) {
                 Err(error) if error == EBUSY => {
                     drop(lease);
                     self.shared.queue_events();

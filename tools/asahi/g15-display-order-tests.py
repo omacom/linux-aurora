@@ -227,7 +227,7 @@ C_MUTANTS = {
 }
 
 RS_PREFIX = r'''
-#![allow(dead_code, unused_variables, unused_imports, non_snake_case)]
+#![allow(dead_code, unused_variables, unused_imports, unused_macros, non_snake_case)]
 use std::cell::RefCell;
 use std::marker::PhantomData;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -236,13 +236,21 @@ impl Error { fn from_errno(errno: i32) -> Self { Self(errno) } }
 type Result<T = ()> = std::result::Result<T, Error>;
 const ENODEV: Error = Error(-19);
 const EINVAL: Error = Error(-22);
+const EIO: Error = Error(-5);
 const EPROBE_DEFER: Error = Error(-517);
 macro_rules! dev_err { ($($args:tt)*) => {{}}; }
 macro_rules! dev_info { ($($args:tt)*) => {{}}; }
-struct State { board: bool, machine: bool, pmp: i32, display: i32 }
+macro_rules! dev_warn { ($($args:tt)*) => {{ warned(); }}; }
+struct State { board: bool, machine: bool, pmp: i32, display: i32, sleep_hold: bool, asc_fail: bool }
 thread_local! {
     static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
-    static STATE: RefCell<State> = const { RefCell::new(State { board: true, machine: true, pmp: 0, display: 0 }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { board: true, machine: true, pmp: 0, display: 0, sleep_hold: true, asc_fail: false }) };
+    static HOLD: RefCell<Option<bool>> = const { RefCell::new(None) };
+    static WARNINGS: RefCell<u32> = const { RefCell::new(0) };
+}
+fn warned() { WARNINGS.with(|w| *w.borrow_mut() += 1); }
+mod params {
+    pub fn sleep_hold() -> bool { super::STATE.with(|s| s.borrow().sleep_hold) }
 }
 fn call(name: &'static str) { CALLS.with(|c| c.borrow_mut().push(name)); }
 mod device {
@@ -276,7 +284,9 @@ mod regs {
     pub struct Regs;
     impl Regs {
         pub fn new<C>(_: &super::platform::Device<C>) -> super::Result<Self> { super::call("regs"); Ok(Self) }
-        pub fn asc_control(&self) -> super::Result<u32> { Ok(0) }
+        pub fn asc_control(&self) -> super::Result<u32> {
+            if super::STATE.with(|s| s.borrow().asc_fail) { Err(super::EIO) } else { Ok(0) }
+        }
     }
 }
 mod glue {
@@ -286,7 +296,7 @@ mod glue {
     pub unsafe fn asahi_g15_pmp_prepare(_: *mut core::ffi::c_void) -> core::ffi::c_int { call("pmp"); STATE.with(|s| s.borrow().pmp) }
     pub unsafe fn asahi_g15_display_prepare(_: *mut core::ffi::c_void) -> core::ffi::c_int { call("display"); STATE.with(|s| s.borrow().display) }
     pub fn dma_coherent(_: &super::device::Device) -> bool { call("coherent"); false }
-    pub fn hold_power(_: &super::device::Device) { call("hold"); }
+@HOLD_POWER@
 }
 struct Admitted { regs: regs::Regs, adt: adt::GpuAdt, board_images: u32 }
 '''
@@ -297,12 +307,15 @@ static T6030: Config = Config { platform: hw::Platform::AdtWithPmp, machine: "ap
 const TAIL: [&str; 6] = ["adt", "identity", "coherent", "board_images", "regs", "hold"];
 fn run(cfg: &'static Config, machine: bool, pmp: i32, display: i32) -> (Result<()>, Vec<&'static str>) {
     CALLS.with(|c| c.borrow_mut().clear());
-    STATE.with(|s| *s.borrow_mut() = State { board: true, machine, pmp, display });
+    STATE.with(|s| *s.borrow_mut() = State { board: true, machine, pmp, display, sleep_hold: true, asc_fail: false });
+    HOLD.with(|h| *h.borrow_mut() = None);
+    WARNINGS.with(|w| *w.borrow_mut() = 0);
     let pdev = platform::Device(device::Device, Core(PhantomData));
     let ret = admit(&pdev, &AsahiDevice, cfg).map(|_| ());
     (ret, CALLS.with(|c| c.borrow().clone()))
 }
 fn with_tail(head: &[&'static str]) -> Vec<&'static str> { head.iter().chain(TAIL.iter()).copied().collect() }
+@SLEEP_HOLD_RUN@
 fn main() {
     assert_eq!(run(&T6031, true, 0, -517), (Err(EPROBE_DEFER), vec!["machine", "display"]), "T6031 defers before firmware");
     assert_eq!(run(&T6031, true, 0, -19), (Err(ENODEV), vec!["machine", "display"]), "T6031 refusal stops admission");
@@ -310,8 +323,41 @@ fn main() {
     assert_eq!(run(&T6031, false, 0, 0), (Err(ENODEV), vec!["machine"]), "the machine check comes first");
     assert_eq!(run(&T6030, true, 0, -517), (Ok(()), with_tail(&["board", "pmp"])), "T6030 path unchanged");
     assert_eq!(run(&T6030, true, -517, 0), (Err(EPROBE_DEFER), vec!["board", "pmp"]), "T6030 still defers on its PMP link");
+@SLEEP_HOLD_CHECKS@
 }
 '''
+
+HOLD_PLAIN = '    pub fn hold_power(_: &super::device::Device) { call("hold"); }'
+HOLD_SLEEP = ('    pub fn hold_power(_: &super::device::Device, sleep_hold: bool) {\n'
+              '        call("hold"); super::HOLD.with(|h| *h.borrow_mut() = Some(sleep_hold));\n    }')
+SLEEP_HOLD_RUN = r'''
+fn run_hold(cfg: &'static Config, sleep_hold: bool, asc_fail: bool) -> (Result<()>, Vec<&'static str>, Option<bool>, u32) {
+    CALLS.with(|c| c.borrow_mut().clear());
+    STATE.with(|s| *s.borrow_mut() = State { board: true, machine: true, pmp: 0, display: 0, sleep_hold, asc_fail });
+    HOLD.with(|h| *h.borrow_mut() = None);
+    WARNINGS.with(|w| *w.borrow_mut() = 0);
+    let pdev = platform::Device(device::Device, Core(PhantomData));
+    let ret = admit(&pdev, &AsahiDevice, cfg).map(|_| ());
+    (ret, CALLS.with(|c| c.borrow().clone()), HOLD.with(|h| *h.borrow()), WARNINGS.with(|w| *w.borrow()))
+}
+fn before_hold(head: &[&'static str]) -> Vec<&'static str> { head.iter().chain(TAIL[..TAIL.len() - 1].iter()).copied().collect() }
+'''
+SLEEP_HOLD_CHECKS = r'''
+    // The system-sleep hold: T6031 only, and only while g15_sleep_hold is on; off is warned about.
+    assert_eq!(run_hold(&T6031, true, false), (Ok(()), with_tail(&["machine", "display"]), Some(true), 0), "T6031 holds gfx through sleep");
+    assert_eq!(run_hold(&T6031, false, false), (Ok(()), with_tail(&["machine", "display"]), Some(false), 1), "g15_sleep_hold=0: no sleep hold, one warning");
+    assert_eq!(run_hold(&T6030, true, false), (Ok(()), with_tail(&["board", "pmp"]), Some(false), 0), "T6030 never holds through sleep");
+    // The ASC read comes before the hold: a failure there leaves no hold behind.
+    assert_eq!(run_hold(&T6031, true, true), (Err(EIO), before_hold(&["machine", "display"]), None, 0), "T6031: ASC failure takes no hold");
+    assert_eq!(run_hold(&T6030, true, true), (Err(EIO), before_hold(&["board", "pmp"]), None, 0), "T6030: ASC failure takes no hold");
+'''
+SLEEP_HOLD_MUTANTS = {
+    "sleep-hold-any-platform": ("let sleep_hold = t6031 && params::sleep_hold();", "let sleep_hold = params::sleep_hold();"),
+    "sleep-hold-ignores-parameter": ("let sleep_hold = t6031 && params::sleep_hold();", "let sleep_hold = t6031;"),
+    "no-warning-when-off": ("} else if t6031 {", "} else if false {"),
+    "asc-read-after-hold": (re.compile(r"(\n\s*)let asc = regs\.asc_control\(\)\?;(.*?glue::hold_power\(dev, sleep_hold\);)", re.S),
+                            r"\2\1let asc = regs.asc_control()?;"),
+}
 
 RS_MUTANTS = {
     "display-refusal-ignored": ("dev_err!(dev, \"native display not admitted: {:?}\\n\", err);\n            }\n            return Err(err);",
@@ -346,10 +392,18 @@ def c_failures(exe):
     return [s for s in C_SCENARIOS if subprocess.run([str(exe), s], capture_output=True).returncode]
 
 
-def compile_rs(work, rustc, source, name):
+def rs_model(admit):
+    """The prelude and main for this admit(): with the system-sleep hold argument (g15_sleep_hold) or without."""
+    sleep = "glue::hold_power(dev, sleep_hold);" in admit
+    prefix = RS_PREFIX.replace("@HOLD_POWER@", HOLD_SLEEP if sleep else HOLD_PLAIN)
+    main = RS_MAIN.replace("@SLEEP_HOLD_RUN@", SLEEP_HOLD_RUN if sleep else "").replace("@SLEEP_HOLD_CHECKS@", SLEEP_HOLD_CHECKS if sleep else "")
+    return sleep, prefix, main
+
+
+def compile_rs(work, rustc, source, name, model):
     src = work / f"{name}.rs"
     exe = work / name
-    src.write_text(RS_PREFIX + source + RS_MAIN)
+    src.write_text(model[1] + source + model[2])
     result = subprocess.run([rustc, "--edition=2021", "-o", str(exe), str(src)], capture_output=True, text=True)
     if result.returncode:
         raise SystemExit(f"{name}: does not build with {rustc}:\n{result.stderr}")
@@ -387,6 +441,8 @@ def main():
     checks = static_checks(args.root)
     source = c_source(args.root)
     admit = item((args.root / BOOT).read_text(), "pub(crate) fn admit(")
+    model = rs_model(admit)
+    rs_mutants = dict(RS_MUTANTS, **(SLEEP_HOLD_MUTANTS if model[0] else {}))
     with tempfile.TemporaryDirectory(prefix="g15-display-order-", dir=os.environ.get("TMPDIR")) as tmp:
         work = Path(tmp)
         failed = c_failures(compile_c(work, source, "control"))
@@ -396,16 +452,17 @@ def main():
             assert failed, f"C mutant {name} survived"
             print(f"mutant {name}: caught by {', '.join(failed)}")
         for rustc in rustcs:
-            exe = compile_rs(work, rustc, admit, "admit")
+            exe = compile_rs(work, rustc, admit, "admit", model)
             run = subprocess.run([str(exe)], capture_output=True, text=True)
             assert run.returncode == 0, f"admit() control failed with {rustc}:\n{run.stderr}"
-            for name, change in RS_MUTANTS.items():
-                exe = compile_rs(work, rustc, mutate(admit, change), f"admit-{name}")
+            for name, change in rs_mutants.items():
+                exe = compile_rs(work, rustc, mutate(admit, change), f"admit-{name}", model)
                 run = subprocess.run([str(exe)], capture_output=True, text=True)
                 assert run.returncode, f"admit() mutant {name} survived with {rustc}"
                 print(f"mutant {name} ({rustc}): caught")
     print(f"PASS: {checks} static checks, {len(C_SCENARIOS)} C scenarios, "
-          f"{len(C_MUTANTS)} C mutants, admit() on {len(rustcs)} rustc, {len(RS_MUTANTS)} admit() mutants")
+          f"{len(C_MUTANTS)} C mutants, admit() on {len(rustcs)} rustc, {len(rs_mutants)} admit() mutants"
+          + (", system-sleep hold checks" if model[0] else ""))
 
 
 if __name__ == "__main__":

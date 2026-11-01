@@ -96,11 +96,16 @@ static int dcp_get_brightness(struct backlight_device *bd)
 		return ret;
 	}
 
-	/* Firmware nits, clamped to the ceiling, as a perceptual level. */
+	/*
+	 * Firmware can report the old 420-nit scale above the cap. Clamp
+	 * first, then map back to the perceptual level so the readback stays
+	 * within max_brightness and round-trips on the curve.
+	 */
 	nits = dcp->brightness.nits;
 	if (nits < 0)
 		nits = 0;
-	if (nits > bd->props.max_brightness)
+	if (bd->props.max_brightness > 0 &&
+	    nits > bd->props.max_brightness)
 		nits = bd->props.max_brightness;
 	return dcp_level_from_nits(nits, bd->props.max_brightness);
 }

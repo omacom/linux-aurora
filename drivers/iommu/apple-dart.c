@@ -332,6 +332,7 @@ struct apple_dart {
 	 * the retired page tables, so apple_dart_domain_free() keeps the page
 	 * tables of every domain on such a stream. It is never cleared: only
 	 * the hardware could show that the TLB no longer holds those entries.
+	 * The first error of each stream is logged.
 	 */
 	int locked_retire_err[DART_MAX_STREAMS];
 };
@@ -955,6 +956,7 @@ apple_dart_hw_unmap_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx
 		u64 *owned = dart->locked_owned[sid][idx];
 		struct apple_dart_fw_root *fw;
 		unsigned long flags;
+		bool first = false;
 		int err = 0;
 
 		if (!live)
@@ -969,12 +971,19 @@ apple_dart_hw_unmap_locked_ttbr(struct apple_dart_stream_map *stream_map, u8 idx
 			ret = ret ?: err;
 		}
 		spin_lock_irqsave(&dart->lock, flags);
-		if (err && !dart->locked_retire_err[sid])
+		if (err && !dart->locked_retire_err[sid]) {
 			dart->locked_retire_err[sid] = err;
+			first = true;
+		}
 		fw = dart->locked_fw[sid][idx];
 		dart->locked_fw[sid][idx] = NULL;
 		dart->locked_ttbr[sid][idx] = NULL;
 		spin_unlock_irqrestore(&dart->lock, flags);
+		/* Once per stream: the error is never cleared. */
+		if (first)
+			dev_warn(dart->dev,
+				 "stream %d: TLB invalidate failed retiring its root (%d); keeping the page tables of its domains until reboot\n",
+				 sid, err);
 		apple_dart_free_fw_root(dart, fw);
 		devm_memunmap(dart->dev, live);
 		devm_kfree(dart->dev, owned);

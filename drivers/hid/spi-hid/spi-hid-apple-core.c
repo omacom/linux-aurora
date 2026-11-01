@@ -16,6 +16,7 @@
 
 //#define DEBUG 2
 
+#include <linux/atomic.h>
 #include <linux/crc16.h>
 #include <linux/delay.h>
 #include <linux/device/driver.h>
@@ -28,6 +29,7 @@
 #include <linux/spi/spi.h>
 #include <linux/unaligned.h>
 #include <linux/wait.h>
+#include <linux/workqueue.h>
 
 #include "spi-hid-apple.h"
 
@@ -56,6 +58,11 @@
 
 static const u8 spi_hid_apple_booted[4] = { 0xa0, 0x80, 0x00, 0x00 };
 static const u8 spi_hid_apple_status_ok[4] = { 0xac, 0x27, 0x68, 0xd5 };
+
+/* Writers wait out SPIHID_PWR_BOOT and are refused while OFF. */
+#define SPIHID_PWR_OFF	0
+#define SPIHID_PWR_BOOT	1
+#define SPIHID_PWR_ON	2
 
 struct spihid_interface {
 	struct hid_device *hid;
@@ -120,6 +127,8 @@ struct spihid_apple {
 
 	/* state tracking flags */
 	bool status_booted;
+	/* devm_kzalloc leaves this SPIHID_PWR_OFF. */
+	atomic_t power;
 
 #ifdef IRQ_WAKE_SUPPORT
 	bool irq_wake_enabled;
@@ -194,6 +203,53 @@ struct spihid_transfer_packet {
 	__le16 crc16;
 };
 
+static void spihid_set_power(struct spihid_apple *spihid, int power)
+{
+	mutex_lock(&spihid->tx_lock);
+	atomic_set(&spihid->power, power);
+	mutex_unlock(&spihid->tx_lock);
+	wake_up_interruptible(&spihid->wait);
+}
+
+/* Returns with tx_lock held, or a negative errno with the lock released. */
+static int spihid_wait_ready(struct spihid_apple *spihid)
+{
+	int err;
+
+	for (;;) {
+		err = mutex_lock_interruptible(&spihid->tx_lock);
+		if (err < 0)
+			return err;
+
+		if (atomic_read(&spihid->power) != SPIHID_PWR_BOOT)
+			return 0;
+
+		mutex_unlock(&spihid->tx_lock);
+		err = wait_event_interruptible(spihid->wait,
+				atomic_read(&spihid->power) != SPIHID_PWR_BOOT);
+		if (err)
+			return err;
+	}
+}
+
+static void spihid_flush_one_led(struct hid_device *hid)
+{
+	/* hidraw-only devices never call hidinput_connect(). */
+	if (hid && (hid->claimed & HID_CONNECT_HIDINPUT))
+		flush_work(&hid->led_work);
+}
+
+static void spihid_flush_led_reports(struct spihid_apple *spihid)
+{
+	/*
+	 * Input suspend turns lit EV_LEDs off by queueing hid->led_work
+	 * on system_wq, which is not frozen. Flush that report while the
+	 * controller is still powered. The actuator has no input device.
+	 */
+	spihid_flush_one_led(spihid->kbd.hid);
+	spihid_flush_one_led(spihid->tp.hid);
+}
+
 /*
  * how HID is mapped onto the protocol is not fully clear. This are the known
  * reports/request:
@@ -230,9 +286,14 @@ static int spihid_apple_request(struct spihid_apple *spihid, u8 target, u8 unk0,
 	if (len > sizeof(pkt->data) - sizeof(*hdr) - sizeof(__le16))
 		return -EINVAL;
 
-	err = mutex_lock_interruptible(&spihid->tx_lock);
+	err = spihid_wait_ready(spihid);
 	if (err < 0)
 		return err;
+
+	if (atomic_read(&spihid->power) != SPIHID_PWR_ON) {
+		mutex_unlock(&spihid->tx_lock);
+		return -ENODEV;
+	}
 
 	pkt = (struct spihid_transfer_packet *)spihid->tx_buf;
 
@@ -1042,6 +1103,8 @@ int spihid_apple_core_probe(struct spi_device *spi, struct spihid_apple_ops *ops
 		goto error;
 	}
 
+	spihid_set_power(spihid, SPIHID_PWR_ON);
+
 	/* request device information */
 	dev_dbg(dev, "request device info");
 	spihid_apple_request(spihid, 0xd0, 0x20, 0x01, 0xd0, 0, NULL, 0);
@@ -1089,6 +1152,13 @@ void spihid_apple_core_remove(struct spi_device *spi)
 {
 	struct spihid_apple *spihid = spi_get_drvdata(spi);
 
+	/*
+	 * hid_destroy_device() cancels led_work, which calls back into
+	 * spihid_apple_request(). Refuse that transfer. Power stays on
+	 * until power_off() below.
+	 */
+	spihid_set_power(spihid, SPIHID_PWR_OFF);
+
 	/* destroy input devices */
 
 	spihid_destroy_hid_device(&spihid->aux);
@@ -1106,6 +1176,8 @@ EXPORT_SYMBOL_GPL(spihid_apple_core_remove);
 void spihid_apple_core_shutdown(struct spi_device *spi)
 {
 	struct spihid_apple *spihid = spi_get_drvdata(spi);
+
+	spihid_set_power(spihid, SPIHID_PWR_OFF);
 
 	/* disable irq */
 	spihid->ops->disable_irq(spihid->ops);
@@ -1139,6 +1211,14 @@ static int spihid_apple_core_suspend(struct device *dev)
 		}
 	}
 
+	/*
+	 * Children suspend first. Input core has queued a NumLock-off
+	 * report on the non-freezable system workqueue. Deliver it
+	 * before the controller is powered down, or the transfer reads
+	 * status 00 00 00 00.
+	 */
+	spihid_flush_led_reports(spihid);
+
 	/* Save some power */
 	spihid->ops->disable_irq(spihid->ops);
 
@@ -1151,36 +1231,71 @@ static int spihid_apple_core_suspend(struct device *dev)
 			dev_warn(dev, "Failed to enable irq wake: %d\n",
 				wake_status);
 	} else {
+		spihid_set_power(spihid, SPIHID_PWR_OFF);
 		spihid->ops->power_off(spihid->ops);
 	}
 #else
+	spihid_set_power(spihid, SPIHID_PWR_OFF);
 	spihid->ops->power_off(spihid->ops);
 #endif
 
 	return 0;
 }
 
+static int spihid_wake_controller(struct spihid_apple *spihid)
+{
+	int err;
+
+	/*
+	 * Same order as probe. The boot packet (a0 80 00 00) is
+	 * level-triggered and stays pending while the irq is disabled,
+	 * so drop the flag before the reset and enable the irq after.
+	 */
+	spihid_set_power(spihid, SPIHID_PWR_BOOT);
+	spihid->status_booted = false;
+
+	spihid->ops->power_on(spihid->ops);
+	spihid->ops->enable_irq(spihid->ops);
+
+	err = wait_event_interruptible_timeout(spihid->wait,
+					       spihid->status_booted,
+					       msecs_to_jiffies(1000));
+	if (err == 0)
+		err = -ETIMEDOUT;
+	if (err < 0)
+		dev_err(&spihid->spidev->dev,
+			"waiting for device boot failed: %d", err);
+
+	/* ON even on timeout, so waiters are not stuck in BOOT. */
+	spihid_set_power(spihid, SPIHID_PWR_ON);
+	return err < 0 ? err : 0;
+}
+
 static int spihid_apple_core_resume(struct device *dev)
 {
 	int ret_tp = 0, ret_kbd = 0;
+	int err = 0;
 	struct spihid_apple *spihid = spi_get_drvdata(to_spi_device(dev));
 #ifdef IRQ_WAKE_SUPPORT
 	int wake_status;
 
-	if (!device_may_wakeup(dev)) {
-		spihid->ops->power_on(spihid->ops);
-	} else if (spihid->irq_wake_enabled) {
+	if (device_may_wakeup(dev) && spihid->irq_wake_enabled) {
 		wake_status = spihid->ops->disable_irq_wake(spihid->ops);
 		if (!wake_status)
 			spihid->irq_wake_enabled = false;
 		else
 			dev_warn(dev, "Failed to disable irq wake: %d\n",
 				wake_status);
+		spihid->ops->enable_irq(spihid->ops);
+	} else {
+		err = spihid_wake_controller(spihid);
 	}
+#else
+	err = spihid_wake_controller(spihid);
 #endif
-
-	spihid->ops->enable_irq(spihid->ops);
-	spihid->ops->power_on(spihid->ops);
+	if (err)
+		dev_warn(dev, "SPI HID controller resume incomplete: %d\n",
+			 err);
 
 	if (spihid->tp.hid)
 		ret_tp = hid_driver_reset_resume(spihid->tp.hid);

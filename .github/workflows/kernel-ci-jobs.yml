@@ -145,15 +145,16 @@ jobs:
       - name: Check out the change
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.head_sha }}
           persist-credentials: false
+      # Fetch the event's named ref, not raw SHAs: the PR's merge ref contains
+      # both parents. SHA fetches exhausted this job before compilation.
       - name: Fetch history back to the target branch
         run: |
-          git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
           for depth in 64 256 1024 4096; do
-            git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null && break
-            git fetch --quiet --no-tags --depth="$depth" origin "$BASE_SHA" "$HEAD_SHA"
+            git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1 && break
+            git fetch --quiet --no-tags --depth="$depth" origin "$GITHUB_REF"
           done
+          git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null
       - name: Install LLVM 18
         run: |
           sudo apt-get update -q

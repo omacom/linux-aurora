@@ -802,7 +802,8 @@ for variable in LIBGL_ALWAYS_SOFTWARE=1 \
 	HR=$(system_root "override-${variable%%=*}" pro)
 	handoff "$HR" software no "$variable"
 done
-for value in 'LIBGL_DRIVERS_PATH=/opt/mesa-m3/lib/dri' 'VK_DRIVER_FILES=$UNKNOWN'; do
+for value in 'LIBGL_DRIVERS_PATH=/opt/mesa-m3/lib/dri' 'VK_DRIVER_FILES=$UNKNOWN' \
+	'export LIBGL_ALWAYS_SOFTWARE+=1' 'export LD_LIBRARY_PATH+=/opt/custom/lib'; do
 	HR=$(system_root "late-${value%%=*}" pro)
 	mkdir -p "$HR$T/home/.config/uwsm"
 	printf '%s\n' "$value" > "$HR$T/home/.config/uwsm/env"

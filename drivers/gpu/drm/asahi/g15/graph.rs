@@ -251,7 +251,8 @@ impl ComputeGraph {
         q.w64(qinfo::UNK_AC, 4)?;
         self.qstate.w32(qstate::CAP, sizes::QUEUE_CAP)?;
 
-        self.user_stamp.w32(0, engine::COMPUTE_SEED)?;
+        let start = super::encode::stamp(super::params::compute_stamp_base());
+        self.user_stamp.w32(0, start)?;
         self.fw_stamp.w32(0, 0)
     }
 }
@@ -352,8 +353,9 @@ impl RenderGraph {
             q.w64(qinfo::UNK_AC, 4)?;
             self.qstate[e].w32(qstate::CAP, sizes::QUEUE_CAP)?;
             self.ring[e].fill(0, 0xcc, sizes::QUEUE_CAP as usize * 8)?;
-            self.user_stamp[e].w32(0, seed[e])?;
-            self.fw_stamp[e].w32(0, seed[e])?;
+            let start = super::encode::stamp_seed(seed[e], super::params::stamp_base());
+            self.user_stamp[e].w32(0, start)?;
+            self.fw_stamp[e].w32(0, start)?;
         }
         init_sched_ctx(&self.sched_ctx)?;
         init_notifier(&self.notifier, &self.threshold)?;

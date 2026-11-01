@@ -200,9 +200,9 @@ module_param(t6030_show_notch, bool, 0444);
 MODULE_PARM_DESC(t6030_show_notch,
 		 "M3 internal display (14.x and 26.6 IOMFB): use the full height and show the notch");
 
-bool hdmi_audio;
+bool hdmi_audio = true;
 module_param(hdmi_audio, bool, 0644);
-MODULE_PARM_DESC(hdmi_audio, "Enable unstable HDMI audio support");
+MODULE_PARM_DESC(hdmi_audio, "Enable DP/HDMI audio support (default: on)");
 
 static bool unstable_edid = true;
 module_param(unstable_edid, bool, 0644);
@@ -2535,7 +2535,7 @@ int dcp_start(struct platform_device *pdev)
 
 /*
  * A native T6030 external processor: its DP/HDMI audio endpoint (EP 0x29)
- * on the driver's opt-in (hdmi_audio), as the other DCPs start it, for a
+ * unless hdmi_audio is off, as the other DCPs start it, for a
  * processor whose port@0 links an audio device; once per session, and after
  * the first display's EDID was read: with the endpoint's interfaces
  * published, an EDID copy (dcpavserv_copy_edid()) has the firmware rebuild
@@ -3684,6 +3684,21 @@ static int dcp_ext_wait_pmp(struct apple_dcp *dcp)
 	return 0;
 }
 
+/*
+ * J313 BrightnessLCD::nitsToDBV rejects 395 nits and above.  iDAC 1956 is
+ * accepted and 1957 is not, so 394 is the brightest level that applies.
+ * apple,max-brightness on this panel is 420; 100% must land on 394.
+ */
+#define DCP_J313_MAX_NITS 394U
+
+static bool dcp_panel_is_j313(const struct dcp_panel_id *id,
+			      const char *compatible)
+{
+	if (compatible && !strcmp(compatible, "apple,panel-j313"))
+		return true;
+	return id && !strcmp(id->name, "J313");
+}
+
 static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *data)
 {
 	struct device_node *panel_np;
@@ -3769,7 +3784,7 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 
 	if (panel_np) {
 		const char height_prop[2][16] = { "adj-height-mm", "height-mm" };
-		const char *compatible;
+		const char *compatible = NULL;
 
 		if (of_device_is_available(panel_np)) {
 			ret = of_property_read_u32(panel_np, "apple,max-brightness",
@@ -3782,11 +3797,25 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 		/* use adjusted height as long as the notch is hidden */
 		of_property_read_u32(panel_np, height_prop[!dcp->notch_height],
 				     &dcp->panel.height_mm);
+		if (of_property_read_string_index(panel_np, "compatible", 0,
+						  &compatible))
+			compatible = NULL;
 		/* The most specific compatible names the panel for its EDID. */
-		if (iomfb_v14_7_base_edid(dcp) &&
-		    !of_property_read_string_index(panel_np, "compatible", 0, &compatible) &&
+		if (iomfb_v14_7_base_edid(dcp) && compatible &&
 		    dcp_panel_id_from_compatible(&dcp->panel.id, compatible))
 			dev_dbg(dev, "no EDID make and product in '%s'\n", compatible);
+		/*
+		 * Only this panel.  The backlight device's maximum is this
+		 * value, so 100% asks the firmware for DCP_J313_MAX_NITS.
+		 */
+		if (dcp_panel_is_j313(&dcp->panel.id, compatible) &&
+		    dcp->brightness.maximum > DCP_J313_MAX_NITS) {
+			dcp->brightness.maximum = DCP_J313_MAX_NITS;
+			if (dcp->brightness.nits > (int)DCP_J313_MAX_NITS)
+				dcp->brightness.nits = DCP_J313_MAX_NITS;
+			dev_info(dev, "capping panel backlight at %u nits\n",
+				 DCP_J313_MAX_NITS);
+		}
 
 		of_node_put(panel_np);
 		dcp->fixed_connector_type = DRM_MODE_CONNECTOR_eDP;

@@ -400,12 +400,6 @@ bool dcp_audiosrv_link_live(struct device *dev)
 	return asrv->link_gen == asrv->open_gen && av_audiosrv_open_published(asrv);
 }
 
-bool dcp_audiosrv_typec(struct device *dev)
-{
-	KUNIT_STATIC_STUB_REDIRECT(dcp_audiosrv_typec, dev);
-	return dcp_is_typec_output(dev_get_drvdata(dev));
-}
-
 /*
  * The link commands of the 14.7 external role's audio service, the native
  * audio driver's: prepare, start, stop and complete all take the selected

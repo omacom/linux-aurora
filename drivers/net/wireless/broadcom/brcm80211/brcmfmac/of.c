@@ -121,12 +121,18 @@ int brcmf_of_probe(struct device *dev, enum brcmf_bus_type bus_type,
 
 	brcmf_dbg(INFO, "%s LPO clock\n", clk ? "enable" : "no");
 
-	if (!np || !of_device_is_compatible(np, "brcm,bcm4329-fmac"))
+	if (!np)
 		return 0;
 
+	/* The country code map applies to every bus, not only SDIO: Apple
+	 * ARM64 platforms describe their PCIe chips with "pci14e4,..." only.
+	 */
 	err = brcmf_of_get_country_codes(dev, settings);
 	if (err)
 		brcmf_err("failed to get OF country code map (err=%d)\n", err);
+
+	if (!of_device_is_compatible(np, "brcm,bcm4329-fmac"))
+		return 0;
 
 	err = of_get_mac_address(np, settings->mac);
 	if (err == -EPROBE_DEFER)

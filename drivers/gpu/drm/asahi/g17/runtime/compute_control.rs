@@ -69,14 +69,7 @@ impl Backend {
             if !queue.owns_packet(packet) {
                 return Ok(None);
             }
-            let status = queue.timeout(&mut |event| deferred.push(event));
-            // A timed-out queue leaves ordinary retirement: announce what it withheld.
-            let withheld = queue.take_withheld_doorbell();
-            drop(queue);
-            if let Some(doorbell) = withheld {
-                firmware.port.notify_compute(((doorbell >> 2) & 3) as u8, doorbell)?;
-            }
-            status
+            queue.timeout(&mut |event| deferred.push(event))
         })();
         if result.as_ref().is_ok_and(|status| status.is_some()) {
             // VM status and peer settlement precede signalling this timeout. The backend
@@ -99,11 +92,6 @@ impl Backend {
             firmware.scan_compute(None, &mut deferred)?;
             if let Some(mut queue) = firmware.queues.compute_mut(self.owner) {
                 queue.cancel(packet, &mut |event| deferred.push(event))?;
-                let withheld = queue.take_withheld_doorbell();
-                drop(queue);
-                if let Some(doorbell) = withheld {
-                    firmware.port.notify_compute(((doorbell >> 2) & 3) as u8, doorbell)?;
-                }
             }
             Ok(())
         })();
