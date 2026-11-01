@@ -180,6 +180,10 @@ def main():
     print(json.dumps({"passed": ok, "cases": len(cases),
                       "variants": [{k: x[k] for k in ("name", "failed_cases", "verdict")}
                                    for x in results]}))
+    # Keep production AV1 bank/dependency coverage in the registered host suite.
+    if ok and not args.ref and not args.mutations:
+        subprocess.run([sys.executable, "-B", str(ROOT / "drivers/media/platform/apple/avd/tests/av1-test.py"),
+                        str(args.output / "av1-banks")], check=True)
     return 0 if ok else 1
 
 
