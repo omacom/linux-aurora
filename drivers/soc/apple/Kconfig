@@ -257,6 +257,16 @@ config APPLE_T6030_GPU_PMP_LINK
 	  GPU power commands wait for that supplier's acknowledged display
 	  request through the existing PMP report startup and removal rules.
 
+config APPLE_T6031_GPU_PMP_REPORT
+	bool
+	depends on APPLE_PMP_REPORT
+	default n
+	help
+	  Set the AGX request of the T6031 (M3 Max) PMP report once the G15
+	  firmware runs. The T6031 GPU is powered by its PMGR domain alone, so
+	  nothing else sets that request, and without it the PMP ignores the
+	  GPU's bandwidth demand: memory stays at its idle floor.
+
 config APPLE_DISPLAY_GATE_KUNIT_TEST
 	bool "KUnit tests for the Apple display gate" if !KUNIT_ALL_TESTS
 	depends on KUNIT=y && APPLE_T6030_DISPLAY_GATE

@@ -67,6 +67,7 @@ config DRM_ASAHI_G15
 	depends on DRM_ASAHI
 	depends on DRM_APPLE=y || (DRM_APPLE=m && DRM_ASAHI=m)
 	select APPLE_T6030_GPU_PMP_LINK
+	select APPLE_T6031_GPU_PMP_REPORT
 	select CRYPTO_LIB_SHA256
 	select DRM_ASAHI_UAT_ADOPTION
 	default n

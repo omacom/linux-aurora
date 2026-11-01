@@ -75,6 +75,7 @@ pub(crate) mod glue {
         pub(crate) fn asahi_g15_display_prepare(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_get(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_ready() -> core::ffi::c_int;
+        pub(crate) fn asahi_g15_pmp_report_t6031(enable: bool) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_put(dev: *mut core::ffi::c_void);
         fn asahi_g15_reserved_uat(index: u32, start: u64, size: u64) -> bool;
     }
