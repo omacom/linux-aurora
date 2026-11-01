@@ -241,8 +241,11 @@ struct avd_dev {
 	unsigned int recoveries;
 	unsigned long last_recover;
 	bool retired;
-	/* Retired with the DART on the empty domain; detached at remove. */
+	/* DMA blocked at the DART (retired or resting); detached at remove. */
 	bool dma_parked;
+	/* Out of recovery budget: frames fail without hardware access until then. */
+	unsigned long rest_until;
+	bool irq_parked;
 
 	const struct avd_variant *variant;
 	unsigned int capabilities;
