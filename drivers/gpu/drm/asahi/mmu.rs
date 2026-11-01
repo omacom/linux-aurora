@@ -2905,7 +2905,8 @@ impl Vm {
         // The BO's newest sequence is checked under the same lock as binds. If
         // it is not newer than the close, every mapping belongs to that close
         // and the per-object list is safe and substantially cheaper to walk.
-        let mut vm_exec = match unsafe { self.gpuvm.exec_lock(None, false) } {
+        // SAFETY: See `lock_vm()`.
+        let mut vm_exec = match unsafe { self.gpuvm.exec_lock_vm(None, false) } {
             Err(error) if error == ENOMEM => {
                 return self.drop_mappings_filtered(gem, sequence);
             }
