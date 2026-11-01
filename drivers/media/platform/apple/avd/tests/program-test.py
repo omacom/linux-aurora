@@ -120,7 +120,7 @@ static void record_dma(struct avd_ctx *ctx,dma_addr_t addr,unsigned int shift,un
  assert(addr && (addr>>shift) && dma_count<ARRAY_SIZE(dma_sites));
  dma_sites[dma_count++]=(struct dma_site){ctx->job.num,ctx->job.segments[ctx->job.num].num,shift,width,addr};
 }
-static bool avd_backend_is_qfw(struct avd_dev *d) { return d->queued; }
+static bool avd_backend_is_qfw(const struct avd_dev *d) { return d->queued; }
 static dma_addr_t next_iova=0x204000000ULL;
 static int avd_buf_alloc(struct avd_dev *d, struct avd_buf *b, size_t n)
 { (void)d; free(b->cpu); b->cpu = calloc(1,n); b->size = n;
