@@ -26,6 +26,14 @@
 	aliases {
 		sep = &sep;
 	};
+
+	/* Private diagnostic windows, outside the PMGR syscon's register range. */
+	cpu-context-lab@210150000 {
+		compatible = "apple,j314s-cpu-context-lab";
+		reg = <0x2 0x10150000 0 0x9008>,
+		      <0x2 0x8e0d4000 0 0x10>;
+		reg-names = "cpu-impl", "cpu-start";
+	};
 };
 
 /*
