@@ -231,6 +231,8 @@ struct avd_dev {
 
 	struct iommu_domain *domain;
 	struct iommu_domain *empty_domain;
+	/* Core and perf-floor domains when the node lists more than one. */
+	struct dev_pm_domain_list *pd_list;
 
 	struct mutex vdev_lock;
 

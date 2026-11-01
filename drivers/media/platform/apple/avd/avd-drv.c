@@ -11,6 +11,8 @@
  * Copyright (C) 2011 Samsung Electronics Co., Ltd.
  */
 
+#include <linux/of.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/iommu.h>
 #include <linux/reset.h>
@@ -1074,6 +1076,26 @@ static int avd_probe(struct platform_device *pdev)
 
 	avd->rstc = devm_reset_control_get_exclusive(avd->dev, NULL);
 
+	/*
+	 * A node may list a second power domain, "perf": the PMC floor that
+	 * holds the SoC rail at its performance level while the decoder works
+	 * (decode runs at about half speed on the M4 Pro without it). With more
+	 * than one domain the core attaches none, so attach them all with
+	 * runtime PM device links: the floor is then held exactly while the
+	 * decoder is runtime-active (frames in flight plus the autosuspend
+	 * delay) and released when it idles, rests or is retired.
+	 */
+	if (of_count_phandle_with_args(pdev->dev.of_node, "power-domains",
+				       "#power-domain-cells") > 1) {
+		static const struct dev_pm_domain_attach_data pd_data = {
+			.pd_flags = PD_FLAG_DEV_LINK_ON,
+		};
+
+		ret = devm_pm_domain_attach_list(avd->dev, &pd_data, &avd->pd_list);
+		if (ret < 0)
+			return dev_err_probe(avd->dev, ret, "failed to attach power domains\n");
+	}
+
 	avd->code = devm_platform_ioremap_resource_byname(pdev, "code");
 	if (IS_ERR(avd->code))
 		return PTR_ERR(avd->code);
@@ -1144,6 +1166,16 @@ static int avd_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/*
+	 * The domain links were added active, but the decoder starts
+	 * suspended: settle that before enabling runtime PM, so the floor is
+	 * not held until the first decode has come and gone.
+	 */
+	if (avd->pd_list) {
+		ret = pm_runtime_set_suspended(avd->dev);
+		if (ret)
+			return ret;
+	}
 	pm_runtime_set_autosuspend_delay(avd->dev, 100);
 	pm_runtime_use_autosuspend(avd->dev);
 	pm_runtime_enable(avd->dev);
