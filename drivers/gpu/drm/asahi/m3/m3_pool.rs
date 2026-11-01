@@ -39,3 +39,34 @@ impl Owners {
         objects[self.manager].write(0, &manager)
     }
 }
+
+impl Owners {
+    pub(crate) fn initialize_extended(&self, objects: &mut [Buffer], slot: u8,
+        compute_only: bool) -> Result {
+        let mut backings = KVec::new();
+        for index in self.backing.clone().take(8) {
+            let buffer = objects.get(index).ok_or(EINVAL)?;
+            backings.push(wire::GpuRegion::new(buffer.gpu_va()?, buffer.size()).map_err(|_| EINVAL)?, GFP_KERNEL)?;
+        }
+        let backing = wire::ModernBacking(&backings);
+        let populated = backing.pages().map_err(|_| EINVAL)?;
+        let pages = objects.get(self.pages).ok_or(EINVAL)?;
+        let entries = wire::GpuRegion::new(pages.gpu_va()?, pages.size()).map_err(|_| EINVAL)?;
+        let table = objects.get(self.table).ok_or(EINVAL)?;
+        let groups = wire::GpuRegion::new(table.gpu_va()?, table.size()).map_err(|_| EINVAL)?;
+        if groups.size() < populated / 512 * 64 { return Err(EINVAL); }
+        let descriptor = wire::ModernPool { entries, groups,
+            submitted: FirmwareVa::new(objects.get(self.counter).ok_or(EINVAL)?.va()).map_err(|_| EINVAL)?,
+            identity: FirmwareVa::new(objects.get(self.manager).ok_or(EINVAL)?.va()).map_err(|_| EINVAL)?,
+            slot, capacity: (entries.size() / 8).try_into()?, populated: populated.try_into()?, compute_only };
+        let mut bytes = [0; wire::ModernPool::SIZE];
+        descriptor.encode(&mut bytes).map_err(|_| EINVAL)?;
+        for index in 0..populated {
+            objects[self.pages].u64(index * 8, backing.page(index).map_err(|_| EINVAL)?)?;
+        }
+        for index in 0..populated / 512 {
+            objects[self.table].write(index * 64, &backing.group(index).map_err(|_| EINVAL)?)?;
+        }
+        objects[self.manager].write(0, &bytes)
+    }
+}

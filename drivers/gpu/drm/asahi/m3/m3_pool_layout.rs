@@ -69,3 +69,131 @@ impl<'a> Pool<'a> {
         Ok(())
     }
 }
+
+/// Extended firmware's private-memory pool descriptor. The owners and initial
+/// population are supplied separately from the descriptor's firmware state.
+pub(crate) struct ModernPool {
+    pub(crate) identity: FirmwareVa,
+    pub(crate) slot: u8,
+    pub(crate) entries: GpuRegion,
+    pub(crate) groups: GpuRegion,
+    pub(crate) submitted: FirmwareVa,
+    pub(crate) capacity: u32,
+    pub(crate) populated: u32,
+    pub(crate) compute_only: bool,
+}
+
+impl ModernPool {
+    pub(crate) const SIZE: usize = 0xa0;
+
+    pub(crate) fn encode(&self, output: &mut [u8]) -> Result<(), Error> {
+        let entry_bytes = (self.capacity as usize).checked_mul(8).ok_or(Error::Size)?;
+        let group_bytes = (self.populated as usize / 512).checked_mul(8).ok_or(Error::Size)?;
+        if !(1..=64).contains(&self.slot) || self.capacity == 0 || self.populated >= self.capacity || self.populated % 512 != 0
+            || self.entries.base() & 0x3fff != 0 || self.groups.base() & 0x3fff != 0
+            || self.entries.size() < entry_bytes || self.groups.size() < group_bytes
+            || self.submitted.get() & 7 != 0 || self.identity.get() & 7 != 0 { return Err(Error::Address); }
+        let group_count: u32 = group_bytes.try_into().map_err(|_| Error::Size)?;
+        let bytes = output.get_mut(..Self::SIZE).ok_or(Error::Size)?;
+        bytes.fill(0);
+        let word = |bytes: &mut [u8], offset: usize, value: u32| {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        };
+        bytes[..8].copy_from_slice(&self.identity.get().to_le_bytes());
+        word(bytes, 8, self.slot.into());
+        word(bytes, 12, (self.populated == 0).into());
+        word(bytes, 16, 2);
+        bytes[0x14..0x1c].copy_from_slice(&self.entries.base().to_le_bytes());
+        word(bytes, 0x1c, self.capacity);
+        word(bytes, 0x24, self.populated);
+        word(bytes, 0x28, (self.populated == 0).into());
+        word(bytes, 0x2c, self.populated);
+        bytes[0x30..0x38].copy_from_slice(&self.groups.base().to_le_bytes());
+        word(bytes, 0x40, 4);
+        word(bytes, 0x48, group_count);
+        bytes[0x4c..0x54].copy_from_slice(&self.submitted.get().to_le_bytes());
+        word(bytes, 0x5c, (self.compute_only && self.populated != 0).into());
+        word(bytes, 0x84, (self.populated != 0).into());
+        word(bytes, 0x94, 2);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod modern_tests {
+    use super::*;
+    fn pool(compute_only: bool) -> ModernPool {
+        ModernPool { identity: FirmwareVa::new(0xffff_fc21_9100_0000).unwrap(), slot: 1,
+            entries: GpuRegion::new(0x5000_0000, 0x20000).unwrap(),
+            groups: GpuRegion::new(0x6000_0000, 0x4000).unwrap(),
+            submitted: FirmwareVa::new(0xffff_fc21_9000_0000).unwrap(),
+            capacity: 0x4000, populated: 512, compute_only }
+    }
+    fn word(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+    #[test] fn shared_render_pool_never_gets_compute_exclusion() {
+        for compute in [false, true] {
+            let mut output = [0xa5; ModernPool::SIZE + 8];
+            pool(compute).encode(&mut output).unwrap();
+            assert_eq!(word(&output, 0x5c), compute.into());
+            assert_eq!(word(&output, 0x48), 8);
+            assert_eq!(word(&output, 0x84), 1);
+            assert_eq!(&output[ModernPool::SIZE..], &[0xa5; 8]);
+        }
+    }
+    #[test] fn bad_population_and_insufficient_owners_reject_before_mutation() {
+        for pages in [1, 511, 513, 0x4000] {
+            let mut value = pool(true); value.populated = pages;
+            let mut output = [0xa5; ModernPool::SIZE];
+            assert!(value.encode(&mut output).is_err());
+            assert_eq!(output, [0xa5; ModernPool::SIZE]);
+        }
+        let mut value = pool(true); value.capacity = 0x4001;
+        let mut output = [0xa5; ModernPool::SIZE];
+        assert!(value.encode(&mut output).is_err());
+        assert_eq!(output, [0xa5; ModernPool::SIZE]);
+    }
+}
+
+/// Populate the extended freelist from independently retained 4-MiB owners.
+/// Hardware group records describe 2-MiB subregions, not entire owners.
+pub(crate) struct ModernBacking<'a>(pub(crate) &'a [GpuRegion]);
+impl ModernBacking<'_> {
+    pub(crate) fn pages(&self) -> Result<usize, Error> {
+        if self.0.is_empty() || self.0.len() > 8
+            || self.0.iter().any(|owner| owner.size() != BACKING_SIZE || owner.base() & 0x3fff != 0) {
+            return Err(Error::Size);
+        }
+        Ok(self.0.len() * BACKING_SIZE / PAGE_SIZE)
+    }
+    pub(crate) fn page(&self, index: usize) -> Result<u64, Error> {
+        if index >= self.pages()? { return Err(Error::Index); }
+        let per_owner = BACKING_SIZE / PAGE_SIZE;
+        Ok(self.0[index / per_owner].base() + (index % per_owner * PAGE_SIZE) as u64)
+    }
+    pub(crate) fn group(&self, index: usize) -> Result<[u8; 64], Error> {
+        if index >= self.pages()? / 512 { return Err(Error::Index); }
+        let base = self.page(index * 512)?;
+        let mut record = [0; 64];
+        record[..8].copy_from_slice(&(base | (1 << 61)).to_le_bytes());
+        Ok(record)
+    }
+}
+
+#[cfg(test)]
+mod backing_tests {
+    use super::*;
+    #[test] fn group_records_never_cross_a_noncontiguous_backing_owner() {
+        let owners = [GpuRegion::new(0x5000_0000, BACKING_SIZE).unwrap(),
+            GpuRegion::new(0x6000_0000, BACKING_SIZE).unwrap()];
+        let backing = ModernBacking(&owners);
+        assert_eq!(backing.pages(), Ok(2048));
+        assert_eq!(backing.page(1024), Ok(0x6000_0000));
+        let second = backing.group(2).unwrap();
+        assert_eq!(u64::from_le_bytes(second[..8].try_into().unwrap()), (1 << 61) | 0x6000_0000);
+        assert_eq!(&second[8..], &[0; 56]);
+        assert!(backing.group(4).is_err());
+        assert!(backing.page(2048).is_err());
+    }
+}
