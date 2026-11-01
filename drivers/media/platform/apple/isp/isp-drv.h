@@ -251,6 +251,9 @@ struct apple_isp_hw {
 	 * detected only once.
 	 */
 	bool deferred_start;
+
+	/* The xx24 setfiles' lens shading strides need zeroing (T8142). */
+	bool setfile_stride_fixup;
 };
 
 enum isp_sensor_id {

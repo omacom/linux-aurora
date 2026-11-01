@@ -1096,6 +1096,64 @@ static const struct apple_isp_hw apple_isp_hw_t8132 = {
 	.deferred_start = true,
 };
 
+/*
+ * T8142 (M5, J813): the Neo's ISP17a. The J813 ADT's dart-isp
+ * dapf-instance-0 ranges, rounded out to 16 KiB pages; mostly the T8140
+ * windows at +0x80000000, with one DSID window and two new ranges.
+ */
+static const struct isp_mmio_window apple_isp_fw_mmio_t8142[] = {
+	{ 0x220104000, 0x14000 },	/* DSID broadcast-clear window */
+	{ 0x3803c0000, 0x28000 },	/* PMGR, with the PMP clock scratch */
+	{ 0x380704000, 0x4000 },	/* PMGR, ISP power states */
+	{ 0x380730000, 0x4000 },
+	{ 0x380e3c000, 0x4000 },
+	{ 0x382724000, 0x4000 },	/* PMP bandwidth scratch */
+	{ 0x39062c000, 0x30000 },
+	{ 0x3a1340000, 0x4000 },
+	{ 0x3a1358000, 0xc000 },
+	{ 0x421660000, 0x4000 },
+};
+
+static const struct apple_isp_hw apple_isp_hw_t8142 = {
+	.gen = ISP_GEN_T8140,
+	.fw_abi = ISP_FW_ABI_H17,
+	.pmu_base = 0x0,
+
+	.dsid_count = 1,
+	.dsid_clr_base0 = 0x220116000,
+	.dsid_clr_range0 = 0x2fc,
+
+	.clock_scratch = 0x3803d0ca0,
+	.clock_base = 0x0,
+	.clock_bit = 0x0,
+	.clock_size = 0x8,
+	.bandwidth_scratch = 0x382724000,
+	.bandwidth_base = 0x0,
+	.bandwidth_bit = 0x0,
+	.bandwidth_size = 0x8,
+	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
+
+	/*
+	 * No BES scaler: the firmware asserts on CH_CROP_SET ("BesProc is
+	 * removed/not present. Must config AuxSclPr") and takes the SCL1 set.
+	 */
+	.scl1 = true,
+	.lpdp = true,
+	.meta_size = ISP_META_SIZE_T8140,
+
+	.fw_iova_mask = GENMASK_ULL(35, 0),
+	.mbox2_offset = 0x410,
+	.mbox_irq_route = true,
+	.coproc_control = ISP_COPROC_CONTROL_T8140,
+	.fw_mmio = apple_isp_fw_mmio_t8142,
+	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t8142),
+	.boot_mode = 1,
+	.capture_meta_size = ISP_CAPTURE_META_SIZE_T8140,
+	.resident_fw = true,
+	/* The J813 IMX958 runs the xx24 setfile 2224_01, as T6040 does. */
+	.setfile_stride_fixup = true,
+};
+
 static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t8103-isp", .data = &apple_isp_hw_t8103 },
 	{ .compatible = "apple,t8112-isp", .data = &apple_isp_hw_t8112 },
@@ -1105,6 +1163,7 @@ static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t6030-isp", .data = &apple_isp_hw_t6030 },
 	{ .compatible = "apple,t6031-isp", .data = &apple_isp_hw_t6031 },
 	{ .compatible = "apple,t8140-isp", .data = &apple_isp_hw_t8140 },
+	{ .compatible = "apple,t8142-isp", .data = &apple_isp_hw_t8142 },
 	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6040 },
 	{ .compatible = "apple,t8132-isp", .data = &apple_isp_hw_t8132 },
 	{},
