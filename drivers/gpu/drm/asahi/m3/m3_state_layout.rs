@@ -66,3 +66,55 @@ pub(crate) fn manager_misc(out: &mut [u8]) -> Result<(), Error> {
     word(bytes, 0x20, 1); // cpu_flag / reset
     Ok(())
 }
+
+pub(crate) const EXTENDED_CONTEXT_SIZE: usize = 0x38;
+pub(crate) const EXTENDED_NOTIFIER_SIZE: usize = 0x200;
+
+pub(crate) fn context_extended(output: &mut [u8]) -> Result<(), Error> {
+    let bytes = output.get_mut(..EXTENDED_CONTEXT_SIZE).ok_or(Error::Size)?;
+    bytes.fill(0);
+    bytes[..2].fill(0xff);
+    bytes[5] = 1;
+    bytes[0x26] = 2;
+    bytes[0x33] = 0xff;
+    Ok(())
+}
+
+impl Notifier {
+    pub(crate) fn encode_extended(&self, output: &mut [u8]) -> Result<(), Error> {
+        if self.context >= 64 { return Err(Error::Address); }
+        let bytes = output.get_mut(..EXTENDED_NOTIFIER_SIZE).ok_or(Error::Size)?;
+        bytes.fill(0);
+        bytes[..8].copy_from_slice(&self.threshold.get().to_le_bytes());
+        word(bytes, 0x10, 0x50);
+        word(bytes, NOTIFIER_CONTEXT, self.context);
+        bytes[0xa8..0xb0].fill(0xff);
+        word(bytes, 0x114, 1);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    #[test] fn registration_state_is_left_to_firmware() {
+        let mut bytes = [0xa5; EXTENDED_CONTEXT_SIZE + 8];
+        context_extended(&mut bytes).unwrap();
+        assert_eq!(&bytes[..6], &[255, 255, 0, 0, 0, 1]);
+        assert_eq!(bytes[0x26], 2);
+        assert_eq!(bytes[0x33], 255);
+        assert_eq!(&bytes[EXTENDED_CONTEXT_SIZE..], &[0xa5; 8]);
+    }
+    #[test] fn notifier_has_zero_generation_and_distinct_firmware_storage() {
+        let notifier = Notifier { threshold: FirmwareVa::new(0xffff_fc21_7000_0000).unwrap(), context: 3 };
+        let mut bytes = [0xa5; EXTENDED_NOTIFIER_SIZE + 8];
+        notifier.encode_extended(&mut bytes).unwrap();
+        assert_eq!(&bytes[8..12], &[0; 4]);
+        assert_eq!(&bytes[0xa8..0xb0], &[255; 8]);
+        assert_eq!(&bytes[0x114..0x118], &[1, 0, 0, 0]);
+        assert_eq!(&bytes[EXTENDED_NOTIFIER_SIZE..], &[0xa5; 8]);
+        let mut short = [0xa5; NOTIFIER_SIZE];
+        assert!(notifier.encode_extended(&mut short).is_err());
+        assert_eq!(short, [0xa5; NOTIFIER_SIZE]);
+    }
+}
