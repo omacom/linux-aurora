@@ -27,6 +27,9 @@ class Inflight(transport.Transport):
     def __init__(self):
         self.booting = False
         self.live = None
+        self.multi = "--multi" in sys.argv[4:]
+        self.engines = {}
+        self.live_engines = {}
         self.feed_idx = 0
         self.feed_word = 0
         self.expected = []
@@ -69,15 +72,20 @@ class Inflight(transport.Transport):
             uc.emu_stop()
         if self.decode + self.fifo <= addr < self.decode + self.fifo + self.vps * 4:
             idx, words = self.expected[self.feed_idx]
-            assert addr == self.decode + self.fifo + 4 * 4, 'wrong H.264 VP'
+            vp = self.engines[idx]
+            assert addr == self.decode + self.fifo + vp * 4, 'wrong H.264 VP'
             assert value == words[self.feed_word], (idx, self.feed_word, hex(value))
             if self.feed_word == 0:
-                if self.live is not None:
-                    raise LiveVPError(f'VP4 receives slot {idx} START while slot {self.live} has no DONE')
-                self.live = idx
+                if self.multi:
+                    assert vp not in self.live_engines, f'VP{vp} overwritten before DONE'
+                    self.live_engines[vp] = idx
+                else:
+                    if self.live is not None:
+                        raise LiveVPError(f'VP4 receives slot {idx} START while slot {self.live} has no DONE')
+                    self.live = idx
                 assert (value >> 4) & 15 == idx
                 fifo = self.fifo_addr(idx)
-                self.events.append(f'VP4 START slot={idx} fifo={fifo:#x}')
+                self.events.append(f'VP{vp} START slot={idx} fifo={fifo:#x}')
             self.feed_word += 1
             if self.feed_word == len(words):
                 self.feed_idx += 1
@@ -95,11 +103,16 @@ class Inflight(transport.Transport):
 
     def submit_host(self, idx, start, tag):
         variant = image.stem.removeprefix('avd-fw-')
-        source = programs / variant
+        source = programs / (('multi-' if self.multi else '') + variant)
         data = (source / f'descriptor-{idx}.bin').read_bytes()
         desc = list(struct.unpack('<16I', data))
         words = list(struct.unpack('<' + 'I' * desc[6], (source / f'h264-{idx}.bin').read_bytes()))
-        assert desc[:4] == [0x41565131, 0x10 | idx, 1, 4]
+        assert desc[:3] == [0x41565131, 0x10 | idx, 1]
+        vp = desc[3]
+        assert self.pool[1] & (1 << vp)
+        if not self.multi:
+            assert vp == 4
+        self.engines[idx] = vp
         assert desc[4:6] == [0, 0] and desc[8:12] == [1, 0, 0, 1]
         assert desc[12:] == [0, 0, 0, 0]
         assert desc[7] == 0x2b000200 | idx << 4 | self.info[10]
@@ -126,7 +139,7 @@ class Inflight(transport.Transport):
         for off in offsets:
             at = off + idx * 4
             self.put(self.decode + at, struct.unpack_from('<I', snapshot, at)[0])
-        for at in ([0x10c, 0x120] if self.version == 3 else [0x16c, 0x190]):
+        for at in ([0xfc + vp * 4, 0x120] if self.version == 3 else [0x15c + vp * 4, 0x190]):
             self.put(self.decode + at, struct.unpack_from('<I', snapshot, at)[0])
         self.fifo_addr(idx)
         self.expected.append((idx, words))
@@ -138,7 +151,13 @@ class Inflight(transport.Transport):
         self.route(1)
         return start + len(words)
 
-    def finish_vp(self):
+    def finish_vp(self, vp=4):
+        if self.multi:
+            assert vp in self.live_engines and not self.feed_word
+            self.events.append(f'VP{vp} DONE slot={self.live_engines.pop(vp)}')
+            self.vp_events += 1
+            self.route(80 + vp * 5)
+            return
         assert self.live is not None and not self.feed_word
         self.events.append(f'VP4 DONE slot={self.live}')
         self.live = None
@@ -197,7 +216,41 @@ def check(depth):
           f'{depth} routed VP/PP completions, RP=WP={wp}', flush=True)
 
 
-if '--before' in sys.argv[4:]:
+def check_multi():
+    t = Inflight()
+    engines = [vp for vp in range(t.vps) if t.pool[1] & (1 << vp)]
+    depth = len(engines) + 1
+    wp = 0
+    for idx in range(depth):
+        wp = t.submit_host(idx, wp, 0x10 | idx)
+    t.poll(30)
+    assert set(t.live_engines) == set(engines)
+    # Later pictures finish first, while PP waits for picture zero.
+    for vp in reversed(engines[1:]):
+        t.finish_vp(vp); t.poll(5)
+        assert t.pp_owner is None and not t.notifications
+    t.finish_vp(engines[0]); t.poll(20)
+    assert t.pp_owner == 0 and t.live_engines == {engines[0]: depth - 1}
+    t.finish_vp(engines[0]); t.poll(5)
+    assert t.pp_owner == 0 and not t.live_engines
+    for idx in range(depth):
+        assert t.pp_owner == idx
+        t.busy = True; t.finish_pp(); t.poll(10)
+        assert t.result(idx)[0] == 1
+        t.busy = False; t.poll(10)
+        assert t.result(idx) == [2, 0, 0x10 | idx]
+        assert t.notifications[idx] == 0x54530010 | idx
+    assert t.feed_idx == depth and t.vp_events == t.pp_events == depth
+    assert t.u32(0x10007ff8) == t.u32(0x10007ffc) == wp
+    assert not t.fetches and not t.ring_writes
+    print('\n'.join('TRACE ' + event for event in t.events), flush=True)
+    print(f'PASS {image.stem}: single-stream {depth} banks across {len(engines)} VPs, '
+          f'reverse VP DONE, PP/retire order, retained DMA and {t.address_checks} address checks', flush=True)
+
+
+if '--multi' in sys.argv[4:]:
+    check_multi()
+elif '--before' in sys.argv[4:]:
     try:
         check(2)
     except LiveVPError as error:

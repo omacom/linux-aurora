@@ -98,3 +98,52 @@ Licensed implementation references: eiln/avd (MIT), avd_emu.py, and
 https://github.com/aurora-silicon/aura/blob/main/proxyclient/hv/trace_avd.py
 (MIT).  The Borage facts above come from the supplied clean SPEC sections 3-5;
 no binary or captured Apple command images are used.
+
+Firmware-advertised multi-VP pools
+---------------------------------
+
+The queued open transport uses the optional ABI 2 feature bit 3 and the AVM2
+pool record at SRAM +0x7f80. Its eight u32 words are magic 0x41564d32, version 1,
+four codec VP masks (HEVC, H.264, VP9, AV1), an inferred-count codec mask, and a
+zero reserved word. Masks must be disjoint, within the firmware VP register
+limit and consistent with its codec mask. An absent or malformed extension
+keeps the k4m single-VP selector and two H.264/HEVC banks. Reload clears all
+cached masks and rotation state before negotiation, so an older image cannot
+inherit a prior multi-VP capability.
+
+For a valid pool the host rotates successive submissions through its hardware
+VP indices. The prepared program names its private FIFO, not a VP; retrying a
+busy mailbox cannot consume a rotation turn or alter the saved program/FIFO.
+Separate streams share that rotation, so they also use distinct engines.
+Firmware retains exclusive VP picture ownership through DONE and feeds the
+SRAM programs in order. PP starts strictly in descriptor submission order,
+even when VP completion order differs. Within each context, the host preserves
+submission and retirement order.
+
+H.264 and HEVC allocate one scratch bank per advertised VP plus a bank that PP
+may still own, bounded by the physical FIFO count. The VP work of the next
+picture reads its own bitstream and slice state; reference reconstruction is
+consumed by the ordered PP stage. Buffers, instruction FIFOs and scratch banks
+remain owned through PP completion, not merely VP DONE. No reference wait or
+probability dependency is removed by choosing another engine.
+
+VP9 retains its two banks and producer-side backward-adaptation barrier from
+the VP-DONE implementation. Its tagged VP callback remains separate from full
+PP retirement. AV1 retains its single-picture CDF/segmentation dependency path.
+The advertised pools may select different engines across independent contexts;
+neither codec's dependency rules are relaxed.
+
+Pool counts live in the firmware image, not an additional host SoC table.
+The avd-fw v5-t2 T6040 counts (HEVC 4, H.264 4, VP9 1, AV1 3) are inferred from
+T8132 and marked as inferred by the image. The v2/v3/v4/v5-t0/v5-t1 pools use
+the public codec variant counts. The T6020 v3-t2 image reuses v3-t1 tunables;
+it and all multi-engine silicon behavior still require device qualification.
+
+The host program fixture checks negotiation, invalid/overlapping/absent pool
+fallback, reset, rotation, bank limits, saved FIFO retry and unchanged legacy
+programs. It emits both ordinary and multi-VP programs. Run the routed test
+with ``--multi`` to verify the production H.264 submissions use all advertised
+engines, retain each bank through PP, handle reversed VP DONE, and keep PP and
+retirement in order. The firmware transport test covers every advertised codec
+and engine and tagged VP notifications on every image. These event models do
+not decode pixels or establish throughput.

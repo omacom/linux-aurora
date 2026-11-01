@@ -47,6 +47,7 @@ typedef uint64_t dma_addr_t;
 #define VISIBLE_IF_KUNIT
 #define AVD_QUIRK_LSR 1
 #define AVD_QUIRK_NO_PIPE_STATE 2
+#define AVD_CODEC_HEVC 0
 #define AVD_CODEC_H264 1
 #define AVD_CODEC_VP9 2
 #define AVD_MAX_INST 512
@@ -172,7 +173,35 @@ int main(int argc, char **argv)
  u32 info[16]={AVDQ_MAGIC,2,16,64,0x1090000,0x8000,256,0,9,7,15,3,0,0x1800,0,0};
  memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(avd_qfw_check(&dev)&&!q.vp_done);
  info[11]=7;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(avd_qfw_check(&dev)&&q.vp_done);
- info[1]=3;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(!avd_qfw_check(&dev)&&!q.vp_done);
+
+ u32 pool[8]={AVDQ_POOL_MAGIC,AVDQ_POOL_VERSION,15,240,256,0,0,0};
+ info[11]=15;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));
+ memcpy(q.sram+AVDQ_POOL_OFFSET,pool,sizeof(pool));
+ assert(avd_qfw_check(&dev)&&q.multi_vp&&q.vp_done);
+ assert(avd_qfw_bank_limit(&q,AVD_CODEC_HEVC)==5&&avd_qfw_bank_limit(&q,AVD_CODEC_H264)==5);
+ for(unsigned int n=0;n<8;n++) {
+  assert(avd_qfw_pick_vp(&q,0,99)==n%4);
+  assert(avd_qfw_pick_vp(&q,1,99)==4+n%4);
+  assert(avd_qfw_pick_vp(&q,2,99)==8);
+ }
+ for(unsigned int n=0;n<8;n++) {
+  u32 bad[8];memcpy(bad,pool,sizeof(bad));
+  switch(n) {
+   case 0:bad[0]=0;break;case 1:bad[1]++;break;
+   case 2:bad[2]=0;break;case 3:bad[3]|=1;break;
+   case 4:bad[3]|=1<<12;break;case 5:bad[5]=1<<9;break;
+   case 6:bad[6]=8;break;case 7:bad[7]=1;break;
+  }
+  memcpy(q.sram+AVDQ_POOL_OFFSET,bad,sizeof(bad));
+  assert(avd_qfw_check(&dev)&&!q.multi_vp&&q.vp_done);
+  assert(avd_qfw_pick_vp(&q,1,4)==4&&avd_qfw_bank_limit(&q,1)==2);
+ }
+ memcpy(q.sram+AVDQ_POOL_OFFSET,pool,sizeof(pool));
+ assert(avd_qfw_check(&dev)&&q.multi_vp);
+ info[11]=7;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));
+ assert(avd_qfw_check(&dev)&&!q.multi_vp&&q.vp_done);
+ assert(avd_qfw_pick_vp(&q,1,4)==4&&avd_qfw_bank_limit(&q,1)==2);
+ info[1]=3;memcpy(q.sram+AVDQ_INFO,info,sizeof(info));assert(!avd_qfw_check(&dev)&&!q.vp_done&&!q.multi_vp);
  memset(q.sram,0,0x10000);
  struct avd_buf slice = { .size=4096, .addr=0x200800000ULL };
  struct v4l2_ctrl_h264_sps sps = { .pic_width_in_mbs_minus1=119,
@@ -194,11 +223,14 @@ int main(int argc, char **argv)
   if (!strcmp(argv[2],"v5-t0")) { variant.fifo_slots=7;variant.vp_slot_base[1]=4; }
  } else if (!strcmp(argv[2],"v3-t0")) variant.quirks|=AVD_QUIRK_NO_PIPE_STATE;
  q.fifo_slots=variant.fifo_slots;
+ bool multi=getenv("AVD_MULTI_VP")!=NULL;
+ q.multi_vp=multi;q.vp_pool[0]=15;q.vp_pool[1]=!strcmp(argv[2],"v5-t0")?16:240;
+ unsigned int test_banks=multi?avd_qfw_bank_limit(&q,AVD_CODEC_H264):2;
  ctx.decoded_fmt.fmt.pix_mp.plane_fmt[0].bytesperline=1920;
  run.base.bufs.dst=&dst.base.vb;
  for(unsigned int c=0;c<8;c++) {
-  ctx.priv=&h264[c];h264[c].nbanks=AVD_H264_BANKS;h264[c].b=&h264[c].bank[0];
-  for(unsigned int b=0;b<AVD_H264_BANKS;b++) assert(!avd_h264_alloc_bufs(&ctx,&h264[c].bank[b]));
+  ctx.priv=&h264[c];h264[c].nbanks=test_banks;h264[c].b=&h264[c].bank[0];
+  for(unsigned int b=0;b<test_banks;b++) assert(!avd_h264_alloc_bufs(&ctx,&h264[c].bank[b]));
  }
  /* Fault injection proves every bank-1 DMA fixture is actually checked. */
  const char *zero=getenv("AVD_ZERO_BANK_ADDR");
@@ -210,12 +242,12 @@ int main(int argc, char **argv)
  }
  for (unsigned int mode=0; mode<2; mode++) {
   dev.queued=!mode;
-  for(unsigned int c=0;c<8;c++) for(unsigned int b=0;b<2;b++) {h264[c].bank[b].busy=false;h264[c].bank[b].submitted=false;}
+  for(unsigned int c=0;c<8;c++) for(unsigned int b=0;b<test_banks;b++) {h264[c].bank[b].busy=false;h264[c].bank[b].submitted=false;}
   for (unsigned int idx=0; idx<variant.fifo_slots; idx++) {
    char path[4096]; FILE *out;
-   ctx.priv=&h264[idx/2];struct avd_h264_ctx *hc=ctx.priv;
+   ctx.priv=&h264[idx/test_banks];struct avd_h264_ctx *hc=ctx.priv;
    assert(!avd_h264_pick_bank(&ctx,&dst.base.vb));
-   assert(hc->b==&hc->bank[idx%AVD_H264_BANKS]);hc->b->active_slice=&slice;
+   assert(hc->b==&hc->bank[idx%test_banks]);hc->b->active_slice=&slice;
    hc->b->submitted=true;
    ctx.job_fifo=hc->b->bufs.inst.addr;
    assert(ctx.job_fifo && hc->b->bufs.above_info.addr && hc->b->bufs.ip_above.addr &&
@@ -262,7 +294,10 @@ int main(int argc, char **argv)
     assert(readl(q.sram+0x7ffc)==frame.prog_words);
     assert(!readl(q.sram+0x8000+idx*64+D_PP_EXTRA));
     assert(readl(dev.ctrl+lo+idx*4)==(v5?(u32)frame.fifo_iova:frame.fifo_iova>>8));
-    assert(readl(dev.ctrl+(v5?0x16c:0x10c))==7&&readl(dev.ctrl+(v5?0x190:0x120))==5);
+    unsigned int selected=readl(q.sram+0x8000+idx*64+D_VP);
+    unsigned int expected=multi?(!strcmp(argv[2],"v5-t0")?4:4+idx%4):4;
+    assert(selected==expected);
+    assert(readl(dev.ctrl+(v5?0x15c:0xfc)+selected*4)==7&&readl(dev.ctrl+(v5?0x190:0x120))==5);
     snprintf(path,sizeof(path),"%s/mmio-%u.bin",argv[1],idx);
     out=fopen(path,"wb");assert(out);assert(fwrite(dev.ctrl,0x10000,1,out)==1);assert(!fclose(out));
     snprintf(path,sizeof(path),"%s/descriptor-%u.bin",argv[1],idx);
@@ -283,6 +318,11 @@ int main(int argc, char **argv)
     for (unsigned int b=0;b<4;b++) fputc((w>>(8*b))&255,out);
    }
    assert(!fclose(out));
+  }
+  if (multi && dev.queued) {
+   ctx.priv=&h264[0];
+   for(unsigned int b=0;b<test_banks;b++)assert(h264[0].bank[b].busy&&h264[0].bank[b].submitted);
+   assert(avd_h264_pick_bank(&ctx,&dst.base.vb)==-EBUSY);
   }
  }
  /* Both ring-position wrap and u32-counter wrap must split the I/O copy. */
@@ -714,6 +754,49 @@ def conformance(out):
     print(f'PASS: {unchanged} complete legacy programs identical; {sparse} sparse programs change only reference slots; {normalized} empty-DPB non-IDR I programs equal legacy IDR; all 65536 DPB maps; syntax guards', flush=True)
 
 
+def check_hevc_banks(out, qfw):
+    hevc = (ROOT / 'avd-hevc.c').read_text()
+    declarations = hevc[hevc.index('#define AVD_HEVC_BANKS'):hevc.index('static void stream_refs')]
+    wire = qfw[qfw.index('#define AVDQ_MAGIC'):qfw.index('/* Arguments of dev_dbg()')]
+    code = out / 'hevc-banks.c'
+    code.write_text(PRELUDE + wire + declarations +
+                    'enum vb2_buffer_state { VB2_BUF_STATE_DONE, VB2_BUF_STATE_ERROR };\n' +
+                    function(qfw, 'avd_qfw_picture_banks') +
+                    function(hevc, 'avd_hevc_pick_bank') +
+                    function(hevc, 'avd_hevc_done') + r'''
+int main(void) {
+ struct avd_qfw q={.fifo_slots=15,.vp_pool={15,240,256,0}};
+ struct avd_dev dev={.qfw=&q};struct avd_ctx ctx={.dev=&dev};
+ struct avd_hevc_ctx hc={};ctx.priv=&hc;
+ struct avd_decoded_buffer dst[AVD_MAX_FRAMES]={};
+ for(unsigned int mode=0;mode<3;mode++) {
+  dev.queued=mode!=0;q.multi_vp=mode==2;
+  hc.nbanks=avd_qfw_picture_banks(&dev,AVD_CODEC_HEVC);
+  assert(hc.nbanks==(mode==0?1:mode==1?2:5));
+  for(unsigned int n=0;n<hc.nbanks;n++) {
+   assert(!avd_hevc_pick_bank(&ctx,&dst[n]));
+   assert(hc.b==&hc.bank[n]&&dst[n].bank==n+1&&hc.bank[n].busy);
+  }
+  assert(avd_hevc_pick_bank(&ctx,&dst[hc.nbanks])==-EBUSY);
+  /* Completion selects CAPTURE's saved bank, not the current builder. */
+  avd_hevc_done(&ctx,NULL,&dst[0].base.vb,VB2_BUF_STATE_DONE);
+  assert(!hc.bank[0].busy&&!dst[0].bank);
+  for(unsigned int n=1;n<hc.nbanks;n++)assert(hc.bank[n].busy);
+  assert(!avd_hevc_pick_bank(&ctx,&dst[0])&&hc.b==&hc.bank[0]);
+  for(unsigned int n=hc.nbanks;n>0;n--)
+   avd_hevc_done(&ctx,NULL,&dst[n-1].base.vb,VB2_BUF_STATE_ERROR);
+  for(unsigned int n=0;n<hc.nbanks;n++)assert(!hc.bank[n].busy&&!dst[n].bank);
+ }
+ puts("PASS: production HEVC pool-sized banks, old firmware/legacy fallback, exhaustion, saved-bank PP and error retirement");
+}
+''')
+    exe = out / 'hevc-banks'
+    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',
+                    '-Werror', '-Wno-unused-function', '-Wno-unused-parameter',
+                    '-fsanitize=address,undefined', '-g', str(code), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)
+
+
 def main():
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -729,6 +812,7 @@ def main():
     builder = function((ROOT / 'avd-backend-open.c').read_text(), 'avd_open_build_program')
     code = out / 'program.c'
     qfw = (ROOT / 'avd-backend-queue.c').read_text()
+    check_hevc_banks(out, qfw)
     wire = qfw[qfw.index('#define AVDQ_MAGIC'):qfw.index('/* Arguments of dev_dbg()')]
     hw = (ROOT / 'avd-hw.c').read_text()
     regs = hw[hw.index('#define AVD_V3_'):hw.index('int avd_boot(')]
@@ -751,6 +835,10 @@ def main():
         target = out / variant
         target.mkdir(exist_ok=True)
         subprocess.run([str(exe), str(target), variant], check=True)
+        target = out / ('multi-' + variant)
+        target.mkdir(exist_ok=True)
+        subprocess.run([str(exe), str(target), variant], check=True,
+                       env=dict(os.environ, AVD_MULTI_VP='1'))
     for field in ('inst', 'pipe_state', 'above_info', 'ip_above', 'lf_above', 'lf_above_info', 'mv_above_info'):
         target = out / ('zero-' + field)
         target.mkdir(exist_ok=True)

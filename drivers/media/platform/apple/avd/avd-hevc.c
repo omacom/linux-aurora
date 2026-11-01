@@ -80,7 +80,7 @@ struct avd_hevc_run {
 };
 
 /* See avd-h264.c: one bank per picture in flight on the queued transport. */
-#define AVD_HEVC_BANKS	2
+#define AVD_HEVC_BANKS	AVD_MAX_FRAMES
 
 struct avd_hevc_bank {
 	bool busy;
@@ -1129,7 +1129,7 @@ static int avd_hevc_start(struct avd_ctx *ctx)
 
 	ctx->priv = hevc_ctx;
 	/* Overlap pictures only where the firmware chains VP to PP itself. */
-	hevc_ctx->nbanks = avd_backend_is_qfw(ctx->dev) ? AVD_HEVC_BANKS : 1;
+	hevc_ctx->nbanks = avd_qfw_picture_banks(ctx->dev, AVD_CODEC_HEVC);
 	hevc_ctx->b = &hevc_ctx->bank[0];
 	for (i = 0; i < hevc_ctx->nbanks; i++) {
 		ret = avd_hevc_alloc_bufs(ctx, &hevc_ctx->bank[i]);

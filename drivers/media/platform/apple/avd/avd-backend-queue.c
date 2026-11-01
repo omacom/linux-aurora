@@ -32,6 +32,11 @@
 #define AVDQ_FEAT_SRAM_RING	BIT(0)
 #define AVDQ_FEAT_MULTI_KICK	BIT(1)
 #define AVDQ_FEAT_VP_DONE	BIT(2)
+#define AVDQ_FEAT_MULTI_VP	BIT(3)
+#define AVDQ_POOL_OFFSET	0x7f80
+#define AVDQ_POOL_MAGIC		0x41564d32 /* AVM2 */
+#define AVDQ_POOL_VERSION	1
+#define AVDQ_MAX_VPS		12
 #define AVDQ_FLAG_VP_DONE	BIT(1)
 #define AVDQ_VP_NOTIFY		0x54540000
 #define AVDQ_FLAG_SRAM		BIT(0)
@@ -64,9 +69,62 @@ struct avd_qfw {
 	u32 wp;			/* host write count, free-running */
 	u32 fifo_slots;
 	u32 codec_mask;		/* info+0x24, bit n = codec n */
+	u32 vp_pool[4];		/* firmware masks of hardware VP indices */
+	u32 next_vp[4];		/* per-codec rotation; queue_mutex owns submission */
+	bool multi_vp;
 	bool vp_done;
 	bool usable;		/* last boot found a matching ABI 2 image */
 };
+
+static bool avd_qfw_pool_valid(const u32 *pool, u32 limit, u32 codecs)
+{
+	u32 used = 0;
+	unsigned int codec;
+
+	if (pool[0] != AVDQ_POOL_MAGIC || pool[1] != AVDQ_POOL_VERSION ||
+	    !limit || limit > AVDQ_MAX_VPS || pool[7] || (pool[6] & ~codecs))
+		return false;
+	for (codec = 0; codec < 4; codec++) {
+		u32 mask = pool[2 + codec];
+
+		if (!!mask != !!(codecs & BIT(codec)) ||
+		    mask >> limit || (mask & used))
+			return false;
+		used |= mask;
+	}
+	return true;
+}
+
+static unsigned int avd_qfw_pick_vp(struct avd_qfw *q, u32 codec, u32 fallback)
+{
+	unsigned int n;
+
+	if (!q->multi_vp)
+		return fallback;
+	for (n = 0; n < AVDQ_MAX_VPS; n++) {
+		unsigned int vp = (q->next_vp[codec] + n) % AVDQ_MAX_VPS;
+
+		if (q->vp_pool[codec] & BIT(vp)) {
+			q->next_vp[codec] = (vp + 1) % AVDQ_MAX_VPS;
+			return vp;
+		}
+	}
+	return fallback;
+}
+
+static unsigned int avd_qfw_bank_limit(struct avd_qfw *q, unsigned int codec)
+{
+	unsigned int banks = 1;
+	u32 pool;
+
+	/* k4m keeps two banks with old queue firmware. */
+	if (!q->multi_vp || codec > AVD_CODEC_H264)
+		return 2;
+	/* One bank per VP plus one retained by PP. No SoC counts in the host. */
+	for (pool = q->vp_pool[codec]; pool; pool &= pool - 1)
+		banks++;
+	return min_t(unsigned int, banks, q->fifo_slots);
+}
 
 static void __iomem *avd_qfw_desc(struct avd_qfw *q, unsigned int idx)
 {
@@ -127,6 +185,11 @@ static bool avd_qfw_check(struct avd_dev *avd)
 		info[i] = readl(q->sram + AVDQ_INFO + 4 * i);
 	q->usable = false;
 	q->vp_done = false;
+	q->multi_vp = false;
+	for (i = 0; i < 4; i++) {
+		q->vp_pool[i] = 0;
+		q->next_vp[i] = 0;
+	}
 	if (info[0] != AVDQ_MAGIC)
 		return false;
 	if (info[1] != AVDQ_VERSION || info[2] != AVDQ_COUNT ||
@@ -153,6 +216,19 @@ static bool avd_qfw_check(struct avd_dev *avd)
 	q->ring_words = info[13];
 	q->fifo_slots = min_t(u32, info[10], avd->variant->fifo_slots ?: 1);
 	q->codec_mask = info[9];
+	if (info[11] & AVDQ_FEAT_MULTI_VP) {
+		u32 pool[8];
+
+		for (i = 0; i < ARRAY_SIZE(pool); i++)
+			pool[i] = readl(q->sram + AVDQ_POOL_OFFSET + 4 * i);
+		if (avd_qfw_pool_valid(pool, info[8], info[9])) {
+			for (i = 0; i < 4; i++)
+				q->vp_pool[i] = pool[2 + i];
+			q->multi_vp = true;
+		} else {
+			dev_warn_once(avd->dev, "invalid firmware VP pool, using one VP per codec\n");
+		}
+	}
 	q->wp = 0;
 	q->usable = true;
 	dev_dbg(avd->dev, "queue ABI %u: aperture %#x ring %#x/%u words FIFO slots %u codecs %#x\n",
@@ -258,6 +334,8 @@ static int avd_qfw_submit(struct avd_dev *avd, struct avd_frame *f)
 		vp = avd->variant->vp_slot_base[codec];
 	if (extra > AVDQ_MAX_PP_EXTRA)
 		return -E2BIG;
+	/* Advance only after all retry/error exits; prepared programs are VP-neutral. */
+	vp = avd_qfw_pick_vp(q, codec, vp);
 
 	mask = codec == AVD_CODEC_VP9 && avd->variant->revision == 3 ?
 		AVD_OP_EXEC_REV3_VP9_MASK : 0;
@@ -382,6 +460,11 @@ bool avd_backend_is_qfw(const struct avd_dev *avd)
 bool avd_qfw_has_vp_done(const struct avd_dev *avd)
 {
 	return avd_backend_is_qfw(avd) && avd->qfw->vp_done;
+}
+
+unsigned int avd_qfw_picture_banks(const struct avd_dev *avd, unsigned int codec)
+{
+	return avd_backend_is_qfw(avd) ? avd_qfw_bank_limit(avd->qfw, codec) : 1;
 }
 
 /*

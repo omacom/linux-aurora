@@ -59,12 +59,12 @@ struct avd_h264_run {
 };
 
 /*
- * One bank per picture in flight. With the queued transport two pictures of
- * a stream overlap (VP of one, PP of the other), so everything the hardware
- * reads or writes while decoding a picture, and the CPU copies of its slices,
- * exists once per bank. The legacy transport uses a single bank.
+ * One bank per picture in flight. The queued transport retains a bank for PP
+ * while the advertised VP pool processes later pictures. Everything the
+ * hardware reads or writes for a picture, and the CPU copies of its slices,
+ * exists once per bank. Old queue firmware keeps two; legacy uses one.
  */
-#define AVD_H264_BANKS	2
+#define AVD_H264_BANKS	AVD_MAX_FRAMES
 
 struct avd_bank {
 	bool monochrome;
@@ -727,7 +727,7 @@ static int avd_h264_start(struct avd_ctx *ctx)
 
 	ctx->priv = h264_ctx;
 	/* Overlap pictures only where the firmware chains VP to PP itself. */
-	h264_ctx->nbanks = avd_backend_is_qfw(ctx->dev) ? AVD_H264_BANKS : 1;
+	h264_ctx->nbanks = avd_qfw_picture_banks(ctx->dev, AVD_CODEC_H264);
 	h264_ctx->b = &h264_ctx->bank[0];
 
 	for (unsigned int i = 0; i < h264_ctx->nbanks; i++) {
