@@ -23,3 +23,75 @@
 &framebuffer0 {
 	power-domains = <&ps_dispext0_fe>, <&ps_dptx_phy>;
 };
+
+&smc_mbox {
+	status = "okay";
+};
+
+&smc {
+	status = "okay";
+
+	smc_reboot: reboot {
+		compatible = "apple,smc-reboot";
+		nvmem-cells = <&shutdown_flag>, <&boot_stage>,
+			      <&boot_error_count>, <&panic_count>;
+		nvmem-cell-names = "shutdown_flag", "boot_stage",
+				   "boot_error_count", "panic_count";
+	};
+
+	smc_rtc: rtc {
+		compatible = "apple,smc-rtc";
+		nvmem-cells = <&rtc_offset>;
+		nvmem-cell-names = "rtc_offset";
+	};
+};
+
+&nub_spmi {
+	status = "okay";
+
+	pmic1: pmic@e {
+		compatible = "apple,abbey-pmic", "apple,spmi-nvmem";
+		reg = <0xe SPMI_USID>;
+
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			pm_setting: pm-setting@2001 {
+				reg = <0x2001 0x1>;
+			};
+
+			rtc_offset: rtc-offset@2100 {
+				reg = <0x2100 0x6>;
+			};
+
+			fault_shadow: fault-shadow@867b {
+				reg = <0x867b 0x10>;
+			};
+
+			socd: socd@8b00 {
+				reg = <0x8b00 0x1800>;
+			};
+
+			boot_stage: boot-stage@f801 {
+				reg = <0xf801 0x1>;
+			};
+
+			boot_error_count: boot-error-count@f802,0 {
+				reg = <0xf802 0x1>;
+				bits = <0 4>;
+			};
+
+			panic_count: panic-count@f802,4 {
+				reg = <0xf802 0x1>;
+				bits = <4 4>;
+			};
+
+			shutdown_flag: shutdown-flag@f80f,3 {
+				reg = <0xf80f 0x1>;
+				bits = <3 1>;
+			};
+		};
+	};
+};
