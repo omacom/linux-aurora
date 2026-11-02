@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/apple-aic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/pinctrl/apple.h>
+#include <dt-bindings/spmi/spmi.h>
 
 / {
 	compatible = "apple,t8132", "apple,arm-platform";
@@ -459,6 +460,15 @@
 			clock-names = "uart", "clk_uart_baud0";
 			power-domains = <&ps_uart0>;
 
+			status = "disabled";
+		};
+
+		nub_spmi: spmi@388714000 {
+			compatible = "apple,t8132-spmi", "apple,t8103-spmi";
+			reg = <0x3 0x88714000 0x0 0x100>;
+			#address-cells = <2>;
+			#size-cells = <0>;
+			power-domains = <&ps_nub_spmi0>;
 			status = "disabled";
 		};
 
