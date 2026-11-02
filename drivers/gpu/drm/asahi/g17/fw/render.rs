@@ -162,8 +162,14 @@ const UTILE_CONFIG_HEIGHT_SHIFT: u32 = 14;
 const UTILE_CONFIG_SIZE_MASK: u64 = 0xf000;
 /// The partial-render phases load and store every attached depth and stencil
 /// surface.
-const ZLS_PARTIAL_DEPTH: u64 = 1 << 15 | 1 << 19;
-const ZLS_PARTIAL_STENCIL: u64 = 1 << 14 | 1 << 18;
+const ZLS_STORE_DEPTH: u64 = 1 << 19;
+const ZLS_STORE_STENCIL: u64 = 1 << 18;
+const ZLS_LOAD_DEPTH: u64 = 1 << 15;
+const ZLS_LOAD_STENCIL: u64 = 1 << 14;
+const ZLS_COMPRESS_DEPTH: u64 = 1 << 6;
+const ZLS_COMPRESS_STENCIL: u64 = 1 << 8;
+/// Bits of the main word a partial render sets for itself.
+const ZLS_PARTIAL_CLEAR: u64 = ZLS_COMPRESS_DEPTH | ZLS_COMPRESS_STENCIL | 0xf << 56;
 const STENCIL_CLEAR_BASE: u32 = 0x300;
 /// Value of the ZLS swizzle registers and descriptor field.
 const ZLS_SWIZZLE: u32 = 0x0404_0404;
@@ -443,6 +449,7 @@ struct PassWords {
     layer_mode: u64,
     tib_blocks: u64,
     partial_zls_control: u64,
+    partial_zls_reload: u64,
     aux_fb_flags: u64,
     bg_rsrc_spec: u64,
     bg_va: u64,
@@ -478,12 +485,27 @@ impl PassWords {
             tile_config |= TILE_CONFIG_PROCESS_EMPTY_TILES;
         }
 
-        let mut partial_zls_control = pass.zls_control;
+        // The partial store keeps the main word, loads included, and stores and compresses each
+        // plane it has. The reload arrays add the loads, which a clearing pass doesn't have.
+        let mut partial_zls_control = pass.zls_control & !ZLS_PARTIAL_CLEAR;
         if pass.depth.va != 0 {
-            partial_zls_control |= ZLS_PARTIAL_DEPTH;
+            partial_zls_control |= ZLS_STORE_DEPTH;
+        }
+        if pass.depth.compression_va != 0 {
+            partial_zls_control |= ZLS_COMPRESS_DEPTH;
         }
         if pass.stencil.va != 0 {
-            partial_zls_control |= ZLS_PARTIAL_STENCIL;
+            partial_zls_control |= ZLS_STORE_STENCIL;
+        }
+        if pass.stencil.compression_va != 0 {
+            partial_zls_control |= ZLS_COMPRESS_STENCIL;
+        }
+        let mut partial_zls_reload = partial_zls_control;
+        if pass.depth.va != 0 {
+            partial_zls_reload |= ZLS_LOAD_DEPTH;
+        }
+        if pass.stencil.va != 0 {
+            partial_zls_reload |= ZLS_LOAD_STENCIL;
         }
 
         let mut aux_fb_flags = AUX_FB_FLAGS_BASE;
@@ -511,6 +533,7 @@ impl PassWords {
                 * samples)
                 .div_ceil(TIB_BLOCK_SIZE),
             partial_zls_control,
+            partial_zls_reload,
             aux_fb_flags,
             bg_rsrc_spec: rsrc_spec(pass.bg.rsrc_spec),
             bg_va: usc(pass.bg.offset)?,
@@ -937,7 +960,7 @@ fn partial_resume_registers(
         RegisterWrite::new(0x153c1, p.depth.compression_va),
         RegisterWrite::new(0x15339, p.stencil.va),
         RegisterWrite::new(0x153d1, p.stencil.compression_va),
-        RegisterWrite::new(0x15319, w.partial_zls_control),
+        RegisterWrite::new(0x15319, w.partial_zls_reload),
         RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
     ]
 }
@@ -955,7 +978,7 @@ fn partial_load_registers(
         RegisterWrite::new(0x153c1, p.depth.compression_va),
         RegisterWrite::new(0x15339, p.stencil.va),
         RegisterWrite::new(0x153d1, p.stencil.compression_va),
-        RegisterWrite::new(0x15319, w.partial_zls_control),
+        RegisterWrite::new(0x15319, w.partial_zls_reload),
         RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
     ]
 }
