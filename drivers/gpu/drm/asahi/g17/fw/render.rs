@@ -639,6 +639,13 @@ fn ta_registers(
 /// The 25G83 tiling array: the A18 Pro's without 0x1748 and 0x1740 (and 0x17d9 unless the stage
 /// has SCS), with the tiler parameter sub-buffer registers and 0x10131 = 0x88, in the order the
 /// M4 Pro has run with. Returns the array and its used entry count.
+/// Tiler segment control of a two-cluster pass, what macOS writes.
+const VDM_SEGMENT_CONTROL: u64 = 0x20_0440;
+const VDM_SEGMENT_INDEX: u64 = 4;
+/// Pages the tiler keeps out of a partial render's segments: without them the pages a pass
+/// returns shrink to none and the tiler can't advance. Fifteen blocks, macOS's minimum heap.
+const MIN_FREE_TVB_PAGES: u64 = 0x3c;
+
 fn ta_registers_25g83(
     args: &RenderArgs<'_>,
     g: &Geometry,
@@ -686,15 +693,15 @@ fn ta_registers_25g83(
     push(find(0x1c880, 0)?);
     push(RegisterWrite::new(0x1c948, gtp(4)?));
     push(RegisterWrite::new(0x1c888, gtp(5)?));
-    push(RegisterWrite::new(0x1c890, 0));
-    push(RegisterWrite::new(0x1c918, 0));
+    push(RegisterWrite::new(0x1c890, VDM_SEGMENT_CONTROL));
+    push(RegisterWrite::new(0x1c918, VDM_SEGMENT_INDEX));
     push(find(0x1c079, 0)?);
     push(find(0x1c9d8, 0)?);
     push(RegisterWrite::new(0x1c089, gtp2));
     push(RegisterWrite::new(0x1c9e0, gtp2));
     push(RegisterWrite::new(0x16c41, gtp6));
     push(RegisterWrite::new(0x1ca40, gtp6));
-    push(RegisterWrite::new(0x1c9a8, 0));
+    push(RegisterWrite::new(0x1c9a8, MIN_FREE_TVB_PAGES));
     push(RegisterWrite::new(0x1c920, gtp(7)?));
     for reg in [0x10151, 0x1c199, 0x1c1a1, 0x1c1a9, 0x1c1b1, 0x1c1b9, 0x1c8f8, 0x1c0b1, 0x1c850] {
         push(find(reg, 0)?);
