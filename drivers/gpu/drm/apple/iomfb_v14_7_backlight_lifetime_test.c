@@ -84,7 +84,7 @@ static int v14_bl_actor_run(void *data)
 	current->kunit_test = c->test;
 	complete(&a->entered);
 	if (a->op < 2)
-		a->shown = dcp_v14_present(c->f.v14, &c->fb[a->op], 64, 64, 0, NULL);
+		a->shown = dcp_v14_present(c->f.v14, &c->fb[a->op], 64, 64, 0, NULL, NULL);
 	else if (a->op == 2)
 		iomfb_v14_7_backlight_suspend(c->f.dcp);
 	else
@@ -243,7 +243,7 @@ static void v14_bl_running_work_suspend(struct kunit *test)
 	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
 	struct v14_bl_actor *stop;
 
-	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL, NULL));
 	atomic_set(&c->submits, 0);
 	c->block_first = true;
 	v14_bl_request(test, c->f.dcp, 200);
@@ -264,7 +264,7 @@ static void v14_bl_running_work_suspend(struct kunit *test)
 	dcp_v14_backlight_work(&c->f.v14->backlight_work.work);
 	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 1);
 	iomfb_v14_7_backlight_resume(c->f.dcp);
-	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL, NULL));
 	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 2);
 	KUNIT_EXPECT_TRUE(test, c->nits_present[1]);
 	KUNIT_EXPECT_EQ(test, c->nits[1], dcp_v14_nits_binary64(250));
@@ -278,7 +278,7 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, pdev);
 	platform_set_drvdata(pdev, c->f.dcp);
-	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL, NULL));
 	KUNIT_EXPECT_FALSE(test, c->nits_present[0]);
 	KUNIT_EXPECT_FALSE(test, dcp_backlight_level_known(c->f.dcp));
 	dcp_poweroff(pdev);
@@ -288,7 +288,7 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 	/* Even the advertised default must be an explicit first request. */
 	dcp_poweron(pdev);
 	v14_bl_request(test, c->f.dcp, DCP_V14_NITS_DEFAULT);
-	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL, NULL));
 	KUNIT_EXPECT_TRUE(test, c->nits_present[2]);
 	KUNIT_EXPECT_TRUE(test, dcp_backlight_level_known(c->f.dcp));
 	dcp_poweroff(pdev);
@@ -299,7 +299,7 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 	dcp_poweron(pdev);
 	KUNIT_EXPECT_TRUE(test, dcp_backlight_pending(c->f.dcp));
 	KUNIT_EXPECT_FALSE(test, c->f.dcp->backlight.state.dpms_off);
-	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL, NULL));
 	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 5);
 	KUNIT_EXPECT_TRUE(test, c->nits_present[4]);
 	KUNIT_EXPECT_EQ(test, c->nits[4], dcp_v14_nits_binary64(DCP_V14_NITS_DEFAULT));
@@ -310,11 +310,13 @@ static void v14_bl_dpms_dispatch(struct kunit *test)
 static void v14_bl_failed_submit_unknown(struct kunit *test)
 {
 	struct v14_bl_rpc *c = v14_bl_rpc_setup(test);
+	bool cursor_shown;
 
 	c->refuse = true;
 	v14_bl_request(test, c->f.dcp, 240);
 	mutex_lock(&c->f.v14->lock);
-	KUNIT_EXPECT_EQ(test, dcp_v14_swap_locked(c->f.v14, NULL, 0, 0, 0, 0, NULL), -EIO);
+	KUNIT_EXPECT_EQ(test, dcp_v14_swap_locked(c->f.v14, NULL, 0, 0, 0, 0, NULL, NULL,
+						  &cursor_shown), -EIO);
 	mutex_unlock(&c->f.v14->lock);
 	KUNIT_EXPECT_FALSE(test, dcp_backlight_level_known(c->f.dcp));
 	KUNIT_EXPECT_EQ(test, c->f.v14->nits_presents, 0ULL);
@@ -396,7 +398,7 @@ static void v14_bl_fbdev_unknown_level(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, dcp_backlight_pending(c->f.dcp));
 	KUNIT_EXPECT_EQ(test, atomic_read(&c->submits), 0);
 	v14_bl_request(test, c->f.dcp, 250);
-	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL));
+	KUNIT_ASSERT_TRUE(test, dcp_v14_present(c->f.v14, &c->fb[0], 64, 64, 0, NULL, NULL));
 	KUNIT_EXPECT_TRUE(test, bd->ops->controls_device(bd, NULL));
 	KUNIT_EXPECT_TRUE(test, bd->ops->controls_device(bd, c->f.dcp->dev));
 	KUNIT_EXPECT_FALSE(test, bd->ops->controls_device(bd, &unrelated));

@@ -12,6 +12,7 @@ struct device;
 struct drm_atomic_commit;
 struct drm_crtc;
 struct drm_crtc_state;
+struct drm_plane;
 struct device_node;
 
 /*
@@ -82,6 +83,9 @@ int iomfb_v14_7_start(struct apple_dcp *dcp);
 
 int iomfb_v14_7_atomic_check(struct apple_dcp *dcp, struct drm_crtc *crtc,
 			     struct drm_atomic_commit *state);
+/* The panel shows a cursor plane on its own IOMFB layer (T6030, hw_cursor). */
+bool iomfb_v14_7_has_cursor(struct apple_dcp *dcp);
+int iomfb_v14_7_cursor_atomic_check(struct drm_plane *plane, struct drm_atomic_commit *state);
 int iomfb_v14_7_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state);
 void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 		       struct drm_atomic_commit *state);

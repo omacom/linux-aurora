@@ -45,6 +45,8 @@
 #include "apple_boot_display.h"
 #include "apple_resume.h"
 #include "dcp.h"
+#include "iomfb_v14_7.h"
+#include "iomfb_v14_7_swap.h"
 #include "plane.h"
 
 #define DRIVER_NAME     "apple"
@@ -630,6 +632,7 @@ static int apple_probe_per_dcp(struct device *dev,
 	struct apple_crtc *crtc;
 	struct apple_encoder *enc;
 	struct drm_plane *planes[DCP_MAX_PLANES];
+	struct drm_plane *cursor = NULL;
 	unsigned long *iomfb_surfaces = dcp_get_iomfb_surfaces(dcp);
 	unsigned long top_surf = find_last_bit(iomfb_surfaces, DCP_MAX_PLANES);
 	int ret;
@@ -662,6 +665,19 @@ static int apple_probe_per_dcp(struct device *dev,
 		if (ret)
 			return ret;
 		zpos = 1;
+		/*
+		 * The T6030 panel shows the cursor on the IOMFB layer above
+		 * the primary's (iomfb_v14_7.c, appledrm.hw_cursor).
+		 */
+		if (iomfb_v14_7_has_cursor(dcp_data)) {
+			cursor = apple_cursor_init_v14_7(drm, 1U << num,
+							 DCP_V14_CURSOR_LAYER);
+			if (IS_ERR(cursor))
+				return PTR_ERR(cursor);
+			ret = drm_plane_create_zpos_immutable_property(cursor, 1);
+			if (ret)
+				return ret;
+		}
 	}
 
 	/*
@@ -704,7 +720,7 @@ static int apple_probe_per_dcp(struct device *dev,
 	crtc = kzalloc(sizeof(*crtc), GFP_KERNEL);
 	if (!crtc)
 		return -ENOMEM;
-	ret = drm_crtc_init_with_planes(drm, &crtc->base, planes[0], NULL,
+	ret = drm_crtc_init_with_planes(drm, &crtc->base, planes[0], cursor,
 					&apple_crtc_funcs, NULL);
 	if (ret)
 		return ret;
