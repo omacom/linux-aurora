@@ -56,7 +56,9 @@ properties:
               - apple,t6000-pcie
           - const: apple,pcie
       - items:
-          - const: apple,t8122-pcie
+          - enum:
+              - apple,t8122-pcie
+              - apple,t8132-pcie
           - const: apple,t6020-pcie
       - const: apple,t6020-pcie
       - const: apple,t8140-pcie

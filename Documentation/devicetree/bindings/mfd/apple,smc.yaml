@@ -20,6 +20,7 @@ properties:
           - enum:
               - apple,t6020-smc
               - apple,t8122-smc
+              - apple,t8132-smc
               - apple,t8140-smc
               - apple,t8142-smc
           - const: apple,t8103-smc
