@@ -3,7 +3,9 @@
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
+#include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
+#include <linux/iosys-map.h>
 #include <linux/iommu.h>
 #include <linux/ktime.h>
 #include <linux/mfd/syscon.h>
@@ -24,6 +26,7 @@
 #include <linux/workqueue.h>
 
 #include <drm/drm_atomic.h>
+#include <drm/drm_atomic_helper.h>
 #include <drm/drm_color_mgmt.h>
 #include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
@@ -95,6 +98,21 @@ static int dcp_v14_pmp_wait_ready(struct device_node *entry,
 /* IOMFB layer of the primary plane. */
 #define DCP_V14_LAYER		0
 #define DCP_V14_BLACK		0xff000000
+/* The largest cursor framebuffer the cursor plane takes. */
+#define DCP_V14_CURSOR_MAX	256
+
+/*
+ * The T6030 panel's cursor plane: the cursor framebuffer is shown on its own
+ * IOMFB layer above the primary, so a moving pointer costs a swap but no
+ * redraw of the frame. Read when the planes are created; turning it off
+ * later makes the compositor draw the pointer itself.
+ */
+static bool hw_cursor = true;
+module_param(hw_cursor, bool, 0644);
+MODULE_PARM_DESC(hw_cursor,
+		 "T6030 internal panel: show the DRM cursor plane on its own IOMFB layer (default: on)");
+
+MODULE_IMPORT_NS("DMA_BUF");
 
 static const struct dcp_v14_board dcp_v14_board_t6030 = {
 	.name = "T6030",
@@ -220,6 +238,31 @@ struct dcp_v14_buffer {
 	bool piodma_mapped;
 };
 
+/*
+ * A cursor on its layer: the @width x @height rectangle at @src_x,@src_y of
+ * @fb (a @fb_width x @fb_height premultiplied ARGB8888 surface at @iova,
+ * @stride bytes per row), shown unscaled at @dst_x,@dst_y on the panel.
+ */
+struct dcp_v14_cursor {
+	struct drm_framebuffer *fb;
+	u64 iova;
+	u32 stride, fb_width, fb_height;
+	u32 src_x, src_y, width, height;
+	u32 dst_x, dst_y;
+	/*
+	 * Padded: less than DCP_V14_LAYER_MIN of @fb is on the panel, so the
+	 * layer shows cursor_shadow[@shadow] instead: @fb copied to @fb_x,@fb_y
+	 * of a transparent @fb_width x @fb_height surface (@stride, @iova).
+	 */
+	bool padded;
+	s32 fb_x, fb_y;
+	unsigned int shadow;
+};
+
+/* Rows of a shadow surface: wide enough for the largest cursor. */
+#define DCP_V14_SHADOW_STRIDE	(DCP_V14_CURSOR_MAX * 4)
+#define DCP_V14_SHADOW_SIZE	(DCP_V14_SHADOW_STRIDE * DCP_V14_CURSOR_MAX)
+
 struct apple_dcp_v14 {
 	struct device *dev;
 	/* The internal panel's board; NULL on an external processor. */
@@ -298,6 +341,26 @@ struct apple_dcp_v14 {
 	struct drm_framebuffer *active_fb;
 	u64 swaps;
 	u64 swap_ns_max;
+
+	/*
+	 * The cursor layer shown with active_fb; shown_cursor.fb is pinned
+	 * until a swap without it completes. cursor_refused: the firmware
+	 * refused a swap with the cursor layer, which stays off until reboot.
+	 */
+	struct dcp_v14_cursor shown_cursor;
+	bool cursor_refused;
+	u64 cursor_swaps, cursor_refusals;
+	/*
+	 * Transparent surfaces the cursor is copied into when less than
+	 * DCP_V14_LAYER_MIN of it is on the panel; the one shown is never
+	 * written. Allocated on first use for the DRM device's DMA space.
+	 */
+	struct dcp_v14_shadow {
+		void *cpu;
+		dma_addr_t iova;
+	} cursor_shadow[2];
+	struct device *cursor_shadow_dev;
+	u64 cursor_shadow_copies;
 
 	/* Immutable probe admission: only the J514S/J516S/J516C internal panel. */
 	bool panel_nits;
@@ -2523,6 +2586,15 @@ static int dcp_v14_status_show(struct seq_file *m, void *unused)
 		   v14->started, v14->failed, v14->swaps, v14->swap_ns_max / NSEC_PER_USEC);
 	seq_printf(m, "active_fb %u\nimported %d\n", fb ? fb->base.id : 0,
 		   fb && fb->obj[0]->import_attach);
+	fb = v14->shown_cursor.fb;
+	seq_printf(m, "cursor_fb %u\ncursor %ux%u+%u+%u of %ux%u at %u,%u\n",
+		   fb ? fb->base.id : 0, v14->shown_cursor.width, v14->shown_cursor.height,
+		   v14->shown_cursor.src_x, v14->shown_cursor.src_y, v14->shown_cursor.fb_width,
+		   v14->shown_cursor.fb_height, v14->shown_cursor.dst_x, v14->shown_cursor.dst_y);
+	seq_printf(m, "cursor_padded %d shadow %u copies %llu\n", v14->shown_cursor.padded,
+		   v14->shown_cursor.shadow, v14->cursor_shadow_copies);
+	seq_printf(m, "cursor_swaps %llu\ncursor_refused %d refusals %llu\n",
+		   v14->cursor_swaps, v14->cursor_refused, v14->cursor_refusals);
 	seq_printf(m, "panel %ux%u\nboot_fb %ux%u stride %u\nclock %llu\n",
 		   v14->panel_width, v14->panel_height, v14->fb_width, v14->fb_height,
 		   v14->stride, v14->clock_rate);
@@ -2800,56 +2872,126 @@ static void dcp_v14_swap_nits_done(struct apple_dcp_v14 *v14,
 	/* The internal swap failure is final: swap_locked latches failed. */
 }
 
+/* A cursor rectangle that lies within its surface and on the panel. */
+static bool dcp_v14_cursor_fits(const struct apple_dcp_v14 *v14,
+				const struct dcp_v14_cursor *c)
+{
+	/*
+	 * IOMFB widens a narrower source to 32 and then refuses the scaling
+	 * ("verify_scaling ... illegal scaling requested"), without answering
+	 * the swap: the session is lost. Never send one.
+	 */
+	return c->iova && c->width >= DCP_V14_LAYER_MIN && c->height >= DCP_V14_LAYER_MIN &&
+	       c->fb_width <= DCP_V14_CURSOR_MAX && c->fb_height <= DCP_V14_CURSOR_MAX &&
+	       c->width <= c->fb_width && c->height <= c->fb_height &&
+	       c->stride >= c->fb_width * 4 && !(c->stride & 63) &&
+	       c->src_x <= c->fb_width - c->width && c->src_y <= c->fb_height - c->height &&
+	       c->width <= v14->panel_width && c->dst_x <= v14->panel_width - c->width &&
+	       c->height <= v14->panel_height && c->dst_y <= v14->panel_height - c->height;
+}
+
 /*
- * Swap start, then the swap; returns once the firmware completed that swap.
- * @ctm_state, if set, carries the colour matrix to send first.
+ * One swap start and swap. *@refused: the firmware took the swap request and
+ * answered it with a failure status, which leaves the previous swap shown.
  */
-static int dcp_v14_swap_locked(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
-			       u32 width, u32 height, u32 dst_y,
-			       const struct drm_crtc_state *ctm_state)
+static int dcp_v14_swap_once(struct apple_dcp_v14 *v14, u8 *swap, const u8 *surface, u64 iova,
+			     u32 width, u32 height, u32 dst_y,
+			     const struct dcp_v14_cursor *cursor, bool *refused)
 {
 	struct dcp_v14_swap_admission admission = { .v14 = v14 };
 	__le32 start[4] = {}, started[2] = {}, result[3];
 	struct dcp_backlight_present present;
 	bool nits;
-	u8 *swap;
 	u32 id;
 	int ret;
 
-	lockdep_assert_held(&v14->lock);
-	if (surface && (!iova || !width || width > v14->panel_width || !height ||
-			dst_y > v14->panel_height || height > v14->panel_height - dst_y))
-		return -EINVAL;
-	swap = kmalloc(DCP_V14_SWAP_SIZE, GFP_KERNEL);
-	if (!swap)
-		return -ENOMEM;
-
+	*refused = false;
 	admission.generation = v14->description_generation;
-	/*
-	 * A colour matrix the firmware refuses costs night light, not the
-	 * frame: present anyway, and stop sending it (ctm_disabled).
-	 */
-	dcp_v14_ctm_locked(v14, ctm_state);
 	ret = dcp_v14_call_guarded(v14, A(406), start, sizeof(start), started, sizeof(started),
-				  0, dcp_v14_swap_admit, &admission);
+				   0, dcp_v14_swap_admit, &admission);
 	if (!ret && le32_to_cpu(started[1]))
 		ret = -EIO;
 	id = le32_to_cpu(started[0]);
 	if (!ret && !id)
 		ret = -EPROTO;
-	if (!ret) {
-		dcp_v14_encode_swap(swap, id, DCP_V14_BLACK, surface, iova, width, height,
-				    dst_y, DCP_V14_LAYER);
-		if (dcp_v14_board_stamps_swaps(v14->board, v14->external))
-			dcp_v14_swap_timestamps(swap);
-		nits = dcp_v14_swap_nits(v14, swap, &present);
-		ret = dcp_v14_call_guarded(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
+	if (ret)
+		return ret;
+
+	dcp_v14_encode_swap(swap, id, DCP_V14_BLACK, surface, iova, width, height,
+			    dst_y, DCP_V14_LAYER);
+	if (cursor)
+		dcp_v14_encode_layer(swap, DCP_V14_CURSOR_LAYER, DCP_V14_CURSOR_SURF_ID,
+				     cursor->iova, cursor->stride, cursor->fb_width,
+				     cursor->fb_height, cursor->src_x, cursor->src_y,
+				     cursor->width, cursor->height, cursor->dst_x, cursor->dst_y);
+	if (dcp_v14_board_stamps_swaps(v14->board, v14->external))
+		dcp_v14_swap_timestamps(swap);
+	nits = dcp_v14_swap_nits(v14, swap, &present);
+	ret = dcp_v14_call_guarded(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
 				   id, dcp_v14_swap_admit, &admission);
-		/* The swap status sits at byte 5 of the reply. */
-		if (!ret && get_unaligned_le32((u8 *)result + 5))
-			ret = -EIO;
-		if (nits)
-			dcp_v14_swap_nits_done(v14, &present, !ret);
+	/* The swap status sits at byte 5 of the reply. */
+	if (!ret && get_unaligned_le32((u8 *)result + 5)) {
+		*refused = true;
+		ret = -EIO;
+	}
+	if (nits)
+		dcp_v14_swap_nits_done(v14, &present, !ret);
+	return ret;
+}
+
+/*
+ * Swap start, then the swap; returns once the firmware completed that swap.
+ * @ctm_state, if set, carries the colour matrix to send first. @cursor, if
+ * set, is shown on its layer above @surface; *@cursor_shown says whether it
+ * was. A swap refused with the cursor layer turns the cursor layer off and
+ * is sent again without it.
+ */
+static int dcp_v14_swap_locked(struct apple_dcp_v14 *v14, const u8 *surface, u64 iova,
+			       u32 width, u32 height, u32 dst_y,
+			       const struct drm_crtc_state *ctm_state,
+			       const struct dcp_v14_cursor *cursor, bool *cursor_shown)
+{
+	bool refused;
+	u8 *swap;
+	int ret;
+
+	lockdep_assert_held(&v14->lock);
+	*cursor_shown = false;
+	if (surface && (!iova || !width || width > v14->panel_width || !height ||
+			dst_y > v14->panel_height || height > v14->panel_height - dst_y))
+		return -EINVAL;
+	if (!surface || v14->cursor_refused || (cursor && !dcp_v14_cursor_fits(v14, cursor)))
+		cursor = NULL;
+	swap = kmalloc(DCP_V14_SWAP_SIZE, GFP_KERNEL);
+	if (!swap)
+		return -ENOMEM;
+
+	/*
+	 * A colour matrix the firmware refuses costs night light, not the
+	 * frame: present anyway, and stop sending it (ctm_disabled).
+	 */
+	dcp_v14_ctm_locked(v14, ctm_state);
+	ret = dcp_v14_swap_once(v14, swap, surface, iova, width, height, dst_y, cursor, &refused);
+	if (ret && refused && cursor) {
+		/*
+		 * The cursor layer is what this swap adds to the ones the
+		 * firmware takes: show the frame without it, and let the
+		 * compositor draw the pointer from now on.
+		 */
+		WRITE_ONCE(v14->cursor_refused, true);
+		v14->cursor_refusals++;
+		dev_err(v14->dev,
+			"swap with the cursor layer refused (%ux%u+%u+%u of %ux%u, stride %u, at %u,%u); hardware cursor off\n",
+			cursor->width, cursor->height, cursor->src_x, cursor->src_y,
+			cursor->fb_width, cursor->fb_height, cursor->stride,
+			cursor->dst_x, cursor->dst_y);
+		cursor = NULL;
+		ret = dcp_v14_swap_once(v14, swap, surface, iova, width, height, dst_y, NULL,
+					&refused);
+	}
+	if (!ret && cursor) {
+		*cursor_shown = true;
+		v14->cursor_swaps++;
 	}
 	/*
 	 * An external display can go away under a swap: the firmware then
@@ -2887,36 +3029,183 @@ static struct drm_framebuffer *dcp_v14_publish_surface(struct apple_dcp_v14 *v14
 }
 
 /*
+ * The shadow surfaces, in the DMA space of the DRM device that scans out.
+ * Like the session's other scanout memory they are kept until reboot: the
+ * firmware may still show one after KMS goes away.
+ */
+static int dcp_v14_shadow_alloc(struct apple_dcp_v14 *v14)
+{
+	struct apple_dcp *dcp = READ_ONCE(v14->dcp);
+	struct device *dev;
+	unsigned int i;
+
+	lockdep_assert_held(&v14->lock);
+	if (v14->cursor_shadow_dev)
+		return 0;
+	if (!dcp || !dcp->crtc)
+		return -ENODEV;
+	dev = dcp->crtc->base.dev->dev;
+	for (i = 0; i < ARRAY_SIZE(v14->cursor_shadow); i++) {
+		v14->cursor_shadow[i].cpu = dma_alloc_coherent(dev, DCP_V14_SHADOW_SIZE,
+							       &v14->cursor_shadow[i].iova,
+							       GFP_KERNEL);
+		if (!v14->cursor_shadow[i].cpu) {
+			while (i--)
+				dma_free_coherent(dev, DCP_V14_SHADOW_SIZE,
+						  v14->cursor_shadow[i].cpu,
+						  v14->cursor_shadow[i].iova);
+			memset(v14->cursor_shadow, 0, sizeof(v14->cursor_shadow));
+			return -ENOMEM;
+		}
+	}
+	v14->cursor_shadow_dev = dev;
+	return 0;
+}
+
+/*
+ * Copies a padded cursor's framebuffer into the shadow surface not shown now,
+ * transparent around it, and points the cursor at that surface.
+ */
+static int dcp_v14_cursor_pad(struct apple_dcp_v14 *v14, struct dcp_v14_cursor *c)
+{
+	struct drm_framebuffer *fb = c->fb;
+	struct drm_gem_dma_object *obj = drm_fb_dma_get_gem_obj(fb, 0);
+	struct dma_buf *dmabuf = NULL;
+	struct iosys_map map;
+	s32 x0, x1, fy;
+	unsigned int idx;
+	u32 row;
+	u8 *dst;
+	int ret;
+
+	lockdep_assert_held(&v14->lock);
+	if (!obj || c->width > DCP_V14_CURSOR_MAX || c->height > DCP_V14_CURSOR_MAX)
+		return -EINVAL;
+	ret = dcp_v14_shadow_alloc(v14);
+	if (ret)
+		return ret;
+	idx = v14->shown_cursor.padded && v14->shown_cursor.shadow == 0 ? 1 : 0;
+	dst = v14->cursor_shadow[idx].cpu;
+
+	if (obj->base.import_attach) {
+		dmabuf = obj->base.import_attach->dmabuf;
+		ret = dma_buf_begin_cpu_access(dmabuf, DMA_FROM_DEVICE);
+		if (ret)
+			return ret;
+		ret = dma_buf_vmap_unlocked(dmabuf, &map);
+		if (ret) {
+			dma_buf_end_cpu_access(dmabuf, DMA_FROM_DEVICE);
+			return ret;
+		}
+	} else if (obj->vaddr) {
+		iosys_map_set_vaddr(&map, obj->vaddr);
+	} else {
+		return -EINVAL;
+	}
+
+	/* The shadow columns the framebuffer covers. */
+	x0 = max(0, c->fb_x);
+	x1 = min_t(s32, c->width, c->fb_x + (s32)fb->width);
+	for (row = 0; row < c->height; row++) {
+		u8 *line = dst + row * DCP_V14_SHADOW_STRIDE;
+
+		memset(line, 0, c->width * 4);
+		fy = (s32)row - c->fb_y;
+		if (fy < 0 || fy >= (s32)fb->height || x0 >= x1)
+			continue;
+		iosys_map_memcpy_from(line + x0 * 4, &map,
+				      fb->offsets[0] + fy * fb->pitches[0] + (x0 - c->fb_x) * 4,
+				      (x1 - x0) * 4);
+	}
+
+	if (dmabuf) {
+		dma_buf_vunmap_unlocked(dmabuf, &map);
+		dma_buf_end_cpu_access(dmabuf, DMA_FROM_DEVICE);
+	}
+	c->iova = v14->cursor_shadow[idx].iova;
+	c->shadow = idx;
+	v14->cursor_shadow_copies++;
+	return 0;
+}
+
+/* Framebuffers a present let go of, put once the RPC lock is dropped. */
+struct dcp_v14_retired {
+	struct drm_framebuffer *fb[3];
+};
+
+static void dcp_v14_retire(struct dcp_v14_retired *retired, struct drm_framebuffer *fb)
+{
+	unsigned int i;
+
+	if (!fb)
+		return;
+	for (i = 0; i < ARRAY_SIZE(retired->fb); i++) {
+		if (!retired->fb[i]) {
+			retired->fb[i] = fb;
+			return;
+		}
+	}
+	/* Three slots cover every present: never reached. */
+	WARN_ON_ONCE(1);
+}
+
+static void dcp_v14_put_retired(struct dcp_v14_retired *retired)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(retired->fb); i++)
+		if (retired->fb[i])
+			drm_framebuffer_put(retired->fb[i]);
+}
+
+/*
  * Shows the top-left @width x @height of @fb (or only the black background),
- * after the colour matrix of @ctm_state if that is set,
- * and keeps @fb until the next swap.
+ * after the colour matrix of @ctm_state if that is set, with @cursor on its
+ * layer above it if that is set, and keeps @fb and the cursor's framebuffer
+ * until the next swap.
  */
 static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebuffer *fb,
 				   u32 width, u32 height, u32 dst_y,
 				   const struct drm_crtc_state *ctm_state,
-				   struct drm_framebuffer **retired)
+				   const struct dcp_v14_cursor *cursor,
+				   struct dcp_v14_retired *retired)
 {
 	u8 surface[DCP_V14_SURFACE_SIZE];
+	struct dcp_v14_cursor padded;
 	struct drm_framebuffer *old;
 	u64 iova = 0, start, elapsed, swaps;
+	bool cursor_shown;
 	int ret;
 
 	lockdep_assert_held(&v14->lock);
 	if (READ_ONCE(v14->failed))
 		return false;
+	if (!fb)
+		cursor = NULL;
+	if (cursor && cursor->padded) {
+		padded = *cursor;
+		ret = dcp_v14_cursor_pad(v14, &padded);
+		if (ret)
+			dev_warn_ratelimited(v14->dev, "cursor copy failed: %d\n", ret);
+		cursor = ret ? NULL : &padded;
+	}
 	if (fb) {
 		drm_framebuffer_get(fb);
 		dcp_v14_encode_surface(surface, fb->pitches[0], fb->width, fb->height,
 				       fb->format->format == DRM_FORMAT_XRGB8888);
 		iova = drm_fb_dma_get_gem_obj(fb, 0)->dma_addr;
 	}
+	if (cursor)
+		drm_framebuffer_get(cursor->fb);
 	start = ktime_get_ns();
 	ret = dcp_v14_swap_locked(v14, fb ? surface : NULL, iova, fb ? width : 0,
-				  fb ? height : 0, dst_y, ctm_state);
+				  fb ? height : 0, dst_y, ctm_state, cursor, &cursor_shown);
 	elapsed = ktime_get_ns() - start;
 	if (ret && v14->external && !READ_ONCE(v14->failed)) {
-		/* Refused before it was taken: the old framebuffer stays on screen. */
-		*retired = fb;
+		/* Refused before it was taken: the old framebuffers stay on screen. */
+		dcp_v14_retire(retired, fb);
+		if (cursor)
+			dcp_v14_retire(retired, cursor->fb);
 		WRITE_ONCE(v14->mode_swaps, 0);
 		dev_warn_ratelimited(v14->dev, "display refused a swap: %d\n", ret);
 		return false;
@@ -2927,11 +3216,18 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 		return false;
 	}
 	old = dcp_v14_publish_surface(v14, fb, surface, iova, width, height, dst_y);
+	dcp_v14_retire(retired, old);
+	/* The cursor shown before this swap, and one this swap did not show. */
+	dcp_v14_retire(retired, v14->shown_cursor.fb);
+	v14->shown_cursor = (struct dcp_v14_cursor){};
+	if (cursor && cursor_shown)
+		v14->shown_cursor = *cursor;
+	else if (cursor)
+		dcp_v14_retire(retired, cursor->fb);
 	swaps = ++v14->swaps;
 	if (fb)
 		v14->mode_swaps++;
 	v14->swap_ns_max = max(v14->swap_ns_max, elapsed);
-	*retired = old;
 	if (swaps <= 3)
 		dev_info(v14->dev, "swap %llu complete: surface %d, imported %d, %llu us\n",
 			 swaps, !!fb, fb && fb->obj[0]->import_attach, elapsed / NSEC_PER_USEC);
@@ -2940,16 +3236,17 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 
 static bool dcp_v14_present(struct apple_dcp_v14 *v14, struct drm_framebuffer *fb,
 			    u32 width, u32 height, u32 dst_y,
-			    const struct drm_crtc_state *ctm_state)
+			    const struct drm_crtc_state *ctm_state,
+			    const struct dcp_v14_cursor *cursor)
 {
-	struct drm_framebuffer *retired = NULL;
+	struct dcp_v14_retired retired = {};
 	bool shown;
 
 	mutex_lock(&v14->lock);
-	shown = dcp_v14_present_locked(v14, fb, width, height, dst_y, ctm_state, &retired);
+	shown = dcp_v14_present_locked(v14, fb, width, height, dst_y, ctm_state, cursor,
+				       &retired);
 	mutex_unlock(&v14->lock);
-	if (retired)
-		drm_framebuffer_put(retired);
+	dcp_v14_put_retired(&retired);
 	return shown;
 }
 
@@ -2960,6 +3257,7 @@ static void dcp_v14_backlight_work(struct work_struct *work)
 	struct dcp_v14_bl_facts facts;
 	struct drm_framebuffer *fb;
 	struct apple_dcp *dcp;
+	bool cursor_shown;
 	int ret;
 
 	guard(mutex)(&v14->lock);
@@ -2983,8 +3281,14 @@ static void dcp_v14_backlight_work(struct work_struct *work)
 	};
 	if (dcp_v14_bl_plan(&facts) != DCP_V14_BL_REPRESENT)
 		return;
+	/*
+	 * The frame shown again with its cursor. A cursor refused here stays
+	 * pinned, unshown, until the next present lets it go.
+	 */
 	ret = dcp_v14_swap_locked(v14, v14->shown_surface, v14->shown_iova,
-				  v14->shown_width, v14->shown_height, v14->shown_dst_y, NULL);
+				  v14->shown_width, v14->shown_height, v14->shown_dst_y, NULL,
+				  v14->shown_cursor.fb ? &v14->shown_cursor : NULL,
+				  &cursor_shown);
 	if (!ret)
 		v14->brightness_presents++;
 	else if (ret != -EAGAIN)
@@ -3000,16 +3304,15 @@ static bool dcp_v14_bl_dpms_applies(struct apple_dcp_v14 *v14, struct apple_dcp 
 
 static void dcp_v14_blank(struct apple_dcp_v14 *v14, struct apple_dcp *dcp)
 {
-	struct drm_framebuffer *retired = NULL;
+	struct dcp_v14_retired retired = {};
 	bool shown;
 
 	mutex_lock(&v14->lock);
 	if (dcp_v14_bl_dpms_applies(v14, dcp))
 		dcp_backlight_dpms(dcp, false);
-	shown = dcp_v14_present_locked(v14, NULL, 0, 0, 0, NULL, &retired);
+	shown = dcp_v14_present_locked(v14, NULL, 0, 0, 0, NULL, NULL, &retired);
 	mutex_unlock(&v14->lock);
-	if (retired)
-		drm_framebuffer_put(retired);
+	dcp_v14_put_retired(&retired);
 	/* Nothing is scanned out any more: the displaced framebuffers can go. */
 	if (shown)
 		dcp_release_all_retained_framebuffers(dcp);
@@ -3042,6 +3345,60 @@ static void dcp_v14_cancel_event(struct apple_dcp *dcp)
 }
 
 /* Only the layout the firmware was qualified with: one full-mode linear plane. */
+bool iomfb_v14_7_has_cursor(struct apple_dcp *dcp)
+{
+	return READ_ONCE(hw_cursor) && dcp->fw_compat == DCP_FIRMWARE_V_14_7 &&
+	       !dcp->external && dcp->v14 && dcp->v14->board == &dcp_v14_board_t6030;
+}
+
+/*
+ * The cursor plane: an unscaled linear ARGB8888 framebuffer (premultiplied,
+ * DRM's blend mode when a plane has no "pixel blend mode"), placed anywhere
+ * and clipped to the panel. The firmware takes no layer under 32x32 and none
+ * off the panel, so a cursor with less of it on the panel is refused here and
+ * the compositor draws that pointer itself.
+ */
+int iomfb_v14_7_cursor_atomic_check(struct drm_plane *plane, struct drm_atomic_commit *state)
+{
+	struct drm_plane_state *ps = drm_atomic_get_new_plane_state(state, plane);
+	struct drm_crtc_state *cs;
+	struct drm_gem_dma_object *obj;
+	struct drm_framebuffer *fb;
+	struct apple_dcp *dcp;
+	int ret;
+
+	if (!ps || !ps->crtc || !ps->fb)
+		return 0;
+	cs = drm_atomic_get_new_crtc_state(state, ps->crtc);
+	if (!cs)
+		return -EINVAL;
+	ret = drm_atomic_helper_check_plane_state(ps, cs, DRM_PLANE_NO_SCALING,
+						  DRM_PLANE_NO_SCALING, true, true);
+	if (ret)
+		return ret;
+	if (!ps->visible)
+		return 0;
+
+	dcp = platform_get_drvdata(to_apple_crtc(ps->crtc)->dcp);
+	if (!dcp || !iomfb_v14_7_has_cursor(dcp) || READ_ONCE(dcp->v14->cursor_refused))
+		return -EINVAL;
+	fb = ps->fb;
+	if (fb->format->format != DRM_FORMAT_ARGB8888 || fb->modifier != DRM_FORMAT_MOD_LINEAR ||
+	    fb->width > DCP_V14_CURSOR_MAX || fb->height > DCP_V14_CURSOR_MAX ||
+	    fb->pitches[0] < fb->width * 4 || (fb->pitches[0] & 63) || (fb->offsets[0] & 63))
+		return -EINVAL;
+	obj = drm_fb_dma_get_gem_obj(fb, 0);
+	if (!obj || !obj->dma_addr ||
+	    (u64)fb->offsets[0] + (u64)fb->pitches[0] * fb->height > obj->base.size)
+		return -EINVAL;
+	/* A cursor mostly off the panel is copied: its pages must map. */
+	if ((drm_rect_width(&ps->dst) < DCP_V14_LAYER_MIN ||
+	     drm_rect_height(&ps->dst) < DCP_V14_LAYER_MIN) &&
+	    (obj->base.import_attach ? !obj->base.import_attach->dmabuf->ops->vmap : !obj->vaddr))
+		return -EINVAL;
+	return 0;
+}
+
 int iomfb_v14_7_atomic_check(struct apple_dcp *dcp, struct drm_crtc *crtc,
 			     struct drm_atomic_commit *state)
 {
@@ -3335,18 +3692,94 @@ int iomfb_v14_7_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state
 	return 0;
 }
 
+/*
+ * The cursor plane's framebuffer as the cursor layer, if the plane shows one
+ * on @crtc: the rectangle atomic check clipped to the @hdisplay x @vdisplay
+ * pipe, below the notch rows when those are hidden. With less than
+ * DCP_V14_LAYER_MIN of it on the pipe either way, the layer is instead the
+ * smallest padded rectangle on the pipe that holds what is visible.
+ */
+static bool dcp_v14_cursor_from_state(struct apple_dcp *dcp, struct drm_crtc *crtc,
+				      struct drm_atomic_commit *state,
+				      u32 hdisplay, u32 vdisplay,
+				      struct dcp_v14_cursor *cursor)
+{
+	struct drm_plane_state *cp;
+	struct drm_gem_dma_object *obj;
+	struct drm_framebuffer *fb;
+	u32 width, height, x, y;
+	s32 fb_x, fb_y;
+
+	if (!crtc->cursor || !READ_ONCE(hw_cursor))
+		return false;
+	cp = drm_atomic_get_new_plane_state(state, crtc->cursor);
+	if (!cp)
+		cp = crtc->cursor->state;
+	if (!cp || cp->crtc != crtc || !cp->visible || !cp->fb)
+		return false;
+	fb = cp->fb;
+	obj = drm_fb_dma_get_gem_obj(fb, 0);
+	if (!obj || !obj->dma_addr)
+		return false;
+	width = drm_rect_width(&cp->dst);
+	height = drm_rect_height(&cp->dst);
+	if (width >= DCP_V14_LAYER_MIN && height >= DCP_V14_LAYER_MIN) {
+		*cursor = (struct dcp_v14_cursor){
+			.fb = fb,
+			.iova = obj->dma_addr + fb->offsets[0],
+			.stride = fb->pitches[0],
+			.fb_width = fb->width,
+			.fb_height = fb->height,
+			.src_x = cp->src.x1 >> 16,
+			.src_y = cp->src.y1 >> 16,
+			.width = width,
+			.height = height,
+			.dst_x = cp->dst.x1,
+			.dst_y = cp->dst.y1 + dcp->notch_height,
+		};
+		return true;
+	}
+	if (hdisplay < DCP_V14_LAYER_MIN || vdisplay < DCP_V14_LAYER_MIN)
+		return false;
+	/* Where the framebuffer's top left lands on the pipe; may be off it. */
+	fb_x = cp->dst.x1 - (cp->src.x1 >> 16);
+	fb_y = cp->dst.y1 - (cp->src.y1 >> 16);
+	x = min_t(u32, cp->dst.x1, hdisplay - DCP_V14_LAYER_MIN);
+	y = min_t(u32, cp->dst.y1, vdisplay - DCP_V14_LAYER_MIN);
+	width = max_t(u32, width, DCP_V14_LAYER_MIN);
+	height = max_t(u32, height, DCP_V14_LAYER_MIN);
+	*cursor = (struct dcp_v14_cursor){
+		.fb = fb,
+		.stride = DCP_V14_SHADOW_STRIDE,
+		.fb_width = width,
+		.fb_height = height,
+		.width = width,
+		.height = height,
+		.dst_x = x,
+		.dst_y = y + dcp->notch_height,
+		.padded = true,
+		.fb_x = fb_x - (s32)x,
+		.fb_y = fb_y - (s32)y,
+	};
+	return true;
+}
+
 void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 		       struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *p = drm_atomic_get_new_plane_state(state, crtc->primary);
 	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
+	struct dcp_v14_cursor cursor;
 	struct drm_framebuffer *fb;
+	bool has_cursor;
 
 	if (!p)
 		p = crtc->primary->state;
 	if (!cs)
 		cs = crtc->state;
 	fb = p && p->visible ? p->fb : NULL;
+	has_cursor = fb && dcp_v14_cursor_from_state(dcp, crtc, state, cs->mode.hdisplay,
+						      cs->mode.vdisplay, &cursor);
 	/*
 	 * No swaps while an external display is off, unset, unplugged, or
 	 * being described again.
@@ -3364,12 +3797,12 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	if (dcp->v14 && dcp_v14_present(dcp->v14, fb,
 					 fb ? (dcp->external ? p->src_w >> 16 : fb->width) : 0,
 					 fb ? (dcp->external ? p->src_h >> 16 : fb->height) : 0,
-					 dcp->notch_height, cs)) {
+					 dcp->notch_height, cs, has_cursor ? &cursor : NULL)) {
 		dcp_drm_crtc_page_flip(dcp, ktime_get());
 		/*
 		 * The swap completed: the framebuffers this commit and earlier
 		 * ones displaced are no longer read. The session pins what it
-		 * shows itself (active_fb).
+		 * shows itself (active_fb, shown_cursor).
 		 */
 		dcp_release_all_retained_framebuffers(dcp);
 	} else {

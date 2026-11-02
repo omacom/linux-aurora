@@ -7,6 +7,7 @@
 
 #include "dcp-internal.h"
 #include "iomfb_internal.h"
+#include "iomfb_v14_7.h"
 
 #include "iomfb_plane.h"
 #include <drm/drm_atomic.h>
@@ -792,6 +793,56 @@ struct drm_plane *apple_plane_init(struct drm_device *dev,
 	else
 		drm_plane_helper_add(&plane->base, &apple_plane_helper_funcs);
 
+	plane->iomfb_surf = iomfb_surf;
+
+	return &plane->base;
+}
+
+/*
+ * The T6030 cursor plane: premultiplied ARGB8888 on its own IOMFB layer.
+ * iomfb_v14_7_flush() reads its state; the session pins the framebuffer
+ * while it is shown, so it needs no retirement of its own.
+ */
+static const u32 dcp_cursor_formats_14_7[] = {
+	DRM_FORMAT_ARGB8888,
+};
+
+static void apple_cursor_atomic_update_v14_7(struct drm_plane *plane,
+					     struct drm_atomic_commit *commit)
+{
+}
+
+static const struct drm_plane_helper_funcs apple_cursor_helper_funcs_v14_7 = {
+	.prepare_fb	= drm_gem_plane_helper_prepare_fb,
+	.atomic_check	= iomfb_v14_7_cursor_atomic_check,
+	.atomic_update	= apple_cursor_atomic_update_v14_7,
+};
+
+/* The cursor sizes compositors may pick from, smallest first. */
+static const struct drm_plane_size_hint dcp_cursor_size_hints_14_7[] = {
+	{ .width = 64, .height = 64 },
+	{ .width = 128, .height = 128 },
+	{ .width = 256, .height = 256 },
+};
+
+struct drm_plane *apple_cursor_init_v14_7(struct drm_device *dev,
+					  unsigned long possible_crtcs, u32 iomfb_surf)
+{
+	struct apple_plane *plane;
+	int ret;
+
+	plane = drmm_universal_plane_alloc(dev, struct apple_plane, base, possible_crtcs,
+					   &apple_plane_funcs, dcp_cursor_formats_14_7,
+					   ARRAY_SIZE(dcp_cursor_formats_14_7),
+					   format_modifiers_no_ix, DRM_PLANE_TYPE_CURSOR, NULL);
+	if (IS_ERR(plane))
+		return ERR_CAST(plane);
+
+	drm_plane_helper_add(&plane->base, &apple_cursor_helper_funcs_v14_7);
+	ret = drm_plane_add_size_hints_property(&plane->base, dcp_cursor_size_hints_14_7,
+						ARRAY_SIZE(dcp_cursor_size_hints_14_7));
+	if (ret)
+		return ERR_PTR(ret);
 	plane->iomfb_surf = iomfb_surf;
 
 	return &plane->base;

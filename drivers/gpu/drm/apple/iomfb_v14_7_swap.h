@@ -86,6 +86,7 @@ static inline int dcp_v14_encode_nits(u8 *swap, bool change, u32 nits)
 #define DCP_V14_SURF_WIDTH		0x21
 #define DCP_V14_SURF_HEIGHT		0x25
 #define DCP_V14_SURF_SIZE		0x29
+#define DCP_V14_SURF_ID			0x35
 #define DCP_V14_SURF_PLANE_WIDTH	0x59
 #define DCP_V14_SURF_PLANE_HEIGHT	0x5d
 #define DCP_V14_SURF_PLANE_STRIDE	0x69
@@ -166,6 +167,40 @@ static inline void dcp_v14_encode_swap(u8 *swap, u32 id, u32 background, const u
 		dcp_v14_put_rect(swap + DCP_V14_SWAP_DST(layer), 0, dst_y, width, height);
 		swap[DCP_V14_SWAP_SURF_NULL(layer)] = 0;
 	}
+}
+
+/*
+ * The cursor layer: a premultiplied-alpha linear BGRA surface on the layer
+ * above the primary's (layer 0), named by its own surface id.
+ */
+#define DCP_V14_CURSOR_LAYER		1
+#define DCP_V14_CURSOR_SURF_ID		2
+/*
+ * The smallest layer the firmware shows: IOMFB verify_surfaces refuses
+ * sources under 32x32, and every layer must lie on the panel.
+ */
+#define DCP_V14_LAYER_MIN		32
+
+/*
+ * Adds a second surface to a swap record built by dcp_v14_encode_swap(): the
+ * @width x @height rectangle at @src_x,@src_y of a @fb_width x @fb_height
+ * premultiplied BGRA surface (@stride bytes per row, at @iova), shown
+ * unscaled at @dst_x,@dst_y on the panel, on @layer under @surf_id.
+ */
+static inline void dcp_v14_encode_layer(u8 *swap, u32 layer, u32 surf_id, u64 iova,
+					u32 stride, u32 fb_width, u32 fb_height,
+					u32 src_x, u32 src_y, u32 width, u32 height,
+					u32 dst_x, u32 dst_y)
+{
+	u8 *s = swap + DCP_V14_SWAP_SURFACE(layer);
+
+	dcp_v14_encode_surface(s, stride, fb_width, fb_height, true);
+	put_unaligned_le32(surf_id, s + DCP_V14_SURF_ID);
+	put_unaligned_le64(iova, swap + DCP_V14_SWAP_IOVA(layer));
+	put_unaligned_le32(surf_id, swap + DCP_V14_SWAP_SURF_ID(layer));
+	dcp_v14_put_rect(swap + DCP_V14_SWAP_SRC(layer), src_x, src_y, width, height);
+	dcp_v14_put_rect(swap + DCP_V14_SWAP_DST(layer), dst_x, dst_y, width, height);
+	swap[DCP_V14_SWAP_SURF_NULL(layer)] = 0;
 }
 
 /*
