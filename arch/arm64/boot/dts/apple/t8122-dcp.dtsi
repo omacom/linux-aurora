@@ -54,6 +54,8 @@
 	display: display-subsystem {
 		compatible = "apple,t8122-display-subsystem";
 		iommus = <&disp0_dart 0>;
+		/* Keep the inherited scanout alias when adding external streams. */
+		apple,dma-range = /bits/ 64 <0x10000000000 0x1000000000>;
 		status = "disabled";
 	};
 };
@@ -147,7 +149,8 @@
 	 * The DMA windows are the ones the working asahi-based kernel uses per
 	 * stream: dcpext stream 5 at 0x8_0000_0000 and PIODMA stream 4 from 0
 	 * (as on T8112). The display subsystem's stream 0 on dispext0_dart
-	 * takes its window from disp0_dart, the first DART of that device.
+	 * uses the display subsystem's own high scanout aperture. Its PIODMA
+	 * stream keeps the low window below.
 	 */
 	dispext0_dart: iommu@319304000 {
 		compatible = "apple,t8122-dart", "apple,t8110-dart";
