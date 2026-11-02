@@ -9,7 +9,7 @@ pub(crate) const PAGE_LIST_SIZE: usize = 0x20_0000;
 pub(crate) const RUN_LIST_SIZE: usize = 0x1_0000;
 pub(crate) const TABLE_SIZE: usize = PAGE_LIST_SIZE + RUN_LIST_SIZE;
 pub(crate) const CONTROL_SIZE: usize = 0x4000;
-pub(crate) const RENDER_BLOCKS: usize = 22;
+pub(crate) const RENDER_BLOCKS: usize = 44;
 pub(crate) const COMPUTE_BLOCKS: usize = 21;
 
 /// Render reserves eight run words per block; compute packs runs consecutively.
