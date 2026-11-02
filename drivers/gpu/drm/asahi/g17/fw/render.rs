@@ -972,7 +972,9 @@ fn partial_load_registers(
     [
         RegisterWrite::new(0x15369, w.partial_bg_rsrc_spec),
         RegisterWrite::new(0x15371, w.partial_bg_va),
-        RegisterWrite::new(0x10039, w.tile_config & !TILE_CONFIG_PROCESS_EMPTY_TILES),
+        // Only the main end-of-tile program resolves, and it has to reach tiles that only
+        // earlier segments drew to. Without this their resolve target is never written.
+        RegisterWrite::new(0x10039, w.tile_config | TILE_CONFIG_PROCESS_EMPTY_TILES),
         RegisterWrite::new(0x15309, u64::from(p.stencil_clear | STENCIL_CLEAR_BASE)),
         RegisterWrite::new(0x15329, p.depth.va),
         RegisterWrite::new(0x153c1, p.depth.compression_va),
