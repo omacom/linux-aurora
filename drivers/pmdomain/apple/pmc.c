@@ -28,6 +28,7 @@
 #include <linux/bits.h>
 #include <linux/debugfs.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -66,6 +67,9 @@
  * @dcs_max: highest DCS performance state
  * @ap_agent: voter agent of the application processor, which a DCS limit
  *	votes through
+ * @has_pending: the word after each agent's floor word holds one pending
+ *	bit per agent, set until the PMC has taken up that agent's last
+ *	floor
  */
 struct apple_pmc_hw {
 	u32 agent_stride;
@@ -76,6 +80,7 @@ struct apple_pmc_hw {
 	u32 dcs_rail;
 	u32 dcs_max;
 	u32 ap_agent;
+	bool has_pending;
 };
 
 struct apple_pmc {
@@ -273,9 +278,13 @@ EXPORT_SYMBOL_GPL(apple_pmc_floor_read);
  * The floor only takes effect on rails where the agent's interface is
  * enabled.
  *
+ * On SoCs with a pending bit, wait until the PMC has taken up the
+ * previous floor before writing, and until it has taken up the new one.
+ *
  * Context: Any context.
- * Return: 0 on success, -EINVAL if @agent is out of range, or -EIO if the
- * PMC did not accept the new floor.
+ * Return: 0 on success, -EINVAL if @agent is out of range, -EIO if the PMC
+ * did not accept the new floor, or -ETIMEDOUT if it did not take up a floor
+ * within 1 ms.
  */
 int apple_pmc_floor_update(struct device *dev, unsigned int agent, u32 mask,
 			   u32 value)
@@ -291,6 +300,12 @@ int apple_pmc_floor_update(struct device *dev, unsigned int agent, u32 mask,
 
 	reg = pmc->voters + agent * pmc->hw->agent_stride;
 	raw_spin_lock_irqsave(&pmc->lock, flags);
+	if (pmc->hw->has_pending) {
+		ret = readl_poll_timeout_atomic(reg + 4, old, !(old & BIT(agent)),
+						1, 1000);
+		if (ret)
+			goto unlock;
+	}
 	old = readl(reg);
 	val = (old & ~mask) | (value & mask);
 	if (val != old) {
@@ -298,6 +313,10 @@ int apple_pmc_floor_update(struct device *dev, unsigned int agent, u32 mask,
 		if ((readl(reg) & mask) != (value & mask))
 			ret = -EIO;
 	}
+	if (!ret && pmc->hw->has_pending)
+		ret = readl_poll_timeout_atomic(reg + 4, old, !(old & BIT(agent)),
+						1, 1000);
+unlock:
 	raw_spin_unlock_irqrestore(&pmc->lock, flags);
 
 	return ret;
@@ -802,6 +821,22 @@ static int apple_pmc_probe(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * T8132: DCS states 0-5 on rail 0, fabric states on rail 1. A floor write
+ * sets the agent's pending bit until the PMC has taken it up.
+ */
+static const struct apple_pmc_hw apple_pmc_hw_t8132 = {
+	.agent_stride = 0x4000,
+	.agents = 4,
+	.rails = 2,
+	.agent_state = 0x0,
+	.rail_enable = 0x2000,
+	.dcs_rail = 0,
+	.dcs_max = 5,
+	.ap_agent = 3,
+	.has_pending = true,
+};
+
 static const struct apple_pmc_hw apple_pmc_hw_t8140 = {
 	.agent_stride = 0x4000,
 	.agents = 4,
@@ -814,6 +849,7 @@ static const struct apple_pmc_hw apple_pmc_hw_t8140 = {
 };
 
 static const struct of_device_id apple_pmc_of_match[] = {
+	{ .compatible = "apple,t8132-pmc", .data = &apple_pmc_hw_t8132 },
 	{ .compatible = "apple,t8140-pmc", .data = &apple_pmc_hw_t8140 },
 	{}
 };
