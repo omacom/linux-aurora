@@ -29,7 +29,12 @@ fn aligned(value: usize, alignment: usize) -> Result<usize> {
 /// the default parameter-buffer sizes. Sizes are
 /// [TPC, tile map × 64, 0x4000 for layered targets, 0, 0xc00, 0xa00, 0x600, 0x80].
 const GTP_ALIGNMENTS: [usize; 8] = [0x40, 0x40, 0x100, 1, 0x20, 0x20, 0x80, 0x40];
-const GTP_FIXED_SIZES: [usize; 4] = [0xc00, 0xa00, 0x600, 0x80];
+const GTP_FIXED_SIZES: [usize; 4] = [0xc00, 0xa00, GTP6_SIZE, 0x80];
+/// Room for the tiler's records across a partial render. macOS uses 0x1c00, so this is a superset,
+/// and the size every partial-render test ran with.
+const GTP_SLOTS: usize = 64;
+const GTP6_SIZE: usize = GTP_SLOTS
+    * (((cfg::TVB_MAX_BLOCKS * cfg::TVB_BLOCK_SIZE).div_ceil(0x8000) + 0x17ff) / 24 * 8 + 8);
 
 /// Per-command geometry, independent of the capacity already allocated.
 #[derive(Copy, Clone, Debug)]
