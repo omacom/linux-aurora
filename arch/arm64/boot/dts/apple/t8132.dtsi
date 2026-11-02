@@ -507,9 +507,15 @@
 
 		nvme: nvme@4c5cc0000 {
 			compatible = "apple,t8132-nvme-ans2";
+			/*
+			 * ADT reg[9] is the controller window and reg[3] the
+			 * NVMMU. The controller window also aliases the NVMMU
+			 * registers, which older kernels use.
+			 */
 			reg = <0x4 0xc5cc0000 0x0 0x60000>,
-			      <0x4 0x81600000 0x0 0x4000>;
-			reg-names = "nvme", "ans";
+			      <0x4 0x81600000 0x0 0x4000>,
+			      <0x4 0x85cc0000 0x0 0x60000>;
+			reg-names = "nvme", "ans", "nvmmu";
 
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1018 IRQ_TYPE_LEVEL_HIGH>;
