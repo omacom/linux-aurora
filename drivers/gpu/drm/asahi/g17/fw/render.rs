@@ -1108,7 +1108,6 @@ unsafe impl Zeroable for TaDescriptor {}
 impl TaDescriptor {
     const ARRAY_OFFSET: u64 = core::mem::offset_of!(Self, registers) as u64;
     const UNK_876: u32 = u32::MAX;
-    const UNK_892: u32 = 1;
     const UNK_932: u8 = 0x44;
     const UNK_93C: u8 = 1;
     const UNK_93E_FIRST_KICK: [u8; 2] = [0xd0, 0x91];
@@ -1157,7 +1156,9 @@ impl TaDescriptor {
         self.sampler_heap_va = pass.sampler_heap_va;
         self.sampler_count = pass.sampler_count;
         self.sampler_max = sampler_max;
-        self.unk_892 = Self::UNK_892;
+        // Asks the firmware to grow the heap. macOS keeps that for memoryless passes, which can't
+        // partial-render, and Honeykrisp has none. 26A428 keeps it: untested there.
+        self.unk_892 = u32::from(args.programs != RegisterPrograms::V25G83);
         self.stamp_va = args.ta.stamp_va;
         self.aux_stamp_va = args.ta.aux_stamp_va;
         self.stamp_value_2 = stamp_value;
