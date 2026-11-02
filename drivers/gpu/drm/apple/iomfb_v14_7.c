@@ -3001,14 +3001,18 @@ static bool dcp_v14_bl_dpms_applies(struct apple_dcp_v14 *v14, struct apple_dcp 
 static void dcp_v14_blank(struct apple_dcp_v14 *v14, struct apple_dcp *dcp)
 {
 	struct drm_framebuffer *retired = NULL;
+	bool shown;
 
 	mutex_lock(&v14->lock);
 	if (dcp_v14_bl_dpms_applies(v14, dcp))
 		dcp_backlight_dpms(dcp, false);
-	dcp_v14_present_locked(v14, NULL, 0, 0, 0, NULL, &retired);
+	shown = dcp_v14_present_locked(v14, NULL, 0, 0, 0, NULL, &retired);
 	mutex_unlock(&v14->lock);
 	if (retired)
 		drm_framebuffer_put(retired);
+	/* Nothing is scanned out any more: the displaced framebuffers can go. */
+	if (shown)
+		dcp_release_all_retained_framebuffers(dcp);
 }
 
 /* Releases helper waiters without reporting a completed flip. */
@@ -3360,10 +3364,17 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	if (dcp->v14 && dcp_v14_present(dcp->v14, fb,
 					 fb ? (dcp->external ? p->src_w >> 16 : fb->width) : 0,
 					 fb ? (dcp->external ? p->src_h >> 16 : fb->height) : 0,
-					 dcp->notch_height, cs))
+					 dcp->notch_height, cs)) {
 		dcp_drm_crtc_page_flip(dcp, ktime_get());
-	else
+		/*
+		 * The swap completed: the framebuffers this commit and earlier
+		 * ones displaced are no longer read. The session pins what it
+		 * shows itself (active_fb).
+		 */
+		dcp_release_all_retained_framebuffers(dcp);
+	} else {
 		dcp_v14_cancel_event(dcp);
+	}
 }
 
 void iomfb_v14_7_poweron(struct apple_dcp *dcp)

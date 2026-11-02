@@ -298,6 +298,9 @@ static struct v14_bl_fixture v14_bl_fixture(struct kunit *test,
 	KUNIT_ASSERT_NOT_NULL(test, f.v14);
 	f.dcp->dev = dev;
 	spin_lock_init(&f.dcp->mode_state.lock);
+	/* As at probe: a completed present or blank releases displaced scanout. */
+	mutex_init(&f.dcp->swapped_out_fbs_lock);
+	INIT_LIST_HEAD(&f.dcp->swapped_out_fbs);
 	mutex_init(&f.dcp->bl_register_mutex);
 	INIT_WORK(&f.dcp->bl_register_wq, dcp_work_register_backlight);
 	INIT_WORK(&f.dcp->bl_update_wq, v14_bl_unused_work);
