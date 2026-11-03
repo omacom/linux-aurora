@@ -160,7 +160,7 @@ int main(int argc, char **argv)
 	sep_diag_set_xart_guard(0, false, SEP_DIAG_MATCHING_USABLE);
 	sep_diag_register(&dev, "T8140/J700", 10, false, false, true);
 	/* The guard's attributes were added within version 2. */
-	expect("probe", "abi", "2");
+	expect("probe", "abi", "3");
 	expect("probe", "sensor", "unbound");
 	expect("probe", "touchid", "unknown");
 	expect("probe", "xart_guard", "0");
@@ -295,14 +295,14 @@ class DiagSensorTest(unittest.TestCase):
         usable, unverified, blocked = 1, 2, 3  # SEP_DIAG_MATCHING_* in shim.h
         cases = [
             # level, list, matching at probe, refusals, matching after them
-            ((0, 0, usable, 0, 0), '2 0 none 0 usable'),            # Neo, M1 Pro (pinned 0)
-            ((1, 1, unverified, 0, 0), '2 1 loaded 0 unverified'),  # M2 under the guard
-            ((1, 1, unverified, 2, blocked), '2 1 loaded 2 blocked'),  # ... after refusals
-            ((2, 1, unverified, 0, 0), '2 2 loaded 0 unverified'),
-            ((1, 0, blocked, 0, 0), '2 1 unavailable 0 blocked'),   # no list
-            ((1, 1, blocked, 0, 0), '2 1 loaded 0 blocked'),        # cold boot, level 1
-            ((0, 0, 0, 0, 0), '2 0 none 0 unknown'),                # never set
-            ((0, 0, 7, 0, 0), '2 0 none 0 unknown'),                # out of range
+            ((0, 0, usable, 0, 0), '3 0 none 0 usable'),            # Neo, M1 Pro (pinned 0)
+            ((1, 1, unverified, 0, 0), '3 1 loaded 0 unverified'),  # M2 under the guard
+            ((1, 1, unverified, 2, blocked), '3 1 loaded 2 blocked'),  # ... after refusals
+            ((2, 1, unverified, 0, 0), '3 2 loaded 0 unverified'),
+            ((1, 0, blocked, 0, 0), '3 1 unavailable 0 blocked'),   # no list
+            ((1, 1, blocked, 0, 0), '3 1 loaded 0 blocked'),        # cold boot, level 1
+            ((0, 0, 0, 0, 0), '3 0 none 0 unknown'),                # never set
+            ((0, 0, 7, 0, 0), '3 0 none 0 unknown'),                # out of range
         ]
         with tempfile.TemporaryDirectory() as directory:
             harness = self.build(Path(directory), GUARD_HARNESS, 'guard')
