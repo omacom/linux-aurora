@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +33,7 @@ CONTROLS = [
     ('stopped-in-begin', 'return v->enabled && !v->voted && !v->stopped;', 'return v->enabled && !v->voted;'),
     ('stopped-in-decide', 'if (!v->enabled || v->stopped)\n\t\treturn v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;',
      'if (!v->enabled)\n\t\treturn v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;'),
+    ('wrap-reached', 'return (agx_sms_t)(now - t) >= 0;', 'return now >= t;'),
 ]
 
 
@@ -53,7 +55,8 @@ def compile_and_run(out, text):
     (out / 'build.log').write_text(built.stdout + built.stderr)
     if built.returncode:
         return {'build_rc': built.returncode, 'run_rc': None, 'note': 'compilation failure is not regression evidence'}
-    ran = subprocess.run([str(out / 'vote')], capture_output=True, text=True)
+    prefix = ['setarch', '-R'] if shutil.which('setarch') else []  # ASan startup can crash under ASLR on a loaded host
+    ran = subprocess.run(prefix + [str(out / 'vote')], capture_output=True, text=True)
     (out / 'run.log').write_text(ran.stdout + ran.stderr)
     return {'build_rc': 0, 'run_rc': ran.returncode}
 
@@ -73,6 +76,10 @@ def main():
 
     mutations = []
     if args.mutations or args.mutation:
+        # A base failure would fail every mutant at the same case and read as caught.
+        # The negative control (--ref) has no passing base: the pre-fix header cannot compile this suite.
+        if not args.ref:
+            assert base['run_rc'] == 0, base
         names = [c[0] for c in CONTROLS] if args.mutations else [args.mutation]
         for name in names:
             old, new = next((c[1], c[2]) for c in CONTROLS if c[0] == name)
@@ -94,7 +101,7 @@ def main():
 
     if args.mutations:
         assert all(m['applied'] and m['build_rc'] == 0 and m['run_rc'] not in (0, None) for m in mutations), mutations
-        print('PASS: 18 actual vote-policy cases and every mutant caught')
+        print('PASS: every vote-policy case passed and every mutant caught')
         return 0
     if args.mutation:
         m = mutations[0]

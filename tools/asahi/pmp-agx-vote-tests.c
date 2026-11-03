@@ -299,6 +299,15 @@ int main(void)
 		CHECK(agx_vote_next(&w, 500) == AGX_VOTE_RETRY_MS);      // the retry deadline, not 1 ms
 		CHECK(agx_vote_next(&w, 500 + AGX_VOTE_RETRY_MS - 1) == 1);
 	}
+	// 19. w7X's wrap mutant: reached() must compare in signed 32-bit arithmetic, so a deadline that has
+	// wrapped into the low range is not "already reached" on the pre-wrap side
+	{
+		struct agx_vote v = {.enabled = true, .voted = true, .idle_ms = 100, .idle_at = 0xFFFFFFF0u};
+		CHECK(agx_vote_decide(&v, 0xFFFFFFF8u) == AGX_VOTE_NONE);
+		CHECK(agx_vote_next(&v, 0xFFFFFFF8u) == 0x5Cu);
+		struct agx_vote w = {.enabled = true, .idle_ms = 100, .users = 1, .failures = 1, .retry_at = 0x54u};
+		CHECK(agx_vote_decide(&w, 0xFFFFFFF8u) == AGX_VOTE_NONE);
+	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;
 }
