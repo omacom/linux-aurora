@@ -1697,9 +1697,10 @@ impl Pair {
 
     /// A front group a restart interrupted after its tiler started, which firmware
     /// then retired without writing its fragment end, may have run partly. It is
-    /// not replayed (blending or storage writes could apply twice) and fails now,
-    /// reported to its owner, instead of waiting out the render timeout. Returns
-    /// None when the front is not such a group.
+    /// not replayed (blending or storage writes could apply twice) and fails now
+    /// instead of waiting out the render timeout: its fence carries ECANCELED, and
+    /// only a guilty VM is poisoned. Returns None when the front is not such a
+    /// group.
     fn settle_interrupted_front(
         &mut self,
         host: &mut impl Host,
