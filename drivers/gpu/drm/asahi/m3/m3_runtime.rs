@@ -1079,6 +1079,8 @@ impl Runtime {
                 crate::m3::t8122_start::prepare_verdict(pdev.as_ref(),device.soc(),started,e);
                 state.health.mark_failed();
                 if device.stop_asc().is_err() {
+                    // Without module unloading, the C helper is an unbound no-op.
+                    #[cfg(CONFIG_MODULE_UNLOAD)]
                     unsafe {kernel::bindings::__module_get(crate::THIS_MODULE.as_ptr())};
                     core::mem::forget(transport);core::mem::forget(state);
                     core::mem::forget(adopted);
@@ -1348,6 +1350,7 @@ impl Drop for Runtime {
         for batch in self.inner.active.iter() {Inner::finish_all(&batch.entries,Err(ENODEV));}
         if policy::retain_runtime(self.inner.device.stop_asc().is_err(),self.inner.gpu_pending) {
             // SAFETY: a live module reference pins callbacks with retained DMA.
+            #[cfg(CONFIG_MODULE_UNLOAD)]
             unsafe { kernel::bindings::__module_get(crate::THIS_MODULE.as_ptr()) };
             return;
         }
