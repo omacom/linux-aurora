@@ -29,10 +29,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path)
     parser.add_argument('--emit', type=Path, help='write C for build-time compilation')
+    parser.add_argument('--base-source', type=Path, help='pinned public baseline for rollback control')
     parser.add_argument('--cc', default='clang')
-    parser.add_argument('--suite', choices=['session', 'buffers', 'receive'], default='session')
-    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback', 'drain'])
+    parser.add_argument('--suite', choices=['session', 'buffers', 'receive', 'returns'], default='session')
+    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback', 'drain', 'address', 'pool', 'duplicate', 'snapshot'])
     args = parser.parse_args()
+    allowed = {'session': {None, 'send', 'overwrite', 'stop', 'reset'},
+               'buffers': {None, 'rollback'}, 'receive': {None, 'drain'},
+               'returns': {None, 'address', 'pool', 'duplicate', 'snapshot'}}
+    if args.control not in allowed[args.suite]:
+        parser.error('control does not belong to this suite')
     inputs = {n: (DRIVER / n).read_text() for n in
               ['isp-ipc.c', 'isp-cmd.c', 'isp-cam.c', 'isp-fw.c']}
     groups = {
@@ -62,17 +68,43 @@ def main():
         body = body.replace('WRITE_ONCE(isp->ipc_error, 0);', '')
         bodies['isp_firmware_boot'] = body.replace(
             'int err;', 'int err;\n\tWRITE_ONCE(isp->ipc_error, 0);', 1)
-    if args.suite == 'buffers':
+    if args.suite in ['buffers', 'returns']:
         inputs = {'isp-v4l2.c': (DRIVER / 'isp-v4l2.c').read_text()}
         bodies = {n: function(inputs['isp-v4l2.c'], n) for n in
                   ['isp_submit_buffers', 'apple_isp_start_streaming']}
         bodies['apple_isp_stop_capture'] = function(
             (DRIVER / 'isp-cam.c').read_text(), 'apple_isp_stop_capture')
         if args.control == 'rollback':
-            old = subprocess.check_output(
+            old = args.base_source.read_text() if args.base_source else subprocess.check_output(
                 ['git', 'show', '7876c8e8349c4f3d0a2f4ce982e3e13ce5bb5d70:'
                  'drivers/media/platform/apple/isp/isp-v4l2.c'], cwd=ROOT, text=True)
             bodies['isp_submit_buffers'] = function(old, 'isp_submit_buffers')
+    if args.suite == 'returns':
+        bodies = {n: function(inputs['isp-v4l2.c'], n) for n in
+                  ['isp_returned_surface', 'ipc_bt_handle', 'isp_submit_buffers',
+                   'apple_isp_start_streaming', 'apple_isp_stop_streaming',
+                   'isp_vb2_release_buffers', 'apple_isp_video_suspend',
+                   'apple_isp_video_resume']
+                  }
+        bodies['apple_isp_stop_capture'] = function(
+            (DRIVER / 'isp-cam.c').read_text(), 'apple_isp_stop_capture')
+        bodies = {**{'apple_isp_stop_capture': bodies.pop('apple_isp_stop_capture')}, **bodies}
+
+        if args.control == 'address':
+            bodies['isp_returned_surface'] = bodies['isp_returned_surface'].replace(
+                '(u32)buf->surfs[0].iova == iova', 'true')
+        elif args.control == 'pool':
+            body = bodies['isp_returned_surface']
+            bodies['isp_returned_surface'] = body.replace(
+                'desc->pool_type == CISP_POOL_TYPE_META', 'false')
+        elif args.control == 'duplicate':
+            bodies['ipc_bt_handle'] = bodies['ipc_bt_handle'].replace(
+                'surfaces[i] == surfaces[j]', 'false')
+        elif args.control == 'snapshot':
+            body = bodies['ipc_bt_handle']
+            body = body.replace('isp_returned_surface(isp, &buffers[i]',
+                                'isp_returned_surface(isp, &bl->buffers[i]')
+            bodies['ipc_bt_handle'] = body
     if args.suite == 'receive':
         bodies = {n: function(inputs[f], n) for f, n in [
             ('isp-ipc.c', 'chan_rx_done'), ('isp-ipc.c', 'ipc_chan_handle'),
@@ -81,7 +113,10 @@ def main():
             bodies['ipc_chan_handle'] = bodies['ipc_chan_handle'].replace(
                 'for (u32 i = 0; i < chan->num; i++)', 'while (1)')
     code = (ROOT / ('tools/asahi/isp/' + args.suite + '.c')).read_text()
-    if args.suite == 'buffers':
+    if args.suite == 'returns':
+        prefix = (ROOT / 'tools/asahi/isp/buffers.c').read_text()
+        code = code.replace('/* BUFFER FIXTURE */', prefix.split('/* DRIVER FUNCTIONS */')[0])
+    if args.suite in ['buffers', 'returns']:
         structures = re.findall(r'^struct isp_buflist(?:_buffer)? \{.*?^} __packed;',
                                 inputs['isp-v4l2.c'], re.M | re.S)
         if len(structures) != 2:
@@ -99,7 +134,7 @@ def main():
         source.write_text(code)
         compile_cmd = [args.cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                        '-Wno-unused-parameter', '-Wno-unused-but-set-variable',
-                       '-Wno-sign-compare', '-O1', '-g', '-pthread',
+                       '-Wno-sign-compare', '-Wno-unused-function', '-O1', '-g', '-pthread',
                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                        str(source), '-o', str(binary)]
         subprocess.run(compile_cmd, check=True)

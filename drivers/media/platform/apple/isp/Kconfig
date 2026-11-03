@@ -24,7 +24,7 @@ config VIDEO_APPLE_ISP_KUNIT_TEST
 	depends on KUNIT=y || VIDEO_APPLE_ISP=m
 	default KUNIT_ALL_TESTS
 	help
-	  Builds unit tests for the videobuf2 queue set-up and for the
+	  Builds unit tests for videobuf2 queue setup, return ownership and
 	  shared memory the firmware frees into the Apple ISP driver. They
 	  need no hardware. Only useful for kernel developers running KUnit.
 

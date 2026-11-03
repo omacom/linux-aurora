@@ -57,16 +57,55 @@ static_assert(ISP_CMD_AREA_SIZE(0) >= ISP_IPC_BUFEXC_STAT_SIZE);
  */
 #define ISP_BUFLIST_POOL_CAPTURE_META 2
 
+/* Only identities currently owned by the firmware may be returned. */
+static struct isp_surf *isp_returned_surface(struct apple_isp *isp,
+					     const struct isp_buflist_buffer *desc,
+					     struct isp_buffer **rendered)
+{
+	u32 iova = desc->iovas[0];
+	struct isp_buffer *buf;
+
+	*rendered = NULL;
+	if (desc->pool_type == CISP_POOL_TYPE_META) {
+		for (int i = 0; i < ARRAY_SIZE(isp->meta_surfs); i++) {
+			struct isp_surf *meta = isp->meta_surfs[i];
+
+			if (meta && meta->submitted && (u32)meta->iova == iova)
+				return meta;
+		}
+	} else if (desc->pool_type == ISP_BUFLIST_POOL_CAPTURE_META &&
+		   isp_num_capmeta(isp)) {
+		for (int i = 0; i < isp_num_capmeta(isp); i++) {
+			struct isp_surf *meta = isp->capmeta_surfs[i];
+
+			if (meta && meta->submitted && (u32)meta->iova == iova)
+				return meta;
+		}
+	} else {
+		/* Preserve the existing returned-tag and low-address ABI. */
+		list_for_each_entry(buf, &isp->bufs_submitted, link) {
+			if ((u32)buf->surfs[0].iova == iova) {
+				*rendered = buf;
+				return &buf->surfs[0];
+			}
+		}
+	}
+
+	return NULL;
+}
+
 int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 {
 	struct isp_message *req = &chan->req, *rsp = &chan->rsp;
-	struct isp_buffer *tmp, *buf;
+	struct isp_surf *surfaces[ISP_MAX_BUFFERS * 2 + ISP_CAPMETA_BUFFERS];
+	struct isp_buffer *rendered[ARRAY_SIZE(surfaces)];
+	struct isp_buflist_buffer *buffers;
 	struct isp_buflist *bl;
 	u64 count;
 	int err = 0;
 
-	/* printk("H2T: 0x%llx 0x%llx 0x%llx\n", (long long)req->arg0,
-	       (long long)req->arg1, (long long)req->arg2); */
+	if (READ_ONCE(isp->ipc_error))
+		return READ_ONCE(isp->ipc_error);
 
 	if (!isp->bt_surf || req->arg1 < sizeof(*bl) ||
 	    req->arg1 > isp->bt_surf->size) {
@@ -80,66 +119,74 @@ int ipc_bt_handle(struct apple_isp *isp, struct isp_channel *chan)
 	if (!bl)
 		return -EIO;
 
-	count = bl->num_buffers;
-	if (count > (req->arg1 - sizeof(*bl)) /
-			    sizeof(struct isp_buflist_buffer)) {
-		dev_err_ratelimited(isp->dev, "%s: Bad length 0x%llx\n",
-				    chan->name, req->arg1);
+	count = READ_ONCE(bl->num_buffers);
+	if (count > (req->arg1 - sizeof(*bl)) / sizeof(*buffers) ||
+	    count > ARRAY_SIZE(surfaces)) {
+		dev_err_ratelimited(isp->dev, "%s: Bad count 0x%llx\n",
+				    chan->name, count);
 		return -EIO;
 	}
 
+	/* Validate and consume the same snapshot of firmware-writable records. */
+	buffers = kmemdup(bl->buffers, array_size(count, sizeof(*buffers)), GFP_KERNEL);
+	if (!buffers)
+		return -ENOMEM;
+
 	spin_lock(&isp->buf_lock);
+	if (READ_ONCE(isp->ipc_error)) {
+		err = READ_ONCE(isp->ipc_error);
+		goto unlock;
+	}
 	for (u64 i = 0; i < count; i++) {
-		struct isp_buflist_buffer *bufd = &bl->buffers[i];
-
-		/* printk("Return: 0x%llx (%d)\n", bufd->iovas[0],
-		       bufd->pool_type); */
-
-		if (bufd->pool_type == 0) {
-			for (int j = 0; j < ARRAY_SIZE(isp->meta_surfs); j++) {
-				struct isp_surf *meta = isp->meta_surfs[j];
-				if ((u32)bufd->iovas[0] == (u32)meta->iova) {
-					WARN_ON(!meta->submitted);
-					meta->submitted = false;
-				}
-			}
-		} else if (bufd->pool_type == ISP_BUFLIST_POOL_CAPTURE_META &&
-			   isp_num_capmeta(isp)) {
-			for (int j = 0; j < isp_num_capmeta(isp); j++) {
-				struct isp_surf *meta = isp->capmeta_surfs[j];
-
-				if (meta && (u32)bufd->iovas[0] == (u32)meta->iova)
-					meta->submitted = false;
-			}
-		} else {
-			list_for_each_entry_safe_reverse(
-				buf, tmp, &isp->bufs_submitted, link) {
-				if ((u32)buf->surfs[0].iova ==
-				    (u32)bufd->iovas[0]) {
-					enum vb2_buffer_state state =
-						VB2_BUF_STATE_ERROR;
-
-					buf->vb.vb2_buf.timestamp =
-						ktime_get_ns();
-					buf->vb.sequence = isp->sequence++;
-					buf->vb.field = V4L2_FIELD_NONE;
-					if (req->arg2 ==
-					    ISP_IPC_BUFEXC_FLAG_RENDER)
-						state = VB2_BUF_STATE_DONE;
-					vb2_buffer_done(&buf->vb.vb2_buf,
-							state);
-					list_del(&buf->link);
-				}
+		surfaces[i] = isp_returned_surface(isp, &buffers[i], &rendered[i]);
+		if (!surfaces[i]) {
+			err = -EIO;
+			goto unlock;
+		}
+		for (u64 j = 0; j < i; j++) {
+			if (surfaces[i] == surfaces[j]) {
+				err = -EIO;
+				goto unlock;
 			}
 		}
 	}
+
+	/* No completion or ownership change until the whole list is valid. */
+	for (u64 i = 0; i < count; i++) {
+		struct isp_buffer *buf = rendered[i];
+
+		if (buf) {
+			enum vb2_buffer_state state = VB2_BUF_STATE_ERROR;
+
+			if (test_bit(ISP_STATE_SLEEPING, &isp->state)) {
+				list_move_tail(&buf->link, &isp->bufs_pending);
+				continue;
+			}
+
+			buf->vb.vb2_buf.timestamp = ktime_get_ns();
+			buf->vb.sequence = isp->sequence++;
+			buf->vb.field = V4L2_FIELD_NONE;
+			if (req->arg2 == ISP_IPC_BUFEXC_FLAG_RENDER)
+				state = VB2_BUF_STATE_DONE;
+			list_del(&buf->link);
+			vb2_buffer_done(&buf->vb.vb2_buf, state);
+		} else {
+			surfaces[i]->submitted = false;
+		}
+	}
+unlock:
 	spin_unlock(&isp->buf_lock);
+	kfree(buffers);
+	if (err) {
+		dev_err_ratelimited(isp->dev, "%s: invalid buffer return\n", chan->name);
+		return err;
+	}
 
 	rsp->arg0 = req->arg0 | ISP_IPC_FLAG_ACK;
 	rsp->arg1 = 0x0;
 	rsp->arg2 = ISP_IPC_BUFEXC_FLAG_ACK;
 
-	return err;
+	return 0;
 }
 
 /*
@@ -480,20 +527,18 @@ int apple_isp_video_suspend(struct apple_isp *isp)
 
 	mutex_lock(&isp->video_lock);
 
-	/*
-	 * Stop the stream but keep its buffers queued to the driver. First
-	 * move the buffers given to the firmware to the pending list, so that
-	 * the buffer return for the stop does not complete them; they are
-	 * submitted again when the stream restarts on resume.
-	 * isp_vb2_buf_queue() does not submit while the stream is stopped.
-	 */
+	/* Keep outstanding identities until their return or the stop boundary. */
 	if (test_bit(ISP_STATE_STREAMING, &isp->state)) {
 		spin_lock_irqsave(&isp->buf_lock, flags);
-		list_splice_init(&isp->bufs_submitted, &isp->bufs_pending);
+		set_bit(ISP_STATE_SLEEPING, &isp->state);
 		spin_unlock_irqrestore(&isp->buf_lock, flags);
 
 		apple_isp_stop_streaming(isp);
-		set_bit(ISP_STATE_SLEEPING, &isp->state);
+
+		/* Unreturned buffers can be resubmitted only after camera stop. */
+		spin_lock_irqsave(&isp->buf_lock, flags);
+		list_splice_init(&isp->bufs_submitted, &isp->bufs_pending);
+		spin_unlock_irqrestore(&isp->buf_lock, flags);
 	}
 
 	mutex_unlock(&isp->video_lock);

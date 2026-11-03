@@ -42,6 +42,19 @@ static unsigned int acquisitions;
 	((void)(l), (void)(f), pthread_mutex_unlock(&buffer_mutex))
 #define spin_lock(l) ((void)(l), acquisitions++, pthread_mutex_lock(&buffer_mutex))
 #define spin_unlock(l) ((void)(l), pthread_mutex_unlock(&buffer_mutex))
+static bool test_bit(unsigned int bit, const unsigned long *state)
+{
+	return *state & (1UL << bit);
+}
+
+static inline bool test_and_clear_bit(unsigned int bit, unsigned long *state)
+{
+	bool previous = test_bit(bit, state);
+
+	*state &= ~(1UL << bit);
+	return previous;
+}
+
 #define ISP_STATE_STREAMING 0
 #define ISP_STATE_SLEEPING 2
 
@@ -97,14 +110,25 @@ static void list_move_tail(struct list_head *e, struct list_head *h)
 	list_add_tail(e, h);
 }
 
+static void list_splice_init(struct list_head *from, struct list_head *to)
+{
+	if (from->next == from)
+		return;
+	from->prev->next = to->next;
+	to->next->prev = from->prev;
+	to->next = from->next;
+	from->next->prev = to;
+	INIT_LIST_HEAD(from);
+}
+
 static bool list_empty(struct list_head *h)
 {
 	return h->next == h;
 }
 
-#define container_of(p, type, m)                                      \
+#define container_of(p, type, m)                                   \
 	({                                                         \
-		type *__ptr;                                          \
+		type *__ptr;                                       \
 		__ptr = (void *)((char *)(p) -                     \
 				 offsetof(__typeof__(*__ptr), m)); \
 		__ptr;                                             \
@@ -137,12 +161,20 @@ struct isp_surf {
 	void *virt;
 };
 
+struct apple_isp;
+struct vb2_queue {
+	struct apple_isp *priv;
+	bool error;
+};
+
+struct vb2_buffer {
+	u64 timestamp;
+	unsigned int done;
+};
+
 struct isp_buffer {
 	struct {
-		struct {
-			u64 timestamp;
-			unsigned int done;
-		} vb2_buf;
+		struct vb2_buffer vb2_buf;
 		unsigned int sequence, field;
 	} vb;
 	struct list_head link;
@@ -177,14 +209,25 @@ struct apple_isp {
 	struct list_head bufs_pending, bufs_submitted;
 	void *cmd_virt;
 	u64 cmd_iova, fw_iova_mask;
-	int ipc_error, buf_lock;
+	int ipc_error, buf_lock, video_lock;
 	unsigned int current_ch;
+	struct vb2_queue vbq;
 	unsigned long state;
 	unsigned int sequence;
 };
 
 /* DRIVER STRUCTURES */
 static unsigned int sends, fail_at, sent_meta, sent_capmeta;
+static int (*return_hook)(struct apple_isp *isp);
+static pthread_mutex_t *video_lock(void)
+{
+	static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+	return &lock;
+}
+
+#define mutex_lock(l) ((void)(l), pthread_mutex_lock(video_lock()))
+#define mutex_unlock(l) ((void)(l), pthread_mutex_unlock(video_lock()))
 static bool quiescent;
 static void (*transition_error)(struct apple_isp *isp);
 static int send_error;
@@ -238,7 +281,7 @@ static int isp_cmd_ch_stop(struct apple_isp *isp, int channel)
 
 static int isp_cmd_ch_buffer_return(struct apple_isp *isp, int channel)
 {
-	return 0;
+	return return_hook ? return_hook(isp) : 0;
 }
 
 static void apple_isp_wdt_stop(struct apple_isp *isp)
@@ -262,7 +305,10 @@ int main(void)
 		.fmt = { .num_planes = 2, .plane_size = { 4096, 2048 } },
 	};
 
-	for (unsigned int caps = 0; caps < 2; caps++) {
+	for (unsigned int mode = 0; mode < 4; mode++) {
+		unsigned int caps = mode & 1;
+		bool pre_start = mode & 2;
+
 		for (unsigned int fail = 0; fail < 2; fail++) {
 			for (unsigned int change = 0; change < 2; change++) {
 				INIT_LIST_HEAD(&isp.bufs_pending);
@@ -296,29 +342,38 @@ int main(void)
 				mutate = change;
 				unsigned int locks_before = acquisitions;
 
-				CHECK(isp_submit_buffers(&isp, false) ==
+				CHECK(isp_submit_buffers(&isp, pre_start) ==
 				      send_error);
 				CHECK(acquisitions == locks_before + 1);
 				CHECK(isp.bufs_pending.next ==
-				      &rendered[ISP_MAX_BUFFERS].link);
+				      &rendered[caps && pre_start ?
+							0 :
+							ISP_MAX_BUFFERS]
+					       .link);
 				CHECK(isp.bufs_pending.prev ==
 				      &rendered[ISP_MAX_BUFFERS].link);
 				CHECK(isp.bufs_submitted.next ==
-				      &rendered[0].link);
+				      (caps && pre_start ? &isp.bufs_submitted :
+							   &rendered[0].link));
 				CHECK(isp.bufs_submitted.prev ==
-				      &rendered[ISP_MAX_BUFFERS - 1].link);
+				      (caps && pre_start ?
+					       &isp.bufs_submitted :
+					       &rendered[ISP_MAX_BUFFERS - 1]
+							.link));
 				for (unsigned int i = 0;
 				     i < ARRAY_SIZE(metadata); i++)
 					CHECK(metadata[i].submitted);
 				for (unsigned int i = 0;
 				     i < ARRAY_SIZE(capmeta); i++)
-					CHECK(capmeta[i].submitted == !!caps);
+					CHECK(capmeta[i].submitted ==
+					      !!(caps && !pre_start));
 				if (fail) {
 					unsigned int before = sends;
 					unsigned char saved[sizeof(area)];
 
 					memcpy(saved, area, sizeof(area));
-					CHECK(isp_submit_buffers(&isp, false) ==
+					CHECK(isp_submit_buffers(&isp,
+								 pre_start) ==
 					      -ETIME);
 					CHECK(sends == before &&
 					      !memcmp(saved, area,
