@@ -1523,6 +1523,49 @@ int apple_pmp_report_set_t6030_gfx(struct device *supplier, bool enable)
 }
 EXPORT_SYMBOL_GPL(apple_pmp_report_set_t6030_gfx);
 
+/**
+ * apple_pmp_report_set_request() - set or clear one bit of the PMP power request word of a bound report
+ * @report_np: device tree node of the report region (compatible apple,t6000-pmp-v2-report and its
+ *	siblings)
+ * @id: bit number of the request, the index of the soc-device record, 0 to 63 (ANE0 is 10 and AGX
+ *	is 9 on the T6001)
+ * @enable: set or clear the bit
+ * @no_ack: do not wait for the acknowledge
+ *
+ * One read-modify-write of the word, made under the report's lock: the same lock every report
+ * entry and the AGX vote take, so requests for different bits cannot lose each other. Unless
+ * @no_ack, waits (atomic poll, at most 50 ms) until the acknowledge word shows the bit as
+ * requested. A PMP that does not run has nothing to acknowledge: the request is written and 0 is
+ * returned, as for a report entry.
+ *
+ * The caller owns the bit it requests; this function does not arbitrate between callers of the
+ * same bit. On the T6001 bit 9 belongs to the AGX vote (pmp_report.agx_vote), so other callers
+ * must not use it.
+ *
+ * Context: process context (the acknowledge wait is a busy poll of up to 50 ms).
+ * Return: 0, -ENODEV if no report is bound to @report_np, -EINVAL if @id is out of range,
+ * -ETIMEDOUT if the acknowledge did not follow.
+ */
+int apple_pmp_report_set_request(const struct device_node *report_np, unsigned int id,
+				bool enable, bool no_ack)
+{
+	struct apple_pmp_report *rep;
+	int ret = -ENODEV;
+
+	if (id > 63)
+		return -EINVAL;
+	rcu_read_lock();
+	list_for_each_entry_rcu(rep, &apple_pmp_reports, list) {
+		if (rep->dev->of_node == report_np) {
+			ret = apple_pmp_report_set_state(rep, id, enable, no_ack);
+			break;
+		}
+	}
+	rcu_read_unlock();
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_set_request);
+
 static int apple_pmp_report_entry_set_state(struct generic_pm_domain *genpd, bool enable)
 {
 	struct apple_pmp_report_entry *ent = genpd_to_apple_pmp_report_entry(genpd);
