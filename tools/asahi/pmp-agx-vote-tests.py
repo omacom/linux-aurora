@@ -40,7 +40,6 @@ CONTROLS = [
      'return v->enabled && !v->voted && !v->stopped && ((void)now, (!v->failures || true));'),
     ('begin-ignores-retry', 'return v->enabled && !v->voted && !v->stopped && (!v->failures || agx_vote_retry_reached(v, now));',
      'return v->enabled && !v->voted && !v->stopped && ((void)now, !v->failures);'),
-    ('begin-ignores-retry', '(!v->failures || agx_vote_retry_reached(v, now))', '!v->failures'),
     ('retry-revival', '|| (agx_sms_t)(v->retry_at - now) > (agx_sms_t)AGX_VOTE_RETRY_MS', ''),
 ]
 
