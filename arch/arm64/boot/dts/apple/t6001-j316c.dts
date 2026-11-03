@@ -9,6 +9,13 @@
 
 /dts-v1/;
 
+/*
+ * PMP manages system power states. This board has run sustained ANE and GPU
+ * measurement lanes with PMP enabled; s2idle resume qualification is tracked
+ * on the pull request.
+ */
+#define APPLE_USE_PMP
+
 #include "t6001.dtsi"
 #include "t600x-j314-j316.dtsi"
 
