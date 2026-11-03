@@ -204,7 +204,12 @@ struct dcp_method_entry {
 	char tag[4];
 	/* H17G shares the H17P transport but changes selected method IDs. */
 	char tag_h17g[4];
+	char tag_ext26[4];
 };
+
+#define IOMFB_METHOD_EXT26(tag, native, name) [name] = { #name, \
+	{ tag[0], tag[1], tag[2], tag[3] }, {0}, \
+	{ native[0], native[1], native[2], native[3] } }
 
 #define IOMFB_MAX_CB (1000)
 

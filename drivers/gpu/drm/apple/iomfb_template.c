@@ -72,6 +72,18 @@ static void dcp_swap_submit(struct apple_dcp *dcp, bool oob,
 {
 	const void *data = request;
 
+	if (dcp_is_ext26(dcp)) {
+		if (ext26_encode(dcp, request)) {
+			WRITE_ONCE(dcp->crashed, true);
+			if (cb)
+				cb(dcp, NULL, cookie);
+			return;
+		}
+		dcp_push(dcp, oob, &dcp_methods[dcpep_swap_submit], 0x1bd8, 12,
+			 dcp->ext26_present, cb, cookie);
+		return;
+	}
+
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G) {
 		iomfb_serialize_present_h17p(&dcp->present_h17p, request);
 		if (!iomfb_apply_backlight_h17p(dcp, request, &dcp->present_h17p)) {
@@ -249,8 +261,22 @@ static u32 dcpep_cb_zero(struct apple_dcp *dcp)
 static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 				   struct DCP_FW_NAME(dc_swap_complete_resp) *resp)
 {
-	ktime_t now = ktime_get();
+	ktime_t now = dcp_is_ext26(dcp) ? ns_to_ktime(dcp->ext26_rx_ns) : ktime_get();
 	bool retire = true;
+	if (dcp_is_ext26(dcp)) {
+		if (iomfb_ext26_control_complete(dcp, resp->swap_id, false))
+			return;
+		if (resp->swap_id == dcp->last_swap_id)
+			return;
+		if (dcp->present_state_h17p.pending && !dcp->present_state_h17p.accepted &&
+		    resp->swap_id == dcp->present_state_h17p.swap_id) {
+			dcp->ext26_early_complete = true;
+			dcp->ext26_early_id = resp->swap_id;
+			dcp->ext26_early_ns = dcp->ext26_rx_ns;
+			return;
+		}
+	}
+
 
 #if DCP_FW_VERSION(26, 0, 0) <= DCP_FW_VER
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G &&
@@ -702,15 +728,27 @@ dcpep_cb_allocate_buffer(struct apple_dcp *dcp,
 		return resp;
 	}
 
-	allocated.buf = dma_alloc_coherent(dcp->dev, size, &allocated.dva,
-					   GFP_KERNEL);
+	if (dcp_is_ext26(dcp)) {
+		allocated.size = size;
+		allocated.buf = dma_alloc_attrs(dcp->dev, size, &allocated.dva,
+					    GFP_KERNEL, DMA_ATTR_FORCE_CONTIGUOUS);
+	} else {
+		allocated.buf = dma_alloc_coherent(dcp->dev, size, &allocated.dva, GFP_KERNEL);
+	}
 	if (!allocated.buf)
 		return resp;
 
 	ret = dma_get_sgtable(dcp->dev, &allocated.map, allocated.buf,
 			      allocated.dva, size);
-	if (ret) {
-		dma_free_coherent(dcp->dev, size, allocated.buf, allocated.dva);
+	if (ret || (dcp_is_ext26(dcp) && (allocated.map.orig_nents != 1 ||
+	    ((sg_phys(allocated.map.sgl) | allocated.dva) & (SZ_16K - 1))))) {
+		if (!ret)
+			sg_free_table(&allocated.map);
+		if (dcp_is_ext26(dcp))
+			dma_free_attrs(dcp->dev, size, allocated.buf, allocated.dva,
+				       DMA_ATTR_FORCE_CONTIGUOUS);
+		else
+			dma_free_coherent(dcp->dev, size, allocated.buf, allocated.dva);
 		return resp;
 	}
 
@@ -967,6 +1005,10 @@ static void iomfbep_cb_enable_backlight_message_ap_gated(struct apple_dcp *dcp,
 /* Chunked data transfer for property dictionaries */
 static u8 dcpep_cb_prop_start(struct apple_dcp *dcp, u32 *length)
 {
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+	if (dcp_is_ext26(dcp))
+		return ext26_prop_start(dcp, *length);
+#endif
 	if (dcp->chunks.data != NULL) {
 		dev_warn(dcp->dev, "ignoring spurious transfer start\n");
 		return false;
@@ -1039,8 +1081,11 @@ static u8 dcpep_cb_prop_chunk(struct apple_dcp *dcp,
 		return false;
 	}
 
-	if (req->offset != dcp->chunks.received)
+	if (req->offset != dcp->chunks.received) {
 		dcp->chunks.contiguous = false;
+		if (dcp_is_ext26(dcp))
+			return false;
+	}
 	if (dcp->chunks.contiguous)
 		dcp->chunks.received += req->length;
 	memcpy(dcp->chunks.data + req->offset, req->data, req->length);
@@ -1064,6 +1109,9 @@ static bool dcpep_process_chunks(struct apple_dcp *dcp,
 			dcp_property_complete(dcp->chunks.data, dcp->chunks.received,
 					      dcp->chunks.length);
 
+	if (dcp_is_ext26(dcp) && (!dcp->chunks.contiguous ||
+	    dcp->chunks.received != dcp->chunks.length))
+		return false;
 	ret = parse(dcp->chunks.data, dcp->chunks.length, &ctx);
 
 	if (ret) {
@@ -1595,6 +1643,14 @@ static void dcp_prepare_clear_swap(struct apple_dcp *dcp, void *request)
 #endif
 }
 
+static void dcp_present_rejected(struct apple_dcp *dcp)
+{
+	if (dcp_is_ext26(dcp)) {
+		WRITE_ONCE(dcp->ext26_blocked, true);
+		WRITE_ONCE(dcp->crashed, true);
+	}
+}
+
 static void dcp_swap_cleared(struct apple_dcp *dcp, void *data, void *cookie)
 {
 	struct DCP_FW_NAME(dcp_swap_submit_resp) *resp = data;
@@ -1608,6 +1664,8 @@ static void dcp_swap_cleared(struct apple_dcp *dcp, void *data, void *cookie)
 		status = ~0U;
 
 	if (status) {
+		dcp_present_rejected(dcp);
+		dcp->ext26_early_complete = false;
 		/* An aborted present has already been reported. */
 		if (ret != -ECANCELED)
 			dev_err(dcp->dev, "swap_clear failed! status %u\n", status);
@@ -1659,7 +1717,8 @@ static void dcp_swap_clear_started(struct apple_dcp *dcp, void *data,
 	if (info)
 		info->swap_id = resp->swap_id;
 
-	dcp_h17p_prepare_swap(dcp);
+	if (!dcp_is_ext26(dcp))
+		dcp_h17p_prepare_swap(dcp);
 	dcp_swap_submit(dcp, false, &DCP_FW_UNION(dcp->swap), dcp_swap_cleared, cookie);
 }
 
@@ -1709,6 +1768,11 @@ void DCP_FW_NAME(iomfb_poweron)(struct apple_dcp *dcp)
 	int ret;
 	u32 handle;
 	dev_info(dcp->dev, "dcp_poweron() starting\n");
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+	if (dcp_is_ext26(dcp))
+		return; /* Native26 publishes A473 only after a successful A413. */
+#endif
+
 
 #if DCP_FW_VERSION(26, 0, 0) <= DCP_FW_VER
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G)
@@ -2185,6 +2249,8 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
 		status = ~0U;
 
 	if (status) {
+		dcp_present_rejected(dcp);
+		dcp->ext26_early_complete = false;
 		/* An aborted present has already been reported. */
 		if (ret != -ECANCELED)
 			dev_err(dcp->dev, "swap failed! status %u\n", status);
@@ -2193,6 +2259,17 @@ static void dcp_swapped(struct apple_dcp *dcp, void *data, void *cookie)
 			dcp_unarm_retained_framebuffers(dcp, swap_id);
 			dcp_drm_crtc_vblank(dcp->crtc);
 		}
+		return;
+	}
+	if (dcp_is_ext26(dcp) && dcp->ext26_early_complete && dcp->ext26_early_id == swap_id) {
+		struct DCP_FW_NAME(dc_swap_complete_resp) completed = { .swap_id = swap_id };
+
+		u64 received = dcp->ext26_rx_ns;
+
+		dcp->ext26_early_complete = false;
+		dcp->ext26_rx_ns = dcp->ext26_early_ns;
+		dcpep_cb_swap_complete(dcp, &completed);
+		dcp->ext26_rx_ns = received;
 		return;
 	}
 	dcp->swap_start = ktime_get();
@@ -2204,13 +2281,15 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
 {
 	struct DCP_FW_NAME(dcp_swap_start_resp) *resp = data;
 
-	if (!resp || resp->ret) {
+	if (!resp || resp->ret || (dcp_is_ext26(dcp) && !resp->swap_id)) {
+		dcp_present_rejected(dcp);
 		dev_err(dcp->dev, "swap_start was rejected\n");
 		if (dcp_present_retires(dcp))
 			dcp_drm_crtc_vblank(dcp->crtc);
 		return;
 	}
 	if (!dcp_present_begin(dcp, resp->swap_id)) {
+		dcp_present_rejected(dcp);
 		if (dcp_present_retires(dcp))
 			dcp_drm_crtc_vblank(dcp->crtc);
 		return;
@@ -2220,7 +2299,8 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
 		dcp_arm_retained_framebuffers(dcp, resp->swap_id);
 
 	trace_iomfb_swap_submit(dcp, resp->swap_id);
-	dcp_h17p_prepare_swap(dcp);
+	if (!dcp_is_ext26(dcp))
+		dcp_h17p_prepare_swap(dcp);
 	dcp_swap_submit(dcp, false, &DCP_FW_UNION(dcp->swap), dcp_swapped, NULL);
 }
 
@@ -2276,7 +2356,10 @@ static void dcp_pre_swap_a428(struct apple_dcp *dcp, void *out, void *cookie)
 {
 	u32 identity = 0x10000;
 
-	dcp_pipe_set_428(dcp, false, &identity, dcp_post_swap_a428, cookie);
+	if (dcp_is_ext26(dcp))
+		do_swap(dcp, out, cookie);
+	else
+		dcp_pipe_set_428(dcp, false, &identity, dcp_post_swap_a428, cookie);
 }
 #endif
 
@@ -2325,12 +2408,46 @@ static void dcp_set_adaptive_sync(struct apple_dcp *dcp, u32 min_vrr,
 }
 
 int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
-			       struct drm_crtc_state *crtc_state)
+			       struct drm_crtc_state *crtc_state
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+			       , struct drm_plane_state *primary
+#endif
+			       )
 {
 	struct dcp_display_mode selected, *mode = &selected;
 	struct dcp_wait_cookie *cookie;
 	struct dcp_color_mode *cmode = NULL;
 	int ret;
+
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+	if (dcp_is_ext26(dcp)) {
+		u32 pitch = primary && primary->fb ? primary->fb->pitches[0] : dcp->ext26_stride;
+
+		if (READ_ONCE(dcp->ext26_blocked))
+			return -EIO;
+		if (READ_ONCE(dcp->pipe_enabled_h17p) &&
+		    (pitch != dcp->ext26_stride ||
+		     !drm_mode_equal(&dcp->ext26_mode, &crtc_state->mode))) {
+			/* A layout change cannot resume the old gentle-blank surface. */
+			ret = dcp_ext26_layout_stop(dcp);
+			if (ret)
+				return ret;
+		}
+		dcp->ext26_stride = pitch;
+		if ((READ_ONCE(dcp->ext26_blanked) || READ_ONCE(dcp->ext26_normal)) &&
+		    READ_ONCE(dcp->pipe_enabled_h17p) &&
+		    dcp->ext26_generation == READ_ONCE(dcp->typec_generation) &&
+		    drm_mode_equal(&dcp->ext26_mode, &crtc_state->mode)) {
+			WRITE_ONCE(dcp->ext26_blanked, false);
+			return 0;
+		}
+		WRITE_ONCE(dcp->ext26_normal, false);
+		WRITE_ONCE(dcp->ext26_power_sent, false);
+		dcp->ext26_generation = READ_ONCE(dcp->typec_generation);
+		reinit_completion(&dcp->ext26_ready);
+	}
+
+#endif
 
 	if (!lookup_mode(dcp, &crtc_state->mode, mode)) {
 		dev_err(dcp->dev, "no match for " DRM_MODE_FMT "\n",
@@ -2350,6 +2467,14 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 		cmode = &mode->sdr;
 	else if (mode->color_mode_id == mode->best.id)
 		cmode = &mode->best;
+	if (dcp_is_ext26(dcp)) {
+		if (mode->sdr_rgb.score < 0 || mode->sdr_rgb.depth != 8 ||
+		    mode->sdr_rgb.format != DCP_COLOR_FORMAT_RGB || crtc_state->vrr_enabled)
+			return -EINVAL;
+		mode->color_mode_id = mode->sdr_rgb.id;
+		mode->vrr = false;
+		cmode = &mode->sdr_rgb;
+	}
 	if (cmode)
 		dev_info(dcp->dev,
 			"set_digital_out_mode() color mode depth:%hhu format:%u "
@@ -2377,8 +2502,17 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	kref_get(&cookie->refcount);
 
 	dcp->swap_submit_timestamp = 0;
-
-	if (DCP_INHERIT_BOOT_MODE &&
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+	if (dcp_is_ext26(dcp)) {
+		ret = ext26_open_client(dcp);
+		if (ret) {
+			kref_put(&cookie->refcount, release_wait_cookie);
+			kref_put(&cookie->refcount, release_wait_cookie);
+			return ret;
+		}
+	}
+#endif
+	if (DCP_INHERIT_BOOT_MODE && !dcp_is_ext26(dcp) &&
 	    dcp->hw.iomfb_method_profile !=
 	    DCP_IOMFB_METHODS_H17P_EXTERNAL) {
 		dev_dbg(dcp->dev, "inheriting the bootloader's display mode\n");
@@ -2434,6 +2568,17 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 			dev_info(dcp->dev, "set_digital_out_mode returned %#x\n",
 				 READ_ONCE(cookie->status));
 	}
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+	if (dcp_is_ext26(dcp)) {
+		ret = READ_ONCE(cookie->replied) && !READ_ONCE(cookie->status) ? 0 : -EREMOTEIO;
+		kref_put(&cookie->refcount, release_wait_cookie);
+		if (!ret)
+			ret = ext26_activate(dcp);
+		if (!ret)
+			drm_mode_copy(&dcp->ext26_mode, &crtc_state->mode);
+		return ret;
+	}
+#endif
 	kref_put(&cookie->refcount, release_wait_cookie);
 	dcp->vrr_enabled = mode->vrr && crtc_state->vrr_enabled;
 

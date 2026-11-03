@@ -138,7 +138,11 @@ int systemep_init(struct apple_dcp *dcp)
 	init_completion(&dcp->systemep_done);
 
 	dcp->systemep = afk_init(dcp, SYSTEM_ENDPOINT, systemep_ops);
-	afk_start(dcp->systemep);
+	if (IS_ERR(dcp->systemep))
+		return PTR_ERR(dcp->systemep);
+	int ret = afk_start(dcp->systemep);
+	if (ret || dcp_is_ext26(dcp))
+		return ret;
 
 	if (!enable_verbose_logging)
 		return 0;

@@ -66,6 +66,8 @@ bool dcp_fw_compat_is_14_7(struct platform_device *pdev);
 bool dcp_ext_unusable(struct platform_device *pdev);
 unsigned long* dcp_get_iomfb_surfaces(struct platform_device *pdev);
 int dcp_start(struct platform_device *pdev);
+void dcp_ext26_open_services(struct apple_dcp *dcp);
+int dcp_ext26_layout_stop(struct apple_dcp *dcp);
 int dcp_wait_ready(struct platform_device *pdev, u64 timeout);
 void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit);
 void dcp_retain_framebuffer(struct platform_device *pdev,
@@ -109,6 +111,7 @@ int dcp_dptx_disconnect_oob(struct platform_device *pdev, u32 port);
 bool dcp_hold_resume_event(struct platform_device *pdev);
 
 int iomfb_start_rtkit(struct apple_dcp *dcp);
+void iomfb_ext26_start(struct apple_dcp *dcp);
 void iomfb_shutdown(struct apple_dcp *dcp);
 /* rtkit message handler for IOMFB messages */
 void iomfb_recv_msg(struct apple_dcp *dcp, u64 message);

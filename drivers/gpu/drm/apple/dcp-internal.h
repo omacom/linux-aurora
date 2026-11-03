@@ -39,6 +39,7 @@
 
 #define DCP_MAX_PLANES 4
 
+struct ext26_control;
 struct apple_dcp_afkep;
 struct dcp_method_entry;
 
@@ -183,6 +184,7 @@ enum dcp_iomfb_method_profile {
 	DCP_IOMFB_METHODS_DEFAULT,
 	DCP_IOMFB_METHODS_H17G,
 	DCP_IOMFB_METHODS_H17P_EXTERNAL,
+	DCP_IOMFB_METHODS_J613_EXT26,
 };
 
 struct apple_dcp_hw_data {
@@ -322,6 +324,41 @@ struct apple_dcp {
 
 	/* DCP has crashed */
 	bool crashed;
+	/* Native26 control/property epochs, serialized by the IOMFB owner. */
+	struct completion ext26_link_ready;
+	bool ext26_services_open;
+	bool ext26_client_open;
+	struct apple_dcp_afkep *ext26_aux[3];
+	u32 ext26_stride;
+	u64 ext26_edid_generation;
+	bool ext26_edid_tried;
+	u64 ext26_rx_ns;
+	u64 ext26_power_ns;
+	u64 ext26_generation;
+	u64 ext26_buffer_bytes;
+	bool ext26_blocked;
+	bool ext26_pm_work_off;
+	bool ext26_stopping;
+	bool ext26_blanked;
+	bool ext26_pm_preparing;
+	bool ext26_control_pending;
+	bool ext26_early_complete;
+	u32 ext26_early_id;
+	u64 ext26_early_ns;
+	u32 ext26_control_id;
+	struct ext26_control *ext26_control;
+	struct work_struct ext26_blank_work;
+	struct list_head ext26_retained;
+	u64 ext26_retained_bytes;
+	unsigned int ext26_epochs;
+	struct drm_display_mode ext26_mode;
+	DECLARE_BITMAP(ext26_released, DCP_MAX_MAPPINGS);
+	bool ext26_power_sent;
+	bool ext26_normal;
+	struct completion ext26_ready;
+	iomfb_cb_handler *ext26_handlers;
+	u8 ext26_present[0x1bd8];
+
 
 	DECLARE_BITMAP(iomfb_surfaces, DCP_MAX_PLANES);
 
@@ -734,6 +771,11 @@ static inline bool dcp_fw_is_14_7(const struct apple_dcp *dcp)
 		dcp->hw.fw_14_7_endpoints);
 }
 
+static inline bool dcp_is_ext26(const struct apple_dcp *dcp)
+{
+	return dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_J613_EXT26;
+}
+
 /*
  * The T6030 external processor (the J514S/J516S built-in HDMI port and
  * USB-C displays) driven natively through Aurora's DCPLink session: DCP
@@ -766,8 +808,8 @@ void dcp_external_audio_start(struct apple_dcp *dcp);
 static inline bool dcp_ext_dptx_607(const struct apple_dcp *dcp)
 {
 	/* Not the generic M1/M2 DCPs this tree also runs on the template. */
-	return dcp->fw_compat == DCP_FIRMWARE_V_14_7_TEMPLATE &&
-	       dcp->hw.fw_14_7_endpoints;
+	return (dcp->fw_compat == DCP_FIRMWARE_V_14_7_TEMPLATE &&
+		dcp->hw.fw_14_7_endpoints);
 }
 
 #define DCP_AUDIO_MAX_CHANS 15

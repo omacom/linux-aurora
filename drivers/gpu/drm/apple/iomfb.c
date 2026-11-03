@@ -36,6 +36,7 @@
 #include "dcp-internal.h"
 #include "iomfb.h"
 #include "iomfb_internal.h"
+#include "dcpext26-lifecycle.h"
 #include "parser.h"
 #include "trace.h"
 
@@ -162,6 +163,8 @@ static u8 dcp_pop_depth(u8 *depth)
 }
 
 /* Older firmware and the H17G method profile retain their existing transport. */
+static u64 ext26_scanout_bytes(struct iomfb_scanout_h17p *scanout);
+
 static bool iomfb_uses_queue(struct apple_dcp *dcp)
 {
 	return dcp->fw_compat == DCP_FIRMWARE_H17P &&
@@ -197,7 +200,7 @@ static int iomfb_enqueue_opaque_x(struct apple_dcp *dcp)
 	lockdep_assert_held(&dcp->iomfb.lock);
 	/* DCPEXT rejects enableGPAlphaDiv; retain the panel-only workaround. */
 	if (dcp->hw.iomfb_method_profile ==
-	    DCP_IOMFB_METHODS_H17P_EXTERNAL)
+	    DCP_IOMFB_METHODS_H17P_EXTERNAL || dcp_is_ext26(dcp))
 		return 0;
 	if (atomic_read(&dcp->iomfb.opaque_x_state) != IOMFB_OPAQUE_X_NEEDED)
 		return 0;
@@ -243,7 +246,8 @@ static void iomfb_queue_advance(struct apple_dcp *dcp)
 		/* The active operation may still be visible to firmware. */
 		return;
 	}
-	if (!iomfb_channels_idle(dcp) || dcp->present_state_h17p.pending)
+	if (!iomfb_channels_idle(dcp) || dcp->present_state_h17p.pending ||
+	    dcp->ext26_control_pending)
 		return;
 
 	if (transaction) {
@@ -648,6 +652,8 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
 	if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17G &&
 	    call->tag_h17g[0])
 		memcpy(resolved.tag, call->tag_h17g, sizeof(resolved.tag));
+	if (dcp_is_ext26(dcp) && call->tag_ext26[0])
+		memcpy(resolved.tag, call->tag_ext26, sizeof(resolved.tag));
 	call = &resolved;
 
 	enum dcp_context_id context = dcp_call_context(dcp, oob);
@@ -688,9 +694,9 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
 
 	if (in_len > 0)
 		memcpy(out_data, data, in_len);
-	/* An unwritten status must not look like a successful response. */
+	/* Native26 Boolean replies may leave their padding unwritten. */
 	if (out_len)
-		memset(out_data + in_len, 0xff, out_len);
+		memset(out_data + in_len, dcp_is_ext26(dcp) ? 0 : 0xff, out_len);
 
 	trace_iomfb_push(dcp, call, context, offset, depth);
 
@@ -700,8 +706,19 @@ void dcp_push(struct apple_dcp *dcp, bool oob, const struct dcp_method_entry *ca
 	ch->header[depth] = header;
 	ch->end[depth] = offset + ALIGN(data_len, DCP_PACKET_ALIGNMENT);
 
+	if (dcp_is_ext26(dcp))
+		dma_wmb();
 	dcp_send_message(dcp, IOMFB_ENDPOINT,
 			 dcpep_msg(context, data_len, offset));
+	/* Only a successful transport send can establish the readiness boundary. */
+	if (dcp_is_ext26(dcp) && !memcmp(call->tag, "A473", 4) && in_len == 16 &&
+	    get_unaligned_le64(data) == 1) {
+		bool sent = !READ_ONCE(dcp->crashed) && !READ_ONCE(dcp->quiescing) &&
+			    !READ_ONCE(dcp->ext26_blocked);
+
+		WRITE_ONCE(dcp->ext26_power_ns, sent ? ktime_get_ns() : 0);
+		WRITE_ONCE(dcp->ext26_power_sent, sent);
+	}
 }
 
 /* Parse a callback tag "D123" into the ID 123. Returns -EINVAL on failure. */
@@ -729,6 +746,8 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context)
 	struct dcp_channel *ch = dcp_get_channel(dcp, context);
 
 	dcp_pop_depth(&ch->depth);
+	if (dcp_is_ext26(dcp))
+		dma_wmb();
 	dcp_send_message(dcp, IOMFB_ENDPOINT,
 			 dcpep_ack(context));
 }
@@ -1293,6 +1312,13 @@ static void dcpep_handle_cb(struct apple_dcp *dcp, enum dcp_context_id context,
 	out = in + hdr->in_len;
 
 	if (!handled) {
+		if (dcp_is_ext26(dcp)) {
+			dev_err(dev, "native26 unsupported callback D%03d (%u/%u); session retained\n",
+				tag, hdr->in_len, hdr->out_len);
+			WRITE_ONCE(dcp->crashed, true);
+			complete(&dcp->start_done);
+			return;
+		}
 		zero_reply = dcp_external_zero_reply(dcp, tag, context,
 						     hdr->in_len, hdr->out_len);
 		if (!zero_reply &&
@@ -1374,15 +1400,16 @@ static void dcpep_handle_ack(struct apple_dcp *dcp, enum dcp_context_id context)
 	 * acked on the callback context, whose receive area holds the callback
 	 * record rather than the reply, so the ack cannot be used to find it.
 	 *
-	 * On older firmware the lengths in the record header must still be
-	 * the ones that were sent; otherwise the record was overwritten and
-	 * its output cannot be trusted.  The tag is left out of the check: it
-	 * has only been seen preserved on 13.5 firmware.
+	 * Native26 preserves the command header, including its tag. Validate it
+	 * before using the reply. Older firmware keeps its length-only check;
+	 * other H17 profiles retain their existing admission policy.
 	 */
-	if (dcp->fw_compat != DCP_FIRMWARE_H17P) {
+	if (dcp->fw_compat != DCP_FIRMWARE_H17P || dcp_is_ext26(dcp)) {
 		record = out - sent->in_len - sizeof(*record);
 		if (record->in_len != sent->in_len ||
-		    record->out_len != sent->out_len) {
+		    record->out_len != sent->out_len ||
+		    (dcp_is_ext26(dcp) &&
+		     memcmp(record->tag, sent->tag, sizeof(record->tag)))) {
 			dev_err(dcp->dev,
 				"corrupt %c%c%c%c command record on context %X\n",
 				sent->tag[3], sent->tag[2], sent->tag[1],
@@ -1421,6 +1448,8 @@ static void dcpep_got_msg(struct apple_dcp *dcp, u64 message)
 	}
 
 	data = dcp->shmem + channel_offset + offset;
+	if (dcp_is_ext26(dcp))
+		dma_rmb();
 
 	if (FIELD_GET(IOMFB_MSG_ACK, message))
 		dcpep_handle_ack(dcp, ctx_id);
@@ -1799,7 +1828,7 @@ int dcp_get_modes(struct drm_connector *connector)
 	dcp = platform_get_drvdata(pdev);
 	modes = dcp_modes_snapshot(dcp, apple_connector, &nr_modes);
 
-	physical_edid = dcp->hw.iomfb_method_profile ==
+	physical_edid = dcp_is_ext26(dcp) || dcp->hw.iomfb_method_profile ==
 		DCP_IOMFB_METHODS_H17P_EXTERNAL;
 	/* get_modes holds mode_config.mutex; HPD paths never acquire it. */
 	if (physical_edid) {
@@ -1822,6 +1851,8 @@ int dcp_get_modes(struct drm_connector *connector)
 
 	/* Internal H17P still has no supported EDID command transport. */
 	if (nr_modes && !apple_connector->drm_edid &&
+	    (!dcp_is_ext26(dcp) || !dcp->ext26_edid_tried ||
+	     dcp->ext26_edid_generation != edid_generation) &&
 	    (dcp->fw_compat != DCP_FIRMWARE_H17P ||
 	     (dcp->dcpavservep && dcp->dcpavservep->wire_v2))) {
 		const struct drm_edid *edid;
@@ -1829,6 +1860,10 @@ int dcp_get_modes(struct drm_connector *connector)
 		mutex_unlock(&dcp->dcpavserv.lock);
 		if (physical_edid)
 			mutex_unlock(&dcp->hpd_mutex);
+		if (dcp_is_ext26(dcp)) {
+			dcp->ext26_edid_tried = true;
+			dcp->ext26_edid_generation = edid_generation;
+		}
 		edid = dcpavserv_copy_edid(dcp, edid_generation, &service_epoch);
 		if (physical_edid)
 			mutex_lock(&dcp->hpd_mutex);
@@ -1851,6 +1886,15 @@ int dcp_get_modes(struct drm_connector *connector)
 		/* Retirement may have queued cleanup while this request waited. */
 		dcp_consume_edid_invalidation(apple_connector);
 		if (IS_ERR_OR_NULL(edid)) {
+			if (dcp_is_ext26(dcp) && IS_ERR(edid) &&
+			    PTR_ERR(edid) != -ENODEV && PTR_ERR(edid) != -ESTALE) {
+				WRITE_ONCE(dcp->ext26_blocked, true);
+				WRITE_ONCE(dcp->crashed, true);
+				apple_connector->connected = false;
+				nr_modes = 0;
+				dev_err(dcp->dev, "native26 initial EDID discovery failed: %pe; session retained\n", edid);
+				goto edid_done;
+			}
 			/*
 			 * There is no AV service for an internal panel, nor
 			 * for an external display while its link is down;
@@ -1922,6 +1966,13 @@ int dcp_get_modes(struct drm_connector *connector)
 	}
 
 edid_done:
+	/* Discovery can replace the catalogue while the OOB read waits. */
+	if (dcp_is_ext26(dcp)) {
+		if (READ_ONCE(dcp->crashed) || READ_ONCE(dcp->ext26_blocked))
+			nr_modes = 0;
+		else
+			modes = dcp_modes_snapshot(dcp, apple_connector, &nr_modes);
+	}
 	/* Publish after a possibly delayed raw read, under its physical generation. */
 	for (i = 0; i < nr_modes; ++i) {
 		mode = drm_mode_duplicate(dev, &modes[i].mode);
@@ -2028,7 +2079,7 @@ static bool dcp_mode_settable(struct apple_dcp *dcp,
 	if (!lookup_mode(dcp, mode, &dcp_mode))
 		return false;
 
-	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
+	if (dcp->fw_compat == DCP_FIRMWARE_H17P && !dcp_is_ext26(dcp) &&
 	    dcp->hw.iomfb_method_profile !=
 	    DCP_IOMFB_METHODS_H17P_EXTERNAL)
 		return dcp_mode.mode.type & DRM_MODE_TYPE_PREFERRED;
@@ -2065,7 +2116,7 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
 
 	/* Disconnect cannot pass the admission check before these RPCs finish. */
 	guard(mutex)(&dcp->external_lock);
-	if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL &&
+	if (dcp_is_retained_external(dcp) &&
 	    (!dcp->external_running || dcp->external_error || READ_ONCE(dcp->quiescing) ||
 	     READ_ONCE(dcp->crashed) || READ_ONCE(dcp->iomfb.presentation_paused))) {
 		/*
@@ -2113,7 +2164,8 @@ int dcp_crtc_atomic_modeset(struct drm_crtc *crtc,
 		ret = iomfb_v14_7_modeset(dcp, crtc_state);
 		break;
 	case DCP_FIRMWARE_H17P:
-		ret = iomfb_modeset_h17p(dcp, crtc_state);
+		ret = iomfb_modeset_h17p(dcp, crtc_state,
+			drm_atomic_get_new_plane_state(commit, crtc->primary));
 		break;
 	default:
 		WARN_ONCE(true, "Unexpected firmware version: %u\n",
@@ -2455,6 +2507,12 @@ VISIBLE_IF_KUNIT void iomfb_scanout_put_h17p(struct apple_dcp *dcp,
 		return;
 	if (dcp->iomfb.next_scanout == scanout)
 		dcp->iomfb.next_scanout = NULL;
+	if (dcp_is_ext26(dcp)) {
+		/* An unsuccessful present can still have exposed its IOVAs. */
+		list_add_tail(&scanout->link, &dcp->ext26_retained);
+		dcp->ext26_retained_bytes += ext26_scanout_bytes(scanout);
+		return;
+	}
 	iomfb_scanout_release_h17p(scanout);
 }
 
@@ -2692,7 +2750,12 @@ static void iomfb_recv_message(struct apple_dcp *dcp, u64 message)
 				 "IOMFB: init complete %#llx (version %llu)\n",
 				 message,
 				 FIELD_GET(GENMASK_ULL(63, 48), message));
-		iomfb_start(dcp);
+		if (dcp_is_ext26(dcp)) {
+			dev_dbg(dcp->dev, "native26 DCPLink ready before AFK startup\n");
+			complete_all(&dcp->ext26_link_ready);
+		} else {
+			iomfb_start(dcp);
+		}
 	} else if (type == IOMFB_MESSAGE_TYPE_MSG)
 		dcpep_got_msg(dcp, message);
 	else
@@ -2713,6 +2776,15 @@ void iomfb_recv_msg(struct apple_dcp *dcp, u64 message)
 	WRITE_ONCE(dcp->iomfb.owner, NULL);
 	iomfb_queue_advance(dcp);
 	mutex_unlock(&dcp->iomfb.lock);
+}
+
+void iomfb_ext26_start(struct apple_dcp *dcp)
+{
+	guard(mutex)(&dcp->iomfb.lock);
+	WRITE_ONCE(dcp->iomfb.owner, current);
+	iomfb_start(dcp);
+	WRITE_ONCE(dcp->iomfb.owner, NULL);
+	iomfb_queue_advance(dcp);
 }
 
 int iomfb_start_rtkit(struct apple_dcp *dcp)
@@ -2737,7 +2809,8 @@ int iomfb_start_rtkit(struct apple_dcp *dcp)
 	 * display DART faults.
 	 */
 	if (dcp->fw_compat == DCP_FIRMWARE_H17P &&
-	    dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17P_EXTERNAL) {
+	    dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17P_EXTERNAL &&
+	    !dcp_is_ext26(dcp)) {
 		ret = apple_rtkit_start_ep(dcp->rtk, REMOTE_ALLOC_ENDPOINT);
 		if (ret)
 			return ret;
@@ -2784,3 +2857,61 @@ void iomfb_shutdown(struct apple_dcp *dcp)
 #if IS_ENABLED(CONFIG_DRM_APPLE_PARSER_KUNIT_TEST)
 #include "iomfb-parser-test.c"
 #endif
+
+static u64 ext26_scanout_bytes(struct iomfb_scanout_h17p *scanout)
+{
+	u64 bytes = 0;
+	unsigned int i;
+
+	for (i = 0; i < SWAP_SURFACES; i++)
+		if (scanout->fb[i] && scanout->fb[i]->obj[0])
+			bytes += scanout->fb[i]->obj[0]->size;
+	return bytes;
+}
+
+/* A release/transport boundary is not a backing-retirement witness. */
+int iomfb_ext26_retain_epoch(struct apple_dcp *dcp)
+{
+	struct iomfb_scanout_h17p *scanout;
+	u64 bytes = 0;
+
+	guard(mutex)(&dcp->iomfb.lock);
+	if (!iomfb_channels_idle(dcp) || dcp->present_state_h17p.pending ||
+	    dcp->iomfb.active || dcp->iomfb.next_scanout || dcp->chunks.data ||
+	    dcp->ext26_control_pending)
+		return -EBUSY;
+	if (dcp->iomfb.scanout)
+		bytes += ext26_scanout_bytes(dcp->iomfb.scanout);
+	list_for_each_entry(scanout, &dcp->iomfb.dropped, link)
+		bytes += ext26_scanout_bytes(scanout);
+	if (!dcpext26_epoch_fits(dcp->ext26_epochs, dcp->ext26_retained_bytes, bytes))
+		return -ENOSPC;
+	if (dcp->iomfb.scanout) {
+		list_add_tail(&dcp->iomfb.scanout->link, &dcp->ext26_retained);
+		dcp->iomfb.scanout = NULL;
+	}
+	list_splice_tail_init(&dcp->iomfb.dropped, &dcp->ext26_retained);
+	dcp->ext26_retained_bytes += bytes;
+	if (bytes)
+		dcp->ext26_epochs++;
+	dcp->ext26_blanked = false;
+	dcp->ext26_normal = false;
+	dcp->ext26_early_complete = false;
+	dev_dbg(dcp->dev, "native26 retained epoch %u: %llu backing bytes; remote/DMA fence unproved\n",
+		 dcp->ext26_epochs, dcp->ext26_retained_bytes);
+	return 0;
+}
+
+/* A retained old attachment may still address this GEM object. */
+bool iomfb_ext26_backing_fresh(struct apple_dcp *dcp, struct drm_framebuffer *fb)
+{
+	struct iomfb_scanout_h17p *scanout;
+	unsigned int i;
+
+	guard(mutex)(&dcp->iomfb.lock);
+	list_for_each_entry(scanout, &dcp->ext26_retained, link)
+		for (i = 0; i < SWAP_SURFACES; i++)
+			if (scanout->fb[i] && scanout->fb[i]->obj[0] == fb->obj[0])
+				return false;
+	return true;
+}
