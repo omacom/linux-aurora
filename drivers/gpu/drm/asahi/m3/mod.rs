@@ -133,6 +133,8 @@ mod t8122_knobs;
 #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
 mod t8122_start;
 
+mod m3_completion_policy;
+
 mod m3_compute_layout;
 
 mod m3_compute_sequence;

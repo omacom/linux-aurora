@@ -106,3 +106,6 @@ fn extended_parameter_aliases_are_gpu_only_and_legacy_is_unchanged() {
         }
     }
 }
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_completion_policy.rs"]
+mod m3_completion_policy;

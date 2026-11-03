@@ -38,7 +38,7 @@ impl EventWait {
         Arc::pin_init(
             pin_init!(EventWait {
                 count: AtomicU64::new(0),
-                wait_us: AtomicU64::new(100),
+                wait_us: AtomicU64::new(1000),
                 overlap_cpu: AtomicBool::new(crate::m3::m3_params::unlocked_wait()),
                 cpu_preparations: AtomicU64::new(0),
                 sleeps: AtomicU64::new(0),
@@ -55,13 +55,17 @@ impl EventWait {
         self.arrived.complete();
     }
 
-    /// Diagnostic tuning changes only the bounded resnapshot cadence, never
+    /// Diagnostic tuning sets the adaptive fallback ceiling in microseconds, never
     /// stamps, pipe retirement, event counts, fences or the two-second timeout.
     /// Atomic publication permits root to compare policies in the same boot.
     pub(crate) fn set_wait_us(&self, us: u64) -> Result {
         if !(25..=1000).contains(&us) { return Err(EINVAL); }
         self.wait_us.store(us, Ordering::Relaxed);
         Ok(())
+    }
+
+    pub(crate) fn wait_ceiling_us(&self) -> u64 {
+        self.wait_us.load(Ordering::Relaxed)
     }
 
     pub(crate) fn cpu_overlap(&self) -> bool {
@@ -82,11 +86,11 @@ impl EventWait {
     }
 
     /// Sleep until a notification later than `seen` has been recorded or
-    /// the selected 25..1000 us elapse (default 100 us). A one-jiffy fallback alone takes up to 4 ms at HZ=250,
+    /// the selected 25..1000 us fallback elapses. A one-jiffy fallback alone takes up to 4 ms at HZ=250,
     /// even when the GPU stamp arrives just after its notification. The timer
     /// adds a bounded resnapshot without replacing IRQ wakeups or busy-waiting.
     /// Only the single completion worker may call this method.
-    pub(crate) fn wait_past(self: &Arc<Self>, seen: u64) -> bool {
+    pub(crate) fn wait_past(self: &Arc<Self>, seen: u64, wait_us: u64) -> bool {
         // Events can arrive while the worker is polling. Discard stale wakeup
         // tokens before checking the sequence. A concurrent event either moves
         // the sequence or leaves a token, including between the check and wait.
@@ -98,7 +102,7 @@ impl EventWait {
                 // on every return, before a subsequent wait can arm the timer.
                 self.sleeps.fetch_add(1, Ordering::Relaxed);
                 let timer = self.clone().start(Delta::from_micros(
-                    self.wait_us.load(Ordering::Relaxed) as i64));
+                    wait_us.clamp(25, 1000) as i64));
                 // Retain one tick as a backup bound; normally either the real
                 // interrupt or our high-resolution timer supplies the token.
                 self.arrived.wait_for_completion_timeout(1);

@@ -38,7 +38,7 @@ struct CompletionView(Arc<crate::m3::m3_rtkit::EventWait>);
 impl kernel::debugfs::Writer for CompletionView {
     fn write(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
         let (us, irqs, sleeps, timers, preparations) = self.0.snapshot();
-        writeln!(f, "version=1 wait_us={} notifications={} sleeps={} timer_wakes={} cpu_preparations={}",
+        writeln!(f, "version=2 policy=adaptive wait_us={} notifications={} sleeps={} timer_wakes={} cpu_preparations={}",
                  us, irqs, sleeps, timers, preparations)
     }
 }

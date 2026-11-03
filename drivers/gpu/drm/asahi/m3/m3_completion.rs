@@ -24,10 +24,9 @@ impl WorkItem for Completion {
     type Pointer = Arc<Self>;
     fn run(owner: Arc<Self>) {
         use crate::m3::m3_runtime::Service;
-        // Snapshots after a notification before sleeping for the next one: the completion
-        // stamps can trail the firmware's event message.
-        const TRAILING_POLLS: u32 = 4;
-        let (mut trailing, mut waited_at) = (0, u64::MAX);
+        // No deliberate spin: fsleep(5) selects udelay, not a scheduler sleep.
+        // Check immediately on IRQ, with backoff for trailing coherent witnesses.
+        let mut policy = super::m3_completion_policy::WaitPolicy::new();
         loop {
             let (outcome, events) = {
                 let mut guard = owner.shared.lock();
@@ -37,23 +36,20 @@ impl WorkItem for Completion {
                 // Preserve the root-only CPU-overlap diagnostic: disabled waits retain
                 // the runtime lock so VM/timestamp preparation cannot overlap the GPU.
                 if let Service::Waiting(messages)=outcome {
-                    if !events.cpu_overlap() {events.wait_past(messages);continue;}
+                    if !events.cpu_overlap() {
+                        events.wait_past(messages, policy.next_wait_us(events.wait_ceiling_us()));
+                        continue;
+                    }
                 }
                 (outcome,events)
             };
             match outcome {
                 Service::Idle => break,
-                Service::Progress => { trailing = 0; waited_at = u64::MAX; }
+                Service::Progress => policy.progress(),
                 Service::Waiting(messages) => {
-                    if messages != waited_at { waited_at = messages; trailing = 0; }
-                    if trailing < TRAILING_POLLS {
-                        trailing += 1;
-                        kernel::time::delay::fsleep(kernel::time::Delta::from_micros(5));
-                    } else {
-                        // Until the next firmware event, or a bounded 100 us resnapshot.
-                        events.wait_past(messages);
-                        trailing = 0;
-                    }
+                    // IRQs and timer expiry alone are not retirement progress.
+                    // Keep backing off until service publishes or retires work.
+                    events.wait_past(messages, policy.next_wait_us(events.wait_ceiling_us()));
                 }
             }
         }
