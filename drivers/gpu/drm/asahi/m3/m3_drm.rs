@@ -96,6 +96,11 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
+    /// HIGH promises host publication ordering, not firmware preemption.
+    pub(crate) fn supports_high_priority(&self) -> bool {
+        self.soc.chip_id == 0x8122 && self.profile == super::m3_profile::Profile::Extended
+    }
+
     /// Admits and starts the M3 runtime on `soc` (the T8122), with the DRM device `drm` that the
     /// caller registers afterwards.
     pub(crate) fn start(
