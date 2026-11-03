@@ -16,6 +16,7 @@ struct sim {
 	bool armed;
 	uint32_t timer_at;
 	int begin_in_write;  // begin this many operations while the register write of the next reconcile is in progress
+	int end_in_write;    // end this many operations while the register write of the next reconcile is in progress
 	int kicks;           // reconciliations the operations asked for
 };
 
@@ -29,6 +30,7 @@ static void arm(struct sim *s, uint32_t delay_ms)
 }
 
 static void begin(struct sim *s);
+static void end(struct sim *s);
 
 // What the kernel work function does.
 static void reconcile(struct sim *s)
@@ -49,6 +51,10 @@ static void reconcile(struct sim *s)
 	} else if (act == AGX_VOTE_CLEAR) {
 		s->clears++;
 		s->bit = false;
+	}
+	while (s->end_in_write > 0) {
+		s->end_in_write--;
+		end(s);
 	}
 	while (s->begin_in_write > 0) {
 		s->begin_in_write--;
@@ -404,6 +410,28 @@ int main(void)
 		CHECK(!agx_vote_release(&w));                         // idle release: no clear write
 		CHECK(!agx_vote_resume(&w));                          // idle resume: still no immediate kick
 		CHECK(agx_vote_begin(&w, 6100) == 1);                 // past the deadline the kick is back
+	}
+	// 25. the residual w7X flagged on the delay contract: the end lands inside a failed SET write and no new
+	// operation starts. The write path arms nothing (users is already 0 when applied runs), so the work
+	// function must arm the retry from the failure state itself, and when the retry fires with nobody
+	// waiting it must clear the backoff instead of re-arming forever.
+	{
+		struct sim s = fresh(true, 100, 0);
+		s.fail_sets = 1;
+		s.end_in_write = 1;                                    // the op ends inside the ack
+		begin(&s); advance_to(&s, 0);
+		CHECK(s.v.failures == 1 && s.v.users == 0 && s.bit == false);
+		CHECK(s.armed);                                        // the retry is armed from the failure state
+		advance_to(&s, AGX_VOTE_RETRY_MS);
+		CHECK(s.v.failures == 0 && !s.armed && !s.bit);        // the idle fire clears the backoff, once
+		advance_to(&s, AGX_VOTE_RETRY_MS + 500);
+		CHECK(!s.armed && s.sets == 1);                        // no re-arm, no hot loop
+		begin(&s); advance_to(&s, s.now + 1);
+		CHECK(s.sets == 2 && s.bit);                           // and a later operation votes as usual
+		// the header alone: next arms the remaining delay with no user and no pending timer
+		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 6000};
+		CHECK(agx_vote_next(&v, 5500) == 500);
+		CHECK(agx_vote_next(&v, 6000) == 1);
 	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;
