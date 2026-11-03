@@ -252,6 +252,9 @@ impl platform::Driver for AsahiPlatformDriver {
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
         debug::update_debug_flags();
 
+        // SAFETY: Takes no arguments, process context. Lets the T6001 AGX vote run again after an earlier unbind released it; a no-op everywhere else.
+        unsafe { bindings::apple_pmp_agx_activity_resume() };
+
         dev_info!(pdev.as_ref(), "Probing...\n");
 
         let cfg = match info.ok_or(ENODEV)? {

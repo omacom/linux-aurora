@@ -35,12 +35,17 @@ int apple_pmp_report_set_request(const struct device_node *report_np, unsigned i
 void apple_pmp_agx_activity_begin(void);
 void apple_pmp_agx_activity_end(void);
 void apple_pmp_agx_activity_release(void);
+void apple_pmp_agx_activity_resume(void);
 #else
 static inline void apple_pmp_agx_activity_begin(void)
 {
 }
 
 static inline void apple_pmp_agx_activity_end(void)
+{
+}
+
+static inline void apple_pmp_agx_activity_resume(void)
 {
 }
 

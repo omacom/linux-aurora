@@ -32,6 +32,7 @@ typedef int32_t agx_sms_t;
 struct agx_vote {
 	bool enabled;		/* the module parameter */
 	bool voted;		/* bit 9 is set and was acknowledged */
+	bool stopped;		/* released (GPU unbind, report removal, sleep): no new vote until agx_vote_resume() */
 	unsigned int users;	/* GPU operations in flight */
 	agx_ms_t idle_ms;	/* keep the vote this long after the last operation ends */
 	agx_ms_t idle_at;	/* when users last fell to 0 */
@@ -54,7 +55,7 @@ static inline bool agx_vote_reached(agx_ms_t now, agx_ms_t t)
 static inline bool agx_vote_begin(struct agx_vote *v)
 {
 	v->users++;
-	return v->enabled && !v->voted;
+	return v->enabled && !v->voted && !v->stopped;
 }
 
 /* An operation ends. Returns the delay in ms after which the reconcile step must run, 0 when none is needed. */
@@ -73,7 +74,7 @@ static inline agx_ms_t agx_vote_end(struct agx_vote *v, agx_ms_t now)
 /* What the reconcile step must do now. */
 static inline enum agx_vote_action agx_vote_decide(const struct agx_vote *v, agx_ms_t now)
 {
-	if (!v->enabled)
+	if (!v->enabled || v->stopped)
 		return v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;
 	if (v->users)
 		return !v->voted && (!v->failures || agx_vote_reached(now, v->retry_at)) ? AGX_VOTE_SET : AGX_VOTE_NONE;
@@ -82,13 +83,18 @@ static inline enum agx_vote_action agx_vote_decide(const struct agx_vote *v, agx
 	return AGX_VOTE_NONE;
 }
 
-/* Delay in ms until the reconcile step must run again, 0 when no timer is needed. */
+/*
+ * Delay in ms until the reconcile step must run again, 0 when no timer is needed. 1 when a set is owed right now: an operation began while a
+ * clear was being written (begin saw voted still true and did not kick), so after the clear nothing would schedule the set.
+ */
 static inline agx_ms_t agx_vote_next(const struct agx_vote *v, agx_ms_t now)
 {
 	agx_ms_t at;
 
-	if (!v->enabled)
+	if (!v->enabled || v->stopped)
 		return 0;
+	if (v->users && !v->voted && !v->failures)
+		return 1;
 	if (v->users && !v->voted && v->failures)
 		at = v->retry_at;
 	else if (!v->users && v->voted)
@@ -114,13 +120,30 @@ static inline void agx_vote_applied(struct agx_vote *v, enum agx_vote_action act
 	}
 }
 
-/* The GPU driver unbinds: drop the vote now. True when bit 9 is set and the caller must write the clear. */
+/*
+ * The GPU driver unbinds, the report goes away, or the system sleeps: drop the vote now and refuse new ones. True when bit 9 is set and the caller must
+ * write the clear. An operation that begins afterwards (an ioctl already past the unplug check) counts as a user but does not vote.
+ */
 static inline bool agx_vote_release(struct agx_vote *v)
 {
 	bool was_voted = v->voted;
 
 	v->voted = false;
+	v->stopped = true;
 	return was_voted;
+}
+
+/* Refuse new votes without touching the one that is set (the first step of a release, before the work item is waited out). */
+static inline void agx_vote_refuse(struct agx_vote *v)
+{
+	v->stopped = true;
+}
+
+/* The GPU probes (or the report comes back, or the system resumes): votes are allowed again. True when work is already in flight and the caller must run the reconcile step. */
+static inline bool agx_vote_resume(struct agx_vote *v)
+{
+	v->stopped = false;
+	return v->enabled && v->users && !v->voted;
 }
 
 #endif /* PMP_AGX_VOTE_H */
