@@ -51,11 +51,21 @@ static inline bool agx_vote_reached(agx_ms_t now, agx_ms_t t)
 	return (agx_sms_t)(now - t) >= 0;
 }
 
+/* A retry deadline more than one backoff window in the future cannot be real: an idle gap beyond half the
+ * 32-bit millisecond range makes the wrapped arithmetic read an expired deadline as future. Treat it as expired. */
+static inline bool agx_vote_retry_reached(const struct agx_vote *v, agx_ms_t now)
+{
+	return agx_vote_reached(now, v->retry_at)
+	       || (agx_sms_t)(v->retry_at - now) > (agx_sms_t)AGX_VOTE_RETRY_MS;
+}
+
 /* An operation starts. True: run the reconcile step now. */
 static inline bool agx_vote_begin(struct agx_vote *v)
 {
 	v->users++;
-	return v->enabled && !v->voted && !v->stopped;
+	/* While a failed set is in backoff the retry timer drives the set: decide would return NONE here, so
+	 * asking for a reconciliation only burns a kick per operation until the deadline. */
+	return v->enabled && !v->voted && !v->stopped && !v->failures;
 }
 
 /* An operation ends. Returns the delay in ms after which the reconcile step must run, 0 when none is needed. */
@@ -77,15 +87,17 @@ static inline enum agx_vote_action agx_vote_decide(const struct agx_vote *v, agx
 	if (!v->enabled || v->stopped)
 		return v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;
 	if (v->users)
-		return !v->voted && (!v->failures || agx_vote_reached(now, v->retry_at)) ? AGX_VOTE_SET : AGX_VOTE_NONE;
+		return !v->voted && (!v->failures || agx_vote_retry_reached(v, now)) ? AGX_VOTE_SET : AGX_VOTE_NONE;
 	if (v->voted && agx_vote_reached(now, v->idle_at + v->idle_ms))
 		return AGX_VOTE_CLEAR;
 	return AGX_VOTE_NONE;
 }
 
 /*
- * Delay in ms until the reconcile step must run again, 0 when no timer is needed. 1 when a set is owed right now: an operation began while a
- * clear was being written (begin saw voted still true and did not kick), so after the clear nothing would schedule the set.
+ * Delay in ms until the reconcile step must run again, 0 when no timer is needed. 1 when work is due now: an
+ * operation began while a clear was being written (begin saw voted still true and did not kick), or an end
+ * landed inside the SET write so the vote is set with an already-reached idle deadline. The caller must run the
+ * reconcile those cases would otherwise skip; it cannot read 1 as "nothing pending".
  */
 static inline agx_ms_t agx_vote_next(const struct agx_vote *v, agx_ms_t now)
 {
@@ -96,12 +108,14 @@ static inline agx_ms_t agx_vote_next(const struct agx_vote *v, agx_ms_t now)
 	if (v->users && !v->voted && !v->failures)
 		return 1;
 	if (v->users && !v->voted && v->failures)
-		at = v->retry_at;
+		at = agx_vote_retry_reached(v, now) ? now : v->retry_at;
 	else if (!v->users && v->voted)
 		at = v->idle_at + v->idle_ms;
 	else
 		return 0;
-	return agx_vote_reached(now, at) ? 0 : at - now;
+	/* An already-reached deadline returns 1: there is work, due now. The SET-write race leaves exactly
+	 * this state (voted, no user, deadline passed), and 0 here would strand the vote set forever. */
+	return agx_vote_reached(now, at) ? 1 : at - now;
 }
 
 /* Record the outcome of the register write for `action` (ret 0: acknowledged). */
