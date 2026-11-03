@@ -2282,6 +2282,85 @@
     "{output}"
    ],
    "note": "Build only the host Kconfig tool in an isolated output directory; check all built-in/module dependency combinations."
+  },
+  {
+   "name": "tools/asahi/isp-preview-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-preview-tests.py"
+   ]
+  },
+  {
+   "name": "tools/asahi/isp-preview-flow-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-preview-flow-tests.py"
+   ]
+  },
+  {
+   "name": "tools/asahi/isp-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-tests.py",
+    "--suite",
+    "session",
+    "--out",
+    "{output}"
+   ]
+  },
+  {
+   "name": "isp-buffers",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-tests.py",
+    "--suite",
+    "buffers",
+    "--out",
+    "{output}"
+   ],
+   "commits": [
+    "7876c8e8349c4f3d0a2f4ce982e3e13ce5bb5d70"
+   ]
+  },
+  {
+   "name": "isp-receive",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-tests.py",
+    "--suite",
+    "receive",
+    "--out",
+    "{output}"
+   ]
+  },
+  {
+   "name": "isp-returns",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-tests.py",
+    "--suite",
+    "returns",
+    "--out",
+    "{output}"
+   ]
+  },
+  {
+   "name": "isp-queue",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/isp-tests.py",
+    "--suite",
+    "queue",
+    "--out",
+    "{output}"
+   ]
   }
  ],
  "helpers": {
