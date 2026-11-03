@@ -326,6 +326,9 @@ impl Firmware {
             .set_generation(service.firmware.recovery.generation());
         service.firmware.rings.invalidate_statistics();
         let result = result?;
+        if result.leftover && service.firmware.recovery.forgive_restart() {
+            pr_warn!("G17: recovery dropped queued work of an already failed VM; not counted as a restart storm\n");
+        }
         if let Some(error) = result.target_error {
             dev_warn!(
                 shared.dev.as_ref(),

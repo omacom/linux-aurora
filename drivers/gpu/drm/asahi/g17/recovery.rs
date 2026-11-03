@@ -45,6 +45,8 @@ pub(super) struct Entries {
     /// Listed commands found by their exact stamp, and by the oldest-work fallback.
     pub(super) exact: u32,
     pub(super) fallback: u32,
+    /// QIDs with a listed command found by its exact stamp: that command was dropped.
+    exact_qids: u128,
 }
 
 impl Entries {
@@ -149,6 +151,8 @@ pub(super) struct State {
 pub(super) struct ServiceResult {
     pub(super) scan_error: Option<Error>,
     pub(super) target_error: Option<Error>,
+    /// Every VM found guilty had failed before, and the restart dropped one of its commands.
+    pub(super) leftover: bool,
 }
 
 impl State {
@@ -164,6 +168,9 @@ impl State {
         self.timeouts.note_unless_progress(now, safety::retired())
     }
     pub(super) fn restart_limit(&mut self, now: u64) -> bool { self.restarts.note(now) }
+    /// A restart that only dropped leftover work of failed VMs (`ServiceResult::leftover`)
+    /// does not count toward the storm limit. Returns whether it was forgiven.
+    pub(super) fn forgive_restart(&mut self) -> bool { self.restarts.forgive() }
     pub(super) fn generation(&self) -> u64 {
         self.accepted
     }
@@ -292,7 +299,7 @@ pub(super) fn service<H: Host>(
     host.recovery_mut().pending = None;
 
     let (listed, exact, fallback) = (entries.listed, entries.exact, entries.fallback);
-    let (cancelled, blame) = classify(host, entries, request.blamed, attribution);
+    let (cancelled, blame, leftover) = classify(host, entries, request.blamed, attribution);
     if listed != 0 {
         pr_warn!(
             "G17: GPU recovery: {} commands were in flight ({} matched by stamp, {} by queue); they fail instead of completing\n",
@@ -317,7 +324,7 @@ pub(super) fn service<H: Host>(
     }
     let scan_error = host.rescan_compute().err();
     host.release_retired_compute();
-    Ok(ServiceResult { scan_error, target_error })
+    Ok(ServiceResult { scan_error, target_error, leftover })
 }
 
 /// Walks the packed recovery table up to its first invalid record and marks
@@ -331,8 +338,12 @@ fn read_entries<H: Host>(host: &mut H) -> Entries {
         if !entries.include(flags) {
             break;
         }
-        match host.note_interrupted(((flags >> 4) & 0x7f) as u8, stamp) {
-            Interrupted::Exact => entries.exact += 1,
+        let qid = ((flags >> 4) & 0x7f) as u8;
+        match host.note_interrupted(qid, stamp) {
+            Interrupted::Exact => {
+                entries.exact += 1;
+                entries.exact_qids |= 1u128 << qid;
+            }
             Interrupted::Oldest => entries.fallback += 1,
             Interrupted::None => {}
         }
@@ -346,7 +357,9 @@ fn read_entries<H: Host>(host: &mut H) -> Entries {
 /// Also returns whether the firmware's blamed QID is still guilty after attribution: a blamed
 /// render that had not started while others had (or with no culprit at all) is innocent, and its
 /// work is spared like that of every other innocent VM instead of failing with EIO.
-fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, attribution: Attribution) -> (u128, bool) {
+/// Last, whether every guilty VM had failed before this restart and it dropped one of their
+/// commands: a failed VM publishes nothing new, so such restarts end with its queued work.
+fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, attribution: Attribution) -> (u128, bool, bool) {
     let mut guilty_qids = entries.guilty | blamed.map_or(0, |qid| 1u128 << qid);
     let cancelled = entries.cancelled;
     match attribution {
@@ -357,7 +370,7 @@ fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, att
     let no_culprit = attribution == Attribution::NoCulprit;
     let blame = blamed.is_some_and(|qid| guilty_qids & (1u128 << qid) != 0);
     if guilty_qids == 0 && !no_culprit {
-        return (0, blame);
+        return (0, blame, false);
     }
     let mut guilty: [Option<Arc<VmStatus>>; MAX_GUILTY_VMS] = Default::default();
     let mut count = 0;
@@ -393,8 +406,14 @@ fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, att
         }
     }
     if unresolved || (count == 0 && collateral == 0 && !no_culprit) {
-        return (0, blame);
+        return (0, blame, false);
     }
+    let known = |status: &Arc<VmStatus>| guilty[..count].iter().flatten().any(|known| Arc::ptr_eq(known, status));
+    let mut dropped = false;
+    for qid in (0..QIDS).filter(|qid| entries.exact_qids & (1u128 << qid) != 0) {
+        queues.visit_owners(qid, &mut |status| dropped |= known(status));
+    }
+    let leftover = count != 0 && dropped && guilty[..count].iter().flatten().all(|status| status.get() != 0);
     let spared = queues.classify_work(&|status| {
         guilty[..count]
             .iter()
@@ -406,7 +425,7 @@ fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, att
             })
             .unwrap_or(Class::Spared)
     });
-    (cancelled & !(guilty_qids & !collateral) & spared, blame)
+    (cancelled & !(guilty_qids & !collateral) & spared, blame, leftover)
 }
 
 
@@ -496,6 +515,49 @@ mod tests {
         assert_eq!(host.state.get(), 0);
         assert_eq!(host.recovery.generation(), 1);
         assert!(!host.blamed);
+    }
+
+    /// Two VMs, each owning one render pair: `a` queues 40/41, `b` queues 60/61.
+    struct Owners([(u8, Arc<VmStatus>); 4]);
+
+    impl Queues for Owners {
+        fn render_scheduler_active(&self) -> bool { true }
+        fn render_pass_started(&self, _qid: u8, _stamp: u64) -> Option<bool> { None }
+        fn publish_recovery_targets(&self) -> Option<Error> { None }
+        fn oldest_spared(&self, qid: u8) -> Option<bool> {
+            self.0.iter().any(|(own, _)| *own == qid).then_some(false)
+        }
+        fn visit_owners(&self, qid: u8, visit: &mut dyn FnMut(&Arc<VmStatus>)) {
+            self.0.iter().filter(|(own, _)| *own == qid).for_each(|(_, status)| visit(status));
+        }
+        fn classify_work(&mut self, _class: &dyn Fn(&Arc<VmStatus>) -> Class) -> u128 { 0 }
+        fn note_interrupted(&mut self, _qid: u8, _stamp: u32) -> Interrupted { Interrupted::None }
+        fn settle_blamed_render(&mut self, _qid: u8, _error: Error) {}
+        fn settle_cancelled_renders(&mut self, _qids: u128) {}
+        fn rescan_compute(&mut self) -> Result { Ok(()) }
+        fn release_retired_compute(&mut self) {}
+    }
+
+    fn owners() -> Owners {
+        let a = Arc::pin_init(VmStatus::new(), GFP_KERNEL).unwrap();
+        let b = Arc::pin_init(VmStatus::new(), GFP_KERNEL).unwrap();
+        Owners([(40, a.clone()), (41, a), (60, b.clone()), (61, b)])
+    }
+
+    fn leftover(queues: &mut Owners, exact_qid: u8) -> bool {
+        let entries = Entries { exact_qids: 1u128 << exact_qid, ..Entries::default() };
+        classify(queues, entries, Some(40), Attribution::Queues(3u128 << 60)).2
+    }
+
+    #[test]
+    fn only_dropped_work_of_an_already_failed_vm_is_leftover() {
+        let mut queues = owners();
+        // A first failure counts toward the storm.
+        assert!(!leftover(&mut queues, 60));
+        queues.0[2].1.record(EIO);
+        assert!(leftover(&mut queues, 60));
+        // The restart dropped nothing of the failed VM.
+        assert!(!leftover(&mut queues, 40));
     }
 
     #[test]

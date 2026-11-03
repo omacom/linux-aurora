@@ -6,6 +6,9 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 const WINDOW_NS: u64 = 30_000_000_000;
 const LIMIT: u8 = 8;
+/// Restarts forgiven per window: one per group a render pair holds. Leftover work of a failed
+/// VM ends on its own, but an unknown firmware loop must still reach the limit.
+const FORGIVE_LIMIT: u8 = crate::hw::t8140::queues::RENDER_DEPTH;
 
 /// Commands retired successfully. A watchdog storm means the GPU stopped making progress;
 /// timeouts of overloaded clients while other work keeps retiring are not one.
@@ -34,12 +37,13 @@ pub(crate) fn since_retired(now: u64) -> Option<u64> {
 pub(super) struct Storm {
     start: Option<u64>,
     count: u8,
+    forgiven: u8,
     stopped: bool,
     progress: u64,
 }
 impl Storm {
     pub(super) const fn new() -> Self {
-        Self { start: None, count: 0, stopped: false, progress: 0 }
+        Self { start: None, count: 0, forgiven: 0, stopped: false, progress: 0 }
     }
     /// Like [`Self::note`], but work retired since the previous event starts a new window.
     pub(super) fn note_unless_progress(&mut self, now: u64, progress: u64) -> bool {
@@ -54,10 +58,20 @@ impl Storm {
         if self.start.is_none_or(|start| now.saturating_sub(start) >= WINDOW_NS) {
             self.start = Some(now);
             self.count = 0;
+            self.forgiven = 0;
         }
         self.count += 1;
         self.stopped = self.count >= LIMIT;
         self.stopped
+    }
+    /// Takes back the latest event, at most [`FORGIVE_LIMIT`] times per window. A stop stays.
+    pub(super) fn forgive(&mut self) -> bool {
+        if self.stopped || self.count == 0 || self.forgiven >= FORGIVE_LIMIT {
+            return false;
+        }
+        self.count -= 1;
+        self.forgiven += 1;
+        true
     }
 }
 
@@ -107,6 +121,23 @@ mod tests {
         for _ in 1..LIMIT { storm.note(64 * WINDOW_NS); }
         assert!(storm.note(64 * WINDOW_NS));
         for _ in 0..1024 { assert!(storm.note(u64::MAX)); }
+    }
+    #[test]
+    fn forgiven_restarts_are_bounded_per_window() {
+        let mut storm = Storm::new();
+        for _ in 0..FORGIVE_LIMIT {
+            assert!(!storm.note(0));
+            assert!(storm.forgive());
+        }
+        assert!(!storm.note(0));
+        assert!(!storm.forgive());
+        for _ in 2..LIMIT { assert!(!storm.note(0)); }
+        assert!(storm.note(0));
+        assert!(!storm.forgive());
+        let mut storm = Storm::new();
+        for _ in 0..FORGIVE_LIMIT { storm.note(0); storm.forgive(); }
+        assert!(!storm.note(WINDOW_NS));
+        assert!(storm.forgive());
     }
     #[test]
     fn recovery_table_ends_at_its_first_invalid_record() {
