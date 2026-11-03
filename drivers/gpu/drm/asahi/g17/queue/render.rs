@@ -1659,8 +1659,8 @@ impl Pair {
     /// Firmware retired every group of the pair after a restart, but some were dropped
     /// unexecuted and cannot run again in order (see `replay::decide`). Every group fails now,
     /// the ones that ran too: they consumed output the dropped ones never wrote. The work is
-    /// innocent, so it fails without poisoning its VM, with ENODATA, which its owner sees,
-    /// instead of waiting for the render timeout to fail it with ETIMEDOUT.
+    /// innocent, so it fails without poisoning its VM: its fences carry ENODATA, which stays out
+    /// of the VM status, instead of waiting for the render timeout to fail it with ETIMEDOUT.
     fn fail_dropped(
         &mut self,
         host: &mut impl Host,

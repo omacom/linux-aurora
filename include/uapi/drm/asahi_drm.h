@@ -447,8 +447,9 @@ enum drm_asahi_feature {
  * treating that fence as successful execution. Syncobj signal alone is not
  * an execution-success indication. A job cancelled (ECANCELED) because
  * another VM's recovery discarded it, an input did not signal in time, or
- * its queue was closed, is not a failure of this VM: its fence carries the
- * error, error stays 0, and its output is undefined.
+ * its queue was closed, or dropped (ENODATA) because a recovery could not
+ * run it again, is not a failure of this VM: its fence carries the error,
+ * error stays 0, and its output is undefined.
  * The feature bit is the availability contract; older kernels leave it zero.
  * Kernel errors for invalid requests: EINVAL flags/pad/size, ENOENT foreign or
  * missing vm_id, EFAULT inaccessible pointer. No output on invalid request.

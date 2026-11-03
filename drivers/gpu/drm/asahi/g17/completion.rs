@@ -563,13 +563,13 @@ impl Completion {
         (error != ECANCELED || interrupted) && !self.spared() && !(interrupted && !self.guilty())
     }
 
-    /// A non-poisoning ECANCELED stays out of the VM status, as the UAPI documents for work
-    /// another VM's recovery discarded: Honeykrisp reads any status error as a lost device.
-    /// Every other failure reaches the client.
+    /// A non-poisoning ECANCELED or ENODATA (work a recovery discarded or dropped) stays out of
+    /// the VM status, as the UAPI documents for work another VM's recovery discarded:
+    /// Honeykrisp reads any status error as a lost device. Every other failure reaches the client.
     fn report(&self, error: Error) {
         if self.poisons(error) {
             self.status.record(error);
-        } else if error != ECANCELED {
+        } else if !discarded(error) {
             self.status.report_failure(error);
         }
     }
@@ -716,7 +716,7 @@ impl Completion {
             guard.quarantine();
         }
         if self.spared() {
-            if error != ECANCELED {
+            if !discarded(error) {
                 self.status.report_failure(error);
             }
         } else {
@@ -725,6 +725,11 @@ impl Completion {
         self.signal_terminal(Err(error));
         self.output.finish(Err(error));
     }
+}
+
+/// The errors of work a recovery discarded (ECANCELED) or dropped before it ran (ENODATA).
+fn discarded(error: Error) -> bool {
+    error == ECANCELED || error == ENODATA
 }
 
 /// Collected under the device mutex and executed only after releasing it.
