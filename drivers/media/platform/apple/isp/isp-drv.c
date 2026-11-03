@@ -290,9 +290,9 @@ static int apple_isp_init_presets(struct apple_isp *isp)
 }
 
 /* Preview only; processing and image quality need separate qualification. */
-static bool preview_26;
+static bool preview_26 = true;
 module_param(preview_26, bool, 0400);
-MODULE_PARM_DESC(preview_26, "Allow J613 preview on ISP firmware 26.6.2");
+MODULE_PARM_DESC(preview_26, "Enable J613 preview on ISP firmware 26.6.2 (default: true; false disables)");
 
 static const char * isp_fw2str(enum isp_firmware_version version)
 {
@@ -434,7 +434,7 @@ static int apple_isp_probe(struct platform_device *pdev)
 						ISP_FIRMWARE_V_26_6_2)) {
 		if (!isp_preview26_admitted(dev, isp->fw_compat)) {
 			err = dev_err_probe(dev, -ENODEV,
-					    "26.6.2 preview requires J613/T8122 and preview_26=1\n");
+					    "26.6.2 preview requires J613/T8122; preview_26=0 disables it\n");
 			goto free_isp;
 		}
 		isp->preview_26 = true;

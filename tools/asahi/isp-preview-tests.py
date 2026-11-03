@@ -20,7 +20,7 @@ preamble = r'''
 #include <stdlib.h>
 typedef uint32_t u32;
 struct device {void *of_node;};
-static bool preview_26, board, soc;
+static bool board, soc;
 static int cells=3, bytes=12;
 static u32 values[5]={26,6,2};
 #define ISP_FW_VERSION_MIN_LEN 3
@@ -38,6 +38,11 @@ static bool of_device_is_compatible(void *n,const char *s) {return soc;}
 main = r'''
 int main(void) {
  struct device dev={0};
+ board=soc=true;
+ CHECK(preview_26);
+ CHECK(isp_preview26_admitted(&dev,ISP_FIRMWARE_V_26_6_2));
+ preview_26=false;
+ CHECK(!isp_preview26_admitted(&dev,ISP_FIRMWARE_V_26_6_2));
  for(int flags=0;flags<8;flags++) {
   preview_26=flags&1;board=flags&2;soc=flags&4;
   CHECK(isp_preview26_admitted(&dev,ISP_FIRMWARE_V_26_6_2)==(flags==7));
@@ -54,11 +59,12 @@ int main(void) {
   CHECK(!isp_preview26_admitted(&dev,ISP_FIRMWARE_V_26_6_2));
  }
  cells=3;bytes=13;CHECK(!isp_preview26_admitted(&dev,ISP_FIRMWARE_V_26_6_2));
- puts("PASS: opt-in/board/SoC combinations, compat mismatch, version mismatch, missing/truncated/extended cells");
+ puts("PASS: production default, opt-out/board/SoC combinations, compat mismatch, version mismatch, missing/truncated/extended cells");
  return 0;
 }
 '''
-code=preamble+header[a:b]+'\n'+mod.function(source,'isp_read_fw_version')+mod.function(source,'isp_preview26_admitted')+main
+default=source[source.index('static bool preview_26'):source.index(';',source.index('static bool preview_26'))+1]
+code=preamble+default+'\n'+header[a:b]+'\n'+mod.function(source,'isp_read_fw_version')+mod.function(source,'isp_preview26_admitted')+main
 with tempfile.TemporaryDirectory() as d:
  p=Path(d);(p/'test.c').write_text(code)
  subprocess.run(['clang','-std=gnu11','-Werror','-Wno-unused-function','-fsanitize=address,undefined',str(p/'test.c'),'-o',str(p/'test')],check=True)
