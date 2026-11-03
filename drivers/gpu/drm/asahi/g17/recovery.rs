@@ -94,10 +94,11 @@ pub(super) enum Class {
 pub(super) trait Queues {
     fn render_scheduler_active(&self) -> bool;
     fn render_pass_started(&self, qid: u8, stamp: u64) -> Option<bool>;
-    /// Read while firmware is halted, like `render_pass_started`. When the oldest published
-    /// render of the pair holding `blamed` had not started, the QIDs of every pair of the one VM
-    /// with a render that started and did not finish. None if no such VM, several, or any other
-    /// VM holds compute work, which these records cannot see.
+    /// Read while firmware is halted, like `render_pass_started`. The QIDs of every pair of a VM
+    /// an earlier recovery found guilty with a render that started and did not finish. Without
+    /// one, and only when the oldest published render of the pair holding `blamed` had not
+    /// started, those of the one VM with such a render. None if no such VM, several, or any
+    /// other VM holds compute work, which these records cannot see.
     fn render_culprit(&self, _blamed: u8) -> Option<u128> { None }
     /// Copy every retained queue's live producer to its recovery target, then
     /// issue a full barrier. A failed graph must not skip subsequent queues.
