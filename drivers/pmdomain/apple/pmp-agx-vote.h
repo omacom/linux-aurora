@@ -22,6 +22,10 @@ typedef uint32_t agx_ms_t;
 typedef int32_t agx_sms_t;
 #endif
 
+/* How long the request is held after the last operation ends. w7X measured idle gaps of up to 111.5 ms inside one 9B generation, so 100 ms
+ * was not enough; 250 ms is about 2.2 times the largest gap seen. The parameter pmp_report.agx_vote_idle_ms overrides it at run time. */
+#define AGX_VOTE_IDLE_MS_DEFAULT 250
+
 /* After a set that was not acknowledged (or a PMP that is not running), wait this long before trying again. */
 #define AGX_VOTE_RETRY_MS 1000
 
