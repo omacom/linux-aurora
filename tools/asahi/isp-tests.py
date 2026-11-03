@@ -30,7 +30,8 @@ def main():
     parser.add_argument('--out', type=Path)
     parser.add_argument('--emit', type=Path, help='write C for build-time compilation')
     parser.add_argument('--cc', default='clang')
-    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset'])
+    parser.add_argument('--suite', choices=['session', 'buffers'], default='session')
+    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback'])
     args = parser.parse_args()
     inputs = {n: (DRIVER / n).read_text() for n in
               ['isp-ipc.c', 'isp-cmd.c', 'isp-cam.c', 'isp-fw.c']}
@@ -58,7 +59,24 @@ def main():
         body = body.replace('WRITE_ONCE(isp->ipc_error, 0);', '')
         bodies['isp_firmware_boot'] = body.replace(
             'int err;', 'int err;\n\tWRITE_ONCE(isp->ipc_error, 0);', 1)
-    code = (ROOT / 'tools/asahi/isp/session.c').read_text()
+    if args.suite == 'buffers':
+        inputs = {'isp-v4l2.c': (DRIVER / 'isp-v4l2.c').read_text()}
+        bodies = {n: function(inputs['isp-v4l2.c'], n) for n in
+                  ['isp_submit_buffers', 'apple_isp_start_streaming']}
+        bodies['apple_isp_stop_capture'] = function(
+            (DRIVER / 'isp-cam.c').read_text(), 'apple_isp_stop_capture')
+        if args.control == 'rollback':
+            old = subprocess.check_output(
+                ['git', 'show', '7876c8e8349c4f3d0a2f4ce982e3e13ce5bb5d70:'
+                 'drivers/media/platform/apple/isp/isp-v4l2.c'], cwd=ROOT, text=True)
+            bodies['isp_submit_buffers'] = function(old, 'isp_submit_buffers')
+    code = (ROOT / ('tools/asahi/isp/' + args.suite + '.c')).read_text()
+    if args.suite == 'buffers':
+        structures = re.findall(r'^struct isp_buflist(?:_buffer)? \{.*?^} __packed;',
+                                inputs['isp-v4l2.c'], re.M | re.S)
+        if len(structures) != 2:
+            raise RuntimeError('missing buffer list structures')
+        code = code.replace('/* DRIVER STRUCTURES */', '\n'.join(structures))
     code = code.replace('/* DRIVER FUNCTIONS */', '\n'.join(bodies.values()))
 
     if args.emit:
@@ -70,7 +88,8 @@ def main():
         source, binary = out / 'session.c', out / 'session'
         source.write_text(code)
         compile_cmd = [args.cc, '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                       '-Wno-unused-parameter', '-O1', '-g', '-pthread',
+                       '-Wno-unused-parameter', '-Wno-unused-but-set-variable',
+                       '-Wno-sign-compare', '-O1', '-g', '-pthread',
                        '-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                        str(source), '-o', str(binary)]
         subprocess.run(compile_cmd, check=True)
