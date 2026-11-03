@@ -1171,10 +1171,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 	list_add_tail_rcu(&rep->list, &apple_pmp_reports);
 	mutex_unlock(&apple_pmp_reports_lock);
 
-	if (rep->offsets->fast_die || rep->start || rep->offsets == &apple_pmp_offsets_t600x)
-		rep->debugfs = debugfs_create_file(dev_name(dev), 0400,
-						   apple_pmp_report_debugfs, rep,
-						   &apple_pmp_report_status_fops);
+	rep->debugfs = debugfs_create_file(dev_name(dev), 0400, apple_pmp_report_debugfs, rep, &apple_pmp_report_status_fops);
 
 	/* Publish the region before child power callbacks start looking it up. */
 	ret = of_platform_populate(np, NULL, NULL, dev);
