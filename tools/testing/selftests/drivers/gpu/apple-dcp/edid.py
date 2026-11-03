@@ -848,9 +848,9 @@ struct apple_dcp {
     struct { struct mutex lock; bool stopped; void *owner; } iomfb;
 };
 struct afk_receive_message_work { struct apple_dcp_afkep *ep; u64 message; struct work_struct work; };
-struct apple_rtkit_ops { void (*recv_message)(void *,u8,u64); };
+struct apple_rtkit_ops { void (*recv_message)(void *,u8,u64); void (*recv_message_timed)(void *,u8,u64,u64); };
 struct apple_rtkit { bool shutting_down, sync_syslog_ack; const struct apple_rtkit_ops *ops; void *cookie,*dev; };
-struct apple_rtkit_rx_work { struct apple_rtkit *rtk; u8 ep; u64 msg; struct work_struct work; };
+struct apple_rtkit_rx_work { u64 received_ns; struct apple_rtkit *rtk; u8 ep; u64 msg; struct work_struct work; };
 #define current ((void *)1)
 static pthread_mutex_t reply_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t reply_ready=PTHREAD_COND_INITIALIZER;

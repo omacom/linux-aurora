@@ -2335,6 +2335,102 @@
         "tools/asahi/test-m3-power.py"
       ],
       "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/dcpext26-wire-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-wire-tests.py"
+      ],
+      "note": "Production native26 external encoder against full byte fixtures and malformed reply/geometry cases; no firmware execution."
+    },
+    {
+      "name": "tools/asahi/pmp-native26-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/pmp-native26-tests.py"
+      ],
+      "note": "Actual native26 report admission on synthetic board/OF/table inputs; no MMIO or firmware execution."
+    },
+    {
+      "name": "tools/asahi/dcpext26-profile-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-profile-tests.py"
+      ],
+      "note": "Actual native26 callback helpers, startup peer and causal readiness; no hardware qualification."
+    },
+    {
+      "name": "tools/asahi/dcpext26-lifecycle-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-lifecycle-tests.py"
+      ],
+      "note": "Actual retained-stop and control bodies with fault peer, host-drain and epoch budget fixtures."
+    },
+    {
+      "name": "tools/asahi/dcpext26-edid-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-edid-tests.py"
+      ],
+      "note": "Actual native AV identity/generation/owner predicates and EDID wire header, length and checksums."
+    },
+    {
+      "name": "tools/asahi/dcpext26-admission-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-admission-tests.py"
+      ],
+      "note": "Actual native identity and powered RUN/locked-DART admission predicates with bit and malformed-profile controls."
+    },
+    {
+      "name": "tools/asahi/dcpext26-present-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-present-tests.py"
+      ],
+      "note": "Actual primary DRM callbacks: native start/submit rejection is terminal; accepted early D590 retains original receive time; classic behavior stays unchanged."
+    },
+    {
+      "name": "tools/asahi/dcpext26-changeset-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-changeset-tests.py"
+      ],
+      "note": "Actual native property builder plus Linux OF update/remove/inversion bodies: absent/existing/equal values and rollback; ASan/UBSan allocation and queue failures."
+    },
+    {
+      "name": "tools/asahi/dcpext26-startup-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-startup-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/dcpext26-modeset-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-modeset-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/dcpext26-parity-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcpext26-parity-tests.py"
+      ]
     }
   ],
   "helpers": {
@@ -2343,7 +2439,7 @@
     "tools/testing/selftests/drivers/gpu/asahi-g15/pmp-bridge.c": "compiled and executed by the registered asahi-g15/run.py maintained PMP fixture",
     "tools/asahi/t6030-pmp-graph-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
     "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
-    "tools/asahi/m3-uapi-tests.rs": "compiled and executed by the registered tools/asahi/test-m3-uapi.py paired-header suite"
+    "tools/asahi/m3-uapi-tests.rs": "compiled and run by the registered tools/asahi/test-m3-uapi.py C8 UAPI fixture"
   },
   "excluded": {
     "tools/aurora-sep/tests/coordinator/runtime-check.sh": "Needs /dev/sep-bio, a running kernel booted with trusted.source=applesep, the hw_random sysfs interface and fprintd. Coordinator payload for an approved device.",

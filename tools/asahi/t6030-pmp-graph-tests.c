@@ -103,6 +103,8 @@ struct apple_pmp_report {
 	struct list_head list;
 	void *debugfs;
 	struct apple_pmp_start *start;
+	struct device_node *native_pmp;
+	u64 native_claimed;
 };
 struct completion {
 	bool done;
@@ -143,6 +145,7 @@ struct apple_pmp_report_entry {
 	u32 id;
 	bool no_ack, removed;
 	bool sleep_release, released;
+	struct apple_pmp_report *native_owner;
 };
 #define genpd_to_apple_pmp_report_entry(p) \
 	container_of(p, struct apple_pmp_report_entry, genpd)
@@ -584,6 +587,13 @@ static const struct apple_pmp_start_ops apple_pmp_start_hw_ops = { hw_check,
 								   hw_bound };
 static const struct apple_pmp_start_timing apple_pmp_start_timing = { 2, 0, 2,
 								      2 };
+/* Native26 table admission is exercised by its separate actual-body fixture. */
+static int apple_pmp_native_records(struct apple_pmp_report *rep)
+{
+	assert(!rep->native_pmp);
+	return 0;
+}
+
 #include "production.h"
 static const struct apple_pmp_report_offsets *
 of_device_get_match_data(struct device *d)
