@@ -36,6 +36,8 @@
 #include <linux/pci.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/pm_wakeup.h>
+#include <linux/suspend.h>
 #include <linux/slab.h>
 #include <linux/soc/apple/tunable.h>
 #include <linux/swab.h>
@@ -288,6 +290,7 @@ struct apple_dart {
 	u32 supports_bypass : 1;
 	/* J613 MTP keeps issuing DMA in the boot loader identity domain. */
 	bool live_mtp;
+	bool live_mtp_sleep;
 	u32 four_level : 1;
 	u32 locked : 1;
 	u32 tunneled : 1;
@@ -3662,7 +3665,45 @@ static __maybe_unused int apple_dart_resume(struct device *dev)
 	return ret;
 }
 
-static DEFINE_RUNTIME_DEV_PM_OPS(apple_dart_pm_ops, apple_dart_suspend, apple_dart_resume, NULL);
+/* The adopted MTP stays live: system s2idle must retain, never reset it. */
+static int apple_dart_system_suspend(struct device *dev)
+{
+	struct apple_dart *dart = dev_get_drvdata(dev);
+
+	if (!dart->live_mtp)
+		return pm_runtime_force_suspend(dev);
+	if (pm_suspend_target_state != PM_SUSPEND_TO_IDLE)
+		return -EBUSY;
+	if (apple_dart_readl(dart, DART_TCR(dart, 1)) != dart->hw->tcr_bypass)
+		return -EIO;
+	/* PMGR's ACTIVE_WAKEUP domains and their ancestors must stay powered. */
+	device_set_awake_path(dev);
+	dart->live_mtp_sleep = true;
+	dev_dbg(dev, "live MTP s2idle: retaining clocks, supplier power and bypass stream 1\n");
+	return 0;
+}
+
+static int apple_dart_system_resume(struct device *dev)
+{
+	struct apple_dart *dart = dev_get_drvdata(dev);
+
+	if (!dart->live_mtp)
+		return pm_runtime_force_resume(dev);
+	if (!dart->live_mtp_sleep)
+		return 0;
+	dart->live_mtp_sleep = false;
+	if (apple_dart_readl(dart, DART_TCR(dart, 1)) != dart->hw->tcr_bypass) {
+		dev_err(dev, "live MTP bypass lost across s2idle; refusing reset of inherited DMA\n");
+		return -EIO;
+	}
+	dev_dbg(dev, "live MTP s2idle: bypass retained; no reset or invalidate\n");
+	return 0;
+}
+
+static const struct dev_pm_ops apple_dart_pm_ops = {
+	RUNTIME_PM_OPS(apple_dart_suspend, apple_dart_resume, NULL)
+	SYSTEM_SLEEP_PM_OPS(apple_dart_system_suspend, apple_dart_system_resume)
+};
 
 static const struct of_device_id apple_dart_of_match[] = {
 	{ .compatible = "apple,t8103-dart", .data = &apple_dart_hw_t8103 },
