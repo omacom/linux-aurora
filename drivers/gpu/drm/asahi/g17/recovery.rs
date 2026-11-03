@@ -414,6 +414,7 @@ fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, att
         queues.visit_owners(qid, &mut |status| dropped |= known(status));
     }
     let leftover = count != 0 && dropped && guilty[..count].iter().flatten().all(|status| status.get() != 0);
+    guilty[..count].iter().flatten().for_each(|status| status.note_recovery_guilty());
     let spared = queues.classify_work(&|status| {
         guilty[..count]
             .iter()
@@ -423,7 +424,9 @@ fn classify<Q: Queues>(queues: &mut Q, entries: Entries, blamed: Option<u8>, att
                     .filter(|known| Arc::ptr_eq(known, status))
                     .map(|_| Class::Guilty)
             })
-            .unwrap_or(Class::Spared)
+            // A VM an earlier recovery found guilty stays guilty. Spared, its leftover work would
+            // make the next blame on it collateral, and that restart would count as a storm.
+            .unwrap_or(if status.recovery_guilty() { Class::Guilty } else { Class::Spared })
     });
     (cancelled & !(guilty_qids & !collateral) & spared, blame, leftover)
 }
@@ -518,7 +521,7 @@ mod tests {
     }
 
     /// Two VMs, each owning one render pair: `a` queues 40/41, `b` queues 60/61.
-    struct Owners([(u8, Arc<VmStatus>); 4]);
+    struct Owners([(u8, Arc<VmStatus>); 4], [Option<Class>; 4]);
 
     impl Queues for Owners {
         fn render_scheduler_active(&self) -> bool { true }
@@ -530,7 +533,12 @@ mod tests {
         fn visit_owners(&self, qid: u8, visit: &mut dyn FnMut(&Arc<VmStatus>)) {
             self.0.iter().filter(|(own, _)| *own == qid).for_each(|(_, status)| visit(status));
         }
-        fn classify_work(&mut self, _class: &dyn Fn(&Arc<VmStatus>) -> Class) -> u128 { 0 }
+        fn classify_work(&mut self, class: &dyn Fn(&Arc<VmStatus>) -> Class) -> u128 {
+            for (index, (_, status)) in self.0.iter().enumerate() {
+                self.1[index] = Some(class(status));
+            }
+            0
+        }
         fn note_interrupted(&mut self, _qid: u8, _stamp: u32) -> Interrupted { Interrupted::None }
         fn settle_blamed_render(&mut self, _qid: u8, _error: Error) {}
         fn settle_cancelled_renders(&mut self, _qids: u128) {}
@@ -541,7 +549,7 @@ mod tests {
     fn owners() -> Owners {
         let a = Arc::pin_init(VmStatus::new(), GFP_KERNEL).unwrap();
         let b = Arc::pin_init(VmStatus::new(), GFP_KERNEL).unwrap();
-        Owners([(40, a.clone()), (41, a), (60, b.clone()), (61, b)])
+        Owners([(40, a.clone()), (41, a), (60, b.clone()), (61, b)], [None; 4])
     }
 
     fn leftover(queues: &mut Owners, exact_qid: u8) -> bool {
@@ -558,6 +566,20 @@ mod tests {
         assert!(leftover(&mut queues, 60));
         // The restart dropped nothing of the failed VM.
         assert!(!leftover(&mut queues, 40));
+    }
+
+    #[test]
+    fn a_guilty_vm_is_not_spared_by_another_vms_recovery() {
+        let mut queues = owners();
+        let entries = || Entries { exact_qids: 1u128 << 40, ..Entries::default() };
+        // b failing for its own client does not make it guilty in a's recovery.
+        queues.0[2].1.record(EIO);
+        classify(&mut queues, entries(), Some(40), Attribution::Queues(3u128 << 40));
+        assert_eq!(queues.1, [Some(Class::Guilty), Some(Class::Guilty), Some(Class::Spared), Some(Class::Spared)]);
+        // Once a recovery finds b guilty, a later recovery that blames a keeps b guilty.
+        classify(&mut queues, entries(), Some(60), Attribution::Queues(3u128 << 60));
+        classify(&mut queues, entries(), Some(40), Attribution::Queues(3u128 << 40));
+        assert_eq!(queues.1, [Some(Class::Guilty); 4]);
     }
 
     #[test]
