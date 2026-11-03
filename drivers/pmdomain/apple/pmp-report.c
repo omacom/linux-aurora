@@ -1458,7 +1458,7 @@ void apple_pmp_agx_activity_begin(void)
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
 	v->enabled = READ_ONCE(agx_vote);
-	kick = agx_vote_begin(v);
+	kick = agx_vote_begin(v, apple_pmp_agx_now_ms());
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 	if (kick)
 		apple_pmp_agx_vote_kick(0);

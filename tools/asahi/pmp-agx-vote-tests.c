@@ -63,7 +63,7 @@ static void reconcile(struct sim *s)
 
 static void begin(struct sim *s)
 {
-	if (agx_vote_begin(&s->v)) {
+	if (agx_vote_begin(&s->v, s->now)) {
 		s->kicks++;
 		arm(s, 0);
 	}
@@ -233,7 +233,7 @@ int main(void)
 		// the header alone, as the reviewer reproduced it: decide (CLEAR), begin, applied, next
 		struct agx_vote v = {.enabled = true, .voted = true, .idle_ms = 100, .idle_at = 0};
 		CHECK(agx_vote_decide(&v, 100) == AGX_VOTE_CLEAR);
-		CHECK(!agx_vote_begin(&v));
+		CHECK(!agx_vote_begin(&v, 100));
 		agx_vote_applied(&v, AGX_VOTE_CLEAR, 0, 100);
 		CHECK(v.users == 1 && !v.voted);
 		CHECK(agx_vote_next(&v, 100) == 1);                // not 0: a set is owed
@@ -292,11 +292,11 @@ int main(void)
 		struct agx_vote v = {.enabled = true, .idle_ms = 100};
 		agx_vote_refuse(&v);
 		CHECK(v.stopped && !v.voted);
-		CHECK(!agx_vote_begin(&v));                            // a user, but no kick
+		CHECK(!agx_vote_begin(&v, 0));                         // a user, but no kick
 		CHECK(agx_vote_decide(&v, 0) == AGX_VOTE_NONE && agx_vote_next(&v, 0) == 0);
 		CHECK(agx_vote_resume(&v));                            // work in flight: the reconcile step must run
 		struct agx_vote w = {.enabled = true, .idle_ms = 100};
-		CHECK(agx_vote_begin(&w));
+		CHECK(agx_vote_begin(&w, 0));
 		agx_vote_applied(&w, AGX_VOTE_SET, -110, 500);          // the set was not acknowledged
 		CHECK(w.failures == 1 && w.retry_at == 500 + AGX_VOTE_RETRY_MS);
 		CHECK(agx_vote_next(&w, 500) == AGX_VOTE_RETRY_MS);      // the retry deadline, not 1 ms
@@ -317,7 +317,7 @@ int main(void)
 	{
 		// exactly the reviewer's interleaving, on the header alone: decide, then end, then the write lands
 		struct agx_vote v = {.enabled = true, .idle_ms = 0};
-		CHECK(agx_vote_begin(&v) && v.users == 1);
+		CHECK(agx_vote_begin(&v, 5000) && v.users == 1);
 		CHECK(agx_vote_decide(&v, 5000) == AGX_VOTE_SET);
 		CHECK(agx_vote_end(&v, 5001) == 0);                   // the end during the write sees voted false: no timer
 		CHECK(v.users == 0);
@@ -358,8 +358,29 @@ int main(void)
 		advance_to(&s, AGX_VOTE_RETRY_MS);
 		CHECK(s.sets == 2 && s.bit && s.v.failures == 0);
 		// the header alone
-		struct agx_vote v = {.enabled = true, .failures = 1};
-		CHECK(!agx_vote_begin(&v));
+		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 100};
+		CHECK(!agx_vote_begin(&v, 0));
+		CHECK(agx_vote_begin(&v, 100));
+	}
+	// 23. w7X's regression repro for the first cut of the backoff gate: a failed set whose retry timer fires
+	// while the GPU is idle left failures set forever, and begin never asked for the set again. The kick
+	// must come back once the deadline has passed.
+	{
+		struct sim s = fresh(true, 100, 0);
+		s.fail_sets = 1;
+		begin(&s); advance_to(&s, 0);
+		CHECK(s.v.failures == 1 && s.armed);
+		end(&s);                                               // the operation ends long before the retry
+		advance_to(&s, AGX_VOTE_RETRY_MS);                     // the timer fires idle: nothing to do
+		CHECK(s.v.failures == 1 && !s.armed && !s.bit);
+		int kicks = s.kicks;
+		begin(&s);                                             // a later operation: the kick must come back
+		advance_to(&s, s.now + 1);
+		CHECK(s.kicks == kicks + 1 && s.sets == 2 && s.bit && s.v.failures == 0);
+		// the header alone: inside the window no kick, past it the kick returns
+		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 100};
+		CHECK(!agx_vote_begin(&v, 50));
+		CHECK(agx_vote_begin(&v, 100));
 	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;
