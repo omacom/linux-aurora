@@ -200,6 +200,9 @@ allOf:
         compatible:
           contains:
             const: apple,t6020-pcie
+          not:
+            contains:
+              const: apple,t8132-pcie
     then:
       properties:
         reg-names:
@@ -252,7 +255,9 @@ allOf:
             properties:
               compatible:
                 contains:
-                  const: apple,t8140-pcie
+                  enum:
+                    - apple,t8132-pcie
+                    - apple,t8140-pcie
           then:
             properties:
               reg:
