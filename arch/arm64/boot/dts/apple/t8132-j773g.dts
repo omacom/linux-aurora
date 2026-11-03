@@ -21,13 +21,6 @@
 		ethernet0 = &ethernet0;
 		wifi0 = &wifi0;
 	};
-
-	vreg_pcie0_port0: regulator-pcie0-port0 {
-		compatible = "regulator-fixed";
-		regulator-name = "pwren-pcie0-port0";
-		gpio = <&smc_gpio 19 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-	};
 };
 
 /*
@@ -159,7 +152,7 @@
 };
 
 &pcie0_port0 {
-	power-supply = <&vreg_pcie0_port0>;
+	pwren-gpios = <&smc_gpio 19 GPIO_ACTIVE_HIGH>;
 	bus-range = <1 1>;
 	status = "okay";
 

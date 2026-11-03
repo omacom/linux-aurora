@@ -619,7 +619,6 @@
 			status = "disabled";
 
 			pcie0_port0: pci@0,0 {
-				compatible = "pciclass,0604";
 				device_type = "pci";
 				reg = <0x0 0x0 0x0 0x0 0x0>;
 				reset-gpios = <&pinctrl_ap 163 GPIO_ACTIVE_LOW>;
@@ -640,7 +639,6 @@
 			};
 
 			pcie0_port1: pci@1,0 {
-				compatible = "pciclass,0604";
 				device_type = "pci";
 				reg = <0x800 0x0 0x0 0x0 0x0>;
 				reset-gpios = <&pinctrl_ap 164 GPIO_ACTIVE_LOW>;
@@ -661,7 +659,6 @@
 			};
 
 			pcie0_port2: pci@2,0 {
-				compatible = "pciclass,0604";
 				device_type = "pci";
 				reg = <0x1000 0x0 0x0 0x0 0x0>;
 				reset-gpios = <&pinctrl_ap 165 GPIO_ACTIVE_LOW>;
