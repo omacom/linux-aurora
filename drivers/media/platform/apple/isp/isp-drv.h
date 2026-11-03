@@ -312,6 +312,8 @@ struct apple_isp {
 	enum isp_fw_state fw_state;
 	/* First IPC failure; cleared only after fresh channel initialization. */
 	int ipc_error;
+	/* End the current receive invocation before resident reclamation. */
+	bool ipc_quiescing;
 
 	struct isp_surf *ipc_surf;
 	struct isp_surf *extra_surf;

@@ -22,6 +22,12 @@ typedef uint32_t u32;
 #define isp_dbg(...) ((void)0)
 #define CISP_OPCODE_GET(x) ((x) >> 32)
 #define ISP_MBOX2_IRQ_DOORBELL 0
+#define irqreturn_t int
+#define IRQ_HANDLED 1
+#define ISP_IPC_FLAG_ACK 1
+#define ISP_IPC_FLAG_TERMINAL_ACK 3
+#define mutex_lock(l) ((void)(l))
+#define mutex_unlock(l) ((void)(l))
 #define ISP_FW_OFF 0
 #define ISP_FW_RUNNING 1
 #define ISP_FW_DEAD 2
@@ -41,7 +47,8 @@ struct isp_message {
 
 struct isp_channel {
 	struct isp_message req;
-	unsigned int doorbell;
+	unsigned int doorbell, num, cursor, remaining;
+	int lock;
 };
 
 struct hardware {
@@ -50,7 +57,8 @@ struct hardware {
 
 struct apple_isp {
 	int ipc_error, wait, fw_state, irq;
-	struct isp_channel *chan_io;
+	bool ipc_quiescing;
+	struct isp_channel *chan_io, *chan_sm, *chan_tm, *chan_bt;
 	const struct hardware *hw;
 	void *dev, *wq, *cmd_virt;
 	u64 cmd_iova;
@@ -186,7 +194,32 @@ static int isp_start_command_processor(struct apple_isp *isp)
 	return stage(isp, 5);
 }
 
-static bool shutdown_called;
+static irqreturn_t apple_isp_isr_thread(int irq, void *dev);
+static unsigned int receive_rounds;
+static bool refill;
+
+static void cond_resched(void)
+{
+	CHECK(++receive_rounds < 10000);
+}
+
+static void chan_read_msg(struct apple_isp *isp, struct isp_channel *chan,
+			  struct isp_message *req)
+{
+	req->arg0 = chan->remaining ? 0 : ISP_IPC_FLAG_ACK;
+}
+
+static int chan_handle_once(struct apple_isp *isp, struct isp_channel *chan)
+{
+	if (!refill)
+		chan->remaining--;
+	return 0;
+}
+
+static bool shutdown_called, flood;
+static struct apple_isp *synchronizing;
+static int sync_error;
+static bool irq_disabled;
 static int isp_stop_command_processor(struct apple_isp *isp)
 {
 	shutdown_called = true;
@@ -195,6 +228,8 @@ static int isp_stop_command_processor(struct apple_isp *isp)
 
 static void isp_disable_irq(struct apple_isp *isp)
 {
+	if (flood)
+		apple_isp_isr_thread(isp->irq, isp);
 }
 
 static void flush_workqueue(void *wq)
@@ -213,12 +248,24 @@ static void pm_runtime_put_sync(void *dev)
 
 static void apple_isp_firmware_halt(struct apple_isp *isp);
 
-static void synchronize_irq(int irq)
+static void disable_irq(int irq)
 {
+	CHECK(synchronizing->ipc_quiescing);
+	irq_disabled = true;
+	apple_isp_isr_thread(irq, synchronizing);
+	if (sync_error)
+		synchronizing->ipc_error = sync_error;
+}
+
+static void enable_irq(int irq)
+{
+	CHECK(irq_disabled && !synchronizing->ipc_quiescing);
+	irq_disabled = false;
 }
 
 static void isp_free_released_surfaces(struct apple_isp *isp)
 {
+	CHECK(irq_disabled);
 	freed_released++;
 }
 
@@ -226,9 +273,12 @@ static void isp_free_released_surfaces(struct apple_isp *isp)
 int main(void)
 {
 	struct isp_channel ch = { 0 };
+	struct isp_channel incoming = { .num = 2, .remaining = 2 };
 	const struct hardware hw = { 0 }, resident = { .resident_fw = true };
 	u64 area[4] = { 1, 2, 3, 4 }, args[4] = { 5, 6, 7, 8 };
-	struct apple_isp isp = { .hw = &hw, .chan_io = &ch, .cmd_virt = area };
+	struct apple_isp isp = { .hw = &hw, .chan_io = &ch, .cmd_virt = area,
+				 .chan_sm = &incoming, .chan_tm = &incoming,
+				 .chan_bt = &incoming };
 
 	pthread_t thread;
 
@@ -284,10 +334,33 @@ int main(void)
 	isp.ipc_error = -ETIME;
 	CHECK(apple_isp_firmware_boot(&isp) == -ETIME &&
 	      isp.ipc_error == -ETIME);
+	synchronizing = &isp;
 	apple_isp_firmware_shutdown(&isp);
 	CHECK(halts == 1 && freed_released == 0 && isp.fw_state == ISP_FW_DEAD);
 	CHECK(stop_order < free_order);
 	CHECK(apple_isp_firmware_boot(&isp) == -EIO);
+	/* Healthy resident close is temporary; a late receive failure halts. */
+	isp.fw_state = ISP_FW_RUNNING;
+	isp.ipc_error = 0;
+	isp.chan_sm = &incoming;
+	isp.chan_tm = &incoming;
+	isp.chan_bt = &incoming;
+	refill = true;
+	receive_rounds = 0;
+	synchronizing = &isp;
+	apple_isp_firmware_shutdown(&isp);
+	CHECK(!irq_disabled && !isp.ipc_quiescing && freed_released == 1);
+	CHECK(receive_rounds == 1);
+	CHECK(isp.fw_state == ISP_FW_RUNNING && !isp.ipc_error);
+	sync_error = -EIO;
+	apple_isp_firmware_shutdown(&isp);
+	CHECK(isp.fw_state == ISP_FW_DEAD && freed_released == 1);
+	CHECK(halts == 2 && isp.ipc_error == -EIO);
+	isp.ipc_error = 0;
+	isp.ipc_quiescing = false;
+	flood = true;
+	isp_firmware_shutdown(&isp);
+	CHECK(isp.ipc_error == -ESHUTDOWN);
 	puts("PASS: timeout, late ACK, shared writes, stop, boot and resident lifetime");
 	return 0;
 }

@@ -225,16 +225,22 @@ static irqreturn_t apple_isp_isr(int irq, void *dev)
 static irqreturn_t apple_isp_isr_thread(int irq, void *dev)
 {
 	struct apple_isp *isp = dev;
+	bool more;
 
-	wake_up_all(&isp->wait);
+	do {
+		wake_up_all(&isp->wait);
 
-	ipc_chan_handle(isp, isp->chan_sm);
-	wake_up_all(&isp->wait); /* Some commands depend on sm */
+		more = ipc_chan_handle(isp, isp->chan_sm) == -EAGAIN;
+		wake_up_all(&isp->wait); /* Some commands depend on sm */
 
-	ipc_chan_handle(isp, isp->chan_tm);
+		more |= ipc_chan_handle(isp, isp->chan_tm) == -EAGAIN;
+		more |= ipc_chan_handle(isp, isp->chan_bt) == -EAGAIN;
+		wake_up_all(&isp->wait);
 
-	ipc_chan_handle(isp, isp->chan_bt);
-	wake_up_all(&isp->wait);
+		/* Fair turns across channels, without depending on another IRQ. */
+		cond_resched();
+	} while (more && !READ_ONCE(isp->ipc_error) &&
+		 !READ_ONCE(isp->ipc_quiescing));
 
 	return IRQ_HANDLED;
 }
@@ -978,6 +984,8 @@ static void isp_firmware_shutdown(struct apple_isp *isp)
 	 */
 	if (isp_stop_command_processor(isp))
 		dev_warn(isp->dev, "firmware did not suspend, stopping it\n");
+	/* Also stop a receive thread whose producer never leaves a gap. */
+	cmpxchg(&isp->ipc_error, 0, -ESHUTDOWN);
 	isp_disable_irq(isp);
 	isp_firmware_stop(isp);
 }
@@ -1042,9 +1050,20 @@ void apple_isp_firmware_shutdown(struct apple_isp *isp)
 	 * The stream has stopped, so free them now: wait for the interrupt
 	 * thread to finish the free requests the firmware has already sent.
 	 */
-	if (isp->fw_state == ISP_FW_RUNNING)
-		synchronize_irq(isp->irq);
+	if (isp->fw_state != ISP_FW_RUNNING)
+		return;
+
+	/* Finish a fair receive round even if the producer keeps refilling. */
+	WRITE_ONCE(isp->ipc_quiescing, true);
+	disable_irq(isp->irq);
+	/* No receive handler can race this lifetime decision while disabled. */
+	if (READ_ONCE(isp->ipc_error)) {
+		apple_isp_firmware_halt(isp);
+		return;
+	}
 	isp_free_released_surfaces(isp);
+	WRITE_ONCE(isp->ipc_quiescing, false);
+	enable_irq(isp->irq);
 }
 
 /* Stop the firmware; resident firmware cannot be started again. */

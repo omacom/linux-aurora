@@ -139,10 +139,15 @@ static inline bool chan_rx_done(struct apple_isp *isp, struct isp_channel *chan)
 
 int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan)
 {
-	int err = 0;
+	int err = -EAGAIN;
 
 	mutex_lock(&chan->lock);
-	while (1) {
+	/* One ring per turn, even if the producer refills acknowledged slots. */
+	for (u32 i = 0; i < chan->num; i++) {
+		if (READ_ONCE(isp->ipc_error)) {
+			err = READ_ONCE(isp->ipc_error);
+			break;
+		}
 		chan_read_msg(isp, chan, &chan->req);
 		if (chan_rx_done(isp, chan)) {
 			err = 0;
@@ -150,8 +155,11 @@ int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan)
 		}
 		err = chan_handle_once(isp, chan);
 		if (err < 0) {
+			cmpxchg(&isp->ipc_error, 0, err);
+			wake_up_all(&isp->wait);
 			break;
 		}
+		err = -EAGAIN;
 	}
 	mutex_unlock(&chan->lock);
 

@@ -30,8 +30,8 @@ def main():
     parser.add_argument('--out', type=Path)
     parser.add_argument('--emit', type=Path, help='write C for build-time compilation')
     parser.add_argument('--cc', default='clang')
-    parser.add_argument('--suite', choices=['session', 'buffers'], default='session')
-    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback'])
+    parser.add_argument('--suite', choices=['session', 'buffers', 'receive'], default='session')
+    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback', 'drain'])
     args = parser.parse_args()
     inputs = {n: (DRIVER / n).read_text() for n in
               ['isp-ipc.c', 'isp-cmd.c', 'isp-cam.c', 'isp-fw.c']}
@@ -43,6 +43,9 @@ def main():
                      'apple_isp_firmware_halt', 'isp_firmware_boot',
                      'apple_isp_firmware_boot', 'apple_isp_firmware_shutdown'],
     }
+    if args.suite == 'session':
+        groups['isp-ipc.c'] += ['chan_rx_done', 'ipc_chan_handle']
+        groups['isp-fw.c'] += ['apple_isp_isr_thread']
     bodies = {n: function(inputs[f], n) for f, names in groups.items() for n in names}
     if args.control == 'send':
         bodies['ipc_chan_send'] = bodies['ipc_chan_send'].replace(
@@ -70,6 +73,13 @@ def main():
                 ['git', 'show', '7876c8e8349c4f3d0a2f4ce982e3e13ce5bb5d70:'
                  'drivers/media/platform/apple/isp/isp-v4l2.c'], cwd=ROOT, text=True)
             bodies['isp_submit_buffers'] = function(old, 'isp_submit_buffers')
+    if args.suite == 'receive':
+        bodies = {n: function(inputs[f], n) for f, n in [
+            ('isp-ipc.c', 'chan_rx_done'), ('isp-ipc.c', 'ipc_chan_handle'),
+            ('isp-fw.c', 'apple_isp_isr_thread')]}
+        if args.control == 'drain':
+            bodies['ipc_chan_handle'] = bodies['ipc_chan_handle'].replace(
+                'for (u32 i = 0; i < chan->num; i++)', 'while (1)')
     code = (ROOT / ('tools/asahi/isp/' + args.suite + '.c')).read_text()
     if args.suite == 'buffers':
         structures = re.findall(r'^struct isp_buflist(?:_buffer)? \{.*?^} __packed;',
