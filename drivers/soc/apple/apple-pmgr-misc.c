@@ -448,7 +448,7 @@ static bool apple_pmgr_init_device(struct apple_pmgr_misc *misc,
 
 	base = devm_platform_ioremap_resource_byname(
 		to_platform_device(misc->dev), name);
-	if (!base)
+	if (IS_ERR(base))
 		return false;
 
 	val = readl_relaxed(base + APPLE_CLKGEN_PSTATE);
