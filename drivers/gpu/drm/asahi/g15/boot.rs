@@ -317,6 +317,7 @@ static RTKIT_OPS: bindings::apple_rtkit_ops = bindings::apple_rtkit_ops {
     flags: 0,
     crashed: Some(rtkit_crashed),
     recv_message: Some(rtkit_recv),
+    recv_message_timed: None,
     recv_message_early: Some(rtkit_recv_early),
     shmem_setup: Some(rtkit_shmem_setup),
     shmem_destroy: Some(rtkit_shmem_destroy),
