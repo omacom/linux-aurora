@@ -1156,8 +1156,7 @@ impl VmBind {
         self.1
     }
 
-    /// Stable wire incarnation for this active root lease. M4 reserves zero as unbound.
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
+    /// Stable firmware wire incarnation for this active root lease; zero is unbound.
     pub(crate) fn generation(&self) -> u8 {
         self.0.binding.lock().generation
     }
@@ -2670,7 +2669,6 @@ impl Vm {
     }
 
     /// Spend the binding generation only for an incarnation exposed to firmware.
-    #[cfg(CONFIG_DRM_ASAHI_G16)]
     pub(crate) fn mark_binding_published(&self) -> Result {
         let uat = self.gpuvm.lock_inner().uat_inner.clone();
         let binding = self.binding.lock();

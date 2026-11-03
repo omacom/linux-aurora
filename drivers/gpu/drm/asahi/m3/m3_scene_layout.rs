@@ -39,3 +39,43 @@ impl Scene {
         Ok(())
     }
 }
+
+pub(crate) const EXTENDED_SIZE: usize = 0x400;
+
+/// Encode a native scene header from its retained aliases. The local
+/// statistics and parameter scratch remain part of this same owned record.
+pub(crate) fn encode_extended(output: &mut [u8], owner: super::m3_init_layout::Region,
+    scratch_gpu: super::m3_pool_layout::GpuRegion, scratch_fw: FirmwareVa,
+    scene_list: super::m3_pool_layout::GpuRegion) -> Result<(), Error> {
+    let statistics = owner.at(0x200, 0x40).map_err(|_| Error::Size)?;
+    owner.at(0, EXTENDED_SIZE).map_err(|_| Error::Size)?;
+    if scratch_gpu.size() < 0x4000 || scene_list.size() < 0x4000 { return Err(Error::Size); }
+    let compact = super::agx_render_state::compact(scene_list.base()).map_err(|_| Error::Address)?;
+    let bytes = output.get_mut(..EXTENDED_SIZE).ok_or(Error::Size)?;
+    bytes.fill(0);
+    bytes[..8].copy_from_slice(&scratch_gpu.base().to_le_bytes());
+    bytes[8..16].copy_from_slice(&scratch_fw.get().to_le_bytes());
+    bytes[0x28..0x30].copy_from_slice(&compact.to_le_bytes());
+    bytes[0x40..0x48].copy_from_slice(&statistics.to_le_bytes());
+    Ok(())
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    use super::super::{m3_init_layout::Region, m3_pool_layout::GpuRegion};
+    #[test] fn native_scene_keeps_scratch_aliases_and_local_statistics_distinct() {
+        let owner = Region::new(0xffff_fc25_0010_0000, EXTENDED_SIZE).unwrap();
+        let scratch = GpuRegion::new(0x10_0200_0000, 0x4000).unwrap();
+        let scratch_fw = FirmwareVa::new(0xffff_fc25_0020_0000).unwrap();
+        let list = GpuRegion::new(0x10_0300_0000, 0x4000).unwrap();
+        let mut bytes = [0xa5; EXTENDED_SIZE + 8];
+        encode_extended(&mut bytes, owner, scratch, scratch_fw, list).unwrap();
+        let read = |at| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        assert_eq!(read(0), scratch.base());
+        assert_eq!(read(8), scratch_fw.get());
+        assert_eq!(read(0x28), 0x300_0000);
+        assert_eq!(read(0x40), owner.at(0x200, 0x40).unwrap());
+        assert_eq!(&bytes[EXTENDED_SIZE..], &[0xa5; 8]);
+    }
+}
