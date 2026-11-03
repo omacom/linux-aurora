@@ -10,6 +10,10 @@ a = s.index('        if data.flags != 0', s.index('pub(crate) fn queue_create(')
 b = s.index('        let queues_xa', a)
 gate = s[a:b]
 predicate = (root / 'drivers/gpu/drm/asahi/m3/m3_drm.rs').read_text().split('pub(crate) fn supports_high_priority(&self) -> bool {', 1)[1].split('\n    }', 1)[0]
+submit = (root / 'drivers/gpu/drm/asahi/m3/m3_submit.rs').read_text()
+ordering = submit.split('        let urgency=', 1)[1].split('        Ok(Self', 1)[0]
+ordering = 'let urgency=' + ordering
+assert 'uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME - data.priority' in s
 unit = r'''
 #![allow(dead_code, non_upper_case_globals)]
 use std::any::Any;
@@ -35,6 +39,13 @@ struct Reg {gpu:Gpu}
 struct Data {flags:u32,priority:u32}
 struct File(bool); impl File {fn is_current_master(&self)->bool {self.0}}
 fn admit(reg_data:&Reg,data:&Data,file:&File)->Result<(),i32> { GATE Ok(()) }
+mod sched {
+ #[derive(Debug,PartialEq)] pub enum Priority {Low,Normal,High,Kernel}
+}
+fn ordering(priority:u32)->Result<(u8,sched::Priority),i32> {
+ ORDERING
+ Ok((urgency,priority))
+}
 fn main() {
  use m3::m3_drm::*;
  let mut n=0;
@@ -56,9 +67,13 @@ fn main() {
     "backend={backend} cap={cap} master={master} flags={flags} priority={priority}"); n+=1;
   }}
  }}}
- println!("{n} actual admission cases passed");
+ for (uapi,expected) in [(0,sched::Priority::Low),(1,sched::Priority::Normal),(2,sched::Priority::High)] {
+  assert_eq!(ordering(3-uapi),Ok((uapi as u8,expected)));
+ }
+ assert_eq!(ordering(4),Err(EINVAL));
+ println!("{n} actual admission cases and LOW/MEDIUM/HIGH host mappings passed");
 }
-'''.replace('PREDICATE', predicate.replace('super::m3_profile::Profile', 'Profile')).replace('GATE', gate)
+'''.replace('PREDICATE', predicate.replace('super::m3_profile::Profile', 'Profile')).replace('GATE', gate).replace('ORDERING', ordering)
 with tempfile.TemporaryDirectory(prefix='queue-priority-') as d:
     p = Path(d) / 'gate.rs'
     p.write_text(unit)
