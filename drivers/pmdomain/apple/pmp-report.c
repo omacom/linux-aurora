@@ -94,6 +94,19 @@ static void apple_pmp_agx_vote_fn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(apple_pmp_agx_vote_work, apple_pmp_agx_vote_fn);
 static void apple_pmp_agx_vote_stop(void);
 
+/* The vote state for the report status, copied under the vote's lock. */
+static void apple_pmp_agx_vote_show(struct seq_file *s)
+{
+	struct agx_vote v;
+	unsigned long flags;
+
+	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
+	v = apple_pmp_agx_vote_state;
+	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
+	seq_printf(s, "agx_vote: enabled=%u voted=%u users=%u idle_ms=%u failures=%u\n", v.enabled, v.voted, v.users, v.idle_ms,
+		   v.failures);
+}
+
 /* Bound report regions, protected by RCU until managed teardown drains readers. */
 static LIST_HEAD(apple_pmp_reports);
 static DEFINE_MUTEX(apple_pmp_reports_lock);
@@ -151,7 +164,7 @@ EXPORT_SYMBOL_GPL(apple_pmp_report_fast_die_effort);
 
 static void apple_pmp_start_show(struct seq_file *s, struct apple_pmp_start *st);
 
-/* Read only the documented status and fast-die entries, never the aperture. */
+/* Read only the documented status and fast-die entries, and the two request words (request and actual) the driver itself reads on every set. Never the rest of the aperture. */
 static int apple_pmp_report_status_show(struct seq_file *s, void *unused)
 {
 	struct apple_pmp_report *rep = s->private;
@@ -163,7 +176,14 @@ static int apple_pmp_report_status_show(struct seq_file *s, void *unused)
 	seq_printf(s, "running: %u\n", !!(status & PMP_REPORT_READY));
 	if (rep->start)
 		apple_pmp_start_show(s, rep->start);
-	if (!(status & PMP_REPORT_READY) || !offs->fast_die)
+	if (!(status & PMP_REPORT_READY))
+		return 0;
+
+	seq_printf(s, "request: 0x%016llx\nactual: 0x%016llx\n", (unsigned long long)readq(rep->base + offs->tgt_read),
+		   (unsigned long long)readq(rep->base + offs->actual));
+	if (offs == &apple_pmp_offsets_t600x)
+		apple_pmp_agx_vote_show(s);
+	if (!offs->fast_die)
 		return 0;
 
 	effort = readl(rep->base + offs->fast_die);
@@ -1151,7 +1171,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 	list_add_tail_rcu(&rep->list, &apple_pmp_reports);
 	mutex_unlock(&apple_pmp_reports_lock);
 
-	if (rep->offsets->fast_die || rep->start)
+	if (rep->offsets->fast_die || rep->start || rep->offsets == &apple_pmp_offsets_t600x)
 		rep->debugfs = debugfs_create_file(dev_name(dev), 0400,
 						   apple_pmp_report_debugfs, rep,
 						   &apple_pmp_report_status_fops);
