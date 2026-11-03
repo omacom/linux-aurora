@@ -30,10 +30,13 @@ HEADER = 'drivers/pmdomain/apple/pmp-agx-vote.h'
 CONTROLS = [
     ('owed-set-branch', '\tif (v->users && !v->voted && !v->failures)\n\t\treturn 1;\n', ''),
     ('owed-failures', 'if (v->users && !v->voted && !v->failures)\n\t\treturn 1;', 'if (v->users && !v->voted)\n\t\treturn 1;'),
-    ('stopped-in-begin', 'return v->enabled && !v->voted && !v->stopped;', 'return v->enabled && !v->voted;'),
+    ('stopped-in-begin', 'return v->enabled && !v->voted && !v->stopped && !v->failures;', 'return v->enabled && !v->voted && !v->failures;'),
     ('stopped-in-decide', 'if (!v->enabled || v->stopped)\n\t\treturn v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;',
      'if (!v->enabled)\n\t\treturn v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;'),
     ('wrap-reached', 'return (agx_sms_t)(now - t) >= 0;', 'return now >= t;'),
+    ('set-write-ends', 'return agx_vote_reached(now, at) ? 1 : at - now;', 'return agx_vote_reached(now, at) ? 0 : at - now;'),
+    ('begin-backoff-kick', 'return v->enabled && !v->voted && !v->stopped && !v->failures;', 'return v->enabled && !v->voted && !v->stopped;'),
+    ('retry-revival', '|| (agx_sms_t)(v->retry_at - now) > (agx_sms_t)AGX_VOTE_RETRY_MS', ''),
 ]
 
 

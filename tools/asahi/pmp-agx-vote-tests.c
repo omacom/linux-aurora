@@ -16,6 +16,7 @@ struct sim {
 	bool armed;
 	uint32_t timer_at;
 	int begin_in_write;  // begin this many operations while the register write of the next reconcile is in progress
+	int kicks;           // reconciliations the operations asked for
 };
 
 static void arm(struct sim *s, uint32_t delay_ms)
@@ -62,8 +63,10 @@ static void reconcile(struct sim *s)
 
 static void begin(struct sim *s)
 {
-	if (agx_vote_begin(&s->v))
+	if (agx_vote_begin(&s->v)) {
+		s->kicks++;
 		arm(s, 0);
+	}
 }
 
 static void end(struct sim *s)
@@ -307,6 +310,56 @@ int main(void)
 		CHECK(agx_vote_next(&v, 0xFFFFFFF8u) == 0x5Cu);
 		struct agx_vote w = {.enabled = true, .idle_ms = 100, .users = 1, .failures = 1, .retry_at = 0x54u};
 		CHECK(agx_vote_decide(&w, 0xFFFFFFF8u) == AGX_VOTE_NONE);
+	}
+	// 20. chriskearney's race: the last end lands between decide (SET) and applied. end saw voted false and
+	// armed nothing; applied then sets the vote with no user and an already-reached idle deadline. The
+	// caller must still be told to run the reconcile that clears it.
+	{
+		// exactly the reviewer's interleaving, on the header alone: decide, then end, then the write lands
+		struct agx_vote v = {.enabled = true, .idle_ms = 0};
+		CHECK(agx_vote_begin(&v) && v.users == 1);
+		CHECK(agx_vote_decide(&v, 5000) == AGX_VOTE_SET);
+		CHECK(agx_vote_end(&v, 5001) == 0);                   // the end during the write sees voted false: no timer
+		CHECK(v.users == 0);
+		agx_vote_applied(&v, AGX_VOTE_SET, 0, 5000);
+		CHECK(v.voted && v.users == 0);
+		CHECK(agx_vote_next(&v, 5001) == 1);                  // an already-reached deadline is due now, not "nothing"
+		CHECK(agx_vote_decide(&v, 5001) == AGX_VOTE_CLEAR);
+		agx_vote_applied(&v, AGX_VOTE_CLEAR, 0, 5001);
+		CHECK(!v.voted && agx_vote_next(&v, 5001) == 0);      // and it settles
+	}
+	// 21. chriskearney's bound: an idle gap beyond half the 32-bit millisecond range makes the wrapped
+	// arithmetic read an expired retry deadline as future, which would keep the vote off for days. A retry
+	// deadline more than one backoff window in the future cannot be real, so it counts as reached.
+	{
+		struct sim s = fresh(true, 100, 0);
+		s.fail_sets = 1;
+		begin(&s); advance_to(&s, 0);
+		CHECK(s.v.failures == 1);
+		s.v.retry_at = 0x54u;
+		advance_to(&s, 0x54u + 0x80000005u);                  // the timer fires absurdly late
+		CHECK(s.bit && s.sets == 2 && s.v.failures == 0);     // the vote is set again at once
+		// the header alone
+		struct agx_vote w = {.enabled = true, .users = 1, .failures = 1, .retry_at = 0x54u};
+		CHECK(agx_vote_decide(&w, 0x54u + 0x80000005u) == AGX_VOTE_SET);
+		CHECK(agx_vote_next(&w, 0x54u + 0x80000005u) == 1);
+	}
+	// 22. the same review: during backoff begin must not ask for a reconciliation decide would refuse
+	// (every begin during the window kicked a NONE reconcile and the retry timer did the work anyway)
+	{
+		struct sim s = fresh(true, 100, 0);
+		s.fail_sets = 1;
+		begin(&s); advance_to(&s, 0);
+		CHECK(s.v.failures == 1 && s.armed);
+		int kicks = s.kicks;
+		for (int i = 0; i < 5; i++)
+			begin(&s);
+		CHECK(s.kicks == kicks && s.sets == 1);               // no kicks, no sets: the timer drives it
+		advance_to(&s, AGX_VOTE_RETRY_MS);
+		CHECK(s.sets == 2 && s.bit && s.v.failures == 0);
+		// the header alone
+		struct agx_vote v = {.enabled = true, .failures = 1};
+		CHECK(!agx_vote_begin(&v));
 	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;
