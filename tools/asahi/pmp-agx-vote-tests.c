@@ -51,6 +51,9 @@ static void reconcile(struct sim *s)
 	} else if (act == AGX_VOTE_CLEAR) {
 		s->clears++;
 		s->bit = false;
+	} else if (s->v.failures && !s->v.users && !s->v.voted &&
+		   agx_vote_retry_reached(&s->v, s->now)) {
+		s->v.failures = 0;     // the glue clears a spent backoff when the retry fires idle
 	}
 	while (s->end_in_write > 0) {
 		s->end_in_write--;
@@ -69,9 +72,11 @@ static void reconcile(struct sim *s)
 
 static void begin(struct sim *s)
 {
-	if (agx_vote_begin(&s->v, s->now)) {
+	agx_ms_t d = agx_vote_begin(&s->v, s->now);
+	if (d) {
 		s->kicks++;
-		arm(s, 0);
+		/* delay 1 is "due now": the glue runs it within the same tick */
+		arm(s, d == 1 ? 0 : d);
 	}
 }
 
@@ -378,7 +383,7 @@ int main(void)
 		CHECK(s.v.failures == 1 && s.armed);
 		end(&s);                                               // the operation ends long before the retry
 		advance_to(&s, AGX_VOTE_RETRY_MS);                     // the timer fires idle: nothing to do
-		CHECK(s.v.failures == 1 && !s.armed && !s.bit);
+		CHECK(s.v.failures == 0 && !s.armed && !s.bit);   // the spent backoff cleared at the idle fire
 		int kicks = s.kicks;
 		begin(&s);                                             // a later operation: the kick must come back
 		advance_to(&s, s.now + 1);
@@ -398,7 +403,7 @@ int main(void)
 		CHECK(agx_vote_decide(&v, 5000) == AGX_VOTE_SET);
 		CHECK(agx_vote_end(&v, 5001) == 0);                   // the end during the ack: no timer
 		agx_vote_applied(&v, AGX_VOTE_SET, -110, 5000);       // the ack times out
-		CHECK(v.failures == 1 && agx_vote_next(&v, 5001) == 0);   // nothing armed by the write path
+		CHECK(v.failures == 1 && agx_vote_next(&v, 5001) == 999);  // next arms the retry from the failure state
 		unsigned delay = agx_vote_begin(&v, 5002);
 		CHECK(delay == 998);                                  // the begin arms the remaining delay
 		CHECK(v.users == 1);

@@ -35,6 +35,12 @@ CONTROLS = [
      'if (!v->enabled)\n\t\treturn v->voted ? AGX_VOTE_CLEAR : AGX_VOTE_NONE;'),
     ('wrap-reached', 'return (agx_sms_t)(now - t) >= 0;', 'return now >= t;'),
     ('set-write-ends', 'return agx_vote_reached(now, at) ? 1 : at - now;', 'return agx_vote_reached(now, at) ? 0 : at - now;'),
+    ('retry-dropped-when-idle',
+     '\telse if (!v->users && !v->voted && v->failures)\n'
+     '\t\t/* The write outlasted the operation: arm the retry from the failure state\n'
+     '\t\t * itself. The caller clears failures when this reconcile finds nobody waiting\n'
+     '\t\t * (decide returns NONE), so it fires once. */\n'
+     '\t\tat = agx_vote_retry_reached(v, now) ? now : v->retry_at;\n', ''),
     ('begin-backoff-kick', 'return (!v->failures || agx_vote_retry_reached(v, now)) ? 1 : v->retry_at - now;', 'return (void)now, 1;'),
     ('begin-no-retry-arm', 'return (!v->failures || agx_vote_retry_reached(v, now)) ? 1 : v->retry_at - now;', 'return (void)now, 0;'),
     ('retry-revival', '|| (agx_sms_t)(v->retry_at - now) > (agx_sms_t)AGX_VOTE_RETRY_MS', ''),

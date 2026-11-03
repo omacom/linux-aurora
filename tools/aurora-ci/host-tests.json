@@ -2361,6 +2361,20 @@
    "note": "self-checking: exits 0 when the mutant aborts"
   },
   {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation retry-dropped-when-idle",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "retry-dropped-when-idle",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
    "name": "tools/asahi/pmp-agx-vote-tests.py --mutation begin-no-retry-arm",
    "group": "tools",
    "argv": [

@@ -1425,6 +1425,9 @@ static void apple_pmp_agx_vote_fn(struct work_struct *work)
 	v->idle_ms = READ_ONCE(agx_vote_idle_ms);
 	now = apple_pmp_agx_now_ms();
 	act = agx_vote_decide(v, now);
+	if (act == AGX_VOTE_NONE && v->failures && !v->users && !v->voted &&
+	    agx_vote_retry_reached(v, now))
+		v->failures = 0;	/* the backoff fired with nobody waiting: it is spent */
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 
 	if (act != AGX_VOTE_NONE) {

@@ -117,6 +117,11 @@ static inline agx_ms_t agx_vote_next(const struct agx_vote *v, agx_ms_t now)
 		at = agx_vote_retry_reached(v, now) ? now : v->retry_at;
 	else if (!v->users && v->voted)
 		at = v->idle_at + v->idle_ms;
+	else if (!v->users && !v->voted && v->failures)
+		/* The write outlasted the operation: arm the retry from the failure state
+		 * itself. The caller clears failures when this reconcile finds nobody waiting
+		 * (decide returns NONE), so it fires once. */
+		at = agx_vote_retry_reached(v, now) ? now : v->retry_at;
 	else
 		return 0;
 	/* An already-reached deadline returns 1: there is work, due now. The SET-write race leaves exactly
