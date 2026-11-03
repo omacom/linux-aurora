@@ -354,13 +354,13 @@ int main(void)
 		int kicks = s.kicks;
 		for (int i = 0; i < 5; i++)
 			begin(&s);
-		CHECK(s.kicks == kicks && s.sets == 1);               // no kicks, no sets: the timer drives it
+		CHECK(s.kicks == kicks + 5 && s.sets == 1);           // each begin arms the same deadline, none reconciles early
 		advance_to(&s, AGX_VOTE_RETRY_MS);
 		CHECK(s.sets == 2 && s.bit && s.v.failures == 0);
 		// the header alone
 		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 100};
-		CHECK(!agx_vote_begin(&v, 0));
-		CHECK(agx_vote_begin(&v, 100));
+		CHECK(agx_vote_begin(&v, 0) == 100);                   // arms the remaining delay
+		CHECK(agx_vote_begin(&v, 100) == 1);                   // past the deadline: now
 	}
 	// 23. w7X's regression repro for the first cut of the backoff gate: a failed set whose retry timer fires
 	// while the GPU is idle left failures set forever, and begin never asked for the set again. The kick
@@ -379,8 +379,8 @@ int main(void)
 		CHECK(s.kicks == kicks + 1 && s.sets == 2 && s.bit && s.v.failures == 0);
 		// the header alone: inside the window no kick, past it the kick returns
 		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 100};
-		CHECK(!agx_vote_begin(&v, 50));
-		CHECK(agx_vote_begin(&v, 100));
+		CHECK(agx_vote_begin(&v, 50) == 50);                   // arms the remaining delay
+		CHECK(agx_vote_begin(&v, 100) == 1);
 	}
 	// 24. chriskearney's second race at efff25c1: the last operation ends during a SET ack that then times
 	// out. applied records the failure with no user and no timer (next returns 0 on that path), and a begin

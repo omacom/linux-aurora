@@ -60,13 +60,18 @@ static inline bool agx_vote_retry_reached(const struct agx_vote *v, agx_ms_t now
 }
 
 /* An operation starts. now is the operation's start time in ms (any wrapping clock; the caller reads it
- * under its lock). True: run the reconcile step now. During a failed-set backoff before the deadline it is
- * false (decide would return NONE, and the retry timer drives the set); once the deadline has passed it is
- * true again, so a failed set whose timer fired idle does not strand the vote. */
-static inline bool agx_vote_begin(struct agx_vote *v, agx_ms_t now)
+ * under its lock). Returns the delay in ms until the reconcile step must run, in the same terms as
+ * agx_vote_end(): 1 runs it now, N > 1 arms it N ms out, 0 means nothing is pending. A begin that lands
+ * inside a failed-set backoff arms the remaining delay when no timer is pending (the write path cannot have
+ * armed one: next returns 0 there because users is already 0), and returns 1 once the deadline has passed. */
+static inline agx_ms_t agx_vote_begin(struct agx_vote *v, agx_ms_t now)
 {
 	v->users++;
-	return v->enabled && !v->voted && !v->stopped && (!v->failures || agx_vote_retry_reached(v, now));
+	if (!v->enabled || v->stopped)
+		return 0;
+	if (v->voted)
+		return 0;
+	return (!v->failures || agx_vote_retry_reached(v, now)) ? 1 : v->retry_at - now;
 }
 
 /* An operation ends. Returns the delay in ms after which the reconcile step must run, 0 when none is needed. */
