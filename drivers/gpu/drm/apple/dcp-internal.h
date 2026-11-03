@@ -432,6 +432,9 @@ struct apple_dcp {
 	/* clear all surfaces on init */
 	bool surfaces_cleared;
 
+	/* J313: the first dcp_poweron() cycles the panel handed over lit */
+	bool panel_cold_poweron;
+
 	/* enable CRC calculation */
 	bool crc_enabled;
 
