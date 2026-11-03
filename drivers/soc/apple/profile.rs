@@ -666,3 +666,30 @@ mod dart_window_tests {
         }
     }
 }
+
+/// The owner-qualified J613 OS-firmware lane; system firmware may differ.
+pub(crate) fn j613_26_6_2() -> bool {
+    machine_has(b"apple,j613")
+        && chosen_string(c"asahi,os-fw-version")
+            .as_deref()
+            .is_some_and(os_firmware_26_6_2)
+}
+
+fn os_firmware_26_6_2(raw: &[u8]) -> bool {
+    raw == b"26.6.2" || raw == b"26.6.2\0"
+}
+
+#[cfg(CONFIG_APPLE_SEP_KUNIT_TEST)]
+#[kernel::macros::kunit_tests(apple_sep_j613_firmware)]
+mod j613_firmware_tests {
+    use super::*;
+
+    #[test]
+    fn exact_os_firmware_only() {
+        assert!(os_firmware_26_6_2(b"26.6.2"));
+        assert!(os_firmware_26_6_2(b"26.6.2\0"));
+        for raw in [&b"14.8.3"[..], &b"26.6.20"[..], &b"27.0"[..], &b""[..]] {
+            assert!(!os_firmware_26_6_2(raw));
+        }
+    }
+}

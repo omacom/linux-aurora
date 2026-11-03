@@ -30,6 +30,26 @@ Description:
 		by the boot-time bring-up, so the sensor and touchid
 		attributes only move on once something has opened it.
 
+		This deployment uses the existing T8122 profile and v4
+		/dev/sep-bio interface. It does not add a new sensor protocol.
+		OS firmware and system firmware are separate: qualify both.
+
+		For an existing bag, select xart_writes=1, provision_keybag=0,
+		xart_guard=1 and xarm_trace=1. trusted_keys=0 and
+		filevault_api=0 omit the optional kernel APIs; both default
+		to 1 to preserve existing deployments. There is no boot_uuid
+		parameter: the OS identity comes from /chosen/apfs-preboot-uuid.
+		Writable J613 26.6.2 attachment rejects a missing DT identity,
+		explicit UUID override or disabled guard before opening xART.
+		Host-store or identity-index read failure refuses attachment.
+
+		Preserve the current keybag, host store, reference key, three
+		Catacombs, ownership journal and fprint records. Different
+		Linux roots must share the same current files globally, before
+		module load; the kernel opens them from init_task's root.
+		Never replace them with a snapshot or enrol again to migrate.
+		Readiness diagnostics do not prove a successful finger match.
+
 What:		/sys/bus/platform/devices/<unit>.sep/diag/profile
 Date:		October 2026
 KernelVersion:	7.1

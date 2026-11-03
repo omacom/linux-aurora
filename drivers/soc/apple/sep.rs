@@ -849,6 +849,18 @@ impl SepData {
         let xart_start = *module_parameters::xart_start_sector.value();
         let xart_guard =
             xart_guard::level(*module_parameters::xart_guard.value(), profile.xart_guard);
+        // The qualified 26.6.2 lane uses only the boot-forwarded identity.
+        // Check before opening the shared xART store writable.
+        if profile::j613_26_6_2() && xart_writes {
+            if dt::preboot_uuid().is_none()
+                || *module_parameters::os_uuid_hi.value() != 0
+                || *module_parameters::os_uuid_lo.value() != 0
+                || xart_guard.is_none()
+            {
+                dev_err!(dev, "J613 26.6.2 requires a DT identity and xART guard\n");
+                return Err(EINVAL);
+            }
+        }
         let store = match xart_store::Store::open_owner(xart_writes, xart_start) {
             Ok(mut store) => {
                 match xart_guard {
@@ -889,6 +901,10 @@ impl SepData {
         let mut host_store = match store::Store::open() {
             Ok(store) => Some(store),
             Err(e) => {
+                if profile::j613_26_6_2() {
+                    dev_err!(dev, "J613 26.6.2 host-state store unavailable: {:?}\n", e);
+                    return Err(e);
+                }
                 dev_warn!(dev, "Linux host-state store unavailable: {:?}\n", e);
                 None
             }
@@ -896,6 +912,7 @@ impl SepData {
 
         let bio_index = match host_store.as_mut().map(bio::IdentityIndex::load) {
             Some(Ok(index)) => index,
+            Some(Err(e)) if profile::j613_26_6_2() => return Err(e),
             Some(Err(_)) => bio::IdentityIndex::new(),
             None => bio::IdentityIndex::new(),
         };
@@ -2664,12 +2681,16 @@ impl platform::Driver for SepDriver {
 
         data.attach(&sep_node)?;
 
-        if let Err(e) = data.register_fv_kernel() {
-            dev_err!(dev, "could not register the FileVault kernel API: {:?}\n", e);
+        if *module_parameters::filevault_api.value() != 0 {
+            if let Err(e) = data.register_fv_kernel() {
+                dev_err!(dev, "could not register the FileVault kernel API: {:?}\n", e);
+            }
         }
 
-        if let Err(e) = trusted::register(data.clone()) {
-            dev_warn!(data.dev, "trusted-keys: registration failed ({:?})\n", e);
+        if *module_parameters::trusted_keys.value() != 0 {
+            if let Err(e) = trusted::register(data.clone()) {
+                dev_warn!(data.dev, "trusted-keys: registration failed ({:?})\n", e);
+            }
         }
 
         if let Err(e) = pm::register(data.clone()) {
@@ -2736,6 +2757,14 @@ module! {
     description: "Apple SEP coprocessor: warm attach, endpoint discovery and tag-correlated control endpoint",
     license: "Dual MIT/GPL",
     params: {
+        trusted_keys: u8 {
+            default: 1,
+            description: "Register the SEP trusted-key source; 0 leaves it disabled",
+        },
+        filevault_api: u8 {
+            default: 1,
+            description: "Register the SEP FileVault kernel API; 0 leaves it disabled",
+        },
         xart_writes: u8 {
             default: 1,
             description: "Allow shared xART writes only if APFS proves a single unsnapshotted .gl extent; set to 0 for read-only operation",
