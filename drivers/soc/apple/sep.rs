@@ -1559,6 +1559,7 @@ impl SepData {
             uuid[..8].copy_from_slice(&hi.to_be_bytes());
             uuid[8..].copy_from_slice(&lo.to_be_bytes());
             self.xarm.lock().os_uuid = Some(uuid);
+            diag::identity_source(diag::IdentitySource::Override);
             dev_info!(
                 self.dev,
                 "xART: using explicit OS UUID {:016x}-{:016x}\n",
@@ -1570,9 +1571,11 @@ impl SepData {
 
         if let Some(uuid) = dt::preboot_uuid() {
             self.xarm.lock().os_uuid = Some(uuid);
+            diag::identity_source(diag::IdentitySource::DeviceTree);
             dev_info!(self.dev, "xART: using /chosen/apfs-preboot-uuid\n");
         } else {
             self.xarm.lock().os_uuid = None;
+            diag::identity_source(diag::IdentitySource::Missing);
             dev_warn!(self.dev, "xART: /chosen/apfs-preboot-uuid is unavailable\n");
         }
     }
@@ -2673,7 +2676,16 @@ impl platform::Driver for SepDriver {
         // As soon as the fixed facts are known, so a tool can watch the attach
         // from "pending" on. Diagnostics are not worth failing the probe for.
         let guard = data.with_store(|store| store.guard_state()).flatten();
-        if let Err(e) = diag::register(dev, data.profile, data.xart_writable(), guard) {
+        let policy = diag::Policy {
+            provision_keybag: *module_parameters::provision_keybag.value() != 0,
+            trusted_keys: *module_parameters::trusted_keys.value() != 0,
+            filevault_api: *module_parameters::filevault_api.value() != 0,
+            xarm_trace: *module_parameters::xarm_trace.value() != 0,
+            refkey_v2: *module_parameters::refkey_v2.value() != 0,
+            identity_override: *module_parameters::os_uuid_hi.value() != 0
+                || *module_parameters::os_uuid_lo.value() != 0,
+        };
+        if let Err(e) = diag::register(dev, data.profile, data.xart_writable(), guard, policy) {
             dev_warn!(dev, "diag: could not add the sysfs attributes ({:?})\n", e);
         }
 

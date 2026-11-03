@@ -30,6 +30,15 @@ extern "C" {
         sepos13: bool,
         xart: bool,
     ) -> c_int;
+    fn sep_diag_set_policy(
+        provision_keybag: bool,
+        trusted_keys: bool,
+        filevault_api: bool,
+        xarm_trace: bool,
+        refkey_v2: bool,
+        identity_override: bool,
+    );
+    fn sep_diag_set_identity_source(source: c_uint);
     fn sep_diag_set_attach(attached: bool);
     fn sep_diag_set_endpoints(count: c_uint);
     fn sep_diag_set_keystore_open();
@@ -66,6 +75,28 @@ pub(crate) enum Restore {
     Unproven = 3,
 }
 
+/// Boot-time policy, without identity values or key material.
+pub(crate) struct Policy {
+    pub provision_keybag: bool,
+    pub trusted_keys: bool,
+    pub filevault_api: bool,
+    pub xarm_trace: bool,
+    pub refkey_v2: bool,
+    pub identity_override: bool,
+}
+
+/// The source selected by prepare_os_uuid, not the UUID itself.
+pub(crate) enum IdentitySource {
+    DeviceTree = 1,
+    Override = 2,
+    Missing = 3,
+}
+
+pub(crate) fn identity_source(source: IdentitySource) {
+    // SAFETY: this only stores the source enum in the passive cache.
+    unsafe { sep_diag_set_identity_source(source as c_uint) };
+}
+
 /// Adds the `diag` group to the SEP device, with the facts fixed at probe. The
 /// group goes away when the driver unbinds.
 ///
@@ -76,6 +107,7 @@ pub(crate) fn register(
     profile: &profile::PlatformProfile,
     xart_writable: bool,
     guard: Option<(u8, bool)>,
+    policy: Policy,
 ) -> Result {
     // Exhaustive, so a new bootstrap or key store fails to build here until
     // the ABI has a value for it.
@@ -97,6 +129,18 @@ pub(crate) fn register(
     REFUSALS.store(0, Relaxed);
     // SAFETY: no preconditions; stores three words.
     unsafe { sep_diag_set_xart_guard(c_uint::from(level), list_loaded, matching() as c_int) };
+
+    // SAFETY: the facts are fixed before the attribute group is published.
+    unsafe {
+        sep_diag_set_policy(
+            policy.provision_keybag,
+            policy.trusted_keys,
+            policy.filevault_api,
+            policy.xarm_trace,
+            policy.refkey_v2,
+            policy.identity_override,
+        )
+    };
 
     // SAFETY: `dev` is bound for the duration of the call, which is what devres
     // needs. `profile.name` is a `str`, valid for reads of `profile.name.len()`

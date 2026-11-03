@@ -3,9 +3,10 @@ Date:		October 2026
 KernelVersion:	7.1
 Contact:	Chris Kearney <chris@kearneymail.com>
 Description:
-		(RO) Version of the diag interface: "2" for the attributes
+		(RO) Version of the diag interface: "3" for the attributes
 		and values described in this file. Version 2 added
-		sensor_attach and restore; version 1 had neither.
+		sensor_attach and restore; version 1 had neither. Version 3
+		adds the policy snapshot.
 
 		Within a version, attributes are only added, and an existing
 		attribute keeps its values and their meaning. A reader tests
@@ -19,7 +20,8 @@ Description:
 		bring-up got without reading the kernel log. It exists while
 		the driver is bound to the SEP: it is created at probe and
 		removed at unbind. Every attribute in it is read-only and
-		reads as one ASCII token followed by a newline.
+		reads as ASCII followed by a newline. The policy snapshot
+		contains space-separated key=value tokens.
 
 		Each value is the state the driver recorded when it made the
 		corresponding decision. Reading an attribute sends nothing
@@ -384,3 +386,24 @@ Description:
 		tools/aurora-sep/XART-SAFETY.md. During a boot the value
 		can only move from "unverified" to "blocked", once the guard
 		refuses a write.
+
+What:		/sys/bus/platform/devices/<unit>.sep/diag/policy
+Date:		November 2026
+KernelVersion:	7.2
+Contact:	Satya Benson <satya@benson.earth>
+Description:
+		(RO, ABI 3) A space-separated key=value snapshot of the
+		driver policy selected at probe: xart_writes (effective store
+		writability), provision_keybag, xart_guard (effective level),
+		trusted_keys, filevault_api, xarm_trace, refkey_v2 and
+		identity_override (0 or 1). API flags describe the selected
+		policy, not successful registration if that API later fails.
+
+		identity_source is pending before the driver selects it, dt
+		for /chosen/apfs-preboot-uuid, override for explicit parameters,
+		or missing. It is updated at the actual identity decision.
+		No UUID value, state, identity or key bytes are exposed.
+		Reads only use cached facts and never contact the enclave.
+		Module-parameter sysfs files need not exist; their absence
+		is not evidence of a mismatched policy. Older diagnostic
+		ABIs retain xart/xart_guard and kernel decision messages.

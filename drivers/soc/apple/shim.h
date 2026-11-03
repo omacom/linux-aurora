@@ -178,6 +178,10 @@ struct device;
 
 int sep_diag_register(struct device *dev, const char *profile,
 		      size_t profile_len, bool cold, bool sepos13, bool xart);
+void sep_diag_set_policy(bool provision_keybag, bool trusted_keys,
+			 bool filevault_api, bool xarm_trace, bool refkey_v2,
+			 bool identity_override);
+void sep_diag_set_identity_source(unsigned int source);
 void sep_diag_set_attach(bool attached);
 void sep_diag_set_endpoints(unsigned int count);
 void sep_diag_set_keystore_open(void);

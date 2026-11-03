@@ -23,7 +23,7 @@
 #include "shim.h"
 
 /* The contract version; see Documentation/ABI/testing/sysfs-driver-apple-sep. */
-#define SEP_DIAG_ABI			2
+#define SEP_DIAG_ABI			3
 
 #define SEP_DIAG_ATTACH_PENDING		0
 #define SEP_DIAG_ATTACH_ATTACHED	1
@@ -64,6 +64,13 @@ static struct {
 	bool cold;
 	bool sepos13;
 	bool xart;
+	bool provision_keybag;
+	bool trusted_keys;
+	bool filevault_api;
+	bool xarm_trace;
+	bool refkey_v2;
+	bool identity_override;
+	atomic_t identity_source;
 	/* The xART guard's effective level (0: none runs), and its list. */
 	unsigned int xart_guard;
 	bool xart_guard_list;
@@ -119,6 +126,54 @@ static ssize_t xart_show(struct device *dev, struct device_attribute *attr,
 	return sysfs_emit(buf, "%s\n", sep_diag.xart ? "enabled" : "disabled");
 }
 static DEVICE_ATTR_RO(xart);
+
+/* Parameter policy is captured at probe; the identity choice is cached later. */
+static ssize_t policy_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	const char *identity;
+
+	switch (atomic_read(&sep_diag.identity_source)) {
+	case 1:
+		identity = "dt";
+		break;
+	case 2:
+		identity = "override";
+		break;
+	case 3:
+		identity = "missing";
+		break;
+	default:
+		identity = "pending";
+		break;
+	}
+	return sysfs_emit(buf,
+		"xart_writes=%u provision_keybag=%u xart_guard=%u "
+		"trusted_keys=%u filevault_api=%u xarm_trace=%u "
+		"refkey_v2=%u identity_override=%u identity_source=%s\n",
+		sep_diag.xart, sep_diag.provision_keybag, sep_diag.xart_guard,
+		sep_diag.trusted_keys, sep_diag.filevault_api, sep_diag.xarm_trace,
+		sep_diag.refkey_v2, sep_diag.identity_override, identity);
+}
+static DEVICE_ATTR_RO(policy);
+
+void sep_diag_set_policy(bool provision_keybag, bool trusted_keys,
+			 bool filevault_api, bool xarm_trace, bool refkey_v2,
+			 bool identity_override)
+{
+	sep_diag.provision_keybag = provision_keybag;
+	sep_diag.trusted_keys = trusted_keys;
+	sep_diag.filevault_api = filevault_api;
+	sep_diag.xarm_trace = xarm_trace;
+	sep_diag.refkey_v2 = refkey_v2;
+	sep_diag.identity_override = identity_override;
+	atomic_set(&sep_diag.identity_source, 0);
+}
+
+void sep_diag_set_identity_source(unsigned int source)
+{
+	atomic_set(&sep_diag.identity_source, source);
+}
 
 static ssize_t attach_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
@@ -346,6 +401,7 @@ static struct attribute *sep_diag_attrs[] = {
 	&dev_attr_boot.attr,
 	&dev_attr_protocol.attr,
 	&dev_attr_xart.attr,
+	&dev_attr_policy.attr,
 	&dev_attr_attach.attr,
 	&dev_attr_endpoints.attr,
 	&dev_attr_keystore.attr,
