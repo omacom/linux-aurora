@@ -289,6 +289,11 @@ static int apple_isp_init_presets(struct apple_isp *isp)
 	return 0;
 }
 
+/* Preview only; processing and image quality need separate qualification. */
+static bool preview_26;
+module_param(preview_26, bool, 0400);
+MODULE_PARM_DESC(preview_26, "Allow J613 preview on ISP firmware 26.6.2");
+
 static const char * isp_fw2str(enum isp_firmware_version version)
 {
 	switch (version) {
@@ -300,6 +305,8 @@ static const char * isp_fw2str(enum isp_firmware_version version)
 		return "13.5";
 	case ISP_FIRMWARE_V_14_7:
 		return "14.7";
+	case ISP_FIRMWARE_V_26_6_2:
+		return "26.6.2";
 	default:
 		return "unknown";
 	}
@@ -329,6 +336,8 @@ static enum isp_firmware_version isp_read_fw_version(struct device *dev,
 		/* not provided, see isp_check_firmware_version() */
 		break;
 	case 3:
+		if (ver[0] == 26 && ver[1] == 6 && ver[2] == 2)
+			return ISP_FIRMWARE_V_26_6_2;
 		if (ver[0] == 12 && ver[1] == 3 && ver[2] <= 1)
 			return ISP_FIRMWARE_V_12_3;
 		else if (ver[0] == 12 && ver[1] == 4 && ver[2] == 0)
@@ -379,6 +388,18 @@ isp_check_firmware_version(struct apple_isp *isp)
 	return compat;
 }
 
+static bool isp_preview26_admitted(struct device *dev,
+				   enum isp_firmware_version compat)
+{
+	if (compat != ISP_FIRMWARE_V_26_6_2 || !preview_26 ||
+	    !of_machine_is_compatible("apple,j613"))
+		return false;
+	if (!of_device_is_compatible(dev->of_node, "apple,t8122-isp"))
+		return false;
+	return isp_read_fw_version(dev, "apple,firmware-version") ==
+		ISP_FIRMWARE_V_26_6_2;
+}
+
 static int apple_isp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -407,6 +428,17 @@ static int apple_isp_probe(struct platform_device *pdev)
 	 * with unknown firmware.
 	 */
 	isp->fw_compat = isp_check_firmware_version(isp);
+	if (isp->hw->fw_abi != ISP_FW_ABI_H17 &&
+	    (isp->fw_compat == ISP_FIRMWARE_V_26_6_2 ||
+	     isp_read_fw_version(dev, "apple,firmware-version") ==
+						ISP_FIRMWARE_V_26_6_2)) {
+		if (!isp_preview26_admitted(dev, isp->fw_compat)) {
+			err = dev_err_probe(dev, -ENODEV,
+					    "26.6.2 preview requires J613/T8122 and preview_26=1\n");
+			goto free_isp;
+		}
+		isp->preview_26 = true;
+	}
 
 	err = of_property_read_u32(dev->of_node, "apple,platform-id",
 				   &isp->platform_id);

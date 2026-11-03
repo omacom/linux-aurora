@@ -504,7 +504,9 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 	if (err)
 		return err;
 
-	err = isp_cmd_ch_mbnr_enable(isp, ch, 0, ISP_MBNR_MODE_ENABLE, 1);
+	err = isp_cmd_ch_mbnr_enable(isp, ch, 0,
+				     isp->preview_26 ? ISP_MBNR_MODE_DISABLE :
+				     ISP_MBNR_MODE_ENABLE, 1);
 	if (err)
 		return err;
 
@@ -536,6 +538,14 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 		err = isp_ch_configure_frame_rate(isp, ch);
 		if (err)
 			return err;
+	}
+
+	/* Preview has no consumer for temporal history on this firmware. */
+	if (isp->preview_26) {
+		err = isp_cmd_apple_ch_temporal_filter_disable(isp, ch);
+		if (err)
+			return err;
+		return isp_ch_configure_pools(isp, ch);
 	}
 
 	err = isp_cmd_apple_ch_temporal_filter_start(isp, ch, isp->temporal_filter);
