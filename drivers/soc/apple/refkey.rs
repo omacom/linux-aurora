@@ -177,7 +177,19 @@ impl SepData {
             return;
         }
 
-        if let Ok(f) = shim::StoreFile::open_readonly(path) {
+        let existing = match shim::StoreFile::open_readonly(path) {
+            Ok(file) => Some(file),
+            Err(ENOENT) => None,
+            Err(error) => {
+                dev_err!(
+                    self.dev,
+                    "sks: cannot read existing machine ref-key: {:?}; refusing replacement\n",
+                    error
+                );
+                return;
+            }
+        };
+        if let Some(f) = existing {
             let sz = f.size().unwrap_or(0);
             if (1..=8192).contains(&sz) {
                 let mut blob: KVec<u8> = KVec::new();
