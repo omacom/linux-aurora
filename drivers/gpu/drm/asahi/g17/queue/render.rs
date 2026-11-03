@@ -1298,6 +1298,30 @@ impl Pair {
         Some(observation::snapshot(&self.memory, ordinal).ok()?.pass[0] != 0)
     }
 
+    /// The oldest published group has neither its tiler start nor its fragment end written.
+    pub(crate) fn front_untouched(&self) -> Option<bool> {
+        let front = self.active.iter().find(|active| active.outer_published)?;
+        Some(observation::snapshot(&self.memory, front.ticket.ordinal).ok()?.untouched())
+    }
+
+    /// The owner of a published group whose tiler started and whose fragment end is unwritten.
+    /// Groups an earlier recovery listed or blamed are skipped: a restart drops started groups,
+    /// so their records stay half-written without anything running.
+    pub(crate) fn running_owner(&self) -> Option<&Arc<VmStatus>> {
+        self.active
+            .iter()
+            .filter(|active| {
+                active.outer_published
+                    && !active.packet.completion.interrupted()
+                    && !active.packet.completion.blamed()
+            })
+            .find(|active| {
+                observation::snapshot(&self.memory, active.ticket.ordinal)
+                    .is_ok_and(|snapshot| snapshot.pass[0] != 0 && snapshot.pass[1] == 0)
+            })
+            .map(|active| active.packet.completion.status())
+    }
+
     /// Firmware is halted and all graph borrowers have joined before this copy.
     pub(crate) fn publish_recovery_targets(&self) -> Result {
         self.memory.graph.publish_recovery_targets()

@@ -92,6 +92,11 @@ pub(super) enum Class {
 pub(super) trait Queues {
     fn render_scheduler_active(&self) -> bool;
     fn render_pass_started(&self, qid: u8, stamp: u64) -> Option<bool>;
+    /// Read while firmware is halted, like `render_pass_started`. When the oldest published
+    /// render of the pair holding `blamed` had not started, the QIDs of every pair of the one VM
+    /// with a render that started and did not finish. None if no such VM, several, or any other
+    /// VM holds compute work, which these records cannot see.
+    fn render_culprit(&self, _blamed: u8) -> Option<u128> { None }
     /// Copy every retained queue's live producer to its recovery target, then
     /// issue a full barrier. A failed graph must not skip subsequent queues.
     fn publish_recovery_targets(&self) -> Option<Error>;
@@ -252,6 +257,11 @@ pub(super) fn service<H: Host>(
     // acknowledged; sampling them during classification can blame a bystander.
     let attribution = sources.attribute(request.blamed,
         |qid, stamp| host.render_pass_started(qid, stamp));
+    let attribution = sources.host_fallback(attribution,
+        || host.render_culprit(request.blamed?));
+    if let Attribution::Queues(qids) = attribution {
+        pr_warn!("G17: recovery gen {} blames queues {:#x}\n", request.generation, qids);
+    }
     let target_error = host.publish_recovery_targets();
     host.transition(1, 2)?;
     let mut recovered = false;

@@ -158,6 +158,9 @@ impl recovery::Queues for Service<'_> {
     fn render_pass_started(&self, qid: u8, stamp: u64) -> Option<bool> {
         self.firmware.queues.render_pass_started(qid, stamp)
     }
+    fn render_culprit(&self, blamed: u8) -> Option<u128> {
+        self.firmware.queues.render_culprit(blamed)
+    }
     fn publish_recovery_targets(&self) -> Option<Error> {
         let mut failure = self.firmware.queues.publish_render_recovery_targets();
         for queue in self

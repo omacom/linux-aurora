@@ -122,6 +122,21 @@ impl Sources {
             Attribution::Queues(guilty)
         }
     }
+
+    /// When slot identity cannot check a timeout's blame (25G83 reads every key as 0, and a
+    /// single-slot mask has no peer), the host's own pass records still can: a blamed render
+    /// that never started was starved, not hung. `culprit` names the queues of the one VM whose
+    /// render started and did not finish; without one the firmware's blame stands.
+    pub(super) fn host_fallback(
+        &self,
+        attribution: Attribution,
+        culprit: impl FnOnce() -> Option<u128>,
+    ) -> Attribution {
+        if attribution != Attribution::Firmware || self.reason.is_none_or(|reason| reason == PAGE_FAULT) {
+            return attribution;
+        }
+        culprit().map_or(Attribution::Firmware, Attribution::Queues)
+    }
 }
 
 #[kernel::macros::kunit_tests(asahi_g17_recovery_sources)]
@@ -172,5 +187,29 @@ mod tests {
         sources.reason = Some(PAGE_FAULT);
         assert_eq!(sources.attribute(Some(38), |qid, _| Some(qid == 39)),
             Attribution::Firmware);
+    }
+
+    #[test]
+    fn host_records_move_a_keyless_timeout_blame_to_the_running_vm() {
+        let mut sources = Sources::sample(0b10, |_| Some((0, 2)));
+        sources.reason = Some(0);
+        let attribution = sources.attribute(Some(36), |_, _| panic!("unknown key"));
+        assert_eq!(attribution, Attribution::Firmware);
+        assert_eq!(sources.host_fallback(attribution, || Some(3 << 60)), Attribution::Queues(3 << 60));
+        assert_eq!(sources.host_fallback(attribution, || None), Attribution::Firmware);
+    }
+
+    #[test]
+    fn host_records_never_override_a_page_fault_or_slot_evidence() {
+        let mut sources = Sources::sample(0b10, |_| Some((0, 2)));
+        sources.reason = Some(PAGE_FAULT);
+        assert_eq!(sources.host_fallback(Attribution::Firmware, || panic!("page fault")),
+            Attribution::Firmware);
+        sources.reason = None;
+        assert_eq!(sources.host_fallback(Attribution::Firmware, || panic!("no reason")),
+            Attribution::Firmware);
+        sources.reason = Some(0);
+        assert_eq!(sources.host_fallback(Attribution::NoCulprit, || panic!("slot evidence")),
+            Attribution::NoCulprit);
     }
 }
