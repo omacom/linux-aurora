@@ -110,15 +110,26 @@ struct drm_framebuffer { const struct drm_format_info *format; u32 width,height,
 struct drm_rect { int x1,y1,x2,y2; };
 enum drm_color_range { DRM_COLOR_YCBCR_LIMITED_RANGE, DRM_COLOR_YCBCR_FULL_RANGE };
 enum drm_color_encoding { DRM_COLOR_YCBCR_BT601, DRM_COLOR_YCBCR_BT709, DRM_COLOR_YCBCR_BT2020 };
-struct drm_crtc_state { struct { int hdisplay,vdisplay; } mode; };
-struct drm_plane_state { void *crtc; bool visible; struct drm_framebuffer *fb; struct drm_rect src,dst; enum drm_color_range color_range; enum drm_color_encoding color_encoding; };
+struct drm_crtc_state { struct { int hdisplay,vdisplay; } mode; bool vrr_enabled; };
+struct drm_plane_state { u32 rotation,src_x,src_y,src_w,src_h; int crtc_x,crtc_y,crtc_w,crtc_h; void *crtc; bool visible; struct drm_framebuffer *fb; struct drm_rect src,dst; enum drm_color_range color_range; enum drm_color_encoding color_encoding; };
 struct drm_plane;
 struct drm_plane_funcs { bool (*format_mod_supported)(struct drm_plane *,u32,u64); };
-struct drm_plane { struct { u32 id; } base;struct drm_plane_state *state;u32 *format_types;unsigned int format_count;u64 *modifiers;unsigned int modifier_count;const struct drm_plane_funcs *funcs; };
+struct drm_plane { int type; struct { u32 id; } base;struct drm_plane_state *state;u32 *format_types;unsigned int format_count;u64 *modifiers;unsigned int modifier_count;const struct drm_plane_funcs *funcs; };
 struct drm_atomic_commit { struct { void *dev; } *dev; };
 '''
     prefix += block(plane_header, 'struct apple_plane_state {') + ';\n'
     prefix += r'''
+/* Layout controls use the legacy DCP; ext26 admission has its own suite. */
+#define DRM_PLANE_TYPE_PRIMARY 1
+#define DRM_MODE_ROTATE_0 1
+struct platform_device { int unused; };
+struct apple_dcp { int unused; };
+struct apple_crtc { struct platform_device *dcp; };
+static struct apple_crtc host_crtc;
+static struct apple_crtc *to_apple_crtc(void *crtc) { return &host_crtc; }
+static struct apple_dcp *platform_get_drvdata(struct platform_device *pdev) { return NULL; }
+static bool dcp_is_ext26(struct apple_dcp *dcp) { return false; }
+static bool iomfb_ext26_backing_fresh(struct apple_dcp *dcp,struct drm_framebuffer *fb) { return true; }
 #define to_apple_plane_state(p) container_of(p,struct apple_plane_state,base)
 static struct drm_crtc_state crtc_state = { .mode = { 3840,2160 } };
 static struct drm_plane_state *drm_atomic_get_new_plane_state(struct drm_atomic_commit *c,struct drm_plane *p) { return p->state; }

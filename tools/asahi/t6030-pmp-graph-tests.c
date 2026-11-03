@@ -23,6 +23,7 @@ typedef uint8_t u8;
 #define PMP_REPORT_READY 1
 #define GFP_KERNEL 0
 #define GENPD_FLAG_ACTIVE_WAKEUP 1
+#define GENPD_FLAG_ALWAYS_ON 2
 #define MAX_PHANDLE_ARGS 4
 #define EPROBE_DEFER 517
 #define SZ_4K 4096

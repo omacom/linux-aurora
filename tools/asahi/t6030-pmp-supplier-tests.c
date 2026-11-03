@@ -47,6 +47,7 @@ struct apple_pmp_report_offsets {
 	const char *name, *fallback, *pwrstate;
 };
 struct apple_pmp_report {
+	struct device_node *native_pmp;
 	void *base;
 	const struct apple_pmp_report_offsets *offsets;
 	struct device *dev;
@@ -83,6 +84,14 @@ static void rcu_read_lock(void)
 static void rcu_read_unlock(void)
 {
 	assert(rcu_depth-- == 1);
+}
+static int apple_pmp_report_record(struct device_node *pmp,
+                                  struct device_node *entry, u32 *id, bool *record)
+{
+        (void)pmp;
+        *id = entry->reg;
+        *record = false;
+        return 0;
 }
 static int apple_pmp_report_bit(struct apple_pmp_start *st,
 				struct device_node *entry, u32 *id,
