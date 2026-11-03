@@ -1539,12 +1539,13 @@ EXPORT_SYMBOL_GPL(apple_pmp_report_set_t6030_gfx);
  * returned, as for a report entry.
  *
  * The caller owns the bit it requests; this function does not arbitrate between callers of the
- * same bit. On the T6001 bit 9 belongs to the AGX vote (pmp_report.agx_vote), so other callers
- * must not use it.
+ * same bit. On the T6001 bit 9 belongs to the AGX vote (pmp_report.agx_vote) and is refused here
+ * with -EBUSY. After -ETIMEDOUT the request was written but not acknowledged and stays in the
+ * word: the caller must clear it (@enable false, @no_ack true) before giving up.
  *
  * Context: process context (the acknowledge wait is a busy poll of up to 50 ms).
  * Return: 0, -ENODEV if no report is bound to @report_np, -EINVAL if @id is out of range,
- * -ETIMEDOUT if the acknowledge did not follow.
+ * -EBUSY for the T6001 AGX bit, -ETIMEDOUT if the acknowledge did not follow.
  */
 int apple_pmp_report_set_request(const struct device_node *report_np, unsigned int id,
 				bool enable, bool no_ack)
@@ -1557,7 +1558,10 @@ int apple_pmp_report_set_request(const struct device_node *report_np, unsigned i
 	rcu_read_lock();
 	list_for_each_entry_rcu(rep, &apple_pmp_reports, list) {
 		if (rep->dev->of_node == report_np) {
-			ret = apple_pmp_report_set_state(rep, id, enable, no_ack);
+			if (id == APPLE_PMP_T6001_AGX_ID && rep->offsets == &apple_pmp_offsets_t600x)
+				ret = -EBUSY;	/* the AGX vote owns this bit */
+			else
+				ret = apple_pmp_report_set_state(rep, id, enable, no_ack);
 			break;
 		}
 	}
