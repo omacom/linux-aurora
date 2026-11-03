@@ -1636,13 +1636,10 @@ impl Pair {
             let packet = front.packet.clone();
             failing = failing || !packet.completion.begin_replay();
             if failing {
-                if !packet.completion.spared() {
-                    packet.completion.status().record(EIO);
-                    if self.terminal.is_none() {
-                        self.terminal = Some((packet.completion.status().clone(), EIO));
-                    }
-                }
-                defer(Deferred::Retired(packet.completion.clone(), Err(EIO)))?;
+                // decide() replays only innocent groups that never ran: like `fail_dropped`,
+                // they fail without poisoning their VM. Restarts other VMs caused dropped them.
+                packet.completion.classify(recovery::Class::Spared);
+                defer(Deferred::Retired(packet.completion.clone(), Err(ENODATA)))?;
                 self.memory.retire(ordinal)?;
                 self.active.pop().ok_or(EIO)?;
                 continue;
