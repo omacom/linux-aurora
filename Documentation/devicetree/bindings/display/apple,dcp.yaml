@@ -23,6 +23,7 @@ properties:
               - apple,t8112-dcp
               - apple,t6000-dcp
               - apple,t6020-dcp
+              - apple,t8122-dcp
               - apple,t8140-dcp
               - apple,t8142-dcp
           - const: apple,dcp
@@ -32,6 +33,7 @@ properties:
               - apple,t8112-dcpext
               - apple,t6000-dcpext
               - apple,t6020-dcpext
+              - apple,t8122-dcpext
           - const: apple,dcpext
       - items:
           - const: apple,t8140-dcpext
@@ -179,6 +181,38 @@ properties:
     minItems: 3
     maxItems: 5
     description: Loader-provided firmware ABI version used for IOMFB selection.
+
+  apple,j613-25g83-dcpext-handoff:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    const: 1
+    description: |
+      Loader validation of the J613 native26 external processor. Requires
+      the separately validated internal mapping handoff, exact 26.6.2 image,
+      complete stream-5 mappings and retained locked page tables. Does not
+      enable hardware. Firmware reservations must also be complete.
+
+  apple,j613-25g83-dcpext-boot-state:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 4
+    maxItems: 4
+    description: |
+      Loader observations in order of powered ancestry, ASC CPU control,
+      ASC CPU status and firmware-DART protection. Read only while the
+      processor's full power ancestry is active. A powered processor must
+      have protected inherited roots; this is not an RTKit readiness claim.
+
+  apple,t8122-dcpext-firmware-ready:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    const: 1
+    description: All external firmware reservations were committed by the loader.
+
+  apple,firmware-uuid:
+    $ref: /schemas/types.yaml#/definitions/string
+    description: UUID of the actual loaded display image, read from its iop nub.
+
+  apple,pmp:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Native PMP supplier, independent of the report request entry.
 
   apple,connector-type:
     enum: [HDMI-A, DP, USB-C]
