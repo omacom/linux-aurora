@@ -190,8 +190,15 @@ static bool avd_qfw_check(struct avd_dev *avd)
 		q->vp_pool[i] = 0;
 		q->next_vp[i] = 0;
 	}
-	if (info[0] != AVDQ_MAGIC)
+	if (info[0] != AVDQ_MAGIC) {
+		/*
+		 * A legacy image writes no block. An ABI 2 image writes it at its own
+		 * SRAM address, so a DT sram window that does not match lands here too.
+		 */
+		dev_info_once(avd->dev, "no queue info block at sram +%#x, using legacy transport\n",
+			      AVDQ_INFO);
 		return false;
+	}
 	if (info[1] != AVDQ_VERSION || info[2] != AVDQ_COUNT ||
 	    info[3] != AVDQ_DESC_BYTES || info[5] != AVDQ_RING_OFFSET ||
 	    !(info[11] & AVDQ_FEAT_SRAM_RING) ||
