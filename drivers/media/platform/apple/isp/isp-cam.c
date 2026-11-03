@@ -655,8 +655,8 @@ int apple_isp_start_capture(struct apple_isp *isp)
 
 void apple_isp_stop_capture(struct apple_isp *isp)
 {
-	isp_cmd_ch_stop(isp, 0); // TODO channel mask
-	isp_cmd_ch_buffer_return(isp, isp->current_ch);
+	if (!isp_cmd_ch_stop(isp, 0)) /* TODO channel mask */
+		isp_cmd_ch_buffer_return(isp, isp->current_ch);
 
 	/* ... until its buffers are back. */
 	apple_isp_wdt_stop(isp);

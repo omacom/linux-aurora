@@ -310,6 +310,8 @@ struct apple_isp {
 	} fw;
 	/* changes under video_lock once the video device is registered */
 	enum isp_fw_state fw_state;
+	/* First IPC failure; cleared only after fresh channel initialization. */
+	int ipc_error;
 
 	struct isp_surf *ipc_surf;
 	struct isp_surf *extra_surf;

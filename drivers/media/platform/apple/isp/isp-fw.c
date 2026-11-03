@@ -789,6 +789,9 @@ static int isp_firmware_boot_stage3(struct apple_isp *isp)
 
 static int isp_stop_command_processor(struct apple_isp *isp)
 {
+	if (READ_ONCE(isp->ipc_error))
+		return READ_ONCE(isp->ipc_error);
+
 #if 0
 	int res = isp_cmd_stop(isp, 0);
 	if (res) {
@@ -920,6 +923,7 @@ static int isp_firmware_boot(struct apple_isp *isp)
 		/* Stage 1 stops the coprocessor and powers it down itself. */
 		isp_err(isp, "failed firmware boot stage 1: %d\n", err);
 		isp_collect_gc_surface(isp);
+		cmpxchg(&isp->ipc_error, 0, err);
 		return err;
 	}
 
@@ -935,6 +939,9 @@ static int isp_firmware_boot(struct apple_isp *isp)
 		isp_err(isp, "failed firmware boot stage 3: %d\n", err);
 		goto stop;
 	}
+
+	/* The old coprocessor stopped and all channel slots were initialized. */
+	WRITE_ONCE(isp->ipc_error, 0);
 
 	err = isp_enable_irq(isp);
 	if (err < 0) {
@@ -953,8 +960,10 @@ static int isp_firmware_boot(struct apple_isp *isp)
 	return 0;
 
 disable_irqs:
+	cmpxchg(&isp->ipc_error, 0, err);
 	isp_disable_irq(isp);
 stop:
+	cmpxchg(&isp->ipc_error, 0, err);
 	isp_firmware_stop(isp);
 	return err;
 }
@@ -991,7 +1000,7 @@ int apple_isp_firmware_boot(struct apple_isp *isp)
 		break;
 	case ISP_FW_RUNNING:
 		/* Resident firmware keeps running between streams. */
-		return 0;
+		return READ_ONCE(isp->ipc_error);
 	case ISP_FW_DEAD:
 		dev_err_ratelimited(isp->dev,
 				    "firmware was stopped and cannot be restarted before the next boot\n");
@@ -1022,7 +1031,7 @@ int apple_isp_firmware_boot(struct apple_isp *isp)
 /* The end of a stream or of the camera detection at probe */
 void apple_isp_firmware_shutdown(struct apple_isp *isp)
 {
-	if (!isp->hw->resident_fw) {
+	if (!isp->hw->resident_fw || READ_ONCE(isp->ipc_error)) {
 		apple_isp_firmware_halt(isp);
 		return;
 	}

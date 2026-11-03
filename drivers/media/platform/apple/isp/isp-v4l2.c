@@ -161,6 +161,9 @@ static int isp_submit_buffers(struct apple_isp *isp, bool pre_start)
 	struct isp_buflist *bl = isp->cmd_virt;
 	struct isp_buflist_buffer *bufd = &bl->buffers[0];
 
+	if (READ_ONCE(isp->ipc_error))
+		return READ_ONCE(isp->ipc_error);
+
 	/* Clear what earlier commands and batches left in the reserved fields. */
 	memset(bl, 0, ISP_CMD_AREA_SIZE(isp_num_capmeta(isp)));
 	bl->type = 1;
