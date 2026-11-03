@@ -659,9 +659,6 @@ fn ta_registers(
     ])
 }
 
-/// The 25G83 tiling array: the A18 Pro's without 0x1748 and 0x1740 (and 0x17d9 unless the stage
-/// has SCS), with the tiler parameter sub-buffer registers and 0x10131 = 0x88, in the order the
-/// M4 Pro has run with. Returns the array and its used entry count.
 /// Tiler segment control of a two-cluster pass, what macOS writes.
 const VDM_SEGMENT_CONTROL: u64 = 0x20_0440;
 const VDM_SEGMENT_INDEX: u64 = 4;
@@ -669,6 +666,9 @@ const VDM_SEGMENT_INDEX: u64 = 4;
 /// returns shrink to none and the tiler can't advance. Fifteen blocks, macOS's minimum heap.
 const MIN_FREE_TVB_PAGES: u64 = 0x3c;
 
+/// The 25G83 tiling array: the A18 Pro's without 0x1748 and 0x1740 (and 0x17d9 unless the stage
+/// has SCS), with the tiler parameter sub-buffer registers and 0x10131 = 0x88, in the order the
+/// M4 Pro has run with. Returns the array and its used entry count.
 fn ta_registers_25g83(
     args: &RenderArgs<'_>,
     g: &Geometry,
