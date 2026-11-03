@@ -60,7 +60,11 @@ pub(crate) const CONFIG: Config = Config {
                 0xa3, 0xc1, 0x83, 0xe8,
             ],
         }],
-        variant: &fw::variant::V25F84,
+        // macOS writes these tiler segment values on this machine, not the two-cluster ones.
+        variant: &fw::variant::Variant {
+            ta_mode_1: true,
+            ..fw::variant::V25F84
+        },
     }]),
     core_layout: CoreLayout {
         cores: Some((4, 40)),

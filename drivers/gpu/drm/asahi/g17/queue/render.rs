@@ -466,6 +466,7 @@ impl Pair {
                 aux_stamp_va: addresses.stamps[1][1],
             },
             programs: self.variant.programs,
+            ta_mode_1: self.variant.ta_mode_1,
             deflake: deflake_layout,
         };
         self.memory.graph.claim(ordinal)?;
