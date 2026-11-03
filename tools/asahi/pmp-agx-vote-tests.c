@@ -382,6 +382,29 @@ int main(void)
 		CHECK(!agx_vote_begin(&v, 50));
 		CHECK(agx_vote_begin(&v, 100));
 	}
+	// 24. chriskearney's second race at efff25c1: the last operation ends during a SET ack that then times
+	// out. applied records the failure with no user and no timer (next returns 0 on that path), and a begin
+	// before the retry deadline must arm the remaining delay instead of returning "no kick", or the retry
+	// never runs. The release/resume cycle must not drop it either.
+	{
+		struct agx_vote v = {.enabled = true, .idle_ms = 100};
+		CHECK(agx_vote_begin(&v, 5000) == 1);
+		CHECK(agx_vote_decide(&v, 5000) == AGX_VOTE_SET);
+		CHECK(agx_vote_end(&v, 5001) == 0);                   // the end during the ack: no timer
+		agx_vote_applied(&v, AGX_VOTE_SET, -110, 5000);       // the ack times out
+		CHECK(v.failures == 1 && agx_vote_next(&v, 5001) == 0);   // nothing armed by the write path
+		unsigned delay = agx_vote_begin(&v, 5002);
+		CHECK(delay == 998);                                  // the begin arms the remaining delay
+		CHECK(v.users == 1);
+		CHECK(agx_vote_decide(&v, 6000) == AGX_VOTE_SET);     // the retry lands and sets
+		agx_vote_applied(&v, AGX_VOTE_SET, 0, 6000);
+		CHECK(v.voted && v.failures == 0 && agx_vote_next(&v, 6000) == 0);
+		// the cancel-on-release/resume variant: the retry survives the cycle
+		struct agx_vote w = {.enabled = true, .failures = 1, .retry_at = 6000};
+		CHECK(!agx_vote_release(&w));                         // idle release: no clear write
+		CHECK(!agx_vote_resume(&w));                          // idle resume: still no immediate kick
+		CHECK(agx_vote_begin(&w, 6100) == 1);                 // past the deadline the kick is back
+	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;
 }
