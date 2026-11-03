@@ -56,7 +56,8 @@ struct hardware {
 };
 
 struct apple_isp {
-	int ipc_error, wait, fw_state, irq;
+	int ipc_error, wait, fw_state, irq, vbq, buf_lock;
+	unsigned long state;
 	bool ipc_quiescing;
 	struct isp_channel *chan_io, *chan_sm, *chan_tm, *chan_bt;
 	const struct hardware *hw;
@@ -64,6 +65,19 @@ struct apple_isp {
 	u64 cmd_iova;
 	unsigned int current_ch;
 };
+
+#define ISP_STATE_STREAMING 0
+#define spin_lock_irqsave(l, f) ((void)(l), (f) = 0)
+#define spin_unlock_irqrestore(l, f) ((void)(l), (void)(f))
+static bool test_bit(unsigned int bit, const unsigned long *state)
+{
+	return *state & (1UL << bit);
+}
+
+static void vb2_queue_error(int *queue)
+{
+	(*queue)++;
+}
 
 static unsigned int writes, bells, cursors, stops, returns, watchdog_stops;
 static unsigned int stop_order, free_order, order, halts, freed_released;

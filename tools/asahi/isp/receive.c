@@ -12,6 +12,8 @@ typedef uint32_t u32;
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define cmpxchg(p, old, v) __sync_val_compare_and_swap(p, old, v)
+#define spin_lock_irqsave(l, f) ((void)(l), (f) = 0)
+#define spin_unlock_irqrestore(l, f) ((void)(l), (void)(f))
 #define mutex_lock(l) ((void)(l))
 #define mutex_unlock(l) ((void)(l))
 #define wake_up_all(w) ((void)(w))
@@ -30,9 +32,21 @@ struct isp_channel {
 
 struct apple_isp {
 	struct isp_channel *chan_sm, *chan_tm, *chan_bt;
-	int ipc_error, wait;
+	int ipc_error, wait, vbq, buf_lock;
 	bool ipc_quiescing;
+	unsigned long state;
 };
+
+#define ISP_STATE_STREAMING 0
+static bool test_bit(unsigned int bit, const unsigned long *state)
+{
+	return *state & (1UL << bit);
+}
+
+static void vb2_queue_error(int *queue)
+{
+	(*queue)++;
+}
 
 static unsigned int schedules;
 static bool refill;
@@ -90,6 +104,15 @@ int main(void)
 	CHECK(!channels[0].remaining && !channels[1].remaining &&
 	      !channels[2].remaining);
 	CHECK(schedules >= 7 && schedules <= 8);
+	/* Healthy streaming IRQs must leave the queue usable. */
+	isp.state = 1UL << ISP_STATE_STREAMING;
+	CHECK(apple_isp_isr_thread(0, &isp) == IRQ_HANDLED);
+	CHECK(!isp.ipc_error && !isp.vbq);
+	channels[0].remaining = 1;
+	CHECK(apple_isp_isr_thread(0, &isp) == IRQ_HANDLED);
+	CHECK(!channels[0].remaining && channels[0].handled == 12);
+	CHECK(!isp.ipc_error && !isp.vbq);
+	isp.state = 0;
 	/* A continuous producer must let a quiescing invocation finish. */
 	refill = true;
 	channels[0].remaining = 2;
@@ -107,6 +130,9 @@ int main(void)
 	channels[0].error = 0;
 	CHECK(ipc_chan_handle(&isp, &channels[0]) == -EIO &&
 	      channels[0].remaining == 2);
+	CHECK(apple_isp_isr_thread(0, &isp) == IRQ_HANDLED && isp.vbq == 0);
+	isp.state = 1UL << ISP_STATE_STREAMING;
+	CHECK(apple_isp_isr_thread(0, &isp) == IRQ_HANDLED && isp.vbq == 1);
 	puts("PASS: bounded turns, burst continuation, channel fairness and error containment");
 	return 0;
 }

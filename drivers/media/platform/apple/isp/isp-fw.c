@@ -242,6 +242,8 @@ static irqreturn_t apple_isp_isr_thread(int irq, void *dev)
 	} while (more && !READ_ONCE(isp->ipc_error) &&
 		 !READ_ONCE(isp->ipc_quiescing));
 
+	apple_isp_video_error(isp);
+
 	return IRQ_HANDLED;
 }
 

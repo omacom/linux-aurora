@@ -168,6 +168,7 @@ struct vb2_queue {
 };
 
 struct vb2_buffer {
+	struct vb2_queue *vb2_queue;
 	u64 timestamp;
 	unsigned int done;
 };
@@ -213,6 +214,7 @@ struct apple_isp {
 	unsigned int current_ch;
 	struct vb2_queue vbq;
 	unsigned long state;
+	void *exposure_priority;
 	unsigned int sequence;
 };
 
@@ -245,7 +247,8 @@ static int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 	}
 	if (mutate) {
 		bl->num_buffers = UINT64_MAX;
-		memset(bl->buffers, 0xff, 64 * 40);
+		memset(bl->buffers, 0xff,
+		       ISP_CMD_AREA_SIZE(isp_num_capmeta(isp)) - 16);
 	}
 	int err = fail_at ? (sends == fail_at ? -ETIME : 0) : send_error;
 

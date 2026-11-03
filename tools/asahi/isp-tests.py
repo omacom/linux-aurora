@@ -31,12 +31,13 @@ def main():
     parser.add_argument('--emit', type=Path, help='write C for build-time compilation')
     parser.add_argument('--base-source', type=Path, help='pinned public baseline for rollback control')
     parser.add_argument('--cc', default='clang')
-    parser.add_argument('--suite', choices=['session', 'buffers', 'receive', 'returns'], default='session')
-    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback', 'drain', 'address', 'pool', 'duplicate', 'snapshot'])
+    parser.add_argument('--suite', choices=['session', 'buffers', 'receive', 'returns', 'queue'], default='session')
+    parser.add_argument('--control', choices=['send', 'overwrite', 'stop', 'reset', 'rollback', 'drain', 'address', 'pool', 'duplicate', 'snapshot', 'queue-error'])
     args = parser.parse_args()
     allowed = {'session': {None, 'send', 'overwrite', 'stop', 'reset'},
                'buffers': {None, 'rollback'}, 'receive': {None, 'drain'},
-               'returns': {None, 'address', 'pool', 'duplicate', 'snapshot'}}
+               'returns': {None, 'address', 'pool', 'duplicate', 'snapshot'},
+               'queue': {None, 'queue-error'}}
     if args.control not in allowed[args.suite]:
         parser.error('control does not belong to this suite')
     inputs = {n: (DRIVER / n).read_text() for n in
@@ -53,6 +54,9 @@ def main():
         groups['isp-ipc.c'] += ['chan_rx_done', 'ipc_chan_handle']
         groups['isp-fw.c'] += ['apple_isp_isr_thread']
     bodies = {n: function(inputs[f], n) for f, names in groups.items() for n in names}
+    if args.suite == 'session' and 'apple_isp_video_error(isp);' in bodies['apple_isp_isr_thread']:
+        bodies = {'apple_isp_video_error': function(
+            (DRIVER / 'isp-v4l2.c').read_text(), 'apple_isp_video_error'), **bodies}
     if args.control == 'send':
         bodies['ipc_chan_send'] = bodies['ipc_chan_send'].replace(
             'int err = READ_ONCE(isp->ipc_error);', 'int err = 0;')
@@ -68,7 +72,7 @@ def main():
         body = body.replace('WRITE_ONCE(isp->ipc_error, 0);', '')
         bodies['isp_firmware_boot'] = body.replace(
             'int err;', 'int err;\n\tWRITE_ONCE(isp->ipc_error, 0);', 1)
-    if args.suite in ['buffers', 'returns']:
+    if args.suite in ['buffers', 'returns', 'queue']:
         inputs = {'isp-v4l2.c': (DRIVER / 'isp-v4l2.c').read_text()}
         bodies = {n: function(inputs['isp-v4l2.c'], n) for n in
                   ['isp_submit_buffers', 'apple_isp_start_streaming']}
@@ -105,18 +109,29 @@ def main():
             body = body.replace('isp_returned_surface(isp, &buffers[i]',
                                 'isp_returned_surface(isp, &bl->buffers[i]')
             bodies['ipc_bt_handle'] = body
+    if args.suite == 'queue':
+        bodies = {n: function(inputs['isp-v4l2.c'], n) for n in
+                  ['isp_submit_buffers', 'isp_vb2_release_buffers',
+                   'isp_vb2_buf_queue', 'apple_isp_stop_streaming', 'isp_vb2_stop_streaming',
+                   'apple_isp_start_streaming', 'apple_isp_video_error']}
+        if args.control == 'queue-error':
+            bodies['isp_vb2_buf_queue'] = bodies['isp_vb2_buf_queue'].replace(
+                'vb2_queue_error(&isp->vbq);', '(void)0;')
     if args.suite == 'receive':
         bodies = {n: function(inputs[f], n) for f, n in [
             ('isp-ipc.c', 'chan_rx_done'), ('isp-ipc.c', 'ipc_chan_handle'),
             ('isp-fw.c', 'apple_isp_isr_thread')]}
+        if 'apple_isp_video_error(isp);' in bodies['apple_isp_isr_thread']:
+            bodies = {'apple_isp_video_error': function(
+                (DRIVER / 'isp-v4l2.c').read_text(), 'apple_isp_video_error'), **bodies}
         if args.control == 'drain':
             bodies['ipc_chan_handle'] = bodies['ipc_chan_handle'].replace(
                 'for (u32 i = 0; i < chan->num; i++)', 'while (1)')
     code = (ROOT / ('tools/asahi/isp/' + args.suite + '.c')).read_text()
-    if args.suite == 'returns':
+    if args.suite in ['returns', 'queue']:
         prefix = (ROOT / 'tools/asahi/isp/buffers.c').read_text()
         code = code.replace('/* BUFFER FIXTURE */', prefix.split('/* DRIVER FUNCTIONS */')[0])
-    if args.suite in ['buffers', 'returns']:
+    if args.suite in ['buffers', 'returns', 'queue']:
         structures = re.findall(r'^struct isp_buflist(?:_buffer)? \{.*?^} __packed;',
                                 inputs['isp-v4l2.c'], re.M | re.S)
         if len(structures) != 2:
