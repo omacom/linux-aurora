@@ -83,7 +83,7 @@ def main():
         controls = [
             ('no-managed-owner', '.starts_pmp = IS_ENABLED(CONFIG_APPLE_T6030_GPU_PMP_LINK)', '.starts_pmp = false'),
             ('no-managed-probe', 'ret = apple_pmp_start_init(rep);', 'ret = 0; (void)apple_pmp_start_init;'),
-            ('no-child-seeding', 'apple_pmp_report_entry_set_state(&ent->genpd, true);', '(void)0;'),
+            ('no-child-seeding', 'apple_pmp_report_entry_set_state(&ent->genpd, true);', '0;'),
             ('no-storage-policy', 'ent->no_ack = of_property_read_bool(node, "apple,no-ack");\n\t}', 'ent->no_ack = false;\n\t}'),
             ('external-startup-ack', '!of_property_read_bool(child, "apple,defer-startup-ack")', 'true'),
             ('ignore-seeded-state', 'status || request != st->seed', 'status'),
