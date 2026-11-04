@@ -45,6 +45,12 @@ struct macsmc_rtc {
 	struct nvmem_cell *alarm_ctrl;
 	struct nvmem_cell *alarm_value;
 	struct nvmem_cell *alarm_mask;
+	/*
+	 * Maverick PMUs (the M1 Pro's and the M2 Pro's) also latch the event in
+	 * a separate, write-1-to-clear interrupt status register, and their
+	 * control byte's event bit clears when it is written as 0, not as 1.
+	 */
+	struct nvmem_cell *alarm_event;
 	struct mutex alarm_lock;
 	u32 alarm_secs;
 };
@@ -206,8 +212,11 @@ static int macsmc_rtc_offset_secs(struct macsmc_rtc *rtc, s64 *secs)
 
 /*
  * Arm the alarm at counter second @secs, or disarm it if @secs is 0. The
- * other bits of the control byte are kept. A latched event is cleared by
- * writing it back, so the event bit is written as 1 only to clear it.
+ * other bits of the control byte are kept. A latched event is cleared first:
+ * on T6030 by writing the control byte back with the event bit set; on a
+ * Maverick PMU by writing 1 to its interrupt status, which must be clear for
+ * the next alarm to raise an interrupt, while the control byte's event bit
+ * clears below, where it is written as 0.
  */
 static int macsmc_rtc_program_alarm(struct macsmc_rtc *rtc, u32 secs)
 {
@@ -218,7 +227,11 @@ static int macsmc_rtc_program_alarm(struct macsmc_rtc *rtc, u32 secs)
 	ret = macsmc_rtc_read_u8(rtc->alarm_ctrl, &ctrl);
 	if (ret)
 		return ret;
-	if (ctrl & RTC_CTRL_ALARM_EVENT) {
+	if (rtc->alarm_event) {
+		ret = macsmc_rtc_write_u8(rtc->alarm_event, 1);
+		if (ret)
+			return ret;
+	} else if (ctrl & RTC_CTRL_ALARM_EVENT) {
 		ret = macsmc_rtc_write_u8(rtc->alarm_ctrl, ctrl);
 		if (ret)
 			return ret;
@@ -366,12 +379,15 @@ static int macsmc_rtc_init_alarm(struct platform_device *pdev,
 	rtc->alarm_ctrl = macsmc_rtc_cell_optional(dev, "rtc_ctrl");
 	rtc->alarm_value = macsmc_rtc_cell_optional(dev, "rtc_alarm");
 	rtc->alarm_mask = macsmc_rtc_cell_optional(dev, "rtc_alarm_mask");
+	rtc->alarm_event = macsmc_rtc_cell_optional(dev, "rtc_alarm_event");
 	if (IS_ERR(rtc->alarm_ctrl))
 		return PTR_ERR(rtc->alarm_ctrl);
 	if (IS_ERR(rtc->alarm_value))
 		return PTR_ERR(rtc->alarm_value);
 	if (IS_ERR(rtc->alarm_mask))
 		return PTR_ERR(rtc->alarm_mask);
+	if (IS_ERR(rtc->alarm_event))
+		return PTR_ERR(rtc->alarm_event);
 	if (!rtc->alarm_ctrl || !rtc->alarm_value || !rtc->alarm_mask)
 		return -ENODEV;
 
