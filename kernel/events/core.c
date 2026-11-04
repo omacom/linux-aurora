@@ -8,6 +8,7 @@
  *  Copyright  ©  2009 Paul Mackerras, IBM Corp. <paulus@au1.ibm.com>
  */
 
+#include <kunit/visibility.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/cpu.h>
@@ -57,6 +58,7 @@
 #include <linux/task_work.h>
 #include <linux/percpu-rwsem.h>
 #include <linux/unwind_deferred.h>
+#include <linux/nospec.h>
 #include <linux/kvm_types.h>
 #include <linux/seq_file.h>
 
@@ -6823,7 +6825,7 @@ static void perf_event_init_userpage(struct perf_event *event)
 	/* Allow new userspace to detect that bit 0 is deprecated */
 	userpg->cap_bit0_is_deprecated = 1;
 	userpg->size = offsetof(struct perf_event_mmap_page, __reserved);
-	userpg->data_offset = PAGE_SIZE;
+	userpg->data_offset = perf_metadata_size(rb);
 	userpg->data_size = perf_data_size(rb);
 
 unlock:
@@ -7008,6 +7010,11 @@ typedef void (*mapped_f)(struct perf_event *event, struct mm_struct *mm);
 	f;					\
 })
 
+static u64 perf_mmap_offset(struct vm_area_struct *vma)
+{
+	return ((u64)vma->vm_pgoff << PAGE_SHIFT) + vma_subpage_offset(vma);
+}
+
 static void perf_mmap_open(struct vm_area_struct *vma)
 {
 	struct perf_event *event = vma->vm_file->private_data;
@@ -7016,7 +7023,7 @@ static void perf_mmap_open(struct vm_area_struct *vma)
 	refcount_inc(&event->mmap_count);
 	refcount_inc(&event->rb->mmap_count);
 
-	if (vma->vm_pgoff)
+	if (perf_mmap_offset(vma))
 		refcount_inc(&event->rb->aux_mmap_count);
 
 	if (mapped)
@@ -7049,7 +7056,7 @@ static void perf_mmap_close(struct vm_area_struct *vma)
 	 * The AUX buffer is strictly a sub-buffer, serialize using aux_mutex
 	 * to avoid complications.
 	 */
-	if (rb_has_aux(rb) && vma->vm_pgoff == rb->aux_pgoff &&
+	if (rb_has_aux(rb) && perf_mmap_offset(vma) == rb->aux_offset &&
 	    refcount_dec_and_mutex_lock(&rb->aux_mmap_count, &rb->aux_mutex)) {
 		/*
 		 * Stop all AUX events that are writing to this buffer,
@@ -7143,7 +7150,9 @@ out_put:
 static vm_fault_t perf_mmap_pfn_mkwrite(struct vm_fault *vmf)
 {
 	/* The first page is the user control page, others are read-only. */
-	return vmf->pgoff == 0 ? 0 : VM_FAULT_SIGBUS;
+	return !perf_mmap_offset(vmf->vma) &&
+	       vmf->address - vmf->vma->vm_start < mm_page_size(vmf->vma->vm_mm) ?
+	       0 : VM_FAULT_SIGBUS;
 }
 
 static int perf_mmap_may_split(struct vm_area_struct *vma, unsigned long addr)
@@ -7164,7 +7173,8 @@ static const struct vm_operations_struct perf_mmap_vmops = {
 
 static int map_range(struct perf_buffer *rb, struct vm_area_struct *vma)
 {
-	unsigned long nr_pages = vma_pages(vma);
+	unsigned long va = vma->vm_start;
+	bool aux = perf_mmap_offset(vma) != 0;
 	int err = 0;
 	unsigned long pagenum;
 
@@ -7208,9 +7218,23 @@ static int map_range(struct perf_buffer *rb, struct vm_area_struct *vma)
 	 * perf_mmap_open() and perf_mmap_close()) so we ensure the lifetime of
 	 * this mapping is maintained correctly.
 	 */
-	for (pagenum = 0; pagenum < nr_pages; pagenum++) {
-		unsigned long va = vma->vm_start + PAGE_SIZE * pagenum;
-		struct page *page = perf_mmap_to_page(rb, vma->vm_pgoff + pagenum);
+	for (pagenum = 0; va < vma->vm_end; pagenum++) {
+		unsigned long size = min(PAGE_SIZE, vma->vm_end - va);
+		struct page *page;
+
+		if (aux) {
+			if (pagenum >= rb->aux_nr_pages) {
+				err = -EINVAL;
+				break;
+			}
+			/* The mapping length drives pagenum: bound it under speculation. */
+			page = virt_to_page(rb->aux_pages[array_index_nospec(pagenum,
+							   rb->aux_nr_pages)]);
+		} else {
+			page = perf_mmap_to_page(rb, pagenum);
+			if (!pagenum)
+				size = perf_metadata_size(rb);
+		}
 
 		if (page == NULL) {
 			err = -EINVAL;
@@ -7218,16 +7242,17 @@ static int map_range(struct perf_buffer *rb, struct vm_area_struct *vma)
 		}
 
 		/* Map readonly, perf_mmap_pfn_mkwrite() called on write fault. */
-		err = remap_pfn_range(vma, va, page_to_pfn(page), PAGE_SIZE,
+		err = remap_pfn_range(vma, va, page_to_pfn(page), size,
 				      vm_get_page_prot(vma->vm_flags & ~VM_SHARED));
 		if (err)
 			break;
+		va += size;
 	}
 
 #ifdef CONFIG_MMU
 	/* Clear any partial mappings on error. */
 	if (err)
-		zap_vma_range(vma, vma->vm_start, nr_pages * PAGE_SIZE);
+		zap_vma_range(vma, vma->vm_start, vma->vm_end - vma->vm_start);
 #endif
 
 	return err;
@@ -7280,7 +7305,7 @@ static void perf_mmap_unaccount(struct vm_area_struct *vma, struct perf_buffer *
 {
 	struct user_struct *user = rb->mmap_user;
 
-	atomic_long_sub((perf_data_size(rb) >> PAGE_SHIFT) + 1 - rb->mmap_locked,
+	atomic_long_sub(data_page_nr(rb) + 1 - rb->mmap_locked,
 			&user->perf_mlock);
 	atomic64_sub(rb->mmap_locked, &vma->vm_mm->pinned_vm);
 }
@@ -7288,7 +7313,9 @@ static void perf_mmap_unaccount(struct vm_area_struct *vma, struct perf_buffer *
 static int perf_mmap_rb(struct vm_area_struct *vma, struct perf_event *event,
 			unsigned long nr_pages)
 {
-	long extra = 0, user_extra = nr_pages;
+	unsigned int page_shift = mm_page_shift(vma->vm_mm);
+	unsigned long data_size;
+	long extra = 0, user_extra;
 	struct perf_buffer *rb;
 	int rb_flags = 0;
 
@@ -7300,11 +7327,14 @@ static int perf_mmap_rb(struct vm_area_struct *vma, struct perf_event *event,
 	 */
 	if (nr_pages != 0 && !is_power_of_2(nr_pages))
 		return -EINVAL;
+	data_size = nr_pages << page_shift;
+	/* Physical allocation and locked-memory accounting stay in native pages. */
+	user_extra = DIV_ROUND_UP(data_size, PAGE_SIZE) + 1;
 
 	WARN_ON_ONCE(event->ctx->parent_ctx);
 
 	if (event->rb) {
-		if (data_page_nr(event->rb) != nr_pages)
+		if (perf_data_size(event->rb) != data_size)
 			return -EINVAL;
 
 		/*
@@ -7340,7 +7370,7 @@ static int perf_mmap_rb(struct vm_area_struct *vma, struct perf_event *event,
 	if (vma->vm_flags & VM_WRITE)
 		rb_flags |= RING_BUFFER_WRITABLE;
 
-	rb = rb_alloc(nr_pages,
+	rb = rb_alloc(data_size, page_shift,
 		      event->attr.watermark ? event->attr.wakeup_watermark : 0,
 		      event->cpu, rb_flags);
 
@@ -7361,9 +7391,10 @@ static int perf_mmap_rb(struct vm_area_struct *vma, struct perf_event *event,
 	return 0;
 }
 
-static int perf_mmap_aux(struct vm_area_struct *vma, struct perf_event *event,
-			 unsigned long nr_pages)
+static int perf_mmap_aux(struct vm_area_struct *vma, struct perf_event *event)
 {
+	unsigned long size = vma->vm_end - vma->vm_start;
+	unsigned long nr_pages = size >> PAGE_SHIFT;
 	long extra = 0, user_extra = nr_pages;
 	u64 aux_offset, aux_size;
 	struct perf_buffer *rb;
@@ -7371,6 +7402,9 @@ static int perf_mmap_aux(struct vm_area_struct *vma, struct perf_event *event,
 
 	rb = event->rb;
 	if (!rb)
+		return -EINVAL;
+	/* PMU setup_aux() consumes whole native pages, independent of mmap layout. */
+	if (!IS_ALIGNED(size, PAGE_SIZE))
 		return -EINVAL;
 
 	guard(mutex)(&rb->aux_mutex);
@@ -7383,14 +7417,14 @@ static int perf_mmap_aux(struct vm_area_struct *vma, struct perf_event *event,
 	aux_offset = READ_ONCE(rb->user_page->aux_offset);
 	aux_size = READ_ONCE(rb->user_page->aux_size);
 
-	if (aux_offset < perf_data_size(rb) + PAGE_SIZE)
+	if (aux_offset < perf_data_size(rb) + perf_metadata_size(rb))
 		return -EINVAL;
 
-	if (aux_offset != vma->vm_pgoff << PAGE_SHIFT)
+	if (aux_offset != perf_mmap_offset(vma))
 		return -EINVAL;
 
 	/* already mapped with a different offset */
-	if (rb_has_aux(rb) && rb->aux_pgoff != vma->vm_pgoff)
+	if (rb_has_aux(rb) && rb->aux_offset != aux_offset)
 		return -EINVAL;
 
 	if (aux_size != nr_pages * PAGE_SIZE)
@@ -7420,7 +7454,7 @@ static int perf_mmap_aux(struct vm_area_struct *vma, struct perf_event *event,
 		if (vma->vm_flags & VM_WRITE)
 			rb_flags |= RING_BUFFER_WRITABLE;
 
-		ret = rb_alloc_aux(rb, event, vma->vm_pgoff, nr_pages,
+		ret = rb_alloc_aux(rb, event, aux_offset, nr_pages,
 				   event->attr.aux_watermark, rb_flags);
 		if (ret) {
 			refcount_dec(&rb->mmap_count);
@@ -7460,12 +7494,13 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		return ret;
 
 	vma_size = vma->vm_end - vma->vm_start;
-	nr_pages = vma_size / PAGE_SIZE;
+	nr_pages = vma_size >> mm_page_shift(vma->vm_mm);
 
 	if (nr_pages > INT_MAX)
 		return -ENOMEM;
 
-	if (vma_size != PAGE_SIZE * nr_pages)
+	if (vma_size != mm_page_size(vma->vm_mm) * nr_pages ||
+	    mm_page_shift(vma->vm_mm) > PAGE_SHIFT)
 		return -EINVAL;
 
 	scoped_guard (mutex, &event->mmap_mutex) {
@@ -7477,10 +7512,14 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
 		if (event->state <= PERF_EVENT_STATE_REVOKED)
 			return -ENODEV;
 
-		if (vma->vm_pgoff == 0)
+		/* One ring has one immutable metadata/data boundary for all aliases. */
+		if (event->rb && event->rb->mmap_page_shift != mm_page_shift(vma->vm_mm))
+			return -EINVAL;
+
+		if (!perf_mmap_offset(vma))
 			ret = perf_mmap_rb(vma, event, nr_pages);
 		else
-			ret = perf_mmap_aux(vma, event, nr_pages);
+			ret = perf_mmap_aux(vma, event);
 		if (ret)
 			return ret;
 
@@ -8502,7 +8541,7 @@ static u64 perf_virt_to_phys(u64 virt)
 /*
  * Return the pagetable size of a given virtual address.
  */
-static u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
+VISIBLE_IF_KUNIT u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
 {
 	u64 size = 0;
 
@@ -8519,45 +8558,46 @@ static u64 perf_get_pgtable_size(struct mm_struct *mm, unsigned long addr)
 		return 0;
 
 	if (pgd_leaf(pgd))
-		return pgd_leaf_size(pgd);
+		return pgd_leaf_size_mm(mm, pgd);
 
-	p4dp = p4d_offset_lockless(pgdp, pgd, addr);
+	p4dp = p4d_offset_lockless_mm(mm, pgdp, pgd, addr);
 	p4d = p4dp_get(p4dp);
-	if (!p4d_present(p4d))
+	if (!p4d_present_mm(mm, p4d))
 		return 0;
 
 	if (p4d_leaf(p4d))
-		return p4d_leaf_size(p4d);
+		return p4d_leaf_size_mm(mm, p4d);
 
-	pudp = pud_offset_lockless(p4dp, p4d, addr);
+	pudp = pud_offset_lockless_mm(mm, p4dp, p4d, addr);
 	pud = pudp_get(pudp);
 	if (!pud_present(pud))
 		return 0;
 
 	if (pud_leaf(pud))
-		return pud_leaf_size(pud);
+		return pud_leaf_size_mm(mm, pud);
 
-	pmdp = pmd_offset_lockless(pudp, pud, addr);
+	pmdp = pmd_offset_lockless_mm(mm, pudp, pud, addr);
 again:
 	pmd = pmdp_get_lockless(pmdp);
 	if (!pmd_present(pmd))
 		return 0;
 
 	if (pmd_leaf(pmd))
-		return pmd_leaf_size(pmd);
+		return pmd_leaf_size_mm(mm, pmd);
 
-	ptep = pte_offset_map(&pmd, addr);
+	ptep = pte_offset_map_mm(mm, &pmd, addr);
 	if (!ptep)
 		goto again;
 
 	pte = ptep_get_lockless(ptep);
 	if (pte_present(pte))
-		size = __pte_leaf_size(pmd, pte);
+		size = __pte_leaf_size_mm(mm, pmd, pte);
 	pte_unmap(ptep);
 #endif /* CONFIG_HAVE_GUP_FAST */
 
 	return size;
 }
+EXPORT_SYMBOL_IF_KUNIT(perf_get_pgtable_size);
 
 static u64 perf_get_page_size(unsigned long addr)
 {
