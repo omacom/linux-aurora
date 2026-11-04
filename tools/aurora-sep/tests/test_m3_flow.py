@@ -343,6 +343,7 @@ M1N1_CONF='{self.m1n1_conf}'
 UPDATE_M1N1_CONF='{self.update_conf}'
 M3GPU_MARKER='{self.tmp}/etc/default/.update-m1n1.created-by-m3gpu'
 MODPROBE_CONF='{self.tmp}/etc/aurora-sep.conf'
+MODPROBE_CONF_OLD='{self.tmp}/etc/aurora-sep-old.conf'
 M1N1_BIN='{self.fake}/m1n1.bin'
 PACKAGES=(
 {pkgs}
