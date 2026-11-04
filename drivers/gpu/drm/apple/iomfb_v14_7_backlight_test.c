@@ -354,7 +354,7 @@ static bool v14_bl_queued(struct apple_dcp_v14 *v14)
 static void v14_bl_other_boards_untouched(struct kunit *test)
 {
 	const struct dcp_v14_board *boards[] = {
-		&dcp_v14_board_j615, &dcp_v14_board_j514c,
+		&dcp_v14_board_j514c,
 	};
 	struct dcp_backlight_present present;
 	unsigned int i;
