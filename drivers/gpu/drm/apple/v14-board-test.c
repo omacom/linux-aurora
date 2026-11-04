@@ -197,14 +197,14 @@ static void v14_board_swap_timestamps(struct kunit *test)
 
 	KUNIT_EXPECT_TRUE(test, j516c_b->swap_timestamps);
 	KUNIT_EXPECT_FALSE(test, j514c_b->swap_timestamps);
-	KUNIT_EXPECT_FALSE(test, t6030_b->swap_timestamps);
+	KUNIT_EXPECT_TRUE(test, t6030_b->swap_timestamps);
 	KUNIT_EXPECT_FALSE(test, j613_b->swap_timestamps);
 
 	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(j516c_b, false));
-	/* The J514C, the external role, the T6030 (J514S, J516S) and T8122 panels, no record. */
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(t6030_b, false));
+	/* The J514C, the external role, the T8122 panels, no record. */
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j514c_b, false));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j516c_b, true));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(t6030_b, false));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(j613_b, false));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(NULL, false));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(NULL, true));
