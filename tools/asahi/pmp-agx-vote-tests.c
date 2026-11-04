@@ -354,6 +354,8 @@ int main(void)
 		struct agx_vote w = {.enabled = true, .users = 1, .failures = 1, .retry_at = 0x54u};
 		CHECK(agx_vote_decide(&w, 0x54u + 0x80000005u) == AGX_VOTE_SET);
 		CHECK(agx_vote_next(&w, 0x54u + 0x80000005u) == 1);
+		CHECK(agx_vote_decide(&w, 0x54u + 0x80000000u) == AGX_VOTE_SET);
+		CHECK(agx_vote_next(&w, 0x54u + 0x80000000u) == 1);
 	}
 	// 22. the same review: during backoff begin must not ask for a reconciliation decide would refuse
 	// (every begin during the window kicked a NONE reconcile and the retry timer did the work anyway)

@@ -56,7 +56,7 @@ static inline bool agx_vote_reached(agx_ms_t now, agx_ms_t t)
 static inline bool agx_vote_retry_reached(const struct agx_vote *v, agx_ms_t now)
 {
 	return agx_vote_reached(now, v->retry_at)
-	       || (agx_sms_t)(v->retry_at - now) > (agx_sms_t)AGX_VOTE_RETRY_MS;
+	       || (agx_ms_t)(v->retry_at - now) > AGX_VOTE_RETRY_MS;
 }
 
 /* An operation starts. now is the operation's start time in ms (any wrapping clock; the caller reads it
