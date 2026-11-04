@@ -262,3 +262,90 @@
 };
 
 #include "hwmon-laptop.dtsi"
+
+/*
+ * External display on both USB-C ports, wired as on the J613 (see
+ * t8122-j613.dts): usb-pd@c is USB-C Left-back (typec0, ATC0) and usb-pd@a is
+ * USB-C Left-front (typec1, ATC1). Everything stays disabled until the boot
+ * loader marks the dcpext firmware reserved and the display gate enables it.
+ *
+ * fbdma is the display DART stream the dcpext scans framebuffers through,
+ * with the display subsystem's DVA window: on the J615 the gate must not add
+ * dispext0_dart to the display subsystem (apple_t8122_display.dcpext_disp_dart=0),
+ * so appledrm mirrors framebuffers there instead.
+ */
+/ {
+	aliases {
+		dcpext = &dcpext;
+	};
+};
+
+&dcpext {
+	apple,connector-type = "USB-C";
+	phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>;
+	phy-names = "typec0", "typec1";
+	mux-controls = <&atcphy0_xbar 0>, <&atcphy1_xbar 0>;
+	mux-control-names = "typec0", "typec1";
+	apple,typec-mux-indices = <2 2>;
+	apple,typec-dptx-phys = <0 1>;
+	/* RTKit quirks of AsahiLinux/linux#607 (syslog/ioreport acks, kdebug). */
+	apple,sync-syslog-ack;
+
+	fbdma {
+		iommus = <&dispext0_dart 0>;
+		apple,dma-range = /bits/ 64 <0x10000000000 0x1000000000>;
+	};
+
+	typec-routes {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		route@0 {
+			reg = <0>;
+			mode-switch;
+			status = "disabled";
+
+			port {
+				dcpext_typec0: endpoint {
+					remote-endpoint = <&typec0_dcpext>;
+				};
+			};
+		};
+
+		route@1 {
+			reg = <1>;
+			mode-switch;
+			status = "disabled";
+
+			port {
+				dcpext_typec1: endpoint {
+					remote-endpoint = <&typec1_dcpext>;
+				};
+			};
+		};
+	};
+};
+
+&typec0 {
+	ports {
+		port@3 {
+			reg = <3>;
+
+			typec0_dcpext: endpoint {
+				remote-endpoint = <&dcpext_typec0>;
+			};
+		};
+	};
+};
+
+&typec1 {
+	ports {
+		port@3 {
+			reg = <3>;
+
+			typec1_dcpext: endpoint {
+				remote-endpoint = <&dcpext_typec1>;
+			};
+		};
+	};
+};
