@@ -8,7 +8,7 @@
  * a refused level never becomes the actual one).
  *
  * The objects are built here, with no DCP: nothing in a case may reach an
- * RPC. A J615 or J514C panel never initialises the backlight policy;
+ * RPC. A J514C panel never initialises the backlight policy;
  * its state is set to answer "yes" so that a case fails if anything on
  * those boards looks at it.
  */
@@ -122,7 +122,7 @@ static bool v14_bl_ctx_machine_is(const void *ctx, const char *compat)
 	return !strcmp(((const char *const *)ctx)[1], compat);
 }
 
-/* Only admitted T6030, J516C and J613 internal panels carry levels. */
+/* Only admitted T6030, J516C, J613 and J615 internal panels carry levels. */
 static void v14_bl_boards(struct kunit *test)
 {
 	static const char *const t6030_j516s[] = { "apple,t6030-dcp", "apple,j516s" };
@@ -152,10 +152,10 @@ static void v14_bl_boards(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, board);
 	KUNIT_EXPECT_TRUE(test, board->panel_nits);
 	KUNIT_EXPECT_TRUE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j613));
-	KUNIT_EXPECT_FALSE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j615));
 	board = dcp_v14_board_select(v14_bl_ctx_dcp_is, v14_bl_ctx_machine_is, j615, &known);
 	KUNIT_ASSERT_NOT_NULL(test, board);
-	KUNIT_EXPECT_FALSE(test, board->panel_nits);
+	KUNIT_EXPECT_TRUE(test, board->panel_nits);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j615));
 	board = dcp_v14_board_select(v14_bl_ctx_dcp_is, v14_bl_ctx_machine_is, j516c, &known);
 	KUNIT_ASSERT_NOT_NULL(test, board);
 	KUNIT_EXPECT_TRUE(test, board->panel_nits);
@@ -348,7 +348,7 @@ static bool v14_bl_queued(struct apple_dcp_v14 *v14)
 }
 
 /*
- * The production paths on J615 and J514C: no policy is consulted, no
+ * The production path on J514C: no policy is consulted, no
  * level is encoded, the work does nothing, sleep leaves the gate alone.
  */
 static void v14_bl_other_boards_untouched(struct kunit *test)
@@ -477,6 +477,11 @@ static void v14_bl_j613_swap_levels(struct kunit *test)
 	v14_bl_swap_levels(test, &dcp_v14_board_j613);
 }
 
+static void v14_bl_j615_swap_levels(struct kunit *test)
+{
+	v14_bl_swap_levels(test, &dcp_v14_board_j615);
+}
+
 /*
  * The gate, through the production queue path: open, a kick queues the work;
  * suspended, nothing queues until resume; closed, nothing ever does. The
@@ -566,6 +571,7 @@ static struct kunit_case v14_backlight_cases[] = {
 	KUNIT_CASE(v14_bl_external_untouched),
 	KUNIT_CASE(v14_bl_t6030_swap_levels),
 	KUNIT_CASE(v14_bl_j613_swap_levels),
+	KUNIT_CASE(v14_bl_j615_swap_levels),
 	KUNIT_CASE(v14_bl_t6030_gate),
 	KUNIT_CASE(v14_bl_t6030_work),
 	{}
