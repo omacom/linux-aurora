@@ -35,6 +35,17 @@
 #define RTC_CTRL_ALARM_EVENT	BIT(1)
 #define RTC_CTRL_ALARM_EN	BIT(6)
 
+/*
+ * The time comes from the SMC's CLKM, which lags the PMU's counter, the
+ * alarm's comparator, by a few ms (5.8 ms on J314s). With a tick offset whose
+ * fraction is smaller than that, the alarm would fire while the time still
+ * reads the second before. The RTC core then sets the same second again, the
+ * alarm fires again at once, and so on until the time catches up: five or six
+ * interrupts instead of one. So below this margin the alarm is armed one counter
+ * second later, and fires within the set second.
+ */
+#define RTC_ALARM_MARGIN_TICKS	(1 << (RTC_SEC_SHIFT - 5))	/* 1/32 s */
+
 struct macsmc_rtc {
 	struct device *dev;
 	struct apple_smc *smc;
@@ -180,8 +191,12 @@ static int macsmc_rtc_write_u8(struct nvmem_cell *cell, u8 val)
 	return ret < 0 ? ret : 0;
 }
 
-/* The wall-clock offset in whole seconds: wall time = counter seconds + offset */
-static int macsmc_rtc_offset_secs(struct macsmc_rtc *rtc, s64 *secs)
+/*
+ * The wall-clock offset in whole seconds (wall time = counter seconds + offset),
+ * and the counter seconds to add to an alarm for RTC_ALARM_MARGIN_TICKS: 1 with
+ * a tick offset whose fraction is under the margin, else 0.
+ */
+static int macsmc_rtc_offset_secs(struct macsmc_rtc *rtc, s64 *secs, int *late)
 {
 	u64 off = 0;
 	size_t len;
@@ -197,6 +212,7 @@ static int macsmc_rtc_offset_secs(struct macsmc_rtc *rtc, s64 *secs)
 			return -EIO;
 		}
 		*secs = (s64)get_unaligned_le64(p);
+		*late = 0;
 	} else {
 		if (len < RTC_BYTES) {
 			kfree(p);
@@ -204,6 +220,7 @@ static int macsmc_rtc_offset_secs(struct macsmc_rtc *rtc, s64 *secs)
 		}
 		memcpy(&off, p, RTC_BYTES);
 		*secs = sign_extend64(off, RTC_BITS - 1) >> RTC_SEC_SHIFT;
+		*late = (off & ((1 << RTC_SEC_SHIFT) - 1)) < RTC_ALARM_MARGIN_TICKS;
 	}
 	kfree(p);
 
@@ -263,11 +280,12 @@ static int macsmc_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	size_t len;
 	s64 off;
 	u32 secs;
+	int late;
 	void *p;
 	u8 ctrl;
 	int ret;
 
-	ret = macsmc_rtc_offset_secs(rtc, &off);
+	ret = macsmc_rtc_offset_secs(rtc, &off, &late);
 	if (ret)
 		return ret;
 
@@ -283,7 +301,8 @@ static int macsmc_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 	secs = len >= sizeof(u32) ? get_unaligned_le32(p) : 0;
 	kfree(p);
 
-	rtc_time64_to_tm((time64_t)secs + off, &alrm->time);
+	/* The time that was set, not the counter second it was armed for */
+	rtc_time64_to_tm((time64_t)secs - late + off, &alrm->time);
 	alrm->enabled = !!(ctrl & RTC_CTRL_ALARM_EN);
 	alrm->pending = !!(ctrl & RTC_CTRL_ALARM_EVENT);
 out:
@@ -295,18 +314,21 @@ static int macsmc_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
 	struct macsmc_rtc *rtc = dev_get_drvdata(dev);
 	s64 off, secs;
+	int late;
 	int ret;
 
-	ret = macsmc_rtc_offset_secs(rtc, &off);
+	ret = macsmc_rtc_offset_secs(rtc, &off, &late);
 	if (ret)
 		return ret;
 
 	/*
 	 * With a tick offset, off is rounded down to whole seconds but the
 	 * time is floor((ctr + off) / 2^15), so the alarm fires at the set
-	 * second or up to one second after it.
+	 * second or up to one second after it. With the offset's fraction
+	 * under RTC_ALARM_MARGIN_TICKS, the alarm is armed a second later, so
+	 * it can't fire while the time still reads the second before.
 	 */
-	secs = rtc_tm_to_time64(&alrm->time) - off;
+	secs = rtc_tm_to_time64(&alrm->time) - off + late;
 	if (secs <= 0 || secs > U32_MAX)
 		return -ERANGE;
 
