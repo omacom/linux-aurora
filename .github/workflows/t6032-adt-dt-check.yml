@@ -28,11 +28,25 @@ on:
       - ".github/workflows/t6032-adt-dt-check.yml"
   workflow_dispatch:
 
+permissions: {}
+
+# A new push to a pull request replaces its run; every other run is kept.
+concurrency:
+  group: t6032-adt-dt-check-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   adt-dt-check:
-    runs-on: ubuntu-latest
+    name: adt-dt-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read # check out the repository
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the tree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install toolchain
         run: |
