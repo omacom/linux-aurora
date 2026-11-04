@@ -1641,20 +1641,20 @@ void brcmf_detach(struct device *dev)
 		if (!ifp)
 			continue;
 
-		if (ifp->ndev) {
+		if (i == 0) {
 			brcmf_remove_interface(ifp, false);
 			continue;
 		}
 
-		/* The P2P device interface has no netdev. Its removal can
-		 * race with NL80211_CMD_DEL_INTERFACE issued by a user space
-		 * process that is exiting (e.g. wpa_supplicant), which ends
-		 * in brcmf_p2p_del_vif() under RTNL and the wiphy mutex. If
-		 * both paths remove the interface, the wdev is unregistered
-		 * twice and the vif is used after being freed. Take the same
-		 * locks and re-read iflist, so only one path removes it.
+		/* Remove under RTNL and the wiphy lock, as brcmf_p2p_del_vif()
+		 * does, but close the netdev under RTNL alone first, as
+		 * nl80211_del_interface() does: cfg80211's down handlers take
+		 * the wiphy lock themselves.
 		 */
 		rtnl_lock();
+		ifp = drvr->iflist[i];
+		if (ifp && ifp->ndev)
+			dev_close(ifp->ndev);
 		wiphy_lock(drvr->wiphy);
 		ifp = drvr->iflist[i];
 		if (ifp)
