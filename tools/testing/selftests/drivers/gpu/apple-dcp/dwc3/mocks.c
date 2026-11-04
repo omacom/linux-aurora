@@ -63,6 +63,13 @@ static void regulator_disable(int p)
 {
 	assert(!p);
 }
+/* Mirrors the pipe-handler window defines in dwc3-apple.c for the fixed T8152 role. */
+#define T8152_PIPE_MUX_CTRL		0x0c
+#define T8152_PIPE_AON_GEN		0x1c
+#define T8152_PIPE_NONSELECTED_OVERRIDE	0x20
+#define T8152_PIPE_MUX_CTRL_DUMMY	0x22
+#define T8152_PIPE_AON_GEN_DWC3_RESET_N	BIT(0)
+#define T8152_PIPE_NONSELECTED_DEVICE	0x9332
 struct dwc3 {
 	struct phy *usb2_generic_phy[3], *usb3_generic_phy[3];
 	int num_usb2_ports, num_usb3_ports, usb2_phy, usb3_phy;
@@ -76,8 +83,10 @@ struct dwc3_apple {
 	int lock;
 	void *dev;
 	struct phy *usb2_phy, *usb3_phy;
-	bool fixed_hub, core_active, core_exit_pending, reset_pending;
+	bool fixed_hub, t8152_usb2, fixed_peripheral;
+	bool core_active, core_exit_pending, reset_pending;
 	unsigned long usb2_power_off_pending, usb3_power_off_pending;
+	void __iomem *tunable_regs[6];
 };
 static unsigned int polls, fail_poll, reset_calls, reset_writes, core_writes;
 static unsigned int host_exits, clocks_disabled, callback_calls;
