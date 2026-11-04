@@ -2502,6 +2502,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 		if (dcp->notch_height > 0)
 			req->swap.dst_rect[l].y += dcp->notch_height;
 
+		dcp_fb_mirror(dcp, new_state->fb);
 		req->surf_iova[l] = apple_state->iova;
 		req->surf[l].base = apple_state->surf;
 #if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)

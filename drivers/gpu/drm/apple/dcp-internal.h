@@ -231,6 +231,13 @@ struct apple_dcp {
 	struct platform_device *piodma;
 	bool piodma_created;
 	struct iommu_domain *iommu_dom;
+	/*
+	 * Experiment (J615 dcpext): a child device on the display DART stream
+	 * the external pipe scans framebuffers through. Framebuffers are
+	 * mirrored into its domain at the display subsystem's addresses.
+	 */
+	struct platform_device *fbdma;
+	struct iommu_domain *fb_dom;
 	/* which of the nine cumulative A031 notify-client states to send next */
 	unsigned int a031_step;
 	struct apple_rtkit *rtk;
