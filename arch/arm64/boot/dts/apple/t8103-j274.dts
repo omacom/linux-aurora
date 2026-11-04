@@ -19,7 +19,6 @@
 
 	aliases {
 		ethernet0 = &ethernet0;
-		sio = &sio;
 	};
 };
 
