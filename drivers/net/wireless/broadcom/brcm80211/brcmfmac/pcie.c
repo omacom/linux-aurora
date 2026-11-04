@@ -1716,7 +1716,13 @@ static int brcmf_pcie_reset(struct device *dev)
 	struct brcmf_fw_request *fwreq;
 	int err;
 
+	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
 	brcmf_pcie_intr_disable(devinfo);
+	if (devinfo->irq_allocated) {
+		synchronize_irq(devinfo->pdev->irq);
+		/* The thread may have re-armed before it saw DOWN. */
+		brcmf_pcie_intr_disable(devinfo);
+	}
 
 	brcmf_pcie_bus_console_read(devinfo, true);
 
