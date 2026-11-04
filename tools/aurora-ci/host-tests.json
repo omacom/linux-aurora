@@ -1013,6 +1013,15 @@
       "rust": "1.85.0"
     },
     {
+      "name": "tools/asahi/queue-priority-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/queue-priority-tests.py"
+      ],
+      "rust": "1.85.0"
+    },
+    {
       "name": "tools/asahi/m3-runtime-tests.rs",
       "group": "tools",
       "argv": [
