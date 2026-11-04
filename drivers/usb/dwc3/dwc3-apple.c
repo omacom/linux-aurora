@@ -21,7 +21,6 @@
 
 #include "dwc3-apple-state.h"
 #include "glue.h"
-#include "io.h"
 
 /*
  * This platform requires a very specific sequence of operations to bring up dwc3 and its USB3 PHY:
@@ -319,10 +318,11 @@ static void dwc3_apple_t8152_apply_tunables(struct dwc3_apple *appledwc,
 		return;
 
 	writel(readl(pipe + 0x20) | BIT(15), pipe + 0x20);
-	value = dwc3_readl(&appledwc->dwc, 0xc680);
-	dwc3_writel(&appledwc->dwc, 0xc680, value & ~BIT(13));
-	value = dwc3_readl(&appledwc->dwc, 0xc680);
-	dwc3_writel(&appledwc->dwc, 0xc680, value & ~BIT(13));
+	/* Raw core access; io.h helpers drag unexported dwc3 tracepoints into this module. */
+	value = readl(appledwc->dwc.regs - DWC3_GLOBALS_REGS_START + 0xc680);
+	writel(value & ~BIT(13), appledwc->dwc.regs - DWC3_GLOBALS_REGS_START + 0xc680);
+	value = readl(appledwc->dwc.regs - DWC3_GLOBALS_REGS_START + 0xc680);
+	writel(value & ~BIT(13), appledwc->dwc.regs - DWC3_GLOBALS_REGS_START + 0xc680);
 }
 
 static void dwc3_apple_set_ptrcap(struct dwc3_apple *appledwc, u32 mode)
