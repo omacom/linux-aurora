@@ -374,11 +374,11 @@ int brcmf_fweh_attach(struct brcmf_pub *drvr)
 }
 
 /**
- * brcmf_fweh_detach() - cleanup firmware event handling.
+ * brcmf_fweh_detach_events() - stop firmware event dispatch.
  *
  * @drvr: driver information object.
  */
-void brcmf_fweh_detach(struct brcmf_pub *drvr)
+void brcmf_fweh_detach_events(struct brcmf_pub *drvr)
 {
 	struct brcmf_fweh_info *fweh = drvr->fweh;
 
@@ -395,6 +395,21 @@ void brcmf_fweh_detach(struct brcmf_pub *drvr)
 		cancel_work_sync(&fweh->event_work);
 		WARN_ON(!list_empty(&fweh->event_q));
 	}
+}
+
+/**
+ * brcmf_fweh_detach() - cleanup firmware event handling.
+ *
+ * @drvr: driver information object.
+ */
+void brcmf_fweh_detach(struct brcmf_pub *drvr)
+{
+	struct brcmf_fweh_info *fweh = drvr->fweh;
+
+	if (!fweh)
+		return;
+
+	brcmf_fweh_detach_events(drvr);
 	drvr->fweh = NULL;
 	kfree(fweh->event_mask);
 	kfree(fweh);

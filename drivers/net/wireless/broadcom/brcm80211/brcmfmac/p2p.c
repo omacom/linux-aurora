@@ -18,6 +18,7 @@
 #include "p2p.h"
 #include "cfg80211.h"
 #include "feature.h"
+#include "bus.h"
 
 /* parameters used for p2p escan */
 #define P2PAPI_SCAN_NPROBES 1
@@ -2155,6 +2156,9 @@ static struct wireless_dev *brcmf_p2p_create_p2pdev(struct brcmf_p2p_info *p2p,
 	int err;
 	u32 bsscfgidx;
 
+	if (drvr->bus_if->state != BRCMF_BUS_UP)
+		return ERR_PTR(-ENODEV);
+
 	if (p2p->bss_idx[P2PAPI_BSSCFG_DEVICE].vif)
 		return ERR_PTR(-ENOSPC);
 
@@ -2261,7 +2265,7 @@ struct wireless_dev *brcmf_p2p_add_vif(struct wiphy *wiphy, const char *name,
 				       struct vif_params *params)
 {
 	struct brcmf_cfg80211_info *cfg = wiphy_to_cfg(wiphy);
-	struct brcmf_if *ifp = netdev_priv(cfg_to_ndev(cfg));
+	struct brcmf_if *ifp;
 	struct brcmf_pub *drvr = cfg->pub;
 	struct brcmf_cfg80211_vif *vif;
 	enum brcmf_fil_p2p_if_types iftype;
@@ -2269,8 +2273,14 @@ struct wireless_dev *brcmf_p2p_add_vif(struct wiphy *wiphy, const char *name,
 	int connidx;
 	u8 *p2p_intf_addr;
 
+	if (drvr->bus_if->state != BRCMF_BUS_UP)
+		return ERR_PTR(-ENODEV);
 	if (brcmf_cfg80211_vif_event_armed(cfg))
 		return ERR_PTR(-EBUSY);
+	/* Only once the bus is known to be up: detach removes the primary
+	 * interface after taking the bus down.
+	 */
+	ifp = netdev_priv(cfg_to_ndev(cfg));
 
 	brcmf_dbg(INFO, "adding vif \"%s\" (type=%d)\n", name, type);
 

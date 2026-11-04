@@ -1628,8 +1628,10 @@ void brcmf_detach(struct device *dev)
 	brcmf_bus_change_state(bus_if, BRCMF_BUS_DOWN);
 	/* Stop event producers before draining their worker. */
 	brcmf_bus_stop(drvr->bus_if);
-	/* Drain IF events before their interfaces and protocol state go away. */
-	brcmf_fweh_detach(drvr);
+	/* Drain IF events before their interfaces and protocol state go away.
+	 * fweh itself stays allocated until the interfaces are removed below.
+	 */
+	brcmf_fweh_detach_events(drvr);
 	if (drvr->config)
 		brcmf_cfg80211_awdl_stop(drvr->config);
 	/* make sure primary interface removed last */
@@ -1660,6 +1662,13 @@ void brcmf_detach(struct device *dev)
 		wiphy_unlock(drvr->wiphy);
 		rtnl_unlock();
 	}
+
+	/* Wait out any P2P create that passed its bus check: it uses fweh
+	 * until it drops the wiphy lock.
+	 */
+	wiphy_lock(drvr->wiphy);
+	wiphy_unlock(drvr->wiphy);
+	brcmf_fweh_detach(drvr);
 
 	brcmf_proto_detach(drvr);
 
