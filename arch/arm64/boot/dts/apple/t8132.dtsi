@@ -552,7 +552,7 @@
 
 		pcie0_dart: iommu@490000000 {
 			compatible = "apple,t8132-dart", "apple,t8110-dart";
-			reg = <0x4 0x90000000 0x0 0x4000>;
+			reg = <0x4 0x90000000 0x0 0xc000>;
 			#iommu-cells = <1>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1232 IRQ_TYPE_LEVEL_HIGH>;
@@ -562,7 +562,7 @@
 
 		pcie1_dart: iommu@491000000 {
 			compatible = "apple,t8132-dart", "apple,t8110-dart";
-			reg = <0x4 0x91000000 0x0 0x4000>;
+			reg = <0x4 0x91000000 0x0 0xc000>;
 			#iommu-cells = <1>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1236 IRQ_TYPE_LEVEL_HIGH>;
@@ -572,7 +572,7 @@
 
 		pcie2_dart: iommu@492000000 {
 			compatible = "apple,t8132-dart", "apple,t8110-dart";
-			reg = <0x4 0x92000000 0x0 0x4000>;
+			reg = <0x4 0x92000000 0x0 0xc000>;
 			#iommu-cells = <1>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1250 IRQ_TYPE_LEVEL_HIGH>;
