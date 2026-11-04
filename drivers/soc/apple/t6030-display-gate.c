@@ -1741,6 +1741,19 @@ static int __init gate_t8122_dcpext_setup(char *arg)
 }
 early_param("apple_t8122_display.dcpext", gate_t8122_dcpext_setup);
 
+/*
+ * Experiment (J615): apple_t8122_display.dcpext_disp_dart=0 enables dcpext
+ * without appending its display DART to the display subsystem's iommus, to
+ * tell whether that shared domain is what faults the internal DCP's DART.
+ */
+static bool gate_t8122_dcpext_disp_dart __initdata = true;
+
+static int __init gate_t8122_dcpext_disp_dart_setup(char *arg)
+{
+	return kstrtobool(arg, &gate_t8122_dcpext_disp_dart);
+}
+early_param("apple_t8122_display.dcpext_disp_dart", gate_t8122_dcpext_disp_dart_setup);
+
 /* The most display crossbars a T8122 dcpext's routes switch: ATC0's and ATC1's. */
 #define GATE_T8122_XBARS	2
 
@@ -1911,8 +1924,11 @@ static void __init gate_t8122_dcpext_one(struct device_node *np)
 		ret = of_changeset_update_prop_string(cs, np, "status", "okay");
 	if (!ret)
 		ret = gate_ext_routes(cs, np, "okay");
-	if (!ret)
+	if (!ret && gate_t8122_dcpext_disp_dart)
 		ret = gate_display_add_dart(cs, disp_dart);
+	else if (!ret)
+		gate_info("%pOF: display DART %pOF not added to the display subsystem (dcpext_disp_dart=0)\n",
+			  np, disp_dart);
 	if (!ret)
 		ret = of_changeset_apply(cs);
 	if (ret) {
