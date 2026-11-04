@@ -329,8 +329,10 @@ static int isp_ch_cache_sensor_configs(struct apple_isp *isp, u32 ch, u32 count)
 			    preset->input_dim.x == config->in_width &&
 			    preset->input_dim.y == config->in_height &&
 			    !preset->crop_offset.x && !preset->crop_offset.y &&
-			    preset->crop_size.x == preset->output_dim.x &&
-			    preset->crop_size.y == preset->output_dim.y)
+			    /* Same aspect ratio, never enlarged: the scaler may shrink it. */
+			    preset->crop_size.x >= preset->output_dim.x &&
+			    preset->crop_size.x * preset->output_dim.y ==
+			    preset->crop_size.y * preset->output_dim.x)
 				preset->p010 = preview || reported;
 		}
 		if (!cached->usable)
