@@ -209,8 +209,8 @@ pub(crate) struct Config {
 pub(crate) struct CoreLayout {
     /// The measured cluster and enabled core counts; `None` admits every configuration.
     pub(crate) cores: Option<(u32, u32)>,
-    /// An additional observed layout: core slots per cluster and enabled masks.
-    pub(crate) alternate_core_masks: Option<(u32, &'static [u32])>,
+    /// An experimental layout: core slots and enabled cores per cluster.
+    pub(crate) alternate_core_masks: Option<(u32, u32)>,
     /// A compute queue's operand-state buffer.
     pub(crate) operand_state: fw::compute::OperandState,
     /// A render's deflake buffer.
@@ -1212,8 +1212,10 @@ impl Gpu {
         let alternate = cfg.core_layout.cores.is_some_and(|(clusters, cores)| {
             clusters == id.num_clusters
                 && cores != active_cores
-                && cfg.core_layout.alternate_core_masks.is_some_and(|(slots, masks)| {
-                    id.num_cores == slots && id.core_masks.as_slice() == masks
+                && cfg.core_layout.alternate_core_masks.is_some_and(|(slots, enabled)| {
+                    id.num_cores == slots
+                        && id.core_masks.len() == clusters as usize
+                        && id.core_masks.iter().all(|mask| mask.count_ones() == enabled)
                 })
         });
         if cfg
@@ -1233,7 +1235,7 @@ impl Gpu {
         if alternate {
             dev_warn!(
                 dev.as_ref(),
-                "Experimental GPU layout: command-buffer offsets are not yet validated\n"
+                "Experimental GPU topology admission: command-buffer offsets are not yet validated\n"
             );
         }
         let shared = Arc::pin_init(

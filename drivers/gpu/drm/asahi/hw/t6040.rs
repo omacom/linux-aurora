@@ -102,9 +102,9 @@ pub(crate) const CONFIG: Config = Config {
     // Measured on the 20-core M4 Pro; the alternative below remains experimental.
     core_layout: CoreLayout {
         cores: Some((2, 20)),
-        // The observed 16-core M4 Pro reports two clusters with ten slots each.
+        // Admit two clusters of ten slots with eight enabled cores in each cluster.
         // Reusing the measured 20-core buffers on it remains experimental.
-        alternate_core_masks: Some((10, &[0x3db, 0x3db])),
+        alternate_core_masks: Some((10, 8)),
         operand_state: fw::compute::OperandState::TWO_BY_TEN,
         deflake: fw::render::Deflake::TWO_CLUSTERS,
     },
