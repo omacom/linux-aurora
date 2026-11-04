@@ -105,6 +105,7 @@ static const struct dcp_v14_board dcp_v14_board_t6030 = {
 	.handoff = "apple,t6030-handoff",
 	.promotion = true,
 	.panel_nits = true,
+	.swap_timestamps = true,
 };
 
 /*
