@@ -33,7 +33,8 @@ impl Layout {
     /// auxiliary framebuffer, each on its own page above the store's extent. With the
     /// two-cluster store the three end at 64 KiB; with the G17D's eight-cluster store at
     /// 80 KiB. The host writes the viewport words into the state
-    /// stream.
+    /// stream, except with the G17D forms: there the stream is the hardware's, which overwrites it
+    /// when a pass is stored, and the host leaves the store alone.
     const fn m5_for(store: ContextStore, host_viewport: bool) -> Self {
         let page = mmu::UAT_PGSZ;
         let status = store.extent.div_ceil(page) * page;
@@ -47,7 +48,8 @@ impl Layout {
 
     /// The selected board's M5 layout.
     pub(in crate::g17) fn m5() -> Self {
-        Self::m5_for(ContextStore::selected(), true)
+        // STUB(G): super::compute::g17d_forms.
+        Self::m5_for(ContextStore::selected(), !crate::g17::fw::m5::topology::g17d_forms())
     }
 
     pub(in crate::g17) fn prepare(self, state: &mut [u8], pass: &RenderPass) -> Result {
@@ -72,7 +74,7 @@ const _: () = {
     let two = Layout::m5_for(ContextStore::of(2), true);
     assert!(two.bytes == 0x10000 && two.status == 0x4000 && two.auxiliary == 0x8000);
     assert!(matches!(two.viewport, Some(0x9c0)));
-    let eight = Layout::m5_for(ContextStore::of(8), true);
+    let eight = Layout::m5_for(ContextStore::of(8), false);
     assert!(eight.bytes == 0x14000 && eight.status == 0x8000 && eight.auxiliary == 0xc000);
 };
 
