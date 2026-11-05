@@ -303,7 +303,14 @@ pub(super) fn service<H: Host>(
 
     let (listed, exact, fallback) = (entries.listed, entries.exact, entries.fallback);
     let (cancelled, blame, leftover) = classify(host, entries, request.blamed, attribution);
-    if listed != 0 {
+    if listed != 0 && host.is_m5() {
+        // The M5 table only classifies (read_entries): each command is retired from its own
+        // queue's records, replayed when it never ran.
+        pr_warn!(
+            "G17: GPU recovery: {} commands were in flight; each is retired from its own queue's records\n",
+            listed
+        );
+    } else if listed != 0 {
         pr_warn!(
             "G17: GPU recovery: {} commands were in flight ({} matched by stamp, {} by queue); they fail instead of completing\n",
             listed,
