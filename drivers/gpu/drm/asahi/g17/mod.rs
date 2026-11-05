@@ -2224,12 +2224,14 @@ impl gpu::Gpu for Gpu {
             .new_vm(self.ids.vm.next(), kernel_range)?
             .with_status()?;
         if self.cfg.profile.is_m5() {
-            // The canonical arena the client's queues alias and the client-private one stay
-            // reserved against userspace binds from creation, so no bind replaces a kernel alias
-            // the firmware reads.
+            // The canonical arena the client's queues alias, the client-private one and the
+            // compact window, where the kernel places the parameter buffers' page lists, render
+            // targets, scratch and metrics records, stay reserved against userspace binds from
+            // creation, so no bind replaces a kernel alias the firmware reads. The client's own
+            // kernel range need not cover the compact window.
             let ranges = firmware.uat.m5_client_reserved_ranges();
-            let mut reserved = KVec::with_capacity(ranges.len(), GFP_KERNEL)?;
-            for range in ranges {
+            let mut reserved = KVec::with_capacity(ranges.len() + 1, GFP_KERNEL)?;
+            for range in Iterator::chain(ranges.into_iter(), [buffer::BlockGeometry::M5_COMPACT]) {
                 reserved.push(range, GFP_KERNEL)?;
             }
             vm.install_driver_mappings(KVec::new(), reserved)?;

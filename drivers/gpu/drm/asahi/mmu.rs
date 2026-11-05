@@ -3693,8 +3693,9 @@ impl Uat {
         }
     }
 
-    /// Ranges an M5 client VM keeps from userspace binds, even while they hold
-    /// nothing: the canonical arena its queues alias and the client-private one.
+    /// The MMU's arenas an M5 client VM keeps from userspace binds, even while they
+    /// hold nothing: the canonical arena its queues alias and the client-private one.
+    /// The client VM also reserves the compact window (`BlockGeometry::M5_COMPACT`).
     pub(crate) fn m5_client_reserved_ranges(&self) -> [Range<u64>; 2] {
         [layout::CANONICAL_RANGE, layout::CLIENT_PRIVATE_RANGE]
     }
