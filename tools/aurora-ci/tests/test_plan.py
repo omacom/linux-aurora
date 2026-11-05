@@ -131,6 +131,38 @@ class TrustedAuthorTest(TempDirTestCase):
                                                     label="ci:build"), vouched=self.vouched)
         self.assertEqual(labeled["tier"], "full")
 
+    def test_vouched_fork_names_the_runner(self):
+        vouched = {"team": "vouched"}
+        for event in (pull_request("synchronize", fork=True, author="team"),
+                      pull_request("labeled", labels=["ci:build"], fork=True, label="ci:build",
+                                   author="team", draft=True)):
+            with self.subTest(action=event["action"]):
+                result = plan("pull_request", event, vouched=vouched)
+                self.assertEqual(result["tier"], "full")
+                self.assertEqual(json.loads(result["runner"]),
+                                 ["namespace-profile-arm64-linux-apple-aurora"])
+
+    def test_no_other_pull_request_names_a_runner(self):
+        vouched = {"team": "vouched", "gone": "denounced"}
+        cases = {
+            "same repository": pull_request("synchronize", author="team"),
+            "unknown fork": pull_request("synchronize", fork=True),
+            "maintainer label on an unknown fork": pull_request(
+                "labeled", labels=["ci:build"], fork=True, label="ci:build", sender="team"),
+            "unknown maintainer label on a team fork": pull_request(
+                "labeled", labels=["ci:build"], fork=True, label="ci:build", author="team",
+                sender="outsider"),
+            "outsider's push to a team fork": pull_request(
+                "synchronize", fork=True, author="team", sender="outsider"),
+            "draft team fork": pull_request("synchronize", fork=True, author="team", draft=True),
+            "denounced fork": pull_request(
+                "labeled", labels=["ci:build"], fork=True, label="ci:build", author="gone",
+                sender="team"),
+        }
+        for name, event in cases.items():
+            with self.subTest(name):
+                self.assertEqual(plan("pull_request", event, vouched=vouched)["runner"], "")
+
     def test_denouncement_overrides_access_and_label(self):
         for event in (pull_request("synchronize", author="banned", association="COLLABORATOR"),
                       pull_request("labeled", labels=["ci:build"], label="ci:build", author="Revoked"),
@@ -184,6 +216,15 @@ class OtherEventsTest(TempDirTestCase):
     def test_unknown_event_is_an_error(self):
         with self.assertRaises(ValueError):
             plan("issue_comment", {})
+
+
+class OtherEventsRunnerTest(TempDirTestCase):
+    def test_no_run_of_the_branch_names_a_runner(self):
+        for name, event in (("schedule", {}), ("workflow_dispatch", {}),
+                            ("push", {"after": HEAD, "ref": "refs/heads/integration/aurora"}),
+                            ("merge_group", {"merge_group": {"base_sha": BASE, "head_sha": HEAD}})):
+            with self.subTest(name):
+                self.assertEqual(plan(name, event)["runner"], "")
 
 
 class MainTest(TempDirTestCase):
