@@ -83,6 +83,7 @@ static DEFINE_MUTEX(apple_g15_display_lock);
 static struct device *apple_t6030_display;
 static struct device *apple_t6031_display;
 static struct device *apple_t8132_display;
+static struct device *apple_t6034_display;
 
 /* The publication slot of a G15/G16 SoC's internal display subsystem, or NULL. */
 static struct device **apple_g15_display_slot(struct device *dev)
@@ -93,6 +94,8 @@ static struct device **apple_g15_display_slot(struct device *dev)
 		return &apple_t6031_display;
 	if (of_device_is_compatible(dev->of_node, "apple,t8132-display-subsystem"))
 		return &apple_t8132_display;
+	if (of_device_is_compatible(dev->of_node, "apple,t6034-display-subsystem"))
+		return &apple_t6034_display;
 	return NULL;
 }
 
@@ -165,6 +168,15 @@ int apple_drm_t8132_link_device(struct device *consumer)
 				     &apple_t8132_display);
 }
 EXPORT_SYMBOL_GPL(apple_drm_t8132_link_device);
+
+int apple_drm_t6034_link_device(struct device *consumer)
+{
+	if (!of_machine_is_compatible("apple,j514m"))
+		return -ENODEV;
+	return apple_g15_link_device(consumer, "apple,t6034", "apple,agx-t6034",
+				     &apple_t6034_display);
+}
+EXPORT_SYMBOL_GPL(apple_drm_t6034_link_device);
 
 DEFINE_DRM_GEM_DMA_FOPS(apple_fops);
 
@@ -1954,6 +1966,7 @@ static const struct of_device_id of_match[] = {
 	{ .compatible = "apple,t6030-display-subsystem" },
 	{ .compatible = "apple,t8122-display-subsystem" },
 	{ .compatible = "apple,t6031-display-subsystem" },
+	{ .compatible = "apple,t6034-display-subsystem" },
 #if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T8132)
 	{ .compatible = "apple,t8132-display-subsystem" },
 	/* Accept the qualified handoff emitted by the existing boot loader. */

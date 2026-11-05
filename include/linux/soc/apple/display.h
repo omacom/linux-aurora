@@ -8,5 +8,6 @@ struct device;
 int apple_drm_t6030_link_device(struct device *consumer);
 int apple_drm_t6031_link_device(struct device *consumer);
 int apple_drm_t8132_link_device(struct device *consumer);
+int apple_drm_t6034_link_device(struct device *consumer);
 
 #endif
