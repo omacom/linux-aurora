@@ -298,6 +298,33 @@ impl Queue {
         }
     }
 
+    /// Returns the raw `struct workqueue_struct` pointer, for C interfaces that take a queue.
+    pub fn as_raw(&self) -> *mut bindings::workqueue_struct {
+        self.0.get()
+    }
+
+    /// Enqueues a work item on `cpu`.
+    ///
+    /// This may fail if the work item is already enqueued in a workqueue.
+    ///
+    /// On a per-CPU queue the work item runs on `cpu`. On an unbound queue `cpu` only selects the
+    /// affinity pod (for example the CPU's last-level cache) whose worker runs it, so the
+    /// scheduler may pick another CPU of that pod.
+    pub fn enqueue_on<W, const ID: u64>(&self, cpu: crate::cpu::CpuId, w: W) -> W::EnqueueOutput
+    where
+        W: RawWorkItem<ID> + Send + 'static,
+    {
+        let queue_ptr = self.0.get();
+
+        // SAFETY: As for `enqueue`. `cpu` is a valid CPU ID by its type invariant, which is what
+        // `queue_work_on` requires in place of `WORK_CPU_UNBOUND`.
+        unsafe {
+            w.__enqueue(move |work_ptr| {
+                bindings::queue_work_on(cpu.as_u32() as ffi::c_int, queue_ptr, work_ptr)
+            })
+        }
+    }
+
     /// Enqueues a delayed work item.
     ///
     /// This may fail if the work item is already enqueued in a workqueue.
@@ -374,17 +401,23 @@ impl<T: FnOnce()> WorkItem for ClosureWork<T> {
 
 /// A work queue owned by the caller.
 ///
-/// Wraps a `struct workqueue_struct` allocated with `alloc_ordered_workqueue()`. It dereferences
-/// to a [`Queue`], so work items are enqueued on it exactly like on the system queues. Dropping it
-/// calls `destroy_workqueue()`, which waits for every pending work item to finish first.
+/// Wraps a `struct workqueue_struct` allocated with `alloc_ordered_workqueue()` or, for an
+/// unbound queue, `alloc_workqueue(WQ_UNBOUND)`. It dereferences to a [`Queue`], so work items
+/// are enqueued on it exactly like on the system queues. Dropping it calls `destroy_workqueue()`,
+/// which waits for every pending work item to finish first.
 ///
-/// An owned queue gives a driver two things the system queues do not: its work items run one at a
-/// time in queueing order, and the driver can wait for all of them at once (see [`drain`]) before
-/// it tears down the state they use.
+/// An ordered owned queue gives a driver two things the system queues do not: its work items run
+/// one at a time in queueing order, and the driver can wait for all of them at once (see
+/// [`drain`]) before it tears down the state they use. An unbound owned queue runs its work items
+/// in the affinity pod of the CPU they are queued for (see [`Queue::enqueue_on`]), and either kind
+/// can be restricted to a set of CPUs (see [`restrict`]).
 ///
 /// # Invariants
 ///
-/// The pointer is valid and points at a workqueue allocated by `alloc_ordered_workqueue()`.
+/// `queue` is valid and points at a workqueue allocated by `alloc_ordered_workqueue()` when
+/// `ordered` is set, or by `alloc_workqueue(WQ_UNBOUND)` with `WQ_HIGHPRI` when `highpri` is set.
+///
+/// [`restrict`]: OwnedQueue::restrict
 ///
 /// # Examples
 ///
@@ -422,7 +455,11 @@ impl<T: FnOnce()> WorkItem for ClosureWork<T> {
 /// ```
 ///
 /// [`drain`]: OwnedQueue::drain
-pub struct OwnedQueue(NonNull<bindings::workqueue_struct>);
+pub struct OwnedQueue {
+    queue: NonNull<bindings::workqueue_struct>,
+    ordered: bool,
+    highpri: bool,
+}
 
 impl OwnedQueue {
     /// Allocates an ordered workqueue named `name`.
@@ -431,11 +468,52 @@ impl OwnedQueue {
     /// they were queued, by an unbound worker. The name is copied by the kernel and appears in the
     /// worker's thread name.
     pub fn new_ordered(name: &CStr) -> Result<Self> {
+        Self::ordered(name, 0)
+    }
+
+    /// Allocates an ordered workqueue named `name` that may be used on the memory reclaim path
+    /// (`WQ_MEM_RECLAIM`), such as a GPU scheduler's submission queue.
+    pub fn new_ordered_reclaim(name: &CStr) -> Result<Self> {
+        Self::ordered(name, bindings::wq_flags_WQ_MEM_RECLAIM)
+    }
+
+    fn ordered(name: &CStr, flags: u32) -> Result<Self> {
         // SAFETY: `name` is a valid NUL-terminated string; the C side copies it.
-        let ptr = unsafe { bindings::alloc_ordered_workqueue(name.as_char_ptr(), 0) };
+        let ptr = unsafe { bindings::alloc_ordered_workqueue(name.as_char_ptr(), flags) };
 
         // INVARIANT: `alloc_ordered_workqueue()` returns a valid workqueue or NULL.
-        Ok(Self(NonNull::new(ptr).ok_or(ENOMEM)?))
+        Ok(Self {
+            queue: NonNull::new(ptr).ok_or(ENOMEM)?,
+            ordered: true,
+            highpri: false,
+        })
+    }
+
+    /// Allocates an unbound workqueue named `name`, with high-priority workers if `highpri`.
+    ///
+    /// Its work items run concurrently, each in the affinity pod of the CPU it is queued for.
+    pub fn new_unbound(name: &CStr, highpri: bool) -> Result<Self> {
+        // SAFETY: `name` is a valid NUL-terminated string; the C side copies it.
+        let ptr = unsafe { bindings::alloc_unbound_workqueue(name.as_char_ptr(), highpri) };
+
+        // INVARIANT: The helper returns a valid unbound workqueue, high priority if asked, or NULL.
+        Ok(Self {
+            queue: NonNull::new(ptr).ok_or(ENOMEM)?,
+            ordered: false,
+            highpri,
+        })
+    }
+
+    /// Restricts the queue's workers to the CPUs in `cpus`.
+    ///
+    /// An ordered queue stays ordered and a high-priority one keeps its priority. Allocates, so it
+    /// must be called from a context that may sleep.
+    pub fn restrict(&self, cpus: &crate::cpumask::Cpumask) -> Result {
+        // SAFETY: The queue is a valid unbound workqueue by the type invariant and `cpus` is a
+        // valid mask; the helper copies it.
+        crate::error::to_result(unsafe {
+            bindings::workqueue_restrict(self.queue.as_ptr(), cpus.as_raw(), self.ordered, self.highpri)
+        })
     }
 
     /// Waits until the workqueue is empty.
@@ -446,7 +524,7 @@ impl OwnedQueue {
     /// stop every other producer before draining. Must be called from a context that may sleep.
     pub fn drain(&self) {
         // SAFETY: The pointer is valid by the type invariant.
-        unsafe { bindings::drain_workqueue(self.0.as_ptr()) };
+        unsafe { bindings::drain_workqueue(self.queue.as_ptr()) };
     }
 }
 
@@ -456,7 +534,7 @@ impl Deref for OwnedQueue {
     fn deref(&self) -> &Queue {
         // SAFETY: The pointer is valid by the type invariant and stays valid for as long as `self`
         // does, which bounds the returned reference.
-        unsafe { Queue::from_raw(self.0.as_ptr()) }
+        unsafe { Queue::from_raw(self.queue.as_ptr()) }
     }
 }
 
@@ -464,7 +542,7 @@ impl Drop for OwnedQueue {
     fn drop(&mut self) {
         // SAFETY: The pointer is valid by the type invariant. `destroy_workqueue()` drains the
         // queue before freeing it, so no work item can run on a freed queue.
-        unsafe { bindings::destroy_workqueue(self.0.as_ptr()) };
+        unsafe { bindings::destroy_workqueue(self.queue.as_ptr()) };
     }
 }
 
