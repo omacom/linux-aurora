@@ -54,7 +54,9 @@ fn main() {
  assert!(c.firmware.is_empty());
  assert_eq!((c.compute.tail,c.compute.ptc,c.compute.dupm),(0x2980,0x6000400020,0x3c000000140));
  assert_eq!((c.compute.tail,c.compute.ptc,c.compute.dupm),(t6031::CONFIG.compute.tail,t6031::CONFIG.compute.ptc,t6031::CONFIG.compute.dupm));
- let mask=0x7b5ed7f5fdu64;
+ let mask=0x7b5fc7f5fdu64;
+ let masks:Vec<_>=(0..4).map(|i|(mask>>(10*i))&1023).collect();
+ assert_eq!(masks,[0x1fd,0x1fd,0x1fc,0x1ed]);
  let counts:Vec<_>=(0..4).map(|i|((mask>>(10*i))&1023).count_ones()).collect();
  assert_eq!(counts,[8,8,7,7]);
  let maps=c.layout.iomaps;let records=c.layout.record_slots;
