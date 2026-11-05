@@ -183,6 +183,8 @@ pub(crate) struct IoSlot {
 
 /// Everything the record is built from.
 pub(crate) struct Inputs<'a> {
+    /// SoC identity of this G15C record.
+    pub(crate) chip_id: u32,
     pub(crate) props: [u32; PROPS.len()],
     /// `apple,power-zones` cells (triples).
     pub(crate) zones: &'a [u32],
@@ -458,7 +460,7 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         put32(out, IOMAPS + 32 * slot as usize + 0x18, 1)?;
     }
     // Identity and flags.
-    put32(out, 0xa28, 0x6031)?;
+    put32(out, 0xa28, i.chip_id)?;
     put32(out, 0xa2c, 1)?;
     put32(out, 0xa30, 2)?;
     for at in [0xa38, 0xa3c, 0xa40, 0xa50, 0xa58, 0xa60] {
@@ -848,6 +850,9 @@ pub(crate) fn cross_check(built: &[u8], file: &[u8]) -> Option<(usize, u32, u32)
 
 /// Builds the record into `out` (zeroed first) from the inputs.
 pub(crate) fn build(out: &mut [u8], i: &Inputs<'_>) -> R<()> {
+    if !matches!(i.chip_id, 0x6031 | 0x6034) {
+        return Err("unsupported G15C record SoC");
+    }
     if out.len() != SIZE {
         return Err("record of another size");
     }
@@ -950,6 +955,7 @@ mod tests {
 
     fn inputs<'a>(main: &'a [Opp], cs: &'a [Opp], slots: &'a [IoSlot]) -> Inputs<'a> {
         Inputs {
+            chip_id: 0x6031,
             props: props(),
             zones: &[],
             main,
@@ -964,6 +970,31 @@ mod tests {
             sensor_rows: rows(),
             reference: &TEST_REFERENCE,
         }
+    }
+
+    #[test]
+    fn t6034_identity_and_six_memory_channels() {
+        let main = main_opps();
+        let cs = [opp(24, [635; CLUSTERS])];
+        let slots = [IoSlot {
+            slot: 11,
+            pa: 0x220000000,
+            va: 0xfffffc2068000000,
+            total: 6 * 0xd8000,
+            element: 0xd8000,
+            writable: true,
+        }];
+        let mut input = inputs(&main, &cs, &slots);
+        input.chip_id = 0x6034;
+        let mut out = vec![0u8; SIZE];
+        build(&mut out, &input).unwrap();
+        assert_eq!(get(&out, 0xa28), 0x6034);
+        assert_eq!(get(&out, IOMAPS + 32 * 11 + 0x10), 6 * 0xd8000);
+        assert_eq!(get(&out, IOMAPS + 32 * 11 + 0x14), 0xd8000);
+        // The fused 30-core part still has four ten-slot physical clusters.
+        assert_eq!(get(&out, 0xb54), 40);
+        input.chip_id = 0x6030;
+        assert_eq!(build(&mut out, &input), Err("unsupported G15C record SoC"));
     }
 
     #[test]
@@ -1500,6 +1531,7 @@ mod tests {
             })
             .collect();
         let i = Inputs {
+            chip_id: 0x6031,
             props,
             zones: &zones,
             main: &main,

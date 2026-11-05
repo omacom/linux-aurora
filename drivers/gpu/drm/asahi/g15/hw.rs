@@ -9,6 +9,8 @@ use core::ops::Range;
 
 #[cfg(CONFIG_DRM_ASAHI_G15)]
 pub(crate) mod t6031;
+#[cfg(CONFIG_DRM_ASAHI_G15)]
+pub(crate) mod t6034;
 
 /// Identification register values of a qualified G15S.
 pub(crate) struct HwId {

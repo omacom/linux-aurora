@@ -97,7 +97,14 @@ pub(crate) fn firmware(
     let qualified = builds
         .iter()
         .map(|b| (Measured::from(b), b.machine.map_or(true, glue::machine)));
-    match lookup::verdict(&m, qualified, super::params::accept_text_prefix()) {
+    // An incomplete SoC profile is measurement-only, even if a generic
+    // bring-up prefix remains on the command line. It must first pin a build.
+    let accept_prefix = if builds.is_empty() {
+        0
+    } else {
+        super::params::accept_text_prefix()
+    };
+    match lookup::verdict(&m, qualified, accept_prefix) {
         Verdict::Pinned(i) => {
             let build = builds.get(i).ok_or(EINVAL)?;
             dev_info!(dev, "GPU firmware build: {}\n", build.name);

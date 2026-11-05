@@ -139,7 +139,7 @@ impl Config {
 }
 
 /// OF match table of the G15 platform driver.
-const OF_TABLE: kernel::device_id::IdArray<of::DeviceId, &'static Config, 2> =
+const OF_TABLE: kernel::device_id::IdArray<of::DeviceId, &'static Config, 3> =
     kernel::device_id::IdArray::new([
         (
             of::DeviceId::new(c_str!("apple,agx-t6030")),
@@ -148,6 +148,10 @@ const OF_TABLE: kernel::device_id::IdArray<of::DeviceId, &'static Config, 2> =
         (
             of::DeviceId::new(c_str!("apple,agx-t6031")),
             &&hw::t6031::CONFIG,
+        ),
+        (
+            of::DeviceId::new(c_str!("apple,agx-t6034")),
+            &&hw::t6034::CONFIG,
         ),
     ]);
 
@@ -159,6 +163,7 @@ kernel::of_device_table!(
     [
         of::DeviceId::new(c_str!("apple,agx-t6030")),
         of::DeviceId::new(c_str!("apple,agx-t6031")),
+        of::DeviceId::new(c_str!("apple,agx-t6034")),
     ]
 );
 
