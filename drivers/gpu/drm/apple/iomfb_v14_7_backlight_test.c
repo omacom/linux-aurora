@@ -122,13 +122,14 @@ static bool v14_bl_ctx_machine_is(const void *ctx, const char *compat)
 	return !strcmp(((const char *const *)ctx)[1], compat);
 }
 
-/* Only admitted T6030, J516C and J613 internal panels carry levels. */
+/* Only admitted T6030, J516C, J613 and J504 internal panels carry levels. */
 static void v14_bl_boards(struct kunit *test)
 {
 	static const char *const t6030_j516s[] = { "apple,t6030-dcp", "apple,j516s" };
 	static const char *const t6030_j514s[] = { "apple,t6030-dcp", "apple,j514s" };
 	static const char *const j613[] = { "apple,t8122-dcp", "apple,j613" };
 	static const char *const j615[] = { "apple,t8122-dcp", "apple,j615" };
+	static const char *const j504[] = { "apple,t8122-dcp", "apple,j504" };
 	static const char *const j516c[] = { "apple,t6031-dcp", "apple,j516c" };
 	static const char *const other_t6030[] = { "apple,t6030-dcp", "apple,other" };
 	const struct dcp_v14_board *board;
@@ -156,6 +157,11 @@ static void v14_bl_boards(struct kunit *test)
 	board = dcp_v14_board_select(v14_bl_ctx_dcp_is, v14_bl_ctx_machine_is, j615, &known);
 	KUNIT_ASSERT_NOT_NULL(test, board);
 	KUNIT_EXPECT_FALSE(test, board->panel_nits);
+	board = dcp_v14_board_select(v14_bl_ctx_dcp_is, v14_bl_ctx_machine_is, j504, &known);
+	KUNIT_ASSERT_NOT_NULL(test, board);
+	KUNIT_EXPECT_TRUE(test, board->panel_nits);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j504));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j615));
 	board = dcp_v14_board_select(v14_bl_ctx_dcp_is, v14_bl_ctx_machine_is, j516c, &known);
 	KUNIT_ASSERT_NOT_NULL(test, board);
 	KUNIT_EXPECT_TRUE(test, board->panel_nits);
