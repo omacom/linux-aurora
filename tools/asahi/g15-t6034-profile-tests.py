@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only OR MIT
-"""Compile the actual G15C profiles and test T6034 shape and measurement-only admission."""
+"""Compile actual G15C profiles and test T6034 shape and exact firmware admission.
+
+The diagnostic profile has no firmware row. Once a measured row is present,
+exercise its complete public identity and J514M binding without reading an image.
+"""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,6 +32,8 @@ pub mod str { pub type CStr = core::ffi::CStr; }
 #[macro_export] macro_rules! c_str { ($s:literal) => { $crate::c_str_const(concat!($s,"\0").as_bytes()) }; }
 const fn c_str_const(s: &[u8])->&core::ffi::CStr { unsafe { core::ffi::CStr::from_bytes_with_nul_unchecked(s) } }
 mod hw { pub enum GpuVariant { C } }
+#[path="@MATCHING@"] mod matching;
+#[path="@LOOKUP@"] mod lookup;
 mod g15 {
  use kernel::str::CStr;
  @CONFIG@
@@ -51,7 +57,35 @@ fn main() {
  assert_eq!((c.num_clusters,c.num_cores_per_cluster),(4,10));
  assert_eq!(c.gpu_revision,0x11);
  assert_eq!((c.hw_ids[0].version,c.hw_ids[0].counts),(0x07041100,0x0021040a));
- assert!(c.firmware.is_empty());
+ // An empty table is the first diagnostic build. A completed profile may
+ // contain only the measured row for this exact board.
+ assert_eq!(c.firmware.len(),1);
+ if !c.firmware.is_empty() {
+  use lookup::{Measured,Verdict};
+  assert_eq!(c.firmware.len(),1);
+  let b=&c.firmware[0];
+  assert_eq!(b.machine.map(|m|m.to_bytes()),Some(b"apple,j514m".as_slice()));
+  let exact=Measured {text_size:b.text_size,data_size:b.data_size,marker:b.marker,sha256:b.text_sha256};
+  let verdict=|measured:&Measured,board:&[u8]| {
+   let qualified=c.firmware.iter().map(|b| {
+    (Measured {text_size:b.text_size,data_size:b.data_size,marker:b.marker,sha256:b.text_sha256},
+     b.machine.is_some_and(|m|m.to_bytes()==board))
+   });
+   lookup::verdict(measured,qualified,0)
+  };
+  assert_eq!(verdict(&exact,b"apple,j514m"),Verdict::Pinned(0));
+  for board in [b"apple,j514c".as_slice(),b"apple,j516c",b"apple,j516m",b"apple,j514s",b"apple,j999"] {
+   assert_eq!(verdict(&exact,board),Verdict::Refused);
+  }
+  let mut changed=exact;changed.sha256[31]^=1;
+  assert_eq!(verdict(&changed,b"apple,j514m"),Verdict::Refused);
+  let mut changed=exact;changed.text_size+=0x4000;
+  assert_eq!(verdict(&changed,b"apple,j514m"),Verdict::Refused);
+  let mut changed=exact;changed.data_size+=0x4000;
+  assert_eq!(verdict(&changed,b"apple,j514m"),Verdict::Refused);
+  let mut changed=exact;changed.marker+=8;
+  assert_eq!(verdict(&changed,b"apple,j514m"),Verdict::Refused);
+ }
  assert_eq!((c.compute.tail,c.compute.ptc,c.compute.dupm),(0x2980,0x6000400020,0x3c000000140));
  assert_eq!((c.compute.tail,c.compute.ptc,c.compute.dupm),(t6031::CONFIG.compute.tail,t6031::CONFIG.compute.ptc,t6031::CONFIG.compute.dupm));
  let mask=0x7b5fc7f5fdu64;
@@ -73,7 +107,7 @@ fn main() {
  assert_eq!(t6031::IOMAPS.iter().find(|m|m.slot==11).unwrap().map_bytes,8*0xd8000);
 }
 '''
-for token,replacement in {'@CONFIG@':config,'@REFERENCE@':reference,'@VALUE@':value,'@TYPES@':types,'@T6031@':str(G15/'hw/t6031.rs'),'@T6034@':str(G15/'hw/t6034.rs')}.items():source=source.replace(token,replacement)
+for token,replacement in {'@CONFIG@':config,'@REFERENCE@':reference,'@VALUE@':value,'@TYPES@':types,'@T6031@':str(G15/'hw/t6031.rs'),'@T6034@':str(G15/'hw/t6034.rs'),'@MATCHING@':str(G15/'identity/matching.rs'),'@LOOKUP@':str(G15/'identity/lookup.rs')}.items():source=source.replace(token,replacement)
 identity=(G15/'identity.rs').read_text()
 # Run the production firmware admission against synthetic public identity bytes.
 firmware=item(identity,'pub(crate) fn firmware(')
@@ -108,12 +142,16 @@ mod identity {
  use super::*;
  FIRMWARE
 }
+static PINNED:[FirmwareBuild;1]=[FirmwareBuild {text_size:64,data_size:64,marker:16,text_sha256:[0x11;32],machine:Some("apple,j514m"),name:"synthetic pinned identity"}];
 static OTHER:[FirmwareBuild;1]=[FirmwareBuild {text_size:64,data_size:64,marker:16,text_sha256:[0x22;32],machine:None,name:"other"}];
 fn main() {
  let a=adt::GpuAdt{text:0x1000..0x1040,data:0x2000..0x2040};
- assert!(identity::firmware(&device::Device,&a,&[]).is_err());
+ assert!(identity::firmware(&device::Device,&a,&[],true).is_err());
  assert_eq!(PREFIX_READS.load(Ordering::Relaxed),0,"empty profile must not consult prefix escape hatch");
- assert!(identity::firmware(&device::Device,&a,&OTHER).unwrap().is_none(),"existing explicitly requested prefix behavior remains");
+ assert!(identity::firmware(&device::Device,&a,&PINNED,false).unwrap().is_some(),"pinned exact identity remains admitted with prefix disabled");
+ assert!(identity::firmware(&device::Device,&a,&OTHER,false).is_err(),"nonempty strict profile must reject a matching override prefix");
+ assert_eq!(PREFIX_READS.load(Ordering::Relaxed),0,"strict profiles never consult the prefix escape hatch");
+ assert!(identity::firmware(&device::Device,&a,&OTHER,true).unwrap().is_none(),"existing explicitly requested prefix behavior remains");
  assert_eq!(PREFIX_READS.load(Ordering::Relaxed),1);
 }
 '''

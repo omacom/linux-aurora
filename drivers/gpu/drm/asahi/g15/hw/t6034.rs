@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! J514M/T6034 (M3 Max, G15C) measurement profile.
+//! J514M/T6034 (M3 Max, G15C) measured boot-chain profile.
 //!
 //! The powered identity read on this J514M found four ten-slot clusters with
 //! enabled masks [0x1fd, 0x1fd, 0x1fc, 0x1ed], or 30 enabled cores. Its ADT has
@@ -9,12 +9,12 @@
 //! macOS capture of this machine. The J516C power/reference words remain
 //! unqualified for this board and are identified at admission.
 //!
-//! No loaded firmware digest has been measured by the kernel yet. An empty
-//! build list permits the normal admission path to report that identity and
-//! refuses firmware startup, including the generic prefix escape hatch.
+//! The loaded firmware identity below was measured after native display
+//! publication on J514M. Runtime and power/thermal qualification remain
+//! pending; this profile never permits the generic digest-prefix override.
 
 use super::super::Config;
-use super::{HwId, IoMap, Layout};
+use super::{FirmwareBuild, HwId, IoMap, Layout};
 
 /// Six memory-cache elements, rather than the T6031 reference's eight.
 const MCC_BYTES: u64 = 6 * 0xd_8000;
@@ -74,7 +74,18 @@ pub(crate) const CONFIG: Config = Config {
         version: 0x07041100,
         counts: 0x0021040a,
     }],
-    firmware: &[],
+    firmware: &[FirmwareBuild {
+        name: "J514M RTKit 2419.140.12 (runtime qualification pending)",
+        machine: Some(kernel::c_str!("apple,j514m")),
+        text_size: 0x64000,
+        data_size: 0x140000,
+        marker: 0x5cf28,
+        text_sha256: [
+                0x4c, 0xa2, 0x4b, 0x65, 0x8f, 0x8e, 0xbe, 0x7c, 0x27, 0x37, 0x5f, 0xdf, 0x38,
+                0xe4, 0x1e, 0x5d, 0xaf, 0x86, 0x32, 0x51, 0x50, 0x77, 0xb5, 0x37, 0xca, 0x19,
+                0xe6, 0xd0, 0xdc, 0x77, 0x04, 0xb7,
+        ],
+    }],
     machine: kernel::c_str!("apple,j514m"),
     platform: super::Platform::DeviceTree,
     layout: &LAYOUT,
