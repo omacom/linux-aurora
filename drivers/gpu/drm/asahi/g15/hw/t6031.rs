@@ -139,7 +139,7 @@ pub(crate) const CONFIG: Config = Config {
     firmware: &[
         FirmwareBuild {
             name: "macOS 14.7 stub firmware (iBoot-10151.140.19.700.2), J516C",
-            machine: None,
+            machine: Some(kernel::c_str!("apple,j516c")),
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -151,7 +151,7 @@ pub(crate) const CONFIG: Config = Config {
         },
         FirmwareBuild {
             name: "macOS 14.8 stub firmware, J516C",
-            machine: None,
+            machine: Some(kernel::c_str!("apple,j516c")),
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -161,11 +161,11 @@ pub(crate) const CONFIG: Config = Config {
                 0x9d, 0x6b, 0xcd, 0xa0, 0x26, 0xcf,
             ],
         },
-        // Measured by the normal driver on J514C's 14.7 boot chain. The
-        // board still needs explicit g15_j514c_bringup=1; runtime qualification
-        // is pending. Keep the full canonical digest and exact machine bound.
+        // Measured by the normal driver on J514C's 14.7 boot chain (system
+        // firmware 26.5.2). Short native GL/Vulkan and normal-login checks passed;
+        // power/thermal qualification remains open. Explicit bring-up opt-in only.
         FirmwareBuild {
-            name: "J514C macOS 14.7 boot-chain candidate (runtime qualification pending)",
+            name: "J514C macOS 14.7 boot-chain firmware (experimental bring-up)",
             machine: Some(kernel::c_str!("apple,j514c")),
             text_size: 0x64000,
             data_size: 0x140000,
