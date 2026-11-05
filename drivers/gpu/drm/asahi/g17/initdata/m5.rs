@@ -127,7 +127,7 @@ impl InitData {
                 fixed(pair.high, m::M5_25G76_COMPLETION_BACKING_SIZE, RW)?
             };
             let object = self.add(backing)?;
-            self.completion_rings[index] = object;
+            *self.completion_rings.get_mut(index).ok_or(EINVAL)? = Some(object);
             self.alias(object, uat.kernel_lower_vm(), pair.low, GPU)?;
         }
         m::encode_common26_aon_ptd(board, &mut self.object_mut(aon)?.bytes_mut()[..m::M5_AON_PTD_SIZE])

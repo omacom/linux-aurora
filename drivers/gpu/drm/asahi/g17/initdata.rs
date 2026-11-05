@@ -205,10 +205,12 @@ pub(super) struct InitData {
     compute_scheduler: Option<ComputeScheduler>,
     compute_active: core::cell::Cell<bool>,
     event_ring_checked: [core::cell::Cell<(u64, u64, u32)>; 2],
-    completion_rings: [usize; 4],
+    /// Completion-ring objects; a family sets only the rings it has.
+    completion_rings: [Option<usize>; 4],
     stamps: [usize; 2],
-    render_pages: usize,
-    render_runs: usize,
+    /// The G17P render page and run lists (client aliases). M5 has none.
+    render_pages: Option<usize>,
+    render_runs: Option<usize>,
     render_blocks: core::ops::Range<usize>,
 }
 
@@ -306,10 +308,10 @@ impl InitData {
             compute_scheduler: None,
             compute_active: core::cell::Cell::new(false),
             event_ring_checked: [const { core::cell::Cell::new((0, 0, 0)) }; 2],
-            completion_rings: [0; 4],
+            completion_rings: [None; 4],
             stamps: [0; 2],
-            render_pages: 0,
-            render_runs: 0,
+            render_pages: None,
+            render_runs: None,
             render_blocks: 0..0,
         }
     }
@@ -555,7 +557,7 @@ impl InitData {
         }
         for slot in 0..2 {
             mappings.push(
-                self.object(self.completion_rings[slot])?.map_alias(
+                self.object(self.completion_rings[slot].ok_or(EINVAL)?)?.map_alias(
                     vm,
                     low::COMPLETION_RINGS[slot],
                     mmu::PROT_GPU_SHARED_RW,
@@ -985,7 +987,7 @@ impl InitData {
         seen: &mut [u64],
         mut record: impl FnMut(ComputeCompletion<'_>) -> Result<CompletionFold>,
     ) -> Result<usize> {
-        let object = self.object(self.completion_rings[0])?;
+        let object = self.object(self.completion_rings[0].ok_or(EINVAL)?)?;
         if seen.len() != COMPUTE_COMPLETION_SLOTS {
             return Err(EINVAL);
         }
@@ -1011,7 +1013,7 @@ impl InitData {
         seen: &mut [u64],
         mut record: impl FnMut(ComputeCompletion<'_>) -> Result,
     ) -> Result<usize> {
-        let object = self.object(self.completion_rings[0])?;
+        let object = self.object(self.completion_rings[0].ok_or(EINVAL)?)?;
         if seen.len() != COMPUTE_COMPLETION_SLOTS {
             return Err(EINVAL);
         }
@@ -1247,8 +1249,8 @@ impl InitData {
                 WB,
             )?)?;
         }
-        self.render_pages = pages;
-        self.render_runs = runs;
+        self.render_pages = Some(pages);
+        self.render_runs = Some(runs);
         self.render_blocks = first_block..self.objects.len();
         self.alias(pages, env.render, low::RENDER_PAGE_LIST, GS)?;
         self.alias(runs, env.render, low::RENDER_RUN_LIST, GS)?;
@@ -1348,7 +1350,7 @@ impl InitData {
         for (slot, completion_ring) in completion_rings.iter_mut().enumerate() {
             let offset = high::BUNDLE + abi::bundle::COMPLETION_RINGS[slot] as u64;
             let ring = self.add(env.fixed(offset, abi::COMPLETION_RING_SIZE, FP, WB)?)?;
-            self.completion_rings[slot] = ring;
+            self.completion_rings[slot] = Some(ring);
             self.alias(ring, env.lower, low::COMPLETION_RINGS[slot], GS)?;
             *completion_ring = abi::CompletionRing {
                 low_va: low::COMPLETION_RINGS[slot],
@@ -1530,7 +1532,7 @@ impl InitData {
     ) -> Result<KVec<mmu::KernelMapping>> {
         let mut mappings = KVec::with_capacity(24, GFP_KERNEL)?;
         mappings.push(
-            self.object_mut(self.render_pages)?.map_alias(
+            self.object_mut(self.render_pages.ok_or(EINVAL)?)?.map_alias(
                 vm,
                 low::RENDER_PAGE_LIST,
                 mmu::PROT_GPU_SHARED_RW,
@@ -1538,7 +1540,7 @@ impl InitData {
             GFP_KERNEL,
         )?;
         mappings.push(
-            self.object_mut(self.render_runs)?.map_alias(
+            self.object_mut(self.render_runs.ok_or(EINVAL)?)?.map_alias(
                 vm,
                 low::RENDER_RUN_LIST,
                 mmu::PROT_GPU_SHARED_RW,
