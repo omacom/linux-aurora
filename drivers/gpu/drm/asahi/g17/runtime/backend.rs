@@ -349,6 +349,13 @@ impl job::Backend for Backend {
         };
     }
 
+    /// Not on M5: a job that does not finish within its watchdog interval fails then, however
+    /// recently other work retired. Its compute kill then follows the first expiry.
+    fn renews_shared(&self) -> bool {
+        let state = self.shared.state.lock();
+        (*state).as_deref().is_none_or(|firmware| !firmware.init.is_m5())
+    }
+
     fn long_job_beside(&self, _packet: &Arc<Packet>) -> bool {
         let state = self.shared.state.lock();
         let Some(firmware) = (*state).as_deref() else {
