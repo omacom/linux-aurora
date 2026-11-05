@@ -32,11 +32,18 @@ use kernel::{
 pub(crate) struct QosIds {
     #[pin]
     used: Mutex<u128>,
+    /// IDs released since the firmware's QoS table last had their rows cleared
+    /// (`take_released`). Locked after `used`.
+    #[pin]
+    released: Mutex<u128>,
 }
 impl QosIds {
     pub(crate) fn new() -> Result<Arc<Self>> {
         Arc::pin_init(
-            pin_init!(Self { used <- new_mutex!(3, "G17 QoS IDs") }),
+            pin_init!(Self {
+                used <- new_mutex!(3, "G17 QoS IDs"),
+                released <- new_mutex!(0, "G17 released QoS IDs"),
+            }),
             GFP_KERNEL,
         )
     }
@@ -47,6 +54,8 @@ impl QosIds {
             return Err(super::capacity::refused(super::capacity::Site::QosIds));
         }
         *used |= 1u128 << id;
+        // A new owner writes its own scheduler row at its first publication.
+        *self.released.lock() &= !(1u128 << id);
         Ok(QosLease {
             ids: self.clone(),
             id: id as u8,
@@ -59,7 +68,9 @@ struct QosLease {
 }
 impl Drop for QosLease {
     fn drop(&mut self) {
-        *self.ids.used.lock() &= !(1u128 << self.id);
+        let mut used = self.ids.used.lock();
+        *used &= !(1u128 << self.id);
+        *self.ids.released.lock() |= 1u128 << self.id;
     }
 }
 
@@ -689,6 +700,15 @@ impl Context {
 impl QosIds {
     pub(crate) fn used(&self) -> u32 {
         (*self.used.lock() & !3u128).count_ones()
+    }
+    /// The IDs released, and not taken again, since the last call: their rows in the
+    /// firmware's QoS table still name the released context's scheduler page.
+    pub(crate) fn take_released(&self) -> u128 {
+        let used = self.used.lock();
+        let mut released = self.released.lock();
+        let ids = *released & !*used;
+        *released = 0;
+        ids
     }
 }
 

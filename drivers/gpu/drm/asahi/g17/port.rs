@@ -451,6 +451,16 @@ impl Port {
         self.qos.lock().cancel(&view, publication)
     }
 
+    /// Clears the QoS table rows of released QoS IDs (`QosIds::take_released`).
+    pub(super) fn qos_forget(&self, ids: u128) -> Result {
+        if ids == 0 {
+            return Ok(());
+        }
+        let view = self.qos_view()?;
+        self.qos.lock().forget(&view, ids);
+        Ok(())
+    }
+
     pub(super) fn qos_complete(&self, owners: &[qos::Owner]) -> Result {
         let view = self.qos_view()?;
         self.qos.lock().complete(&view, owners)?;

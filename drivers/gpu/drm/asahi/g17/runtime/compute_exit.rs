@@ -143,6 +143,9 @@ impl super::Registry {
 
 impl Firmware {
     pub(in crate::g17) fn service_compute_exit(&mut self, deferred: &mut DeferredBatch) -> Result {
+        // Released contexts' QoS rows stop naming their scheduler pages at the next event
+        // turn, and at the latest before a new context is created.
+        let _ = self.port.qos_forget(self.queues.qos_ids.take_released());
         let recovery_closed = self.init.recovery_state()? == 0;
         let port = &self.port;
         for entry in self.queues.compute.iter_mut().flatten() {

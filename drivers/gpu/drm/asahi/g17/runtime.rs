@@ -782,6 +782,9 @@ impl Backend {
             if !firmware.queues.qids.render_fits(firmware.queues.admission.queues() as usize) {
                 return Err(super::capacity::refused(super::capacity::Site::LogicalQueues));
             }
+            // The new context may take a pooled scheduler page a released context's QoS row
+            // still names: clear those rows first.
+            let _ = firmware.port.qos_forget(firmware.queues.qos_ids.take_released());
             match firmware.uat.new_execution_context(vm) {
                 Ok(execution) => {
                     break (
