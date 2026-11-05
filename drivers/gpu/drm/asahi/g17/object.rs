@@ -338,8 +338,7 @@ impl Allocator<'_> {
         prot: mmu::Prot,
         cpu: CpuMap,
     ) -> Result<KernelObject> {
-        let mut range = self.uat.geometry().kernel_range();
-        range.start += crate::hw::t8140::dynamic::KERNEL_OFFSET;
+        let range = self.uat.kernel_dynamic_range();
         KernelObject::new(
             self.dev,
             self.uat.kernel_vm(),
@@ -362,7 +361,7 @@ impl Allocator<'_> {
         KernelObject::new(
             self.dev,
             self.uat.kernel_lower_vm(),
-            Placement::In(crate::hw::t8140::dynamic::LOWER, align),
+            Placement::In(self.uat.kernel_lower_dynamic_range(), align),
             size,
             prot,
             cpu,

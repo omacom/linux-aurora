@@ -112,14 +112,18 @@ const DEBUG_CLASS: DebugFlags = DebugFlags::Mmu;
 
 mod bind;
 mod context;
+mod layout;
+
 mod lifetime;
 mod ppl;
 #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
 mod m3;
 mod residency;
 mod shared;
+mod sparse_tile;
+mod table;
 pub(crate) use bind::PreparedUserBindBatch;
-pub(crate) use lifetime::VmJobGuard;
+pub(crate) use lifetime::{RenderPoolMappings, VmJobGuard};
 pub(crate) use residency::{Gate as ResidencyGate, VmShrinker};
 
 /// PPL magic number for the handoff region
@@ -374,6 +378,17 @@ struct VmInner {
     uat_inner: Arc<UatInner>,
     binding: Arc<Mutex<VmBinding>>,
     id: u64,
+    /// Per-VM sparse tiles (DRM_ASAHI_BIND_SPARSE_TILE): [read-only zero,
+    /// writable sink], allocated on first use.
+    sparse_tiles: [Option<Arc<sparse_tile::SparseTile>>; 2],
+}
+
+/// GPUVA filled from a kernel sparse tile instead of its GEM's first page.
+pub(crate) const GPUVA_SPARSE_TILE: u32 = kernel::bindings::drm_gpuva_flags_DRM_GPUVA_USERBITS;
+
+/// Whether a GPUVA carries [`GPUVA_SPARSE_TILE`].
+fn is_sparse_tile(flags: GpuVaFlags) -> bool {
+    u32::from(flags) & GPUVA_SPARSE_TILE != 0
 }
 
 /// Exec-locked access to the [`VmInner`] of a GPUVM.
@@ -583,6 +598,19 @@ impl gpuvm::DriverGpuVm for VmInner {
         if ctx.dev.is_none() {
             return Err(ENODEV);
         }
+        if is_sparse_tile(op.flags()) {
+            // Kernel tile fill: the GEM only anchors the GPUVA.
+            let result = if one_page {
+                self.map_sparse_tile(iova..iova + left as u64, ctx.prot)
+            } else {
+                Err(EINVAL)
+            };
+            if let Err(error) = result {
+                self.rollback_failed_map(map_addr, map_length as u64);
+                return Err(error);
+            }
+            left = 0;
+        }
         // Bind preparation retained the table's backing before taking the VM reservation.
         // Never acquire the object reservation from inside the GPUVM map callback.
         let segments = op.vm_bo().data().segments.lock();
@@ -764,6 +792,23 @@ impl gpuvm::DriverGpuVm for VmInner {
 }
 
 impl VmInner {
+    /// Fill `range` from the kernel sparse tile for `prot`: the global zero
+    /// tile for read-only fills, this VM's own sink for writable ones (never
+    /// shared, so discarded writes cannot be read by another VM). The caller
+    /// holds the mapping mutation guard.
+    fn map_sparse_tile(&mut self, range: Range<u64>, prot: Prot) -> Result {
+        let kind = usize::from(prot != PROT_GPU_SHARED_RO);
+        let tile = match &self.sparse_tiles[kind] {
+            Some(tile) => tile.clone(),
+            None => {
+                let tile = sparse_tile::SparseTile::new()?;
+                self.sparse_tiles[kind] = Some(tile.clone());
+                tile
+            }
+        };
+        self.page_table.map_tiled(range, &tile, prot)
+    }
+
     /// Remove hardware leaves for one complete user GPUVA without allocating.
     fn unmap_gpuva(&mut self, va: &gpuvm::GpuVa<Self>) -> Result {
         mod_dev_dbg!(
@@ -1036,6 +1081,8 @@ pub(crate) struct Vm {
     dev: ARef<device::Device>,
     id: u64,
     mapping_epoch: Option<Arc<MappingEpoch>>,
+    /// Created by an M5 GPU's UAT ([`Uat::is_m5`]).
+    m5: bool,
     bind_sequence: Arc<AtomicU64>,
     lifetime: Option<Arc<lifetime::VmLifetime>>,
     residency: Option<Arc<residency::Gate>>,
@@ -1058,6 +1105,14 @@ pub(crate) struct ExecutionContext {
     vm: Vm,
 }
 
+/// One published command's claim on its context's hardware identity, held
+/// until the command retires exactly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ContextPin {
+    pub(crate) id: u8,
+    pub(crate) generation: u64,
+}
+
 struct ExecutionRoot {
     released: AtomicBool,
     inner: Arc<UatInner>,
@@ -1074,6 +1129,17 @@ impl ExecutionContext {
     pub(crate) fn generation(&self) -> u8 {
         self.root.generation
     }
+    /// Claim the context's hardware identity for one published command until
+    /// it retires exactly.
+    pub(crate) fn pin(&self) -> Result<ContextPin> {
+        Ok(ContextPin {
+            id: self.root.id,
+            generation: self.root.generation.into(),
+        })
+    }
+
+    pub(crate) fn unpin(&self, _pin: ContextPin) {}
+
     pub(crate) fn vm(&self) -> &Vm {
         &self.vm
     }
@@ -1935,6 +2001,8 @@ pub(crate) struct Uat {
 
     kernel_vm: Vm,
     kernel_lower_vm: Vm,
+    /// The GPU behind this UAT runs the M5 firmware's protocol ([`Uat::is_m5`]).
+    m5: bool,
 }
 
 impl Handoff {
@@ -2174,6 +2242,7 @@ impl Vm {
                 uat_inner,
                 binding: binding.clone(),
                 id,
+                sparse_tiles: [None, None],
             },
         )?;
         let gpuvm = ARef::from(&*unique_gpuvm);
@@ -2185,6 +2254,7 @@ impl Vm {
             id,
             gpuvm,
             mapping_epoch,
+            m5: false,
             bind_sequence,
             lifetime: None,
             residency: None,
@@ -3202,6 +3272,7 @@ impl Uat {
             geometry,
             kernel_vm,
             kernel_lower_vm,
+            m5: false,
             inner,
             slots: slotalloc::SlotAllocator::new(
                 UAT_USER_CTX as u32,
@@ -3498,7 +3569,7 @@ impl Uat {
     /// Creates a new `Vm` linked to this UAT.
     pub(crate) fn new_vm(&self, id: u64, kernel_range: Range<u64>) -> Result<Vm> {
         self.inner.check_m4()?;
-        let vm = Vm::new(
+        let mut vm = Vm::new(
             self.dev.clone(),
             self.inner.clone(),
             kernel_range,
@@ -3506,10 +3577,37 @@ impl Uat {
             None,
             id,
         )?;
+        vm.m5 = self.m5;
         self.inner.check_m4()?;
         Ok(vm)
     }
 
+    /// The GPU behind this UAT runs the M5 firmware's protocol.
+    pub(crate) fn is_m5(&self) -> bool {
+        self.m5
+    }
+
+    /// Keep dynamic objects outside the M5 boot graph, its unmapped sentinel,
+    /// and the firmware register aperture. Client mappings have their own VA.
+    pub(crate) fn kernel_dynamic_range(&self) -> Range<u64> {
+        let mut range = self.geometry.kernel_range();
+        range.start += if self.is_m5() {
+            0x2_0000_0000
+        } else {
+            crate::hw::t8140::dynamic::KERNEL_OFFSET
+        };
+        range
+    }
+
+    /// Canonical lower objects are aliased into every owning client VM.
+    /// Sparse VA reservation has no physical-memory cost.
+    pub(crate) fn kernel_lower_dynamic_range(&self) -> Range<u64> {
+        if self.is_m5() {
+            layout::CANONICAL_RANGE
+        } else {
+            crate::hw::t8140::dynamic::LOWER
+        }
+    }
     /// Returns the address space geometry of this UAT.
     pub(crate) fn geometry(&self) -> UatGeometry {
         self.geometry
@@ -3761,6 +3859,7 @@ impl Uat {
             geometry,
             kernel_vm,
             kernel_lower_vm,
+            m5: false,
             inner,
             slots: slotalloc::SlotAllocator::new(
                 UAT_USER_CTX as u32,

@@ -21,7 +21,7 @@
 //! nests inside nothing. Capacity waits block on an availability domain signalled by the
 //! release that provides the capacity, never on a sleep.
 
-mod availability;
+pub(crate) mod availability;
 mod buffer;
 mod calibration;
 mod channel;

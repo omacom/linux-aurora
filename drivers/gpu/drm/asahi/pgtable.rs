@@ -289,7 +289,7 @@ const HIGH_BITS_PXN: u16 = 1 << 1;
 const HIGH_BITS_UXN: u16 = 1 << 2;
 const HIGH_BITS_GPU_ACCESS: u16 = 1 << 3;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct Prot {
     memattr: u8,
     ap: u8,
