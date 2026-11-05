@@ -17,6 +17,7 @@ description:
 properties:
   compatible:
     oneOf:
+      - const: apple,t6034-dcp
       - items:
           - enum:
               - apple,t8103-dcp
@@ -39,7 +40,7 @@ properties:
 
   reg:
     minItems: 2
-    maxItems: 7
+    maxItems: 8
 
   reg-names:
     minItems: 2
@@ -50,6 +51,7 @@ properties:
       - enum: [disp-2, iop-vbar]
       - enum: [disp-3, iop-vbar]
       - enum: [disp-4, iop-vbar]
+      - enum: [disp-5, iop-vbar]
       - const: iop-vbar
 
   mboxes:

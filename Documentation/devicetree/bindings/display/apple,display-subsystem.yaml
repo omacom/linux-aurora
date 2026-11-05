@@ -15,7 +15,9 @@ description:
 
 properties:
   compatible:
-    const: apple,display-subsystem
+    enum:
+      - apple,display-subsystem
+      - apple,t6034-display-subsystem
 
   iommus:
     minItems: 1
