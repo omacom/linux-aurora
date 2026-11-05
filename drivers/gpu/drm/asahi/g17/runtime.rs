@@ -1380,6 +1380,7 @@ impl DeferredBatch {
 }
 
 struct ComputeHost<'a> {
+    shared: &'a Arc<super::Shared>,
     init: &'a super::initdata::InitData,
     regs: &'a crate::regs::G17Resources,
     port: &'a super::port::Port,
@@ -1439,6 +1440,7 @@ impl compute::Host for ComputeHost<'_> {
         self.port.notify(message)
     }
     fn note_submission(&mut self) -> Result {
+        self.shared.note_gpu_activity();
         self.effort.submit();
         super::Firmware::apply_shared_effort(self.init, self.effort, self.port, super::power::FULL_EFFORT)
     }
@@ -1607,6 +1609,7 @@ impl super::Firmware {
             return Err(EAGAIN);
         }
         let mut host = ComputeHost {
+            shared: &self.primary.state.shared,
             init: &self.init,
             regs: &self.bridge.regs,
             port: &self.port,
@@ -1863,6 +1866,7 @@ impl Backend {
         if !port.note_submission() {
             return None;
         }
+        self.shared.note_gpu_activity();
         match packet.completion.work_state().ok()?.acquire(crate::g17::job::Engine::Compute) {
             Ok(_) => {}
             Err(error) if error == EBUSY => return None,

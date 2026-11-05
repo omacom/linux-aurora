@@ -64,6 +64,7 @@ pub(crate) mod stats;
 pub(crate) mod status;
 mod teardown;
 pub(crate) mod telemetry;
+mod thermal;
 mod timeout;
 mod validation;
 
@@ -686,6 +687,8 @@ struct Firmware {
     recovery: recovery::State,
     effort: power::Effort,
     hold: power::Hold,
+    /// M5: host GPU power budget governor (Region C's budget word).
+    governor: thermal::Governor,
     registration_power_release_pending: bool,
     variant: &'static fw::Variant,
     queues: runtime::Registry,
@@ -798,8 +801,50 @@ impl Firmware {
     /// Called at actual submission publication, not while a queued job is merely being built.
     fn note_submission(&mut self) -> Result {
         self.port.note_gpu_activity();
+        self.primary.state.shared.note_gpu_activity();
         self.effort.submit();
         self.apply_effort(power::FULL_EFFORT)
+    }
+
+    /// One governor step with the hotspot temperature reading; returns whether to run again and
+    /// what the CPU ceiling should do (applied by the caller without the device lock).
+    fn governor_tick(&mut self, temp_mc: Option<i32>, fans: bool)
+        -> (bool, thermal::CpuAdvice, bool)
+    {
+        let now = now_ns();
+        // Work published since the last step, with or without the device mutex.
+        let published = self.primary.state.shared.governor_activity_ns.swap(0, Ordering::AcqRel);
+        if published != 0 {
+            self.governor.note_activity(published);
+        }
+        // Effort remains asserted until submitted work retires. A long job
+        // must not look idle merely because it has no subsequent submission.
+        if self.effort.applied() != 0 && thermal::requested() {
+            self.governor.note_activity(now);
+        }
+        let Ok(current) = self.init.m5_power_budget() else {
+            return (false, thermal::CpuAdvice::Release, false);
+        };
+        self.governor.set_maximum(current);
+        let power = self.init.m5_gpu_power_mw().unwrap_or(0);
+        let clamped = self.init.m5_firmware_clamped().unwrap_or(false);
+        let (publish, again) = self.governor.tick(temp_mc, power, clamped, now);
+        if let Some(budget) = publish {
+            if self.init.publish_m5_power_budget(budget).is_err() {
+                return (false, thermal::CpuAdvice::Release, false);
+            }
+        }
+        let advice = self.governor.cpu_advice(power, now);
+        let want_fans = self.governor.fans_wanted(now);
+        // Keep ticking while the fans are still boosted, so the hold can expire.
+        (again || fans, advice, want_fans)
+    }
+
+    /// Restore the calibrated maximum budget (shutdown).
+    fn governor_restore(&mut self) {
+        if let Some(budget) = self.governor.restore() {
+            let _ = self.init.publish_m5_power_budget(budget);
+        }
     }
 
     fn apply_effort(&mut self, effort: u32) -> Result {
@@ -941,6 +986,7 @@ const IDLE_WORK: u64 = 2;
 const GROW_WORK: u64 = 3;
 const RECLAIM_WORK: u64 = 4;
 const FEED_WORK: u64 = 5;
+const GOVERNOR_WORK: u64 = 6;
 
 /// Device state shared with the coprocessor callbacks and the event worker.
 #[pin_data]
@@ -997,6 +1043,14 @@ struct Shared {
     poll: DelayedWork<Shared, POLL_WORK>,
     #[pin]
     idle: DelayedWork<Shared, IDLE_WORK>,
+    /// M5: the thermal governor runs (the firmware has the host power budget word).
+    governs: bool,
+    #[pin]
+    governor: DelayedWork<Shared, GOVERNOR_WORK>,
+    governor_armed: AtomicBool,
+    /// When work was last published while the governor is requested (0: none since its last
+    /// step). Publishers without the device mutex set it too.
+    governor_activity_ns: AtomicU64,
     #[pin]
     grow: Work<Shared, GROW_WORK>,
     #[pin]
@@ -1011,6 +1065,10 @@ struct Shared {
     /// The device lock. `None` before boot completes and after detachment.
     #[pin]
     state: Mutex<Option<KBox<Firmware>>>,
+    /// M5: the CPU frequency ceiling the thermal governor shares the SoC's heat with, and the
+    /// fan boost. Never taken with `state` held.
+    #[pin]
+    actuators: Mutex<thermal::Actuators>,
     #[pin]
     changed: CondVar,
     /// The port of the session in `state`; null before boot and once detachment begins.
@@ -1026,6 +1084,30 @@ impl_has_delayed_work! {
 }
 impl_has_delayed_work! {
     impl HasDelayedWork<Shared, IDLE_WORK> for Shared { self.idle }
+}
+impl_has_delayed_work! {
+    impl HasDelayedWork<Shared, GOVERNOR_WORK> for Shared { self.governor }
+}
+impl WorkItem<GOVERNOR_WORK> for Shared {
+    type Pointer = Arc<Shared>;
+    fn run(this: Arc<Shared>) {
+        this.governor_armed.store(false, Ordering::Release);
+        // Sensor reads may sleep: take them before the device lock.
+        let temp = thermal::hotspot_temperature_mc();
+        let fans = this.actuators.lock().fans.boosted();
+        let (again, advice, want_fans) = {
+            let mut state = this.state.lock();
+            match (*state).as_deref_mut() {
+                Some(firmware) => firmware.governor_tick(temp, fans),
+                None => (false, thermal::CpuAdvice::Release, false),
+            }
+        };
+        // Frequency QoS updates and SMC accesses may sleep: outside the device lock.
+        this.actuators.lock().apply(advice, want_fans, temp, now_ns());
+        if again {
+            this.queue_governor();
+        }
+    }
 }
 impl_has_work! {
     impl HasWork<Shared, GROW_WORK> for Shared { self.grow }
@@ -1183,6 +1265,23 @@ impl Shared {
     fn queue_poll(self: &Arc<Self>) {
         let _ = workqueue::system_highpri()
             .enqueue_delayed::<Arc<Self>, POLL_WORK>(self.clone(), msecs_to_jiffies(1));
+    }
+
+    fn queue_governor(self: &Arc<Self>) {
+        if !self.governor_armed.swap(true, Ordering::AcqRel) {
+            let _ = workqueue::system_unbound().enqueue_delayed::<Arc<Self>, GOVERNOR_WORK>(
+                self.clone(), msecs_to_jiffies(thermal::PERIOD_MS));
+        }
+    }
+
+    /// M5: work was published. Arms the thermal governor while it is requested. Called at
+    /// actual publication, by publishers with or without the device mutex; callable from any
+    /// context.
+    pub(super) fn note_gpu_activity(self: &Arc<Self>) {
+        if self.governs && thermal::requested() {
+            self.governor_activity_ns.store(now_ns().max(1), Ordering::Release);
+            self.queue_governor();
+        }
     }
 
     fn queue_idle(self: &Arc<Self>, delay_ns: u64) {
@@ -1374,11 +1473,16 @@ impl Gpu {
                 housekeeping_ns: AtomicU64::new(0),
                 poll <- new_delayed_work!("g17::Shared::poll"),
                 idle <- new_delayed_work!("g17::Shared::idle"),
+                governs: m5,
+                governor <- new_delayed_work!("g17::Shared::governor"),
+                governor_armed: AtomicBool::new(false),
+                governor_activity_ns: AtomicU64::new(0),
                 grow <- new_work!("g17::Shared::grow"),
                 reclaim_work <- new_work!("g17::Shared::reclaim_work"),
                 reclaim <- new_mutex!(reclaim, "g17::Shared::reclaim"),
                 stop <- new_mutex!((), "g17::Shared::stop"),
                 state <- new_mutex!(None, "g17::Shared::state"),
+                actuators <- new_mutex!(thermal::Actuators::new(), "g17::Shared::actuators"),
                 changed <- new_condvar!("g17::Shared::changed"),
                 port: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
             }),
@@ -1590,6 +1694,7 @@ impl Gpu {
                 recovery: recovery::State::new(),
                 effort: power::Effort::new(),
                 hold: power::Hold::new(),
+                governor: thermal::Governor::new(),
                 registration_power_release_pending: false,
                 variant: shared.variant,
                 queues <- runtime::Registry::with_waiters(
@@ -1749,6 +1854,11 @@ impl Gpu {
         self.shared.stop_queues();
         self.shared.disable_timer(&self.shared.poll);
         self.shared.disable_timer(&self.shared.idle);
+        self.shared.disable_timer(&self.shared.governor);
+        if let Some(firmware) = (*self.shared.state.lock()).as_deref_mut() {
+            firmware.governor_restore();
+        }
+        self.shared.actuators.lock().release();
         self.shared.disable_work(&self.shared.grow);
         self.shared.disable_work(&self.shared.reclaim_work);
         self.shared.disable_work(&self.shared.work);

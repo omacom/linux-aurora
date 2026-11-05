@@ -1980,3 +1980,49 @@ impl super::recovery::Memory for InitData {
         kernel::time::delay::fsleep(kernel::time::Delta::from_millis(1));
     }
 }
+
+/// M5 thermal governor inputs and the host power budget it publishes.
+impl InitData {
+    /// M5 only: the live host GPU power budget word of Region C.
+    pub(super) fn m5_power_budget(&self) -> Result<u32> {
+        if !self.m5 { return Err(EINVAL); }
+        Ok(self.object(self.region_c)?.word(super::thermal::REGION_C_POWER_BUDGET)?.load(Ordering::Relaxed))
+    }
+
+    /// M5 only: the GPU's current power draw in mW, as the firmware's power controller reports it
+    /// (integer word of the shared power-policy block).
+    pub(super) fn m5_gpu_power_mw(&self) -> Result<u32> {
+        if !self.m5 { return Err(EINVAL); }
+        Ok(self.object(self.bundle)?
+            .word(super::fw::m5::initdata::M5_SHARED_LAYOUT.policy + super::thermal::POLICY_GPU_POWER)?
+            .load(Ordering::Relaxed))
+    }
+
+    /// M5 only: whether the firmware's emergency clamp is active, from its primary performance
+    /// limiter in the shared power-policy block.
+    pub(super) fn m5_firmware_clamped(&self) -> Result<bool> {
+        if !self.m5 { return Err(EINVAL); }
+        let block = self.object(self.bundle)?;
+        let base = super::fw::m5::initdata::M5_SHARED_LAYOUT.policy;
+        let mask = block.word(base + super::thermal::POLICY_LIMITER_MASK)?.load(Ordering::Relaxed);
+        let limit = block.word(base + super::thermal::POLICY_LIMITER_LIMIT)?.load(Ordering::Relaxed);
+        Ok(super::thermal::is_emergency_clamp(mask, limit))
+    }
+
+    /// M5 only: publishes the host GPU power budget like the effort input.
+    pub(super) fn publish_m5_power_budget(&self, budget_mw: u32) -> Result {
+        if !self.m5 { return Err(EINVAL); }
+        let region = self.object(self.region_c)?;
+        let offset = super::thermal::REGION_C_POWER_BUDGET;
+        let word = region.word(offset)?;
+        let line = region.pointer(offset, 4)?;
+        word.store(budget_mw, Ordering::Relaxed);
+        // SAFETY: line points into the retained kernel mapping; cleaning this host-owned cache
+        // line and the following system barrier publish the naturally aligned store.
+        unsafe {
+            core::arch::asm!("dc cvac, {line}", "dsb sy", line = in(reg) line,
+            options(nostack, preserves_flags))
+        };
+        Ok(())
+    }
+}

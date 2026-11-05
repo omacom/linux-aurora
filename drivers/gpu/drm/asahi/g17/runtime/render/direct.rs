@@ -297,6 +297,7 @@ impl Backend {
         if !port.note_submission() {
             return None;
         }
+        self.shared.note_gpu_activity();
         match packet.completion.work_state().ok()?.acquire(crate::g17::job::Engine::Render) {
             Ok(_) => {}
             Err(error) if error == EBUSY => return None,

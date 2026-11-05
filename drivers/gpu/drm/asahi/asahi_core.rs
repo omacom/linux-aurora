@@ -95,6 +95,14 @@ module! {
             default: 0x200,
             description: "M5 mesh rendering buffer bound to API task (object-stage) render kicks only, in 64 KiB chunks; 0 disables the binding and the task feature",
         },
+        m5_thermal_governor: u32 {
+            default: 0,
+            description: "M5 thermal flags: bit 0 enables the host GPU power budget controller, bit 2 lets the controller lower the CPU frequency ceiling while the GPU is budget-bound, bit 3 runs the fans at their maximum while it governs; default 0 preserves the existing policy",
+        },
+        m5_thermal_target_mc: u32 {
+            default: 90000,
+            description: "M5 GPU power budget governor target for the SoC hotspot temperature computed by the SMC, in milli-degrees C (70000..104000)",
+        },
         m5_depth_msaa_compression: u32 {
             default: 1,
             description: "Enable single-layer D32 compressed 2x/4x ZLS admission",
