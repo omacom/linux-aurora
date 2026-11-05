@@ -9,7 +9,7 @@ use crate::g17::{
     fw::channels::{ContextKill, ControlRecord},
     queue::compute::exit,
     recovery::Memory as _,
-    timeout::LIVENESS_NS,
+    timeout::{LIVENESS_NS, RECOVERY_WAIT_MS},
     Firmware, MSG_CONTROL_NOTIFY,
 };
 use core::sync::atomic::{fence, AtomicU32, AtomicU64, Ordering};
@@ -201,6 +201,28 @@ impl Firmware {
                 );
             }
         }
+        // M5: a command the watchdog failed is killed once its quarantine delay has passed,
+        // also while its owner keeps the queue open (`Queue::open_timeout_kill`).
+        for index in 0..self.queues.compute.len() {
+            let due = self.queues.compute[index]
+                .as_ref()
+                .and_then(|entry| entry.queue.as_deref())
+                .and_then(|queue| queue.open_timeout_kill(now));
+            let Some((context, age)) = due else {
+                continue;
+            };
+            if !self.queues.render.teardown_idle(&context)? {
+                continue;
+            }
+            if let Err(error) = self.publish_compute_exit(&context, age, now, &mut pressed) {
+                dev_err!(
+                    self.primary.state.shared.dev.as_ref(),
+                    "Scheduler {} exit request failed: {:?}\n",
+                    context.id(),
+                    error
+                );
+            }
+        }
         Ok(())
     }
 
@@ -242,7 +264,7 @@ impl Firmware {
                 }
                 return Ok(());
             }
-        } else if self.kill_unsafe(context, now) {
+        } else if self.kill_unsafe(context, age, now) {
             return Ok(());
         }
         let (owner, target) = {
@@ -444,13 +466,15 @@ impl Firmware {
     }
 
     /// A compute command of `context` failed and the firmware holds commands behind it that it
-    /// never runs. `publish_compute_exit` is only reached once `teardown_idle` found all of
-    /// the context's render pairs idle; the pairs behind such a failure become idle when
+    /// never runs, or, on M5, the watchdog failed one whose commands may never retire
+    /// (`Queue::timed_out`). `publish_compute_exit` is only reached once `teardown_idle` found
+    /// all of the context's render pairs idle; the pairs behind such a failure become idle when
     /// their commands have executed (`Pair::firmware_drained`), so by then nothing of the
     /// context runs any more.
     fn compute_failed(&self, context: &Arc<Context>) -> bool {
         self.queues.compute.iter().flatten().filter_map(|entry| entry.queue.as_deref()).any(|queue| {
-            queue.context().is_some_and(|bound| Arc::ptr_eq(bound, context)) && queue.fault_pending()
+            queue.context().is_some_and(|bound| Arc::ptr_eq(bound, context))
+                && (queue.fault_pending() || queue.timed_out())
         })
     }
 
@@ -462,9 +486,13 @@ impl Firmware {
     /// kill proceeds. A context whose compute failed ([`Self::compute_failed`])
     /// is not left alone, since its held commands never retire: its kill waits
     /// only for other contexts' compute ([`Self::foreign_compute_running`]).
-    fn kill_unsafe(&self, context: &Arc<Context>, now: u64) -> bool {
+    ///
+    /// On M5 the wait ends [`RECOVERY_WAIT_MS`] after the context closed (`age`): a closed
+    /// context's command that never terminates would otherwise hold its queue, pairs and
+    /// memory for as long as other clients keep the GPU busy.
+    fn kill_unsafe(&self, context: &Arc<Context>, age: u64, now: u64) -> bool {
         let stalled = crate::g17::recovery::since_retired(now).is_none_or(|since| since >= LIVENESS_NS);
-        if stalled {
+        if stalled || (self.init.is_m5() && age >= u64::from(RECOVERY_WAIT_MS) * 1_000_000) {
             return false;
         }
         self.queues.render.foreign_in_flight(context)
@@ -486,7 +514,7 @@ impl Firmware {
             .iter()
             .flatten()
             .filter_map(|entry| entry.queue.as_deref())
-            .any(|queue| queue.exit_polling(now))
+            .any(|queue| queue.exit_polling(now) || queue.open_timeout_polling(now))
         {
             return true;
         }

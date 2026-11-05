@@ -182,12 +182,20 @@ pub(crate) fn note_progress(word: u32) -> bool {
 
 /// Work whose context has an older node in use ahead of its own is not late: the firmware
 /// lists a context's nodes by their words and flushes from the head, so this work's stamps wait
-/// behind the older node until it drains. That wait has no ceiling while the firmware works, so
-/// a published job behind its context's older node is renewed, without a count, while the
-/// firmware's progress word moves; a firmware that stops progressing for the interval expires it
-/// as before, and an older node of another VM still goes through [`attribute`].
-pub(crate) fn behind_own_head(published: bool, older: Option<u32>, progressing: bool) -> bool {
-    published && older.is_some() && progressing
+/// behind the older node until it drains. A published job behind its context's older node is
+/// renewed while the firmware's progress word moves, with two limits:
+///
+/// - Not once its VM has failed work (`failed`). The older node's holder may be that failed
+///   work, held until the firmware drains it, and a failed blocker excuses nothing ([`decide`]).
+/// - At most [`SHARED_RENEWALS`] times, counted with the job's other deferrals (`renewals`).
+///   The older node's own job runs under the same allowances and started earlier, so a healthy
+///   older node drains or fails within that budget; past it the job times out as any other.
+///
+/// A firmware that stops progressing for the interval expires the job as before, and an older
+/// node of another VM still goes through [`attribute`].
+pub(crate) fn behind_own_head(published: bool, older: Option<u32>, progressing: bool,
+    failed: bool, renewals: u8) -> bool {
+    published && older.is_some() && progressing && !failed && renewals < SHARED_RENEWALS
 }
 
 #[cfg_attr(not(test), kernel::macros::kunit_tests(asahi_g17_execution_allowance))]
@@ -315,6 +323,19 @@ mod tests {
         }
         // The thirty-second bound still ends a pair that never finishes.
         assert!(!renew_shared(true, true, &mut renewals));
+    }
+    #[test]
+    fn work_behind_its_own_context_is_renewed_only_while_healthy_and_bounded() {
+        let older = Some(7);
+        for renewals in 0..SHARED_RENEWALS {
+            assert!(behind_own_head(true, older, true, false, renewals));
+        }
+        assert!(!behind_own_head(true, older, true, false, SHARED_RENEWALS));
+        assert!(!behind_own_head(true, older, true, false, u8::MAX));
+        assert!(!behind_own_head(true, older, true, true, 0));
+        assert!(!behind_own_head(true, None, true, false, 0));
+        assert!(!behind_own_head(true, older, false, false, 0));
+        assert!(!behind_own_head(false, older, true, false, 0));
     }
     #[test]
     fn exhausted_or_invalid_credit_never_wraps() {

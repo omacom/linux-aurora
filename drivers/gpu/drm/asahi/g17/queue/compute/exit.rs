@@ -102,7 +102,7 @@ impl Queue {
     }
     pub(crate) fn exit_candidate(&self, context: &Arc<Context>, age: u64) -> bool {
         self.context().is_some_and(|bound| Arc::ptr_eq(bound, context))
-            && self.released
+            && (self.released || self.timed_out())
             && self.active.len != 0
             && self.exit.is_none()
             && (!self.active_traversal() || self.fault_pending())
@@ -113,6 +113,35 @@ impl Queue {
                 } else {
                     CANCELLED_DELAY_NS
                 }
+    }
+    /// M5: the watchdog failed this queue's command, and nothing has killed it yet. Its
+    /// commands may never retire on their own (a dispatch that does not terminate), so a kill
+    /// of its context treats it as failed work, like a command the firmware reported failed.
+    pub(crate) fn timed_out(&self) -> bool {
+        self.graph.m5
+            && self.quarantined
+            && self.quarantine_error == Some(ETIMEDOUT)
+            && !self.spared_quarantine
+            && self.exit.is_none()
+    }
+    /// M5: a timed-out queue whose owner keeps it open, due for a kill of its context, with
+    /// how long ago the watchdog failed it. The owner's VM has already failed, so it loses
+    /// nothing it could still use; without the kill a command that never terminates keeps
+    /// running, and keeps this queue, until the owner closes.
+    pub(crate) fn open_timeout_kill(&self, now: u64) -> Option<(Arc<Context>, u64)> {
+        if self.released || self.timed_out_at == 0 || !self.timed_out() {
+            return None;
+        }
+        let context = self.context()?.clone();
+        let age = now.saturating_sub(self.timed_out_at);
+        self.exit_candidate(&context, age).then_some((context, age))
+    }
+    /// An open timed-out queue's kill is due within the exit polling window.
+    pub(crate) fn open_timeout_polling(&self, now: u64) -> bool {
+        !self.released
+            && self.timed_out_at != 0
+            && self.timed_out()
+            && now.saturating_sub(self.timed_out_at) < POLL_NS
     }
     /// A kill of `context` was published through this queue.
     pub(crate) fn exit_published(&self, context: &Arc<Context>) -> bool {
