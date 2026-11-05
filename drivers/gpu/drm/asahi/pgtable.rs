@@ -669,6 +669,7 @@ impl UatPageTable {
                     mod_pr_debug!("UATPageTable::with_pages: borrowed phys {:#x}\n", phys);
                     let driver_tables = &mut self.driver_tables;
                     let oas_mask = self.oas_mask;
+                    let firmware_tree = reserved.as_deref();
                     let entry = |p: *mut u8| -> Result<Option<PhysicalAddr>> {
                         let uptep = p.cast_const().cast::<Pte>();
                         // SAFETY: with_table() ensures the pointer is valid, and our index is
@@ -706,7 +707,21 @@ impl UatPageTable {
                             }
                         }
                         if upte_val & PTE_TYPE_BITS == PTE_TYPE_LEAF_TABLE {
-                            Ok(Some(upte_val & oas_mask & (!UAT_PGMSK as u64)))
+                            let child = upte_val & oas_mask & (!UAT_PGMSK as u64);
+                            // Below a root the driver did not allocate, the descriptors were
+                            // written by the firmware or the bootloader. Follow one only into a
+                            // reserved table page or a table this driver allocated, never into
+                            // other RAM, whose PTEs this walk would then write.
+                            if let (Some(firmware_tree), Some(tables)) =
+                                (firmware_tree, driver_tables.as_ref())
+                            {
+                                if !firmware_tree.contains(child) && !tables.contains(&child) {
+                                    pr_err!("UATPageTable::with_pages: table PTE {:#x} at iova {:#x} level {} names a page outside the reserved and driver tables\n",
+                                            upte_val, iova, level + 1);
+                                    return Err(EIO);
+                                }
+                            }
+                            Ok(Some(child))
                         } else if upte_val == 0 || (!alloc && !free) {
                             mod_pr_debug!("UATPageTable::with_pages: no level {}\n", level);
                             Ok(None)
