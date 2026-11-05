@@ -30,7 +30,8 @@ for match in re.finditer(
     machine = re.search(r'machine:\s*Some\(kernel::c_str!\("([^"]+)"\)\)', body)
     rows.append((fields, digest, machine.group(1) if machine else None))
 assert sum(machine == "apple,j514c" for _, _, machine in rows) == 1
-assert any(machine in (None, "apple,j516c") for _, _, machine in rows)
+assert any(machine == "apple,j516c" for _, _, machine in rows)
+assert all(machine == "apple,j516c" for _, _, machine in rows if machine != "apple,j514c")
 measurements = []
 machines = []
 for fields, digest, machine in rows:

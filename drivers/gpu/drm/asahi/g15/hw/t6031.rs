@@ -165,7 +165,7 @@ pub(crate) const CONFIG: Config = Config {
         // firmware 26.5.2). Short native GL/Vulkan and normal-login checks passed;
         // power/thermal qualification remains open. Exact board identity is required.
         FirmwareBuild {
-            name: "J514C macOS 14.7 boot-chain firmware (experimental bring-up)",
+            name: "J514C macOS 14.7 boot-chain firmware",
             machine: Some(kernel::c_str!("apple,j514c")),
             text_size: 0x64000,
             data_size: 0x140000,
@@ -177,8 +177,9 @@ pub(crate) const CONFIG: Config = Config {
             ],
         },
     ],
-    // The reference words and measured layout belong to the J516C, not
-    // every T6031 board (in particular, not the 14-inch J514C).
+    // This is the reference board. The exact J514C/T6031 pair also uses this
+    // configuration through normal admission, with the unmeasured reference
+    // power words reported explicitly for that chassis.
     machine: kernel::c_str!("apple,j516c"),
     platform: super::Platform::DeviceTree,
     layout: &LAYOUT,
