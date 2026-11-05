@@ -3544,8 +3544,16 @@ impl Uat {
             }
             let id = free.trailing_zeros() as usize;
             inner.execution_contexts |= 1u64 << id;
-            inner.context_generations[id] = inner.context_generations[id].wrapping_add(1);
-            (id, inner.context_generations[id])
+            // On M5 a slot's reuse generation is never zero, which M5's context token reserves
+            // for none: it wraps from 255 to 1. Slots reused past 255 times (reclaimed M5 queues)
+            // would otherwise hand out zero.
+            let generation = &mut inner.context_generations[id];
+            *generation = if self.m5 {
+                generation.checked_add(1).unwrap_or(1)
+            } else {
+                generation.wrapping_add(1)
+            };
+            (id, *generation)
         };
         let low = tagged_root(vm.ttb(), id);
         let high = tagged_root(self.kernel_vm.ttb(), id);
