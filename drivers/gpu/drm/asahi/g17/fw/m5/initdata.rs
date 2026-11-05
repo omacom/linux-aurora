@@ -1832,9 +1832,9 @@ pub(crate) const J775D: Board = Board {
     // The minimum parameter buffer for eight clusters.
     min_parameter_buffer: 0x0050_0000,
     render_pool: (0x40_0000, 1 << 32),
+    // The power model's synthetic leakage inputs hold for every J775D: no calibration words.
     calibration: None,
-    // No controller configuration.
-    controller_defaults: None,
+    controller_defaults: Some(encode_m5_policy_controller_defaults_j775d),
 };
 
 const _: () = {
@@ -2684,5 +2684,59 @@ pub(crate) fn encode_m5_policy_controller_defaults(out: &mut [u8]) -> Result<(),
         (0x12280, 0x43d60000),
     ];
     for &(offset, value) in INITIAL { put_u32(policy, offset, value); }
+    Ok(())
+}
+
+/// Controller inputs for J775D: the J714 defaults, with the Ultra's power model over them. The
+/// model covers the main and auxiliary operating points of both dies (64 cores, 110 C) with
+/// synthetic leakage inputs (1350 per cluster core and per die auxiliary domain, 51 per cluster
+/// SRAM), which hold for every J775D: P13 sums to 345262 mW. Then the relative power curves of
+/// that model, the controllers' gains and utilization thresholds, and the temperature-sensor
+/// channel masks of both dies (160 GPU and 8 auxiliary-domain channels; the hotspot set is both).
+pub(crate) fn encode_m5_policy_controller_defaults_j775d(out: &mut [u8]) -> Result<(), InitdataError> {
+    encode_m5_policy_controller_defaults(out)?;
+    const RELATIVE_POWER_MAIN: [u32; 14] = [
+        0x0000_0000, 0x4107_2435, 0x414b_7ecd, 0x4187_dfa6, 0x41be_759c, 0x41d6_f4a2, 0x41ff_340b,
+        0x4215_4139, 0x4226_cc22, 0x4247_2db8, 0x426b_3fa4, 0x428b_aed3, 0x42b6_c65b, 0x42c8_0000,
+    ];
+    for (index, &value) in RELATIVE_POWER_MAIN.iter().enumerate() { put_u32(out, 0x19e4 + index * 4, value); }
+    const RELATIVE_POWER_AUX: [u32; 14] = [
+        0x0000_0000, 0x4106_2d7e, 0x4154_96b9, 0x4189_3d11, 0x41ba_e22e, 0x41d5_33ed, 0x4202_7bcd,
+        0x421c_12dd, 0x4230_6915, 0x4250_6a36, 0x427d_e40c, 0x4294_0cc0, 0x42bd_bd8e, 0x42c8_0000,
+    ];
+    for (index, &value) in RELATIVE_POWER_AUX.iter().enumerate() { put_u32(out, 0x1a64 + index * 4, value); }
+    let policy = &mut out[M5_SHARED_LAYOUT.policy..M5_SHARED_LAYOUT.policy + M5_POLICY_SIZE];
+    const MAXIMUM_POWER: u32 = 345_262;
+    const MAXIMUM_POWER_F32: u32 = 0x48a8_95c0;
+    for offset in [M5_POLICY_MAXIMUM_POWER, 0xad0, 0x44a4, 0x44a8, 0x44ac, 0x45e4] {
+        put_u32(policy, offset, MAXIMUM_POWER);
+    }
+    for offset in [0x9f4, 0x45e0] {
+        put_u32(policy, offset, MAXIMUM_POWER_F32);
+    }
+    // Leakage: eight clusters' cores (1350.0) and SRAM (51.0), then each die's auxiliary domain.
+    for index in 0..8 {
+        put_u32(policy, 0x121b0 + index * 4, 0x44a8_c000);
+        put_u32(policy, 0x12230 + index * 4, 0x424c_0000);
+    }
+    for index in 0..2 {
+        put_u32(policy, 0x12280 + index * 4, 0x44a8_c000);
+    }
+    // The power controller's integral and proportional gains (0.08, 0.005), the second
+    // controller's (0.01, 0.28), and the utilization thresholds 75 and 95.
+    for (offset, value) in [(0xaa0, 0x3da3_d70b), (0xab0, 0x3ba3_d70a), (0x45b4, 0x3c23_d70b),
+        (0x45c4, 0x3e8f_5c29), (0xb44, 75), (0xb48, 95)] {
+        put_u32(policy, offset, value);
+    }
+    const DIE_CHANNELS: u64 = 0x6fcc_3fcc_6fcc_3fcc;
+    for (offset, words) in [
+        (0x2324, [0x6fcc_3fcc_0000_0000, DIE_CHANNELS, DIE_CHANNELS, DIE_CHANNELS, 0x6fcc_3fcc]),
+        (0x2cfc, [0x0303_0303, 0, 0, 0, 0]),
+        (0x4ba4, [0x6fcc_3fcc_0303_0303, DIE_CHANNELS, DIE_CHANNELS, DIE_CHANNELS, 0x6fcc_3fcc]),
+    ] {
+        for (index, word) in words.into_iter().enumerate() {
+            put_u64(policy, offset + index * 8, word);
+        }
+    }
     Ok(())
 }
