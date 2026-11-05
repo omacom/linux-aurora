@@ -583,6 +583,10 @@ pub(crate) fn apply_pass(args: &RenderArgs<'_>, c: &M5RenderControls,
         .and_then(|offset|offset.checked_add(ContextStore::selected(c.board).stream as u64)).ok_or(EINVAL)?;
     i.context_id=u32::from(r.context_id);
     i.ta.tpc_va=r.tpc_va;i.ta.tpc_size=r.tpc_size;i.ta.deflake_state_va=deflake;
+    // With the G17D forms the tiler asks the host for parameter-buffer blocks when the buffer
+    // runs out (a growth request, served by the shared growth worker) instead of rendering
+    // partially. J714 keeps 0.
+    i.ta.pb_growth_request = u8::from(c.board.g17d_forms());
     let f=&mut i.fragment;
     f.empty_tile_flags[0]=u8::from(p.process_empty_tiles);
     // The fragment command's pass flag: 1 in every ordinary render pass with the G17D forms. It
