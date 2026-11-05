@@ -507,10 +507,16 @@ pub(crate) fn admit(
         }
     }
     if j514c_candidate {
-        dev_warn!(
-            dev,
-            "J514C bring-up: using J516C reference power/thermal words; this board is not qualified\n"
-        );
+        if let hw::Board::DeviceTree(reference) = cfg.board {
+            dev_warn!(
+                dev,
+                "J514C bring-up: unqualified J516C reference: max_power_mw={} relative_power={:?} fast_die_mask={:#018x} alarm_mask={:#018x}; OPP powers are boot-loader stand-ins\n",
+                reference.max_power_mw,
+                reference.relative_power,
+                reference.fast_die_mask,
+                reference.alarm_mask
+            );
+        }
     }
     let adt = adt::read(dev, cfg)
         .inspect_err(|e| dev_err!(dev, "GPU regions not admitted: {:?}\n", e))?;
