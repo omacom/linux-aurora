@@ -165,6 +165,16 @@ impl EventRecord {
         unsafe { self.words[0] }
     }
 
+    /// Type 7 is a retirement witness only on the firmware whose layout and
+    /// visibility semantics are qualified. 25G83 and M5 must keep consuming it as an
+    /// unknown event until their own fault contract is established.
+    pub(crate) fn decode_for(&self, graph: super::variant::InitGraph, m5: bool) -> Result<Event> {
+        if (m5 || graph == super::variant::InitGraph::V25G83) && self.tag() == Self::COMPUTE_FAULT {
+            return Ok(Event::Unknown(Self::COMPUTE_FAULT));
+        }
+        self.decode()
+    }
+
     /// Validates the record's fields without interpreting resource ownership.
     /// A malformed known event is an error, unlike an unknown tag.
     pub(crate) fn decode(&self) -> Result<Event> {
@@ -562,6 +572,18 @@ mod tests {
     fn a_compute_fault_names_its_queue_and_stamp() {
         let event = record(&[7, 1, 2, 0x39, 0x300, 0xffff_fc00, 1]).decode();
         assert_eq!(event, Ok(Event::ComputeFault { qid: 0x39, stamp: 0x300 }));
+    }
+
+    #[test]
+    fn v25g83_does_not_accept_an_unqualified_fault_witness() {
+        use super::super::variant::InitGraph;
+        let fault = record(&[7, 1, 2, 0x39, 0x300]);
+        assert_eq!(fault.decode_for(InitGraph::G17P, false),
+            Ok(Event::ComputeFault { qid: 0x39, stamp: 0x300 }));
+        assert_eq!(fault.decode_for(InitGraph::G17P, true), Ok(Event::Unknown(7)));
+        assert_eq!(fault.decode_for(InitGraph::V25G83, false), Ok(Event::Unknown(7)));
+        assert_eq!(record(&[7, 1, 2, 128, 0x301]).decode_for(InitGraph::V25G83, false),
+            Ok(Event::Unknown(7)));
     }
 
     #[test]

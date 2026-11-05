@@ -281,7 +281,7 @@ impl Events {
             let words = init.status_read_words(role, offset)?;
             super::trace::report(role as u8, 2, &words);
             let record = EventRecord::from_words(words);
-            let event = record.decode_for(self.graph);
+            let event = record.decode_for(self.graph, init.is_m5());
             fence(Ordering::SeqCst);
             consumer_word.store((consumer + 1) & (EVENT_SLOTS - 1), Ordering::Relaxed);
             fence(Ordering::SeqCst);
