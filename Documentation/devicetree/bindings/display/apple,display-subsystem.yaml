@@ -18,6 +18,7 @@ properties:
     enum:
       - apple,display-subsystem
       - apple,t8122-display-subsystem
+      - apple,t6034-display-subsystem
 
   iommus:
     minItems: 1
