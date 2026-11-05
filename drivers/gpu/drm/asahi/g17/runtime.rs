@@ -1031,7 +1031,8 @@ impl Backend {
         let dev = self.shared.drm()?;
         let uat = self.shared.state.lock().as_ref().ok_or(ENODEV)?.uat.clone();
         let alloc = super::object::Allocator { dev: &dev, uat: &uat };
-        let mut pages = Some(super::freelist::Pages::for_compute(&alloc, required)?);
+        let mut pages = Some(super::freelist::Pages::for_compute(&alloc, required,
+            self.context.vm().memory_client())?);
         let mut alias = Some(pages.as_ref().ok_or(EIO)?.map_client(self.context.vm())?);
         let mut deferred = DeferredBatch::publication()?;
         let mut growth = None;
@@ -1113,7 +1114,8 @@ impl Backend {
         admission: &Admission<'_>,
     ) -> Result<Option<bool>> {
         let built = (|| -> Result<_> {
-            let pages = crate::g17::freelist::Pages::for_compute(alloc, required)?;
+            let pages = crate::g17::freelist::Pages::for_compute(alloc, required,
+                self.context.vm().memory_client())?;
             Ok((pages, compute::DescriptorRing::new(alloc, objects)?))
         })();
         let (pages, ring) = match built {
@@ -1241,7 +1243,8 @@ impl Backend {
                 }
             };
             let built = (|| {
-                let pool = compute::PoolBacking::new(&alloc, reservation.id, required)?;
+                let pool = compute::PoolBacking::new(&alloc, reservation.id, required,
+                    self.context.vm().memory_client())?;
                 {
                     let mut state = self.shared.state.lock();
                     admission.check()?;

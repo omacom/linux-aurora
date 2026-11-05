@@ -544,8 +544,9 @@ pub(crate) struct PoolBacking {
 }
 
 impl PoolBacking {
-    pub(crate) fn new(alloc: &Allocator<'_>, id: kick::Id, required: ComputeCapacity) -> Result<Self> {
-        let pool = ComputePool::new(alloc, id.qid(), required)?;
+    pub(crate) fn new(alloc: &Allocator<'_>, id: kick::Id, required: ComputeCapacity,
+        client: Option<&Arc<crate::memacct::Client>>) -> Result<Self> {
+        let pool = ComputePool::new(alloc, id.qid(), required, client)?;
         Ok(Self { pool, id })
     }
 

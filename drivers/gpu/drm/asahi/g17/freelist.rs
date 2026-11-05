@@ -329,6 +329,8 @@ fn place_lower<T>(size: usize, place: impl FnOnce() -> Result<T>) -> Result<T> {
 pub(crate) struct Pages {
     backing: KernelObject,
     layout: PageLayout,
+    /// The admission of an M5 backing sized by a client's request, released with it.
+    _charge: Option<crate::memacct::Commit>,
 }
 impl Drop for Pages {
     fn drop(&mut self) {
@@ -354,14 +356,17 @@ impl Pages {
         Ok(Self {
             backing,
             layout: PageLayout::Neo { blocks, runs },
+            _charge: None,
         })
     }
     /// Fresh compute backing at the admitted capacity, built off-lock, in the
     /// capacity's family format.
-    pub(crate) fn for_compute(alloc: &Allocator<'_>, capacity: ComputeCapacity) -> Result<Self> {
+    /// An M5 backing is charged to `client` when one is given (see [`Self::m5`]).
+    pub(crate) fn for_compute(alloc: &Allocator<'_>, capacity: ComputeCapacity,
+        client: Option<&Arc<crate::memacct::Client>>) -> Result<Self> {
         match capacity {
             ComputeCapacity::Blocks(blocks) => Self::compute_sized(alloc, blocks),
-            ComputeCapacity::M5(geometry) => Self::compute_m5(alloc, geometry),
+            ComputeCapacity::M5(geometry) => Self::compute_m5(alloc, geometry, client),
         }
     }
     fn compute_sized(alloc: &Allocator<'_>, blocks: usize) -> Result<Self> {
@@ -373,19 +378,27 @@ impl Pages {
     /// Fresh zeroed M5 compute backing, built without the device mutex. M5 keeps
     /// its directory, block list and initial eight render blocks in one retained
     /// allocation.
-    fn compute_m5(alloc: &Allocator<'_>, required: Option<super::fw::m5::pool::PoolGeometry>) -> Result<Self> {
+    fn compute_m5(alloc: &Allocator<'_>, required: Option<super::fw::m5::pool::PoolGeometry>,
+        client: Option<&Arc<crate::memacct::Client>>) -> Result<Self> {
         use super::fw::m5::pool;
         let geometry = match required { Some(geometry) => geometry,
             None => pool::PoolGeometry::g17s(8).map_err(|_| EINVAL)?, };
-        Self::m5(alloc, geometry)
+        Self::m5(alloc, geometry, client)
     }
-    fn m5(alloc: &Allocator<'_>, geometry: super::fw::m5::pool::PoolGeometry) -> Result<Self> {
+    /// M5 pool sizes follow the client's program records, up to the board's whole inventory,
+    /// so the backing is admitted against `client`'s and the device's limits before it is
+    /// allocated, as a user object of that size would be. A refusal fails with ENOMEM.
+    fn m5(alloc: &Allocator<'_>, geometry: super::fw::m5::pool::PoolGeometry,
+        client: Option<&Arc<crate::memacct::Client>>) -> Result<Self> {
         let tables = geometry.directory_bytes.checked_add(geometry.freelist_bytes).ok_or(EOVERFLOW)?;
         let size = geometry.blocks.checked_mul(geometry.block_bytes())
             .and_then(|n| n.checked_add(tables)).ok_or(EOVERFLOW)?;
+        let charge = client
+            .map(|client| crate::memacct::LEDGER.admit(client, size as u64))
+            .transpose()?;
         let backing = alloc.lower(size, mmu::UAT_PGSZ as u64,
             mmu::PROT_GPU_SHARED_RW, CpuMap::WriteCombined)?;
-        let mut pages = Self { backing, layout: PageLayout::M5(geometry) };
+        let mut pages = Self { backing, layout: PageLayout::M5(geometry), _charge: charge };
         pages.populate_m5()?;
         Ok(pages)
     }
@@ -522,7 +535,7 @@ impl RenderBacking {
     /// the canonical and client mappings of these pages.
     fn m5(alloc: &Allocator<'_>, client: &mmu::Vm,
         geometry: super::fw::m5::pool::PoolGeometry) -> Result<Self> {
-        let pages = Pages::m5(alloc, geometry)?;
+        let pages = Pages::m5(alloc, geometry, client.memory_client())?;
         let client = pages.map_client(client)?;
         Ok(Self { _client: client, _global: None, pages })
     }
@@ -1009,11 +1022,12 @@ impl ComputePool {
     }
 
     /// A pool at the admitted capacity, in the capacity's family format.
-    pub(crate) fn new(alloc: &Allocator<'_>, qid: u8, required: ComputeCapacity) -> Result<Self> {
+    pub(crate) fn new(alloc: &Allocator<'_>, qid: u8, required: ComputeCapacity,
+        client: Option<&Arc<crate::memacct::Client>>) -> Result<Self> {
         if qid > super::fw::kick::QID_MAX {
             return Err(EINVAL);
         }
-        let pages = Pages::for_compute(alloc, required)?;
+        let pages = Pages::for_compute(alloc, required, client)?;
         let m5 = pages.is_m5();
         Self::with_pages(alloc, qid, m5, pages)
     }
