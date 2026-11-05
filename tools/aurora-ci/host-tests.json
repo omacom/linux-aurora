@@ -39,6 +39,27 @@
  ],
  "suites": [
   {
+   "name": "tools/asahi/ane-tm-transient-fault-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/ane-tm-transient-fault-tests.py"
+   ]
+  },
+  {
+   "name": "tools/asahi/ane-tm-transient-fault-tests.py --old-ref b798f2b0c767e3d780896cff2f57e19e412bf954",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/ane-tm-transient-fault-tests.py",
+    "--old-ref",
+    "b798f2b0c767e3d780896cff2f57e19e412bf954"
+   ],
+   "commits": [
+    "b798f2b0c767e3d780896cff2f57e19e412bf954"
+   ]
+  },
+  {
    "name": "tools/asahi/apple-dart-fw-tests.py",
    "group": "tools",
    "argv": [

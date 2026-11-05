@@ -247,14 +247,15 @@ static int ane_tm_collect_events(struct ane_device *ane,
 }
 
 /* read_poll_timeout op: consult the DART latch before any engine access.
- * Returns 1 to end the poll when a fault is latched; the caller then
- * handles the fault without ever reading the wedged engine.
+ * Returns -EIO when a fault is latched, so a fault that clears before the
+ * caller reads the latch again is still a failure. The caller handles a
+ * latched fault without ever reading the wedged engine.
  */
 static int ane_tm_poll_step(struct ane_device *ane, struct ane_request *req,
 			    u32 *finished)
 {
 	if (ane_dart_faulted(ane, NULL, NULL))
-		return 1;
+		return -EIO;
 	return ane_tm_collect_events(ane, req, finished);
 }
 
@@ -295,10 +296,13 @@ int ane_tm_execute(struct ane_device *ane, struct ane_request *req)
 			err = status;
 		if (ane_dart_faulted(ane, &fault_iova, &fault_status)) {
 			faulted = true;
-			if (ane->scratch_pages >= ANE_DART_SCRATCH_MAX)
+			if (ane->scratch_pages >= ANE_DART_SCRATCH_MAX) {
+				err = -EIO;
 				break;
-			if (ane_dart_drain_fault(ane, fault_iova, scratch,
-						 &ane->scratch_pages))
+			}
+			err = ane_dart_drain_fault(ane, fault_iova, scratch,
+						   &ane->scratch_pages);
+			if (err)
 				break;
 			/* The retried transaction now completes; poll on. */
 			continue;
