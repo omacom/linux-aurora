@@ -4,7 +4,7 @@
 
 use super::{sparse_tile::SparseTile, Prot, UatPageTable};
 use core::ops::Range;
-use kernel::{prelude::*, sync::Arc};
+use kernel::{addr::PhysicalAddr, prelude::*, sync::Arc};
 
 impl UatPageTable {
     pub(super) fn visit_runs(
@@ -16,8 +16,9 @@ impl UatPageTable {
         Err(EOPNOTSUPP)
     }
 
+    /// Fill `range` from a sparse tile: its first (zeroed) page repeats across
+    /// the range, as a SINGLE_PAGE bind repeats its GEM's first page.
     pub(super) fn map_tiled(&mut self, range: Range<u64>, tile: &Arc<SparseTile>, prot: Prot) -> Result {
-        let _ = (range, tile, prot);
-        Err(EOPNOTSUPP)
+        self.map_pages(range, tile.physical() as PhysicalAddr, prot, true)
     }
 }
