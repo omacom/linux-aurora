@@ -163,7 +163,7 @@ pub(crate) const CONFIG: Config = Config {
         },
         // Measured by the normal driver on J514C's 14.7 boot chain (system
         // firmware 26.5.2). Short native GL/Vulkan and normal-login checks passed;
-        // power/thermal qualification remains open. Explicit bring-up opt-in only.
+        // power/thermal qualification remains open. Exact board identity is required.
         FirmwareBuild {
             name: "J514C macOS 14.7 boot-chain firmware (experimental bring-up)",
             machine: Some(kernel::c_str!("apple,j514c")),
