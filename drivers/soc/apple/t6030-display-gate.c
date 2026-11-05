@@ -85,6 +85,10 @@
 #include <linux/types.h>
 #include <video/nomodeset.h>
 
+#ifdef CONFIG_APPLE_DISPLAY_GATE_KUNIT_TEST
+#include <kunit/static_stub.h>
+#endif
+
 enum {
 	GATE_DCP_DART,
 	GATE_DISP0_DART,
@@ -150,13 +154,23 @@ static bool gate_requested __initdata = true;
  * or 1. Unset, the native display is on for the exact J514C/J516C + T6031 pairs.
  */
 static int gate_t6031_switch __initdata = -1;
+
+/* Only the current KUnit case may substitute its synthetic root identity. */
+static bool __init gate_t6031_is_compatible(const char *compat)
+{
+#ifdef CONFIG_APPLE_DISPLAY_GATE_KUNIT_TEST
+	KUNIT_STATIC_STUB_REDIRECT(gate_t6031_is_compatible, compat);
+#endif
+	return of_machine_is_compatible(compat);
+}
+
 static const char *__init gate_t6031_default_board(void)
 {
-	if (!of_machine_is_compatible("apple,t6031"))
+	if (!gate_t6031_is_compatible("apple,t6031"))
 		return NULL;
-	if (of_machine_is_compatible("apple,j516c"))
+	if (gate_t6031_is_compatible("apple,j516c"))
 		return "apple,j516c";
-	if (of_machine_is_compatible("apple,j514c"))
+	if (gate_t6031_is_compatible("apple,j514c"))
 		return "apple,j514c";
 	return NULL;
 }

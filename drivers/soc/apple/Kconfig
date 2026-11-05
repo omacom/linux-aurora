@@ -264,7 +264,7 @@ config APPLE_DISPLAY_GATE_KUNIT_TEST
 	help
 	  Runs the display gate on test device trees with the T6030, T6031
 	  and T8122 display nodes, without Apple hardware. On T6031: on by
-	  default only on the default board (the J516C), otherwise only with
+	  default only on J514C and J516C, otherwise only with
 	  apple_t6031_display.enable=1, off with apple_t6031_display.enable=0,
 	  only with the boot loader's handoff marker and this Mac's PMP values,
 	  and with nothing changed when a check fails. On T6030: on by default, as

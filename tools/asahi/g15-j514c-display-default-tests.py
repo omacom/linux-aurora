@@ -6,6 +6,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 s = (ROOT / 'drivers/soc/apple/t6030-display-gate.c').read_text()
 def item(name):
  a=s.index(name);a=s.rfind('static ',0,a);b=s.index('\n}',a)+2;return s[a:b]
+compat=item('gate_t6031_is_compatible(const char *compat)')
 selector=item('gate_t6031_default_board(void)')
 wanted=item('gate_t6031_wanted(int sw, bool default_board)')
 assert 'const char *board = gate_t6031_default_board();' in s
@@ -19,7 +20,7 @@ source=r'''
 static const char *board, *soc;
 static int of_machine_is_compatible(const char *s)
 { return (board && !strcmp(board,s)) || (soc && !strcmp(soc,s)); }
-'''+selector+'\n'+wanted+r'''
+'''+compat+'\n'+selector+'\n'+wanted+r'''
 int main(void)
 {
  const char *boards[]={"apple,j514c","apple,j516c","apple,j514m","apple,j516m","apple,j514s","apple,j999"};
@@ -37,8 +38,8 @@ int main(void)
 '''
 mutants={
  'control':source,
- 'missing-j514c':source.replace('of_machine_is_compatible("apple,j514c")','false'),
- 'missing-soc':source.replace('!of_machine_is_compatible("apple,t6031")','false'),
+ 'missing-j514c':source.replace('gate_t6031_is_compatible("apple,j514c")','false'),
+ 'missing-soc':source.replace('!gate_t6031_is_compatible("apple,t6031")','false'),
  'lost-optout':source.replace('return sw < 0 ? default_board : sw;','return sw < 0 ? default_board : true;'),
 }
 with tempfile.TemporaryDirectory(prefix='j514c-display-default-') as temp:
