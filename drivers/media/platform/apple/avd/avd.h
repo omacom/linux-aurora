@@ -295,7 +295,8 @@ void avd_run_postamble(struct avd_ctx *ctx, struct avd_run *run);
 #if IS_ENABLED(CONFIG_KUNIT)
 bool avd_h264_find_slice_data(const u8 *data, u32 len, u32 header_len,
 			      u32 *off);
-bool avd_h264_slice_fits(const struct v4l2_ctrl_h264_sps *sps, size_t held,
+bool avd_h264_slice_fits(const struct v4l2_pix_format_mplane *pix,
+			 const struct v4l2_ctrl_h264_sps *sps, size_t held,
 			 size_t held_bytes, u32 len, size_t decoded_size);
 #endif
 
