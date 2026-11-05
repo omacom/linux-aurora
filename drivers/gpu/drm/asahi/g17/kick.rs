@@ -682,9 +682,20 @@ impl Queue {
 
     /// Both aliases are owned mappings of the same full ring. Publish their
     /// page-table updates to each live translation regime before installation.
+    ///
+    /// With published roots each alias reaches every context whose lower or
+    /// upper half names its VM's root: the low alias lives in the kernel lower
+    /// VM, the firmware alias in the kernel upper VM, whose root sits in the
+    /// upper half of every execution context. Under the handoff the first four
+    /// contexts are invalidated.
     pub(crate) fn prepare_compute_install(&self) -> Result {
-        if self.id.engine != DataMaster::Compute {
+        let Backing::Compute { high, low } = &self.backing else {
             return Err(EINVAL);
+        };
+        if high.tracks_contexts() {
+            low.publish_to_contexts()?;
+            high.publish_to_contexts();
+            return Ok(());
         }
         mem::sync();
         for asid in 0..4 {

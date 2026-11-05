@@ -229,6 +229,13 @@ impl KernelObject {
         self.mapping.take().ok_or(EINVAL)
     }
 
+    /// Publishes the page-table updates of the object's own mapping to every context naming its
+    /// VM's root (see [`mmu::KernelMapping::publish_to_contexts`]).
+    pub(crate) fn publish_to_contexts(&self) -> Result {
+        self.mapping.as_ref().ok_or(EINVAL)?.publish_to_contexts();
+        Ok(())
+    }
+
     /// Returns the GPU address of the object.
     pub(crate) fn gpu_va(&self) -> u64 {
         self.mapping.as_ref().map_or(0, |mapping| mapping.iova())

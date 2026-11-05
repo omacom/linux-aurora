@@ -948,6 +948,21 @@ impl VmInner {
         self.tlbi_context_mask(iova, size, contexts);
     }
 
+    /// Invalidate a VA range in every TTBAT context that names this Vm's root in either half: a
+    /// kernel upper mapping reaches the firmware contexts and every execution context, a kernel
+    /// lower one the contexts that still name the kernel lower root.
+    fn tlbi_contexts_naming_root_in_either_half(&self, iova: u64, size: usize) {
+        if self.uat_inner.firmware == UatFirmware::Handoff {
+            return;
+        }
+
+        let contexts = self
+            .uat_inner
+            .lock()
+            .contexts_naming_root_in_either_half(self.ttb());
+        self.tlbi_context_mask(iova, size, contexts);
+    }
+
     fn tlbi_context_mask(&self, iova: u64, size: usize, contexts: u64) {
         // Complete new leaves even if no context currently names this root:
         // a later context can publish it without repeating the map operation.
@@ -1414,6 +1429,23 @@ impl KernelMapping {
         self.0.start()..(self.0.start() + self.0.mapped_size as u64)
     }
 
+    /// Whether the UAT tracks which TTBAT contexts name each root (published roots), so that
+    /// [`Self::publish_to_contexts`] reaches every context that can walk this mapping. Under the
+    /// handoff the caller keeps its own invalidation.
+    pub(crate) fn tracks_contexts(&self) -> bool {
+        self.0.uat_inner.firmware != UatFirmware::Handoff
+    }
+
+    /// Publishes this mapping's page-table updates to every TTBAT context whose lower or upper
+    /// half names the owner's root. Call once the mapping set is complete, before work naming it
+    /// becomes visible.
+    pub(crate) fn publish_to_contexts(&self) {
+        self.0
+            .owner
+            .lock_inner()
+            .tlbi_contexts_naming_root_in_either_half(self.iova(), self.size());
+    }
+
     /// Resolves a byte in this retained mapping without creating page tables.
     pub(crate) fn translate_offset(&self, offset: usize) -> Result<u64> {
         if offset >= self.size() {
@@ -1840,6 +1872,19 @@ impl UatShared {
                 let expected = tagged_root(ttb, *ctx);
                 let _ = adopted; // Context 0 is naturally untagged; user contexts carry their ASID.
                 slot.ttb0.load(Ordering::Acquire) == expected
+            })
+            .fold(0, |mask, (ctx, _)| mask | (1 << ctx))
+    }
+
+    /// Returns the mask of TTBAT contexts naming the root `ttb` in their lower or upper half.
+    fn contexts_naming_root_in_either_half(&self, ttb: u64) -> u64 {
+        self.ttbs()
+            .iter()
+            .enumerate()
+            .filter(|(ctx, slot)| {
+                let expected = tagged_root(ttb, *ctx);
+                slot.ttb0.load(Ordering::Acquire) == expected
+                    || slot.ttb1.load(Ordering::Acquire) == expected
             })
             .fold(0, |mask, (ctx, _)| mask | (1 << ctx))
     }
