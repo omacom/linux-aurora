@@ -118,6 +118,9 @@ impl Backend {
 }
 
 impl job::Backend for Backend {
+    fn creator_cluster_scheduling(&self) -> bool {
+        self.shared.events.is_some()
+    }
     fn input_sources(&self, inputs: &[crate::file::SyncItem])
         -> Option<Arc<crate::g17::sync_input::Sources>>
     {

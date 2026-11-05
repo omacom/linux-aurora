@@ -811,6 +811,7 @@ impl Firmware {
 
     /// Called at actual submission publication, not while a queued job is merely being built.
     fn note_submission(&mut self) -> Result {
+        self.primary.state.shared.note_submitter();
         self.port.note_gpu_activity();
         self.primary.state.shared.note_gpu_activity();
         self.effort.submit();
@@ -1075,6 +1076,12 @@ struct Shared {
     /// When work was last published while the governor is requested (0: none since its last
     /// step). Publishers without the device mutex set it too.
     governor_activity_ns: AtomicU64,
+    /// M5: the event work's queue. Unbound, so the event work runs in the affinity pod (the L2)
+    /// of the CPU that last published work, not on whichever CPU the completion IRQ thread first
+    /// ran on. On a two-die part that keeps completion processing on the submitter's die.
+    events: Option<workqueue::OwnedQueue>,
+    /// M5: the CPU of the last publication, `u32::MAX` before the first.
+    submitter: AtomicU32,
     #[pin]
     grow: Work<Shared, GROW_WORK>,
     #[pin]
@@ -1245,7 +1252,23 @@ impl Shared {
             return;
         }
         // Already queued if this fails, which is just as good.
-        let _ = workqueue::system_highpri().enqueue::<Arc<Shared>, EVENT_WORK>(self.clone());
+        let _ = match (&self.events, self.submitter()) {
+            (Some(events), Some(cpu)) => {
+                events.enqueue_on::<Arc<Shared>, EVENT_WORK>(cpu, self.clone())
+            }
+            _ => workqueue::system_highpri().enqueue::<Arc<Shared>, EVENT_WORK>(self.clone()),
+        };
+    }
+
+    /// Records the publishing CPU for the event work's placement (M5).
+    fn note_submitter(&self) {
+        if self.events.is_some() {
+            self.submitter.store(kernel::cpu::CpuId::current().as_u32(), Ordering::Relaxed);
+        }
+    }
+
+    fn submitter(&self) -> Option<kernel::cpu::CpuId> {
+        kernel::cpu::CpuId::from_u32(self.submitter.load(Ordering::Relaxed))
     }
 
     fn queue_grow(self: &Arc<Self>) {
@@ -1490,6 +1513,11 @@ impl Gpu {
         let render_policy = if m5 { Some(render_resources::M5Policy::new(&id)?) } else { None };
         // The bare-metal M5 boot runs both engines; other M5 profiles take no submission.
         let submits = !m5 || cfg.profile == FirmwareProfile::M5PublishedRoots;
+        let events = if m5 {
+            Some(workqueue::OwnedQueue::new_unbound(c"aurora_g17_events", true)?)
+        } else {
+            None
+        };
         let shared = Arc::pin_init(
             pin_init!(Shared {
                 drm <- new_mutex!(Some(dev.into()), "g17::Shared::drm"),
@@ -1523,6 +1551,8 @@ impl Gpu {
                 governor <- new_delayed_work!("g17::Shared::governor"),
                 governor_armed: AtomicBool::new(false),
                 governor_activity_ns: AtomicU64::new(0),
+                events,
+                submitter: AtomicU32::new(u32::MAX),
                 grow <- new_work!("g17::Shared::grow"),
                 reclaim_work <- new_work!("g17::Shared::reclaim_work"),
                 reclaim <- new_mutex!(reclaim, "g17::Shared::reclaim"),

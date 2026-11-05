@@ -7,6 +7,9 @@ use crate::driver::AsahiDrmDevice;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use kernel::{
     bindings, c_str,
+    cpu::CpuId,
+    cpumask::Cpumask,
+    workqueue,
     dma_fence::{Fence, RawDmaFence},
     drm::sched,
     prelude::*,
@@ -303,6 +306,8 @@ pub(crate) trait Backend: Send + Sync {
     /// The device accepts command submission (an M5 GPU before its queues take submission
     /// does not).
     fn supports_submission(&self) -> bool { true }
+    /// Whether this backend's scheduler workers run in their queue creator's cluster (M5).
+    fn creator_cluster_scheduling(&self) -> bool { false }
     fn supports_engine(&self, _engine: Engine) -> bool { true }
     /// Device policy applied to a validated command before it is ordered (the M5 resource
     /// plan).
@@ -466,7 +471,16 @@ impl<B: Backend> Scheduler<B> {
             Engine::Render => (RENDER_CREDITS, c_str!("asahi_g17_render")),
             Engine::Compute => (COMPUTE_CREDITS, c_str!("asahi_g17_compute")),
         };
-        let scheduler = sched::Scheduler::new(dev.as_ref().as_ref(), 1, credits, 0, TIMEOUT_MS, name)?;
+        let device = dev.as_ref().as_ref();
+        let scheduler = if backend.creator_cluster_scheduling() {
+            // The run and free work stays in the creating CPU's cluster, as the event work
+            // follows the submitter, instead of wherever an unbound worker last ran.
+            let queue = workqueue::OwnedQueue::new_ordered_reclaim(name)?;
+            queue.restrict(Cpumask::cluster_of(CpuId::current()))?;
+            sched::Scheduler::new_with_submit_wq(device, 1, credits, 0, TIMEOUT_MS, name, queue)?
+        } else {
+            sched::Scheduler::new(device, 1, credits, 0, TIMEOUT_MS, name)?
+        };
         let entity = sched::Entity::new(&scheduler, sched::Priority::Kernel)?;
         Ok(Self {
             entity,
