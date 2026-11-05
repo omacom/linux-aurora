@@ -497,7 +497,7 @@ pub(crate) struct PoolBacking {
 
 impl PoolBacking {
     pub(crate) fn new(alloc: &Allocator<'_>, id: kick::Id, blocks: usize) -> Result<Self> {
-        let pool = ComputePool::new(alloc, id.qid(), blocks)?;
+        let pool = ComputePool::sized(alloc, id.qid(), blocks)?;
         Ok(Self { pool, id })
     }
 
@@ -1836,7 +1836,7 @@ impl Queue {
         Ok((self.pool.id(), self.pool.page_list_va()?))
     }
     pub(crate) fn pool_fits(&self, required: usize) -> bool {
-        !self.growing && self.pool_phase == PoolPhase::Populated && self.pool.fits(required)
+        !self.growing && self.pool_phase == PoolPhase::Populated && self.pool.fits_blocks(required)
     }
 
     /// Only a capacity increase waits for this queue's previously published work.

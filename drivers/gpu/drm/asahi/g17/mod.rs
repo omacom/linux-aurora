@@ -1547,7 +1547,7 @@ impl Gpu {
                 ),
                 pool: object::Pool::new()?,
                 render_rings: kick::RenderRings::new()?,
-                render_ids: Arc::new(freelist::RenderIds::new(), GFP_KERNEL)?,
+                render_ids: freelist::RenderIds::new()?,
                 init: initdata::InitData::new(),
                 _render_global: render_global,
                 _pm_metrics: Arc::new(pm_metrics, GFP_KERNEL)?,

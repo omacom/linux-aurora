@@ -13,7 +13,7 @@ pub(crate) const RENDER_BLOCKS: usize = 44;
 pub(crate) const COMPUTE_BLOCKS: usize = 21;
 
 /// Render reserves eight run words per block; compute packs runs consecutively.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RunLayout {
     Render,
     Compute,
