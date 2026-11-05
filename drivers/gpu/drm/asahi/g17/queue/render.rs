@@ -436,6 +436,7 @@ impl Pair {
             gtp_va: self.memory.target.gtp_va(&layout)?,
             deflake_va: deflake,
             ta_status_va: ta_status,
+            mesh_storage: 0,
             fragment_status_va: fragment_status,
             fragment_status_fw_va: fragment_fw,
             aux_fb_va: auxiliary,

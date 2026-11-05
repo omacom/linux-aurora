@@ -268,8 +268,14 @@ impl<B: Backend> Queue<B> {
             &[]
         };
         let count = frontier.len();
+        // Only a command that copies or resets queries can observe timestamps the
+        // host has not yet published for its predecessors.
+        let query_access = match &command {
+            Validated::Compute { query_access, .. } => *query_access,
+            Validated::Render { .. } => true,
+        };
         let timestamp_prefix = order.wait_through[index];
-        let timestamps = if engine == Engine::Compute && timestamp_prefix.is_some() {
+        let timestamps = if engine == Engine::Compute && query_access && timestamp_prefix.is_some() {
             let frontier = self.frontiers[index].as_slice();
             let end = frontier
                 .partition_point(|(sequence, _)| Order::contains(timestamp_prefix, *sequence));

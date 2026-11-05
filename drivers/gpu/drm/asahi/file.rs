@@ -58,6 +58,77 @@ use kernel::{
     xarray, //
 };
 
+// The M5 runtime's UAPI numbers. The header's values are Mesa's; the M5 queue and
+// GET_PARAMS paths use these names.
+
+/// DRM_ASAHI_BIND_SPARSE_TILE: with SINGLE_PAGE, fill the range
+/// from kernel sparse tiles (read-only: global zero tile; writable: per-VM
+/// sink) instead of the GEM's first page. The GEM only anchors the GPUVA.
+pub(crate) const DRM_ASAHI_BIND_SPARSE_TILE: u32 = uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SPARSE_TILE;
+/// DRM_ASAHI_FEATURE_SPARSE_TILES: BIND_SPARSE_TILE accepted.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_SPARSE_TILES: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SPARSE_TILES as u64;
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_COMPUTE_MATRIX: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_MATRIX as u64;
+/// DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: render programs accept
+/// DRM_ASAHI_RENDER_PROGRAM_TASK and such task (object-stage) kicks get the
+/// TA mesh rendering buffer, which backs the object stage's payload address.
+/// Reported only while m5_mesh_storage_chunks != 0.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_TASK_MESH_STORAGE as u64;
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES as u64;
+/// D32 2x/4x ZLS admission; no compressed stencil or resolve bits.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION as u64;
+/// DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: single-layer
+/// 2x/4x ZLS admission in the compressed Z/S form, stencil included.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION as u64;
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_RENDER_SHADER_WRITES: u32 =
+    uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_SHADER_WRITES;
+/// Renders may carry separate tiling prefixes of both subqueues
+/// (DRM_ASAHI_RENDER_STAGE_PREFIXES).
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES as u64;
+/// The tiling half waits only on the render and compute prefixes of the command's stage-prefix
+/// fields, its fragment half on the whole ones.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_RENDER_STAGE_PREFIXES: u32 =
+    uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_STAGE_PREFIXES;
+/// Renders may declare that they write whole attachments only
+/// (DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS).
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS as u64;
+/// The render area covers every attachment's full extent, so its tile stores
+/// write no pixel outside it: an overlap with another such render without an
+/// ordering dependency is the application's own race.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS: u32 =
+    uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS;
+/// DRM_ASAHI_RENDER_PROGRAM_TASK, only with DRM_ASAHI_RENDER_PROGRAM_OBJECT: the object
+/// program is an API task stage.
+pub(crate) const DRM_ASAHI_RENDER_PROGRAM_TASK: u32 = uapi::DRM_ASAHI_RENDER_PROGRAM_TASK;
+/// Bit 16, as Mesa defines it.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_COMPUTE_USES_MATRIX: u32 =
+    uapi::drm_asahi_compute_flags_DRM_ASAHI_COMPUTE_USES_MATRIX as u32;
+/// The compute command neither copies nor resets queries, so it cannot observe
+/// timestamps the host publishes after earlier commands complete
+/// (DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS). Accepted; DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS
+/// is not reported: with it, top-of-pipe timestamps are read out of order.
+pub(crate) const DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS: u32 =
+    uapi::drm_asahi_compute_flags_DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS as u32;
+
 const DEBUG_CLASS: DebugFlags = DebugFlags::File;
 
 pub(crate) const MAX_COMMANDS_PER_SUBMISSION: u32 = 64;
@@ -925,11 +996,13 @@ impl File {
             if op.flags
                 & !(uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_READ
                     | uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_WRITE
-                    | uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SINGLE_PAGE)
+                    | uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SINGLE_PAGE
+                    | DRM_ASAHI_BIND_SPARSE_TILE)
                 != 0
             {
                 return Err(EINVAL);
             }
+            let sparse_tile = op.flags & DRM_ASAHI_BIND_SPARSE_TILE != 0;
             let read = op.flags & uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_READ != 0;
             let write = op.flags & uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_WRITE != 0;
             let prot = match (read, write) {
@@ -956,7 +1029,7 @@ impl File {
                 op.offset,
                 prot,
                 single_page,
-                false,
+                sparse_tile,
             )?)?;
         }
         vm.reserve_deferred_user_unmaps(unmaps)?;

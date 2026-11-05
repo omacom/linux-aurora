@@ -77,6 +77,9 @@ pub(crate) struct Variant {
     pub(crate) compute: super::compute::ComputeProgram,
     pub(crate) opening_record: bool,
     pub(crate) split_firmware_area: bool,
+    /// Command validation applies the M5 command set: resource commands, the M5 render and
+    /// compute flags, 8x MSAA and the M5 tile-buffer limit.
+    pub(crate) m5_commands: bool,
 }
 
 /// A firmware build a SoC supports, identified by its loaded TEXT.
@@ -121,6 +124,7 @@ pub(crate) const V26A428: Variant = Variant {
     compute: super::compute::ComputeProgram::G17P,
     opening_record: true,
     split_firmware_area: false,
+    m5_commands: false,
 };
 
 /// The M4 Pro firmware (25G83, `mBoot-18000.161.10`).
@@ -152,6 +156,7 @@ pub(crate) const V25G83: Variant = Variant {
     compute: super::compute::ComputeProgram::G17P,
     opening_record: true,
     split_firmware_area: false,
+    m5_commands: false,
 };
 
 pub(crate) const V25F84: Variant = Variant {

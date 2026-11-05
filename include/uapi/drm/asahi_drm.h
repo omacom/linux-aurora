@@ -408,10 +408,22 @@ enum drm_asahi_feature {
 	DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS = (1UL) << 24,
 
 	/**
+	 * @DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES: M5: render commands accept
+	 * DRM_ASAHI_RENDER_STAGE_PREFIXES.
+	 */
+	DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES = (1UL) << 25,
+
+	/**
 	 * @DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: M5: compressed
 	 * multisample stencil.
 	 */
 	DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION = (1UL) << 26,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS: M5: render commands accept
+	 * DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS.
+	 */
+	DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS = (1UL) << 27,
 
 	/** @DRM_ASAHI_FEATURE_COMPUTE_RESOURCES: M5: per-dispatch storage. */
 	DRM_ASAHI_FEATURE_COMPUTE_RESOURCES = (1UL) << 28,
@@ -422,6 +434,12 @@ enum drm_asahi_feature {
 	 * include the earlier points of that timeline without adding GPU waits.
 	 */
 	DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS = (1UL) << 29,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS: Compute commands accept
+	 * DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS as an ordering hint.
+	 */
+	DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS = (1UL) << 30,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -1019,6 +1037,87 @@ struct drm_asahi_sync {
 #define DRM_ASAHI_BARRIER_NONE (0xFFFFu)
 
 /**
+ * struct drm_asahi_compute_program - Storage of one linked compute dispatch.
+ *
+ * SET_COMPUTE_RESOURCES replaces the list for subsequent compute commands.
+ * Include each distinct dispatch profile in the command stream. The kernel
+ * combines their requirements before publishing work. All sizes are bytes.
+ */
+struct drm_asahi_compute_program {
+	/** @primary_bytes: Per-thread primary storage. */
+	__u32 primary_bytes;
+	/** @secondary_bytes: Per-thread secondary storage. */
+	__u32 secondary_bytes;
+	/** @linked_bytes: Additional primary storage after linking. */
+	__u32 linked_bytes;
+	/** @minimum_primary_bytes: Minimum primary storage across variants. */
+	__u32 minimum_primary_bytes;
+	/** @threadgroup_bytes: Storage shared by a workgroup. */
+	__u32 threadgroup_bytes;
+	/** @threads: Number of invocations in a workgroup. */
+	__u32 threads;
+	/** @flags: Reserved; must be zero. */
+	__u32 flags;
+};
+
+/**
+ * struct drm_asahi_render_program - Storage of one linked render program.
+ *
+ * SET_RENDER_RESOURCES replaces the list for subsequent renders in this submit.
+ * Include every vertex and fragment program, including background and end-of-tile
+ * programs. Sizes describe the final linked program, in bytes. Each entry is
+ * evaluated separately before taking the maximum demand across the pass.
+ */
+struct drm_asahi_render_program {
+	/** @stage: 0 for vertex, 1 for fragment (including background/end-of-tile). */
+	__u32 stage;
+	/** @primary_bytes: Primary per-thread storage after linking. */
+	__u32 primary_bytes;
+	/** @secondary_bytes: Secondary per-thread storage after linking. */
+	__u32 secondary_bytes;
+	/** @linked_bytes: Additional primary storage from linked programs. */
+	__u32 linked_bytes;
+	/** @minimum_primary_bytes: Minimum primary storage across linked variants. */
+	__u32 minimum_primary_bytes;
+	/** @auxiliary_count: Fragment auxiliary entries; zero for vertex programs. */
+	__u32 auxiliary_count;
+	/** @threadgroup_bytes: Fragment threadgroup storage; zero for vertex. */
+	__u32 threadgroup_bytes;
+	/** @imageblock_bytes: Fragment imageblock storage; zero for vertex. */
+	__u32 imageblock_bytes;
+	/** @multisample_bytes: Fragment multisample storage; zero for vertex. */
+	__u32 multisample_bytes;
+	/** @flags: MBZ. */
+	__u32 flags;
+};
+/** Version 2 linked render storage. Version 1 remains exactly 40 bytes. */
+#define DRM_ASAHI_RENDER_PROGRAM_SCS (1U << 0)
+#define DRM_ASAHI_RENDER_PROGRAM_MESH (1U << 1)
+#define DRM_ASAHI_RENDER_PROGRAM_OBJECT (1U << 2)
+/* With OBJECT: the object program is an API task stage. The kernel binds the
+ * TA mesh rendering buffer (the backing of the object payload address) to
+ * such kicks only. Requires DRM_ASAHI_FEATURE_TASK_MESH_STORAGE. */
+#define DRM_ASAHI_RENDER_PROGRAM_TASK (1U << 3)
+struct drm_asahi_render_program_v2 {
+	struct drm_asahi_render_program legacy;
+	/** @threads: Mesh/object workgroup invocation count; zero otherwise. */
+	__u32 threads;
+	/** @usage_flags: DRM_ASAHI_RENDER_PROGRAM_* bits. */
+	__u32 usage_flags;
+	/** @scs_layout: Packed depth/levels/cliques/user/driver SCS layout. */
+	__u64 scs_layout;
+	/** @auxiliary_allocation: The stage's auxiliary allocation word. */
+	__u32 auxiliary_allocation;
+	__u32 reserved;
+	__u64 intersection_pool;
+	__u64 intersection_pool_bytes;
+	__u32 intersection_first;
+	__u32 intersection_count;
+	__u64 intersection_default_program;
+	__u64 intersection_default_control;
+};
+
+/**
  * struct drm_asahi_cmd_header - Top level command structure
  *
  * This struct is core to the command buffer definition and therefore is not
@@ -1252,6 +1351,37 @@ enum drm_asahi_render_flags {
 	 * may depend on it. Requires DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS.
 	 */
 	DRM_ASAHI_RENDER_FRAGMENT_BARRIERS = (1U << 20),
+
+	/**
+	 * @DRM_ASAHI_RENDER_SHADER_WRITES: A graphics program in this command
+	 * writes external memory, including buffer/image stores or atomic RMW.
+	 * Ordinary raster outputs and compiler-private transport do not count.
+	 * Requires DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES. Omission retains the
+	 * existing encoding, allowing older userspace to submit unchanged.
+	 */
+	DRM_ASAHI_RENDER_SHADER_WRITES = (1U << 21),
+
+	/**
+	 * @DRM_ASAHI_RENDER_STAGE_PREFIXES: The tiling half waits only on the
+	 * render and compute prefixes in @drm_asahi_cmd_render.ta_vdm_barrier,
+	 * ta_prior_vdm, ta_cdm_barrier and ta_prior_cdm, each no later than the
+	 * command's own prefix of that subqueue; the fragment half waits on the
+	 * whole ones. Earlier renders in the tiling prefix are waited on to
+	 * completion. The command must be the full struct drm_asahi_cmd_render.
+	 * Not combined with DRM_ASAHI_RENDER_FRAGMENT_BARRIERS. Requires
+	 * DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES.
+	 */
+	DRM_ASAHI_RENDER_STAGE_PREFIXES = (1U << 23),
+
+	/**
+	 * @DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS: The render area covers the full
+	 * extent of every attachment, so the render's tile stores write no pixel
+	 * outside it. The kernel need not order such a render against another
+	 * one that writes the same attachments without a dependency between
+	 * them: any overlap is the application's own race. Requires
+	 * DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS.
+	 */
+	DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS = (1U << 24),
 };
 
 /**
@@ -1632,6 +1762,46 @@ struct drm_asahi_cmd_render {
 	 * userspace omits it; a shorter command is read with both stages zeroed.
 	 */
 	struct drm_asahi_render_ray_query_stage ray_query[2];
+
+	/**
+	 * @ta_cdm_barrier: Compute prefix of the tiling half, a command index like
+	 * drm_asahi_cmd_header::cdm_barrier.
+	 *
+	 * This and the fields up to @ta_prior_vdm are read only with
+	 * DRM_ASAHI_RENDER_STAGE_PREFIXES; without it they must be zero, and a
+	 * shorter command reads them as zero.
+	 */
+	__u16 ta_cdm_barrier;
+
+	/** @reserved0: MBZ. */
+	__u16 reserved0;
+
+	/** @reserved1: MBZ. */
+	__u32 reserved1;
+
+	/**
+	 * @ta_prior_cdm: Exact compute prefix of the tiling half, an ordinal like
+	 * @prior_cdm.
+	 */
+	__u64 ta_prior_cdm;
+
+	/**
+	 * @ta_vdm_barrier: Render prefix of the tiling half, a command index like
+	 * drm_asahi_cmd_header::vdm_barrier.
+	 */
+	__u16 ta_vdm_barrier;
+
+	/** @reserved2: MBZ. */
+	__u16 reserved2;
+
+	/** @reserved3: MBZ. */
+	__u32 reserved3;
+
+	/**
+	 * @ta_prior_vdm: Exact render prefix of the tiling half, an ordinal like
+	 * @prior_vdm.
+	 */
+	__u64 ta_prior_vdm;
 };
 
 /**
@@ -1738,6 +1908,20 @@ enum drm_asahi_compute_flags {
 	 * ordered helpers cannot time out while waiting for the build.
 	 */
 	DRM_ASAHI_COMPUTE_AS_BUILD = (1L << 2),
+
+	/**
+	 * @DRM_ASAHI_COMPUTE_USES_MATRIX: The command's dispatches use the
+	 * hardware's matrix instructions. Requires DRM_ASAHI_FEATURE_COMPUTE_MATRIX.
+	 */
+	DRM_ASAHI_COMPUTE_USES_MATRIX = (1L << 16),
+
+	/**
+	 * @DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS: The command neither copies nor
+	 * resets queries, so it cannot observe timestamps the kernel publishes
+	 * for earlier commands and need not wait for that publication. Requires
+	 * DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS.
+	 */
+	DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS = (1L << 17),
 };
 
 /**

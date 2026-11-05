@@ -27,6 +27,9 @@ mod calibration;
 mod channel;
 mod command;
 pub(crate) use command::Attachments;
+// M5 render encodings, reached only once the M5 render runtime is wired.
+#[allow(dead_code)]
+mod render_resources;
 mod completion;
 pub(crate) mod context;
 mod data_segment;

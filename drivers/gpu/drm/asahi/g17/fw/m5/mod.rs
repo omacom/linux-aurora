@@ -23,5 +23,6 @@ pub(crate) fn set_register_array(
 pub(crate) mod pool;
 pub(crate) mod pool_budget;
 pub(crate) mod queue;
+pub(crate) mod compute;
 
 pub(crate) mod render_demand;

@@ -243,6 +243,15 @@ pub(crate) struct RenderPass {
     pub(crate) few_primitives: bool,
     /// Host-only: the resolved barriers order the fragment kick, not the tiling kick.
     pub(crate) fragment_barriers: bool,
+    /// Host-only: the tiling kick waits on its own render and compute prefixes
+    /// (`Order::tiling_wait_through`), the fragment kick on the whole ones. M5 only.
+    pub(crate) stage_prefixes: bool,
+    /// Host-only: the render writes whole attachments: its tile stores reach no pixel
+    /// outside its own render area (hazard ordering). M5 only.
+    pub(crate) whole_attachments: bool,
+    /// A graphics program of the render writes external memory (buffer or image stores,
+    /// atomics); render-target outputs do not count. M5 only.
+    pub(crate) shader_writes_memory: bool,
     /// GPU address of the occlusion-query results, or zero.
     pub(crate) occlusion_query_va: u64,
     /// GPU address of the sampler heap, or zero.
@@ -326,6 +335,10 @@ pub(crate) struct RenderResources {
     pub(crate) deflake_va: u64,
     /// GPU address of the tiling status word.
     pub(crate) ta_status_va: u64,
+    /// The TA mesh rendering buffer word for mesh/object kicks: the context VA
+    /// of the queue's mesh rendering buffer in the low 48 bits and its
+    /// 64 KiB chunk count above. Zero leaves the register out of the program.
+    pub(crate) mesh_storage: u64,
     /// GPU address of the fragment status word, as seen by the pass's VM.
     pub(crate) fragment_status_va: u64,
     /// Firmware alias of the fragment status word.
@@ -469,7 +482,11 @@ struct PassWords {
 
 impl PassWords {
     fn new(pass: &RenderPass) -> Result<Self> {
-        if pass.samples_log2 > SAMPLES_LOG2_MAX {
+        Self::with_sample_limit(pass, SAMPLES_LOG2_MAX)
+    }
+
+    fn with_sample_limit(pass: &RenderPass, max_samples_log2: u8) -> Result<Self> {
+        if pass.samples_log2 > max_samples_log2 {
             return Err(EINVAL);
         }
         let samples = 1u64 << pass.samples_log2;
@@ -996,6 +1013,97 @@ fn partial_load_registers(
         RegisterWrite::new(0x15319, w.partial_zls_reload),
         RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
     ]
+}
+
+/// The M5 render register storage, shared by its phases. Keep this in the caller's heap
+/// workspace when constructing descriptors.
+pub(crate) struct M5RegisterPrograms {
+    pub(crate) ta: [RegisterWrite; TA_REGISTERS],
+    pub(crate) fragment: [RegisterWrite; FRAGMENT_REGISTERS],
+    pub(crate) store: [RegisterWrite; PARTIAL_STORE_REGISTERS],
+    pub(crate) resume: [RegisterWrite; PARTIAL_RESUME_REGISTERS],
+    pub(crate) load: [RegisterWrite; PARTIAL_LOAD_REGISTERS],
+}
+// SAFETY: All members contain only integer register writes.
+unsafe impl Zeroable for M5RegisterPrograms {}
+impl M5RegisterPrograms {
+    /// M5 partial phases add only their own depth/stencil direction while
+    /// preserving the pass's existing operations and surface layout bits.
+    pub(crate) fn write_m5(&mut self, args: &RenderArgs<'_>) -> Result {
+        // The M5 forms of the shared lowering: the A18 Pro arrays without the SCS enable
+        // (the M5 adaptation brackets its own scratch and intersection words), the
+        // one-cluster deflake layout, and up to eight samples.
+        let none = super::render_rt::RayQueryStage {
+            intersection: super::compute::IntersectionTables::NONE,
+            scratch: super::compute::ScratchRequest::new(0)?,
+        };
+        let args = &RenderArgs {
+            programs: RegisterPrograms::G17P,
+            deflake: Deflake::ONE_CLUSTER,
+            ray_query: [none; 2],
+            ..*args
+        };
+        let g = Geometry::new(args.pass)?;
+        let w = PassWords::with_sample_limit(args.pass, 3)?;
+        without_scs_enable(&mut self.ta, &ta_registers(args, &g, &w)?, TA_SCS_ENABLE_INDEX)?;
+        without_scs_enable(
+            &mut self.fragment,
+            &fragment_registers(args, &g, &w),
+            FRAGMENT_SCS_ENABLE_INDEX,
+        )?;
+        self.store = partial_store_registers(args.pass, &w);
+        self.resume = partial_resume_registers(args.pass, &w);
+        self.load = partial_load_registers(args.pass, &w);
+        // The partial phases start from the pass's ZLS word with both directions of each
+        // present surface, as the M5 lowering always has.
+        let mut partial = args.pass.zls_control;
+        if args.pass.depth.va != 0 {
+            partial |= ZLS_LOAD_DEPTH | ZLS_STORE_DEPTH;
+        }
+        if args.pass.stencil.va != 0 {
+            partial |= ZLS_LOAD_STENCIL | ZLS_STORE_STENCIL;
+        }
+        for array in [&mut self.store[..], &mut self.resume[..], &mut self.load[..]] {
+            for register in array {
+                if register.reg == 0x15319 {
+                    register.value = partial;
+                }
+            }
+        }
+        const LOAD: u64 = (1 << 14) | (1 << 15);
+        const STORE: u64 = (1 << 18) | (1 << 19);
+        for register in &mut self.store {
+            if register.reg == 0x15319 {
+                register.value = (register.value & !LOAD) | (args.pass.zls_control & LOAD);
+            } else if register.reg == 0x10039
+                && (args.pass.depth.va != 0 || args.pass.stencil.va != 0)
+            {
+                // A partial store forces empty tiles when either stored ZLS
+                // address (depth or stencil) exists.
+                register.value |= TILE_CONFIG_PROCESS_EMPTY_TILES;
+            }
+        }
+        for register in &mut self.load {
+            if register.reg == 0x15319 {
+                register.value = (register.value & !STORE) | (args.pass.zls_control & STORE);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Copies a lowered array without its SCS enable entry.
+fn without_scs_enable<const N: usize, const M: usize>(
+    out: &mut [RegisterWrite; N],
+    lowered: &[RegisterWrite; M],
+    index: usize,
+) -> Result {
+    if M != N + 1 || lowered.get(index).is_none_or(|write| write.reg != SCS_ENABLE) {
+        return Err(EINVAL);
+    }
+    out[..index].copy_from_slice(&lowered[..index]);
+    out[index..].copy_from_slice(&lowered[index + 1..]);
+    Ok(())
 }
 
 /// Tiling (TA) work descriptor (tag 0).
