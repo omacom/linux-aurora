@@ -153,7 +153,8 @@ pub(crate) fn unexecuted(record: Observation, crossed: bool) -> bool {
     start == end || (crossed && start != 0 && end >= start && end - start <= CANCELLED_TICKS)
 }
 
-/// A zero-duration record fails before visibility polling. It proves execution did not occur;
+/// A record showing the command never executed ([`unexecuted`]) fails before visibility
+/// polling. It proves execution did not occur;
 /// ownership still requires a separate retirement witness before mappings can be released.
 /// The command is complete when its stamp covers it, or when its exact completion record has
 /// been present for [`STAMP_FALLBACK_NS`] without one (`record_aged`) in the same recovery
@@ -174,10 +175,11 @@ pub(crate) fn poll(
     next_end: Option<u64>,
     record_aged: bool,
 ) -> Result<Option<[u64; 2]>> {
-    if observed.is_some_and(|record| record.timestamps[0] == record.timestamps[1]) {
+    let crossed = matches!(recordless, Recordless::CrossedRecovery);
+    if observed.is_some_and(|record| unexecuted(record, crossed)) {
         return Err(ENODATA);
     }
-    let same_generation = !matches!(recordless, Recordless::CrossedRecovery);
+    let same_generation = !crossed;
     let completed = stamp_covers(stamp, ticket.kick)
         || (same_generation && observed.is_some() && record_aged);
     if !completed || !cursors.consumed(ticket.item_producer, ticket.item_count)? {
