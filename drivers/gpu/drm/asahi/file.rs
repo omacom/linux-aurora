@@ -1426,8 +1426,16 @@ impl File {
             return Err(EACCES);
         }
 
+        // One client holds at most half of the device's independent queues, so it cannot
+        // take every execution context and leave other clients, the compositor included,
+        // unable to create one. The table hands out the lowest free ID, so bounding the IDs
+        // bounds the queues the file holds; a full table refuses with EBUSY.
+        let per_client = reg_data
+            .gpu
+            .queue_limits()
+            .map_or(u32::MAX, |limits| (limits.max_queues / 2).max(1));
         let queues_xa = file.inner().queues();
-        let resv = queues_xa.lock().reserve_limit(1..=u32::MAX, GFP_KERNEL)?;
+        let resv = queues_xa.lock().reserve_limit(1..=per_client, GFP_KERNEL)?;
         let vms_xa = file.inner().vms();
         let guard = vms_xa.lock();
         let file_vm = guard.get(data.vm_id.try_into()?).ok_or(ENOENT)?;
