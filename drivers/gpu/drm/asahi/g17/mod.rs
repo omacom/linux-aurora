@@ -1017,9 +1017,9 @@ struct Shared {
     deflake: fw::render::Deflake,
     compute_blocks: usize,
     descriptor_flags: [u32; 2],
-    /// Firmware events and work run: off for an M5 GPU until the M5 queues take submission.
+    /// Firmware events and work run: off for an M5 profile without the bare-metal boot.
     submission_enabled: bool,
-    /// An M5 GPU before its render queues take submission: compute only.
+    /// Such an M5 profile admits no render command.
     firmware_test: bool,
     /// The M5 shared-queue resource policy (frozen device topology).
     render_policy: Option<render_resources::M5Policy>,
@@ -1475,6 +1475,8 @@ impl Gpu {
             );
         }
         let render_policy = if m5 { Some(render_resources::M5Policy::new(&id)?) } else { None };
+        // The bare-metal M5 boot runs both engines; other M5 profiles take no submission.
+        let submits = !m5 || cfg.profile == FirmwareProfile::M5PublishedRoots;
         let shared = Arc::pin_init(
             pin_init!(Shared {
                 drm <- new_mutex!(Some(dev.into()), "g17::Shared::drm"),
@@ -1486,8 +1488,8 @@ impl Gpu {
                 deflake: cfg.core_layout.deflake,
                 compute_blocks: cfg.core_layout.compute_blocks,
                 descriptor_flags: [id.perf_control, id.perf_map[0]],
-                submission_enabled: !m5,
-                firmware_test: m5,
+                submission_enabled: submits,
+                firmware_test: !submits,
                 render_policy,
                 crashed: AtomicBool::new(false),
                 feed,
