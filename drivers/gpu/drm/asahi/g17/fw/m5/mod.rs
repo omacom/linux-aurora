@@ -35,4 +35,3 @@ pub(crate) mod render_registers;
 pub(crate) mod render_assembly;
 
 pub(crate) mod target;
-pub(crate) mod topology;

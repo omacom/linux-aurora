@@ -25,11 +25,10 @@ impl ContextStore {
         Self { auxiliary, stream, extent: stream + 0x680 * clusters + 0x800 }
     }
 
-    /// The selected board's store: laid out for the G17D's own cluster count with its forms;
-    /// other boards keep the two-cluster store.
-    pub(crate) fn selected() -> Self {
-        // STUB(G): super::compute::{g17d_forms, clusters}.
-        Self::of(if super::topology::g17d_forms() { super::topology::clusters() as usize } else { 2 })
+    /// `board`'s store: laid out for the G17D's own cluster count with its forms; other boards
+    /// keep the two-cluster store.
+    pub(crate) const fn selected(board: &super::initdata::Board) -> Self {
+        Self::of(if board.g17d_forms() { board.clusters as usize } else { 2 })
     }
 }
 const _: () = {
@@ -57,6 +56,8 @@ pub(crate) struct M5RenderStageControls {
 
 #[derive(Copy, Clone)]
 pub(crate) struct M5RenderControls {
+    /// The board the render's encodings are for.
+    pub(crate) board: &'static super::initdata::Board,
     /// Encoded event-command state for the initial fragment register list.
     pub(crate) fragment_event_control: u64,
     pub(crate) ta: M5RenderStageControls,
@@ -470,7 +471,7 @@ impl Workspace {
         let p = args.pass;
         // The two sub-buffers sit at the context store's offsets from its base.
         let base = r.deflake_va.checked_sub(0x10_0000_0000).ok_or(EINVAL)?;
-        let store = ContextStore::selected();
+        let store = ContextStore::selected(controls.board);
         let (state_offset, aux_offset) = (store.stream as u64, store.auxiliary as u64);
         let mut vdm_seen = false;
         for reg in &mut self.common.ta {
@@ -573,7 +574,7 @@ pub(crate) fn apply_pass(args: &RenderArgs<'_>, c: &M5RenderControls,
     let bg=usc(p.bg.offset)?;let pbg=usc(p.partial_bg.offset)?;
     let eot=usc(p.eot_offset)?;let peot=usc(p.partial_eot_offset)?;
     let deflake=r.deflake_va.checked_sub(0x10_0000_0000)
-        .and_then(|offset|offset.checked_add(ContextStore::selected().stream as u64)).ok_or(EINVAL)?;
+        .and_then(|offset|offset.checked_add(ContextStore::selected(c.board).stream as u64)).ok_or(EINVAL)?;
     i.context_id=u32::from(r.context_id);
     i.ta.tpc_va=r.tpc_va;i.ta.tpc_size=r.tpc_size;i.ta.deflake_state_va=deflake;
     let f=&mut i.fragment;

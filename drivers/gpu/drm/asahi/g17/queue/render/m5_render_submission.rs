@@ -141,13 +141,17 @@ pub(crate) fn layout(command: &Validated, clusters: u32, programs: RegisterProgr
     layout.with_m5_slices(pass, clusters, groups, 64, bytes)
 }
 
-pub(crate) fn controls(pass: &RenderPass) -> Result<regs::M5RenderControls> {
+pub(crate) fn controls(
+    pass: &RenderPass,
+    board: &'static crate::g17::fw::m5::initdata::Board,
+) -> Result<regs::M5RenderControls> {
     validate(pass)?;
     let stage = |resource_flags| regs::M5RenderStageControls {
         scs: crate::g17::render_resources::StageScratch::NONE,
         resource_flags, resource_control: 0x200000001, ptc_max: 96, work_key: 0,
     };
     Ok(regs::M5RenderControls {
+        board,
         fragment_event_control: regs::fragment_event_control(true, 1),
         ta: stage(0x4054b), fragment: stage(0x104054b),
         ta_tile_control: 0x10c08860, ta_dispatch_control: 0x700,

@@ -5,7 +5,10 @@
 
 use crate::g17::{
     buffer::{self, BlockGeometry},
-    fw::{m5::render_registers::ContextStore, render::{storage, RenderPass}},
+    fw::{
+        m5::{initdata::Board, render_registers::ContextStore},
+        render::{storage, RenderPass},
+    },
     object::{Allocator, CpuMap, KernelObject, Placement},
 };
 use crate::{hw::t8140::{dynamic, resources as cfg}, mmu};
@@ -46,10 +49,9 @@ impl Layout {
         }
     }
 
-    /// The selected board's M5 layout.
-    pub(in crate::g17) fn m5() -> Self {
-        // STUB(G): super::compute::g17d_forms.
-        Self::m5_for(ContextStore::selected(), !crate::g17::fw::m5::topology::g17d_forms())
+    /// `board`'s M5 layout.
+    pub(in crate::g17) const fn m5(board: &Board) -> Self {
+        Self::m5_for(ContextStore::selected(board), !board.g17d_forms())
     }
 
     pub(in crate::g17) fn prepare(self, state: &mut [u8], pass: &RenderPass) -> Result {
@@ -85,7 +87,7 @@ enum Views {
         fragment_client: mmu::KernelMapping,
         fragment: KernelObject,
     },
-    M5 { status_fw: mmu::KernelMapping },
+    M5 { status_fw: mmu::KernelMapping, board: &'static Board },
 }
 
 pub(in crate::g17) struct Generation {
@@ -94,23 +96,26 @@ pub(in crate::g17) struct Generation {
     pub(super) ordinal: Option<u64>,
 }
 impl Generation {
-    pub(in crate::g17) fn allocate_state(alloc: &Allocator<'_>, vm: &mmu::Vm) -> Result<KernelObject> {
+    pub(in crate::g17) fn allocate_state(alloc: &Allocator<'_>, vm: &mmu::Vm,
+        board: Option<&'static Board>) -> Result<KernelObject> {
         let (range, layout) = if alloc.uat.is_m5() {
-            (BlockGeometry::M5_COMPACT, Layout::m5())
+            (BlockGeometry::M5_COMPACT, Layout::m5(board.ok_or(EINVAL)?))
         } else { (dynamic::CLIENT_LOWER, Layout::NEO) };
         KernelObject::new(alloc.dev, vm, Placement::In(range, cfg::TVB_PAGE), layout.bytes,
             mmu::PROT_GPU_FW_SHARED_RW, CpuMap::WriteCombined)
     }
 
     #[inline(never)]
-    pub(in crate::g17) fn new(alloc: &Allocator<'_>, vm: &mmu::Vm, state: KernelObject) -> Result<KBox<Self>> {
+    pub(in crate::g17) fn new(alloc: &Allocator<'_>, vm: &mmu::Vm, state: KernelObject,
+        board: Option<&'static Board>) -> Result<KBox<Self>> {
         let views = if alloc.uat.is_m5() {
-            let layout = Layout::m5();
+            let board = board.ok_or(EINVAL)?;
+            let layout = Layout::m5(board);
             let status_fw = state.map_range(alloc.uat.kernel_vm(),
                 layout.status..layout.status + mmu::UAT_PGSZ,
                 alloc.uat.kernel_dynamic_range(), mmu::UAT_PGSZ as u64,
                 mmu::PROT_FW_SHARED_RW, 0)?;
-            Views::M5 { status_fw }
+            Views::M5 { status_fw, board }
         } else {
             let deflake = buffer::compact_alias(&state, vm,
                 storage::DEFLAKE..storage::DEFLAKE + mmu::UAT_PGSZ,
@@ -134,8 +139,8 @@ impl Generation {
                 fragment.bytes_mut().fill(0);
                 Layout::NEO
             }
-            Views::M5 { .. } => {
-                let layout = Layout::m5();
+            Views::M5 { board, .. } => {
+                let layout = Layout::m5(board);
                 self.state.bytes_mut()[layout.status..layout.status + mmu::UAT_PGSZ].fill(0);
                 layout
             }
@@ -151,9 +156,9 @@ impl Generation {
                 deflake.iova(), self.state.gpu_va() + storage::TA_STATUS as u64,
                 fragment_client.iova(), fragment.gpu_va(), auxiliary.iova(),
             ],
-            Views::M5 { status_fw } => {
+            Views::M5 { status_fw, board } => {
                 let base = self.state.gpu_va();
-                let layout = Layout::m5();
+                let layout = Layout::m5(board);
                 [base + layout.deflake as u64, base + layout.status as u64,
                     base + layout.status as u64 + 8, status_fw.iova() + 8,
                     base + layout.auxiliary as u64]

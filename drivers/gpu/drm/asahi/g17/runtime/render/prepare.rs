@@ -475,6 +475,7 @@ impl super::super::Backend {
                 resources.config.deflake,
                 resources.config.descriptor_flags,
                 self.shared.variant,
+                self.shared.m5_board,
             )
         })();
         let (mut built, error) = match built {

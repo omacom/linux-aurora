@@ -19,6 +19,7 @@ use crate::{
 };
 use core::sync::atomic::Ordering;
 use kernel::{prelude::*, sync::Arc};
+use crate::g17::fw::m5::initdata::Board;
 
 pub(super) const RECORDS: usize = 32;
 pub(super) const TA_BYTES: usize = 0x14000;
@@ -347,16 +348,18 @@ pub(super) enum Generation {
     M5(KBox<super::generation::Generation>),
 }
 impl Generation {
-    fn allocate_state(alloc: &Allocator<'_>, vm: &mmu::Vm) -> Result<KernelObject> {
+    fn allocate_state(alloc: &Allocator<'_>, vm: &mmu::Vm, board: Option<&'static Board>)
+        -> Result<KernelObject> {
         if alloc.uat.is_m5() {
-            super::generation::Generation::allocate_state(alloc, vm)
+            super::generation::Generation::allocate_state(alloc, vm, board)
         } else {
             NeoGeneration::allocate_state(alloc, vm)
         }
     }
-    fn new(alloc: &Allocator<'_>, vm: &mmu::Vm, state: KernelObject) -> Result<Self> {
+    fn new(alloc: &Allocator<'_>, vm: &mmu::Vm, state: KernelObject,
+        board: Option<&'static Board>) -> Result<Self> {
         Ok(if alloc.uat.is_m5() {
-            Self::M5(super::generation::Generation::new(alloc, vm, state)?)
+            Self::M5(super::generation::Generation::new(alloc, vm, state, board)?)
         } else {
             Self::Neo(NeoGeneration::new(alloc, vm, state)?)
         })
@@ -511,6 +514,8 @@ pub(super) struct Memory {
     m5_workspace: Option<KBox<fw::m5::render_registers::Workspace>>,
     pub(super) context: Arc<Context>,
     pub(super) installed_pool: Option<u8>,
+    /// The M5 board ([`crate::g17::Shared::m5_board`]); `None` off M5.
+    pub(super) board: Option<&'static Board>,
 }
 impl Memory {
     #[inline(never)]
@@ -530,6 +535,7 @@ impl Memory {
         ordinal: u64,
         word: u32,
         variant: &'static fw::Variant,
+        board: Option<&'static Board>,
     ) -> Result<(KBox<Self>, KVec<mmu::KernelMapping>)> {
         let storage = KBox::<Self>::new_uninit(GFP_KERNEL)?;
         let vm = context.vm();
@@ -538,7 +544,7 @@ impl Memory {
         let mut graph = Graph::new(alloc, pool, &context, qids, variant.pointers)?;
         let mut target = target::Target::new(alloc.dev, vm, layout)?;
         target.prepare(ordinal, layout)?;
-        let state = Generation::allocate_state(alloc, vm)?;
+        let state = Generation::allocate_state(alloc, vm, board)?;
         let (tvb, mappings, scratch, discard) = if m5 {
             let geometry = super::m5_render_submission::parameter_geometry(layout.tvb_blocks)?;
             let bytes = fw::m5::pool::parameter_scratch_stride(geometry.capacity, 0)
@@ -561,11 +567,11 @@ impl Memory {
             (ordinal ^ 1) as usize % count
         };
         let mut generations = core::array::from_fn(|_| None);
-        generations[initial] = Some(Generation::new(alloc, vm, state)?);
+        generations[initial] = Some(Generation::new(alloc, vm, state, board)?);
         for offset in 1..count {
             let index = (initial + offset) % count;
-            let state = Generation::allocate_state(alloc, vm)?;
-            generations[index] = Some(Generation::new(alloc, vm, state)?);
+            let state = Generation::allocate_state(alloc, vm, board)?;
+            generations[index] = Some(Generation::new(alloc, vm, state, board)?);
         }
         let timestamps = alloc.kernel(
             mmu::UAT_PGSZ,
@@ -641,6 +647,7 @@ impl Memory {
                 m5_workspace,
                 context,
                 installed_pool: None,
+                board,
             }))?,
             mappings,
         ))
@@ -780,7 +787,7 @@ impl Memory {
         if !self.graph.m5 {
             return Err(EINVAL);
         }
-        let mut controls = render_submission::controls(args.pass)?;
+        let mut controls = render_submission::controls(args.pass, self.board.ok_or(EINVAL)?)?;
         if let Some(stages) = plan.and_then(|p| p.stages) {
             controls.ta.scs = stages[0].scs;
             controls.fragment.scs = stages[1].scs;

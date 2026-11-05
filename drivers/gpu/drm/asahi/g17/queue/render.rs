@@ -204,6 +204,7 @@ pub(crate) struct Pair {
     deflake: abi::Deflake,
     descriptor_flags: [u32; 2],
     variant: &'static crate::g17::fw::Variant,
+    board: Option<&'static crate::g17::fw::m5::initdata::Board>,
     installed: [bool; 2],
     configs: [Option<crate::g17::fw::queue::QueueConfig>; 2],
     cursors: [u32; 2],
@@ -271,6 +272,7 @@ impl Pair {
         deflake: abi::Deflake,
         descriptor_flags: [u32; 2],
         variant: &'static crate::g17::fw::Variant,
+        board: Option<&'static crate::g17::fw::m5::initdata::Board>,
     ) -> Result<KBox<Self>> {
         let pool_pin = free_list.pin_id()?;
         if alloc.uat.is_m5() {
@@ -312,6 +314,7 @@ impl Pair {
             0,
             word,
             variant,
+            board,
         )?;
         storage.write_init(kernel::try_init!(Self {
             pool_pin,
@@ -331,6 +334,7 @@ impl Pair {
             deflake,
             descriptor_flags,
             variant,
+            board,
             installed: [false; 2],
             configs: [None; 2],
             cursors: [0; 2],
@@ -374,6 +378,10 @@ impl Pair {
     }
     pub(crate) fn buffer_id(&self) -> u8 {
         self.memory.manager.buffer_id()
+    }
+    /// Whether the pair's M5 board takes the G17D forms.
+    fn g17d_forms(&self) -> bool {
+        self.board.is_some_and(|board| board.g17d_forms())
     }
     /// The parameter-buffer state an M5 PB token is bound to.
     pub(crate) fn m5_pb_state_va(&self) -> Option<u64> {
@@ -803,9 +811,7 @@ impl Pair {
                         // previous pass's on fragment; with the G17D forms 0 on tiling, as the
                         // G17D's tiling queues are seeded (its fragment checks read the paired
                         // fragment queue's payload, not this one).
-                        // STUB(G): super::compute::g17d_forms.
-                        let tiling_zero =
-                            stage == 0 && m5 && crate::g17::fw::m5::topology::g17d_forms();
+                        let tiling_zero = stage == 0 && m5 && self.g17d_forms();
                         kicks[stage].prev().completion_value(if tiling_zero {
                             0
                         } else {
@@ -894,8 +900,7 @@ impl Pair {
         let tiling_barriers = &barriers.tiling[..barriers.tiling_count];
         // With the G17D forms a fragment kick with history also names its parent's
         // predecessor, in class 1, after the self-parent (classes [1, 3, 1] for a lone pass).
-        // STUB(G): super::compute::g17d_forms.
-        let ancestor = if m5 && crate::g17::fw::m5::topology::g17d_forms() {
+        let ancestor = if m5 && self.g17d_forms() {
             self.kicks[1].ancestor()
         } else {
             None
@@ -2829,6 +2834,7 @@ impl Pair {
                 self.ordinal,
                 first.completion.work_state()?.word(),
                 self.variant,
+                self.board,
             )?;
             (Some(memory), Some(persistent), Some(aliases))
         };

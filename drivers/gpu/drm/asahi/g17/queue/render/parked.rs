@@ -27,6 +27,7 @@ pub(crate) struct ParkedPair {
     deflake: crate::g17::fw::render::Deflake,
     descriptor_flags: [u32; 2],
     variant: &'static crate::g17::fw::Variant,
+    board: Option<&'static crate::g17::fw::m5::initdata::Board>,
     installed: [bool; 2],
     recovery_generation: u64,
     registered: Option<u8>,
@@ -95,6 +96,7 @@ impl Pair {
             deflake: self.deflake,
             descriptor_flags: self.descriptor_flags,
             variant: self.variant,
+            board: self.board,
             installed: self.installed,
             recovery_generation: self.recovery_generation,
             registered: self.registered,
@@ -178,6 +180,7 @@ impl ParkedPair {
             self.ordinal,
             word,
             self.variant,
+            self.board,
         )?;
         Ok(Prepared {
             pool_pin,
@@ -245,6 +248,7 @@ impl ParkedPair {
             deflake: self.deflake,
             descriptor_flags: self.descriptor_flags,
             variant: self.variant,
+            board: self.board,
             installed: self.installed,
             configs: [None; 2],
             cursors: [0; 2],
