@@ -188,13 +188,16 @@ impl Port {
         views: Views,
         regs: crate::regs::G17Resources,
         registration: super::fw::variant::QueueRegistration,
+        clamp_rx: bool,
     ) -> Result {
         // SAFETY: The session owns the mailbox and outlives every port user.
         let rx = unsafe { (*views.mailbox).rx_util_min_handle() };
+        // Without `clamp_rx` (M5) no handle is attached and the receive thread keeps its
+        // default; rx_update() then returns at once.
         if self.views.populate(views)
             && self.regs.populate(regs)
             && self.registration.populate(registration)
-            && self.rx.populate(rx)
+            && (!clamp_rx || self.rx.populate(rx))
         {
             Ok(())
         } else {
@@ -455,10 +458,10 @@ impl Port {
         Ok(())
     }
 
-    /// Requests the receive thread's minimum utilization for the feed's current view of the GPU.
-    /// Called at every publication and completion: the feed's state lingers for a few
-    /// milliseconds, so after a pause the publication that ends it restores the default before
-    /// its completion arrives.
+    /// Requests the receive thread's minimum utilization for the feed's current view of the GPU,
+    /// where the port clamps it (not on M5, see attach()). Called at every publication and
+    /// completion: the feed's state lingers for a few milliseconds, so after a pause the
+    /// publication that ends it restores the default before its completion arrives.
     fn rx_update(&self) {
         let Some(rx) = self.rx.as_ref() else {
             return;

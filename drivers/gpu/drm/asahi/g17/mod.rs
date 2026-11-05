@@ -1786,6 +1786,7 @@ impl Gpu {
                 session.init.port_views(mailbox)?,
                 session.bridge.regs.clone(),
                 shared.variant.registration,
+                !shared.variant.m5_commands,
             )
             .inspect_err(at("port"))?;
         session
@@ -1943,6 +1944,7 @@ impl Gpu {
             session.init.port_views(mailbox)?,
             session.bridge.regs.clone(),
             shared.variant.registration,
+            !shared.variant.m5_commands,
         )?;
         session.uat.mirror_secondary_root()?;
         if cfg.fabric_bridge {
