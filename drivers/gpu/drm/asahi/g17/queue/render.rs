@@ -799,9 +799,18 @@ impl Pair {
                 completion_seed: (covered[stage]
                     && (!m5 || !self.installed[stage] || self.context_update))
                     .then(|| {
-                        kicks[stage]
-                            .prev()
-                            .completion_value(payload.wrapping_sub(1))
+                        // The predecessor's timestamp with the stage's scratch payload: the
+                        // previous pass's on fragment; with the G17D forms 0 on tiling, as the
+                        // G17D's tiling queues are seeded (its fragment checks read the paired
+                        // fragment queue's payload, not this one).
+                        // STUB(G): super::compute::g17d_forms.
+                        let tiling_zero =
+                            stage == 0 && m5 && crate::g17::fw::m5::topology::g17d_forms();
+                        kicks[stage].prev().completion_value(if tiling_zero {
+                            0
+                        } else {
+                            payload.wrapping_sub(1)
+                        })
                     }),
                 context_id: context.id().try_into()?,
                 free_list: FreeListBinding {
