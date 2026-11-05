@@ -30,6 +30,10 @@ pub(super) struct Admission<'a> {
     check: &'a dyn Fn() -> Result,
 }
 
+/// Bound for a compute publication's waits: a physical compute queue, or room on the shared
+/// work ring, frees only as other owners' work retires or goes idle.
+pub(super) const QUEUE_WAIT_NS: u64 = 30_000_000_000;
+
 impl<'a> Admission<'a> {
     pub(super) fn new(deadline: u64, check: &'a dyn Fn() -> Result) -> Self {
         Self { deadline: Cell::new(deadline), started: super::now_ns(), check }

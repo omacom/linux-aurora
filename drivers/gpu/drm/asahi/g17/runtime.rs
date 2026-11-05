@@ -2296,7 +2296,7 @@ impl Backend {
         // publication after recovery both signal `progress`.
         let mut bound = true;
         let mut demand = None;
-        let deadline = now_ns().saturating_add(WORK_RING_WAIT_NS);
+        let deadline = now_ns().saturating_add(super::preparation::QUEUE_WAIT_NS);
         let check = || {
             if packet.cancel_requested() { return Err(ECANCELED); }
             self.admission_open()?;
