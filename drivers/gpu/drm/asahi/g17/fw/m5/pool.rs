@@ -4,19 +4,19 @@
 
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::initdata::M5Board;
+use super::initdata::{Board, J714};
 
 pub(crate) const BLOCK_BYTES: usize = 0x20_0000;
 // Render block size and private-memory address inventory of the M5
-// part, selected at probe (`M5Board::render_pool()`). The inventory sizes the
+// part, selected at probe (`Board::render_pool`). The inventory sizes the
 // directory, not the physical allocation; each pool allocates only its
 // requested initial blocks.
-static RENDER_BLOCK_BYTES: AtomicUsize = AtomicUsize::new(M5Board::J714.render_pool().0);
-static POOL_BYTES: AtomicU64 = AtomicU64::new(M5Board::J714.render_pool().1);
+static RENDER_BLOCK_BYTES: AtomicUsize = AtomicUsize::new(J714.render_pool.0);
+static POOL_BYTES: AtomicU64 = AtomicU64::new(J714.render_pool.1);
 
 /// Selects the board's render pool before any pool is built.
-pub(crate) fn select_render_pool(board: M5Board) {
-    let (block, pool) = board.render_pool();
+pub(crate) fn select_render_pool(board: &Board) {
+    let (block, pool) = board.render_pool;
     RENDER_BLOCK_BYTES.store(block, Ordering::Relaxed);
     POOL_BYTES.store(pool, Ordering::Relaxed);
 }

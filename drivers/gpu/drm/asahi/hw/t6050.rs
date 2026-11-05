@@ -3,7 +3,6 @@
 //!
 //! The M5 firmware builds its HW data, performance tables and region C in its own graph
 //! ([`crate::g17::fw::m5::initdata`]), so the 26A428/25G83 graph tables of [`Config`] are empty.
-use crate::g17::fw::m5::initdata::M5Board;
 use crate::g17::{Config, CoreLayout, CrashBuffers, FirmwareProfile, FixedBuffer, Identity};
 use crate::hw::{GpuGen, GpuVariant};
 use crate::regs::G17Id;
@@ -33,7 +32,6 @@ pub(crate) const CONFIG: Config = Config {
     crash_buffers: CrashBuffers::Fixed(J714_CRASH_BUFFERS),
     profile: FirmwareProfile::M5NoBareMetalTables,
     pm_metrics: None,
-    m5_board: Some(M5Board::J714),
     windows: &[],
     reserved_slots: &[],
     perf: None,
@@ -41,6 +39,7 @@ pub(crate) const CONFIG: Config = Config {
     uat_quirks: crate::mmu::UatQuirks::DEFAULT,
     region_c: None,
     chip: None,
+    m5: Some(&crate::g17::fw::m5::initdata::J714),
     adopt_root_entries: true,
     fabric_bridge: false,
     recovery_slot_keys: None,
@@ -81,7 +80,6 @@ pub(crate) const CONFIG_MAX: Config = Config {
     crash_buffers: CrashBuffers::Fixed(J716C_CRASH_BUFFERS),
     profile: FirmwareProfile::M5NoBareMetalTables,
     pm_metrics: None,
-    m5_board: Some(M5Board::J716c),
     windows: &[],
     reserved_slots: &[],
     perf: None,
@@ -89,6 +87,7 @@ pub(crate) const CONFIG_MAX: Config = Config {
     uat_quirks: crate::mmu::UatQuirks::DEFAULT,
     region_c: None,
     chip: None,
+    m5: Some(&crate::g17::fw::m5::initdata::J716C),
     adopt_root_entries: true,
     fabric_bridge: false,
     recovery_slot_keys: None,

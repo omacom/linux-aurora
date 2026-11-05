@@ -215,8 +215,6 @@ pub(crate) struct Config {
     /// Parameter buffer page metrics shared with the firmware; `None` where the firmware graph
     /// places its own (M5).
     pub(crate) pm_metrics: Option<FixedBuffer>,
-    /// M5 board whose HW data the GPU is started with.
-    pub(crate) m5_board: Option<fw::m5::initdata::M5Board>,
     /// Register windows the firmware maps through the hardware data.
     pub(crate) windows: &'static [fw::initdata::RegisterWindow],
     /// Register-map slots that are reserved but have no window.
@@ -238,6 +236,8 @@ pub(crate) struct Config {
     /// The SoC's values of region C; `None` where the firmware graph has its own (M5).
     pub(crate) region_c: Option<&'static fw::initdata::RegionCConfig>,
     pub(crate) chip: Option<&'static fw::initdata::v25g83::Chip>,
+    /// The M5 board whose HW data and power policy the M5 graph is built with; `None` off M5.
+    pub(crate) m5: Option<&'static fw::m5::initdata::Board>,
     /// Physical address of the firmware's per-slot recovery keys, read while the firmware is
     /// halted to attribute a fault; `None` where it is unknown (recovery then relies on the
     /// firmware's own blame).
@@ -1391,10 +1391,10 @@ impl Gpu {
         }
         let m5 = cfg.profile.is_m5();
         if m5 {
-            let board = cfg.m5_board.ok_or(EINVAL)?;
-            if id.num_clusters != board.clusters() || id.num_clusters * id.num_cores != board.gpu_cores() {
-                dev_err!(dev.as_ref(), "M5 {:?} expects {} clusters and {} cores, the GPU reports {} x {}\n",
-                    board, board.clusters(), board.gpu_cores(), id.num_clusters, id.num_cores);
+            let board = cfg.m5.ok_or(EINVAL)?;
+            if id.num_clusters != board.clusters || id.num_clusters * id.num_cores != board.gpu_cores {
+                dev_err!(dev.as_ref(), "M5 board expects {} clusters and {} cores, the GPU reports {} x {}\n",
+                    board.clusters, board.gpu_cores, id.num_clusters, id.num_cores);
                 return Err(ENODEV);
             }
             fw::m5::pool::select_render_pool(board);
@@ -1405,7 +1405,7 @@ impl Gpu {
             oas: cfg.uat_oas,
         };
         let max_frequency_khz = if m5 {
-            cfg.m5_board.ok_or(EINVAL)?.perf_states()[13].0 * 1000
+            cfg.m5.ok_or(EINVAL)?.perf_states[13].0 * 1000
         } else {
             Self::max_frequency_khz(dev)?
         };

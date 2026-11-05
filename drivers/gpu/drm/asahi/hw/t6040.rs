@@ -38,7 +38,6 @@ pub(crate) const CONFIG: Config = Config {
         va: 0x10_0008_0000,
         size: 0x8000,
     }),
-    m5_board: None,
     windows: &REGISTER_WINDOWS,
     reserved_slots: &[],
     perf: Some(&PERF),
@@ -55,6 +54,7 @@ pub(crate) const CONFIG: Config = Config {
     },
     region_c: Some(&REGION_C),
     chip: None,
+    m5: None,
     adopt_root_entries: false,
     fabric_bridge: false,
     // The firmware's per-slot recovery keys are not known for this build; recovery relies on
