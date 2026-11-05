@@ -2459,7 +2459,13 @@ impl Queue {
             shared_control_va: self.pool.control_va(), event_metadata: [0;16],
             usage_fw_va: self.graph.usage.gpu_va(), completion_identity: 1,
         });
-        let m5_dependency_types = [2u8; crate::g17::fw::kick::QID_MAX as usize + 1];
+        // Explicit dependencies keep the pipelined class; the implicit parent, last, takes its
+        // own ([`crate::g17::fw::m5::compute::parent_dependency`]).
+        let mut m5_dependency_types = [crate::g17::fw::m5::compute::COMPUTE_PIPELINED_DEPENDENCY;
+            crate::g17::fw::kick::QID_MAX as usize + 1];
+        if let (Some(board), Some(parent)) = (m5_board, m5_dependency_types.get_mut(dependencies.len())) {
+            *parent = crate::g17::fw::m5::compute::parent_dependency(board, false);
+        }
         let kick_args = KickArgs {
             qid,
             timestamp: kick_timestamp,

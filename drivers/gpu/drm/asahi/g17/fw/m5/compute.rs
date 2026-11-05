@@ -25,6 +25,20 @@ pub(crate) const fn topology_dispatch_control(base: u64, clusters: u32) -> u64 {
     if clusters > 4 { base | 0x9c } else { base }
 }
 
+/// Dependency class of a pipelined compute dependency: the class the kick-queue encoder supplies
+/// for compute work (tiling's is also 2, fragment's 3).
+pub(crate) const COMPUTE_PIPELINED_DEPENDENCY: u8 = 2;
+
+/// Dependency class of a compute kick's implicit parent (the previous kick of its queue) on
+/// `board`. With the G17D forms it is derived as the kick-queue encoder derives it: the compute
+/// class only for a command whose pipeline dependency type is 1, which only a late-evaluated wait
+/// sets, and class 1 otherwise, which holds the kick until its parent has completed. No DRM
+/// compute kick is a late-evaluated wait. Otherwise it is the pipelined class, with which a kick
+/// may start while its parent still runs.
+pub(crate) fn parent_dependency(board: &Board, pipelined: bool) -> u8 {
+    if pipelined || !board.g17d_forms() { COMPUTE_PIPELINED_DEPENDENCY } else { 1 }
+}
+
 /// Contexts per engine in the event space: a pool's event is 64 x its engine + its context.
 const POOL_EVENT_CONTEXTS: u32 = 64;
 /// The engine of a compute pool in the event space: the firmware's record of each compute pool
