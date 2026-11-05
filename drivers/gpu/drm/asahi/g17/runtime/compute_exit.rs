@@ -326,8 +326,11 @@ impl Firmware {
     /// retired on the firmware's fault record, so no compute queue is left to carry a kill,
     /// yet those pairs are released only after one: without this the context, its pairs and
     /// its memory stay until the processors stop.
+    ///
+    /// M5 has none: it issues a context kill only from a compute queue's exit, so a
+    /// render-only M5 context is never killed.
     fn render_kill_candidate(&self, index: usize, context: &Arc<Context>, age: u64) -> bool {
-        render_kill_eligible(
+        !self.init.is_m5() && render_kill_eligible(
             age,
             self.queues.teardown.render_kill_published(index) || context.kill_published(),
             self.queues.render.executed_slots(context) != 0,
@@ -428,8 +431,11 @@ impl Firmware {
     /// minutes of a five-lane load with 67 faults), even with nothing freed before the kill's
     /// acknowledgement; such a kill takes the next moment without foreign compute instead.
     /// Render work is not waited for. A GPU that retired nothing for [`LIVENESS_NS`] has
-    /// stopped.
+    /// stopped. The wait is Neo's; M5 publishes its kills at once.
     fn foreign_compute_running(&self, context: &Arc<Context>, now: u64) -> bool {
+        if self.init.is_m5() {
+            return false;
+        }
         let stalled = crate::g17::recovery::since_retired(now).is_none_or(|since| since >= LIVENESS_NS);
         !stalled
             && self.queues.compute.iter().flatten().filter_map(|entry| entry.queue.as_deref()).any(|queue| {
