@@ -215,13 +215,20 @@ impl Context {
     ) -> Result<Self> {
         let status = execution.vm().status().ok_or(EINVAL)?.clone();
         let qos = qos.acquire()?;
+        // On M5 only the firmware reads and writes the scheduler and work-state pages; the GPU
+        // has no access to them.
+        let kernel_prot = if alloc.uat.is_m5() {
+            mmu::PROT_FW_SHARED_RW
+        } else {
+            mmu::PROT_GPU_FW_SHARED_RW
+        };
         let mut scheduler = if alloc.uat.is_m5() {
             SchedulerStorage::Retained(pool.allocate(
                 alloc,
                 Family::Scheduler,
                 UAT_PGSZ,
                 UAT_PGSZ,
-                mmu::PROT_GPU_FW_SHARED_RW,
+                kernel_prot,
                 CpuMap::WriteCombined,
             )?)
         } else {
@@ -244,7 +251,7 @@ impl Context {
             Family::WorkState,
             2 * UAT_PGSZ,
             UAT_PGSZ,
-            mmu::PROT_GPU_FW_SHARED_RW,
+            kernel_prot,
             CpuMap::WriteCombined,
         )?;
         let work_base = object.gpu_va();

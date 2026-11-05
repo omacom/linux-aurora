@@ -173,7 +173,9 @@ impl Graph {
         let preempt = alloc.kernel(0x4000, page, prot, cpu)?;
         let usage = alloc.kernel(mmu::UAT_PGSZ, page, prot, cpu)?;
         let operand = alloc.lower(operand_state.size, page, prot, cpu)?;
-        let mut support = alloc.kernel(if m5 { mmu::UAT_PGSZ } else { 0xc000 }, page, prot, cpu)?;
+        // The M5 support page is firmware-only; the GPU has no access to it.
+        let support_prot = if m5 { mmu::PROT_FW_SHARED_RW } else { prot };
+        let mut support = alloc.kernel(if m5 { mmu::UAT_PGSZ } else { 0xc000 }, page, support_prot, cpu)?;
         if !m5 {
             let support_va = support.gpu_va();
             support.write(0, support_va + page)?;

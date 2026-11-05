@@ -1551,9 +1551,10 @@ impl KernelMapping {
             }
             let _mutation = owner.mapping_mutation();
             mutated = true;
+            // The prefix keeps the mapping's own access and changes only its cache attribute.
             owner.page_table.reprot_pages(
                 self.iova()..self.iova() + prefix as u64,
-                PROT_GPU_FW_PRIV_RW,
+                self.0.prot.as_cached(),
             )?;
             mem::sync();
             mem::tlbi_all();

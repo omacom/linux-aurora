@@ -417,6 +417,10 @@ impl Prot {
     pub(crate) const fn as_uncached(&self) -> Self {
         self.memattr(MEMATTR_UNCACHED)
     }
+
+    pub(crate) const fn as_cached(&self) -> Self {
+        self.memattr(MEMATTR_CACHED)
+    }
 }
 
 impl Default for Prot {

@@ -111,7 +111,7 @@ impl InitData {
         for stage in 0..2 {
             self.stamps[stage] = self.add(KernelObject::new(dev, uat.kernel_vm(),
                 Placement::In(uat.kernel_dynamic_range(), mmu::UAT_PGSZ as u64),
-                mmu::UAT_PGSZ, mmu::PROT_GPU_FW_SHARED_RW, CpuMap::WriteCombined)?)?;
+                mmu::UAT_PGSZ, mmu::PROT_FW_SHARED_RW, CpuMap::WriteCombined)?)?;
         }
         self.alias(self.pb, uat.kernel_lower_vm(), m::REGION_VIEW_LOW_ADDRS[0], GPU)?;
         self.alias(self.page_pool, uat.kernel_lower_vm(), m::REGION_VIEW_LOW_ADDRS[1], GPU)?;
