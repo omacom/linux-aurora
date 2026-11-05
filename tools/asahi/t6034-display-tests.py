@@ -76,3 +76,52 @@ with tempfile.TemporaryDirectory(prefix='t6034-display-') as directory:
   print(name+': '+('pass' if name=='control' else 'caught'))
 assert 'gate_t6034_requested = gate_t6034_wanted(gate_t6034_switch);' in gate
 print('T6034 normal display defaults, owner disable, exact root pair and firmware identity: PASS')
+
+# Compile the production report layout records and OF match table. Matching
+# T6034 through its generic T6020 fallback binds a report that never creates
+# the halted-PMP startup owner; wait_ready() then correctly returns -ENODEV.
+pmp = (ROOT / 'drivers/pmdomain/apple/pmp-report.c').read_text()
+pmp_type = item(pmp, 'struct apple_pmp_report_offsets {') + ';'
+pmp_tables = pmp[pmp.index('static const struct apple_pmp_report_offsets apple_pmp_offsets_t600x = {'):pmp.index('static struct platform_driver apple_pmp_report_driver = {')]
+pmp_main = r'''
+static const struct apple_pmp_report_offsets *report(const char *specific)
+{
+ const char *compatibles[]={specific,"apple,t6020-pmp-v2-report"};
+ for(unsigned i=0;i<ARRAY_SIZE(compatibles);i++)
+  for(unsigned j=0;apple_pmp_report_of_match[j].compatible;j++)
+   if(!strcmp(compatibles[i],apple_pmp_report_of_match[j].compatible))
+    return apple_pmp_report_of_match[j].data;
+ return NULL;
+}
+int main(void)
+{
+ const struct apple_pmp_report_offsets *o=report("apple,t6034-pmp-v2-report");
+ assert(o && o->starts_pmp);
+ assert(!strcmp(o->name,"T6034"));
+ assert(!strcmp(o->fallback,"apple_t6034_display.enable=0"));
+ assert(!strcmp(o->pwrstate,"apple,t6031-pmgr-pwrstate"));
+ assert(o->tgt_read==0x2000 && o->tgt_write==0x11000 && o->actual==0x2080 && o->status==0x10);
+ assert(o->devices_ordered);
+ o=report("apple,t6031-pmp-v2-report");
+ assert(o && o->starts_pmp && !strcmp(o->fallback,"apple_t6031_display.enable=0"));
+ o=report("apple,t6020-pmp-v2-report");
+ assert(o && !o->starts_pmp);
+ return 0;
+}
+'''
+pmp_source='\n'.join([prefix,'#define IS_ENABLED(x) 0',pmp_type,
+ 'struct of_device_id {const char *compatible; const struct apple_pmp_report_offsets *data;};',pmp_tables,pmp_main])
+pmp_mutants={
+ 'control':pmp_source,
+ 'missing-t6034-match':pmp_source.replace('.compatible = "apple,t6034-pmp-v2-report"','.compatible = "apple,missing-t6034-report"'),
+ 'lost-halted-pmp-owner':pmp_source.replace('.starts_pmp = true,\n\t.name = "T6034"','.starts_pmp = false,\n\t.name = "T6034"'),
+ 'wrong-ack-aperture':pmp_source.replace('.actual = 0x2080,','.actual = 0x2088,'),
+}
+with tempfile.TemporaryDirectory(prefix='t6034-pmp-report-') as directory:
+ for name,c in pmp_mutants.items():
+  exe=Path(directory)/name
+  subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unused-function','-Wno-unused-variable','-x','c','-','-o',str(exe)],input=c,text=True,check=True)
+  result=subprocess.run([str(exe)],capture_output=True)
+  assert (result.returncode==0)==(name=='control'),(name,result.stderr)
+  print('PMP '+name+': '+('pass' if name=='control' else 'caught'))
+print('T6034 exact PMP report binding, halted owner, offsets and explicit fallback: PASS')
