@@ -19,8 +19,9 @@ unsafe impl Send for SparseTile {}
 unsafe impl Sync for SparseTile {}
 
 impl SparseTile {
-    /// 64 pages. The page tables read only the first.
-    const ORDER: u32 = 6;
+    /// One UAT page, the only part the page tables read: the order of the kernel pages that
+    /// make up a UAT page, naturally aligned to it.
+    const ORDER: u32 = (crate::pgtable::UAT_PGSZ / kernel::page::PAGE_SIZE).trailing_zeros();
 
     pub(super) fn new() -> Result<Arc<Self>> {
         // SAFETY: A plain zeroed higher-order page allocation.
