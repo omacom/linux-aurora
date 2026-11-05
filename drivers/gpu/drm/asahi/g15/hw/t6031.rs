@@ -161,6 +161,21 @@ pub(crate) const CONFIG: Config = Config {
                 0x9d, 0x6b, 0xcd, 0xa0, 0x26, 0xcf,
             ],
         },
+        // Measured by the normal driver on J514C's 14.7 boot chain. The
+        // board still needs explicit g15_j514c_bringup=1; runtime qualification
+        // is pending. Keep the full canonical digest and exact machine bound.
+        FirmwareBuild {
+            name: "J514C macOS 14.7 boot-chain candidate (runtime qualification pending)",
+            machine: Some(kernel::c_str!("apple,j514c")),
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x66, 0x99, 0x13, 0xfb, 0xa2, 0x73, 0x6e, 0x4b, 0x8f, 0x8a, 0x0f, 0x81,
+                0xea, 0xdc, 0x5a, 0xc0, 0x0c, 0x9d, 0xc5, 0x1f, 0xdd, 0x4c, 0x9d, 0x37,
+                0x70, 0xc6, 0x6d, 0x2b, 0x0a, 0x1e, 0x87, 0x86,
+            ],
+        },
     ],
     // The reference words and measured layout belong to the J516C, not
     // every T6031 board (in particular, not the 14-inch J514C).
