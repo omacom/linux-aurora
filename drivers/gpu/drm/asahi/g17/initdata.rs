@@ -1874,6 +1874,9 @@ impl InitData {
 }
 
 impl super::recovery::Memory for InitData {
+    fn is_m5(&self) -> bool {
+        self.m5
+    }
     fn fault_sources(&self) -> Result<super::recovery::Sources> {
         let mask_offset = if self.m5 {
             super::fw::m5::initdata::M5_PRIVATE_LAYOUT.status_b

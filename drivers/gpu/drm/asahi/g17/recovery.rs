@@ -50,8 +50,8 @@ pub(super) struct Entries {
 }
 
 impl Entries {
-    /// Returns false at the first invalid record: the table is a packed list and
-    /// records after it are left over from an earlier restart.
+    /// Counts a valid record. Returns false for an invalid one, which the walk skips: the
+    /// table need not be packed (see `read_entries`).
     pub(super) fn include(&mut self, flags: u32) -> bool {
         if flags & 1 == 0 {
             return false;
@@ -132,6 +132,8 @@ pub(super) trait Memory {
     fn entry(&self, index: usize) -> Result<(u32, u32)>;
     /// One millisecond wait; this is polled because the firmware sends no state-3 notification.
     fn wait_tick(&self);
+    /// The M5 firmware's recovery table, whose stamp form is not the G17P one.
+    fn is_m5(&self) -> bool;
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -328,16 +330,19 @@ pub(super) fn service<H: Host>(
     Ok(ServiceResult { scan_error, target_error, leftover })
 }
 
-/// Walks the packed recovery table up to its first invalid record and marks
-/// every listed command interrupted. A failed read keeps what was read so far.
+/// Walks every record of the recovery table: the table need not be packed, so an invalid
+/// record is skipped rather than ending the walk. Every listed command is
+/// marked interrupted where the stamp form is known (not on M5, whose table only classifies).
+/// A failed read keeps what was read so far.
 fn read_entries<H: Host>(host: &mut H) -> Entries {
     let mut entries = Entries::default();
+    let mark = !host.is_m5();
     for index in 0..RECOVERY_RECORDS {
         let Ok((flags, stamp)) = host.entry(index) else {
             break;
         };
-        if !entries.include(flags) {
-            break;
+        if !entries.include(flags) || !mark {
+            continue;
         }
         let qid = ((flags >> 4) & 0x7f) as u8;
         match host.note_interrupted(qid, stamp) {
@@ -456,6 +461,7 @@ mod tests {
     }
 
     impl Memory for Halted {
+        fn is_m5(&self) -> bool { false }
         fn recovery_state(&self) -> Result<u32> { Ok(self.state.get()) }
         fn host_recovery(&self) -> Result<u32> { Ok(0) }
         fn fault_sources(&self) -> Result<Sources> {

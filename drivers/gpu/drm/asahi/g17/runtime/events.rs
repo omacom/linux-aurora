@@ -133,6 +133,9 @@ impl recovery::Host for Service<'_> {
 }
 
 impl recovery::Memory for Service<'_> {
+    fn is_m5(&self) -> bool {
+        self.firmware.init.is_m5()
+    }
     fn recovery_state(&self) -> Result<u32> {
         self.firmware.init.recovery_state()
     }
