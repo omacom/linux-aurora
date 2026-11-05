@@ -25,6 +25,34 @@ pub(crate) const fn topology_dispatch_control(base: u64, clusters: u32) -> u64 {
     if clusters > 4 { base | 0x9c } else { base }
 }
 
+/// Contexts per engine in the event space: a pool's event is 64 x its engine + its context.
+const POOL_EVENT_CONTEXTS: u32 = 64;
+/// The engine of a compute pool in the event space: the firmware's record of each compute pool
+/// names engine 2 beside the pool's context.
+const POOL_EVENT_ENGINE: u32 = 2;
+/// The entry-signal gate: event 254, which the firmware clears in the kick a current-kick
+/// notification names once it has handled that record.
+const ENTRY_GATE_EVENT: u32 = 254;
+
+/// The event mask of a compute kick of context `context_id` on `board`, published with its
+/// current-kick notification. With the G17D forms ([`Board::g17d_forms`]) the kick waits on its
+/// own context's pool event (64 x 2 + the context), which the firmware holds while it processes
+/// that pool's dependencies, and on the entry-signal gate; a context of 64 or more is EINVAL.
+/// Otherwise it is the fixed `[0, 0, 8, 0]` (event 131, context 3's pool event, without the gate).
+pub(crate) fn kick_event_mask(board: &Board, context_id: u32) -> Result<[u64; 4]> {
+    if !board.g17d_forms() {
+        return Ok([0, 0, 8, 0]);
+    }
+    if context_id >= POOL_EVENT_CONTEXTS {
+        return Err(EINVAL);
+    }
+    let mut mask = [0u64; 4];
+    for event in [POOL_EVENT_ENGINE * POOL_EVENT_CONTEXTS + context_id, ENTRY_GATE_EVENT] {
+        mask[(event / 64) as usize] |= 1 << (event % 64);
+    }
+    Ok(mask)
+}
+
 const _: () = {
     assert!(topology_dispatch_control(0x14c0_8a60, 8) == 0x14c0_8afc);
     assert!(topology_dispatch_control(0x10c0_8860, 8) == 0x10c0_88fc);

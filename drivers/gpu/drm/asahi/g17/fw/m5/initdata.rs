@@ -1791,6 +1791,9 @@ pub(crate) struct Board {
     mcc_mask: Option<u64>,
     /// The hotspot at which the thermal governor's fan curve starts, millidegrees C.
     pub(crate) fan_curve_start_mc: i32,
+    /// Whether the host encodings are the G17D ones measured on the M5 Ultra
+    /// ([`Board::g17d_forms`]).
+    g17d_forms: bool,
 }
 
 /// M5 Pro: two clusters of ten cores.
@@ -1811,6 +1814,7 @@ pub(crate) const J714: Board = Board {
     idle_standby_us: None,
     mcc_mask: None,
     fan_curve_start_mc: 84_000,
+    g17d_forms: false,
 };
 
 /// M5 Max: four clusters of ten cores.
@@ -1832,6 +1836,7 @@ pub(crate) const J716C: Board = Board {
     idle_standby_us: None,
     mcc_mask: None,
     fan_curve_start_mc: 84_000,
+    g17d_forms: false,
 };
 
 /// J775D's performance controllers run from P3.
@@ -1863,6 +1868,7 @@ pub(crate) const J775D: Board = Board {
     // full-chip load, with the CPU and GPU still at their top states: the curve starts there,
     // above the SMC's own start rather than below it.
     fan_curve_start_mc: 97_000,
+    g17d_forms: true,
 };
 
 const _: () = {
@@ -2142,6 +2148,12 @@ pub(crate) struct M5RegisterWindow {
 pub(crate) const M5_MAX_REGISTER_WINDOWS: usize = J775D_REGISTER_WINDOWS.len();
 
 impl Board {
+    /// Whether the board takes the host encodings measured on the M5 Ultra (G17D) where they
+    /// differ from J714's, as `super::compute` and the render registers read them.
+    pub(crate) const fn g17d_forms(&self) -> bool {
+        self.g17d_forms
+    }
+
     /// The board's `index`th register window.
     pub(crate) fn register_window_spec(&self, index: usize) -> Option<&'static M5RegisterWindowSpec> {
         self.register_windows.get(index)

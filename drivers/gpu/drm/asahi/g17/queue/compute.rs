@@ -2473,7 +2473,10 @@ impl Queue {
                 class: COMPUTE_QOS_CLASS,
             },
             mcache: None,
-            event_mask: if self.graph.m5 { [0, 0, 8, 0] } else { COMPUTE_KICK_EVENT_MASK },
+            event_mask: match m5_board {
+                Some(board) => crate::g17::fw::m5::compute::kick_event_mask(board, identity.context)?,
+                None => COMPUTE_KICK_EVENT_MASK,
+            },
             register_arrays: if self.graph.m5 {
                 crate::g17::fw::m5::compute::bindings(descriptor_low, m5_scratch, matrix_ops)?
             } else {
