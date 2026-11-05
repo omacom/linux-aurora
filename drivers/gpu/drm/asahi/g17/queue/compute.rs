@@ -830,7 +830,14 @@ impl Queue {
         self.active.front().map(|active| crate::g17::timeout::Head {
             vm: active.packet.context.vm().id(),
             published: active.published,
-            finished: active.observed.is_some(),
+            // An M5 completion record can precede the command's writes: only the stamp
+            // proves it finished.
+            finished: if self.graph.m5 {
+                active.ticket.as_ref().is_some_and(|ticket| self.graph.stamp()
+                    .is_ok_and(|stamp| retirement::stamp_covers(stamp, ticket.kick)))
+            } else {
+                active.observed.is_some()
+            },
             failed: self.quarantined,
         })
     }
