@@ -190,6 +190,14 @@ pub(crate) const CONFIG_ULTRA: Config = Config {
     },
 };
 
+// Each compute operand bank holds 6 KiB per core slot of the board.
+const _: () = {
+    use crate::g17::fw::m5::initdata::{J714, J716C, J775D};
+    assert!(CONFIG.core_layout.operand_state.bank_bytes() == J714.gpu_cores * 0x1800);
+    assert!(CONFIG_MAX.core_layout.operand_state.bank_bytes() == J716C.gpu_cores * 0x1800);
+    assert!(CONFIG_ULTRA.core_layout.operand_state.bank_bytes() == J775D.gpu_cores * 0x1800);
+};
+
 /// Every T6050 board binds the same compatible; the ID registers select the configuration.
 pub(crate) fn config(id: &G17Id) -> Option<&'static Config> {
     [&CONFIG, &CONFIG_MAX, &CONFIG_ULTRA].into_iter().find(|cfg| id.family == cfg.identity.family

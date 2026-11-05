@@ -10,7 +10,6 @@ use super::super::{kick::RegisterWrite, offset_va, work_key};
 pub(crate) const MAIN_COUNT: usize = 40;
 pub(crate) const ALTERNATE_COUNT: usize = 4;
 pub(crate) const PREEMPT_BYTES: usize = 0x4000;
-pub(crate) const OPERAND_BYTES: usize = 0x40000;
 pub(crate) const CHECKPOINTS: [u16; 4] = [37, 39, 39, 40];
 
 /// The SCS scratch allocation. Pages are 4 KiB USC pool pages, independent
@@ -150,6 +149,8 @@ pub(crate) struct RegisterArgs {
     /// Size of one operand-state region; the program exchanges two regions.
     pub(crate) operand_region_bytes: u32,
     pub(crate) operand_aux_offset: u32,
+    /// Size of the operand-state buffer at `operand_va`.
+    pub(crate) operand_bytes: usize,
     pub(crate) resource_control: u64,
     pub(crate) dispatch_control: u64,
     pub(crate) auxiliary_control: u64,
@@ -162,13 +163,13 @@ impl RegisterArgs {
             return Err(EINVAL);
         }
         offset_va(self.preempt_va, PREEMPT_BYTES as u64)?;
-        offset_va(self.operand_va, OPERAND_BYTES as u64)?;
+        offset_va(self.operand_va, self.operand_bytes as u64)?;
         if self.preempt_state_offset & 7 != 0
             || u64::from(self.preempt_state_offset) + 32 > PREEMPT_BYTES as u64
             || self.operand_region_bytes == 0 || self.operand_region_bytes & 0xfff != 0
-            || u64::from(self.operand_region_bytes) * 2 + 0x808 > OPERAND_BYTES as u64
+            || u64::from(self.operand_region_bytes) * 2 + 0x808 > self.operand_bytes as u64
             || self.operand_aux_offset & 7 != 0
-            || u64::from(self.operand_aux_offset) + 8 > OPERAND_BYTES as u64 {
+            || u64::from(self.operand_aux_offset) + 8 > self.operand_bytes as u64 {
             return Err(EINVAL);
         }
         Ok(())

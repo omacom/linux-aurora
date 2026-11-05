@@ -180,6 +180,16 @@ pub(crate) struct OperandState {
 }
 
 impl OperandState {
+    /// Size of one preemption bank, the region the M5 program exchanges.
+    pub(crate) const fn bank_bytes(&self) -> u32 {
+        self.r0a5c9 as u32
+    }
+
+    /// Offset of the per-cluster tails, the M5 program's auxiliary area.
+    pub(crate) const fn tail_offset(&self) -> u32 {
+        self.r140a8 as u32
+    }
+
     /// One cluster of six cores (A18 Pro).
     pub(crate) const ONE_BY_SIX: OperandState = OperandState {
         r10229: 0x12800,

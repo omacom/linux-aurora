@@ -168,8 +168,7 @@ impl Graph {
         let ring = DescriptorRing::new(alloc, objects)?;
         let preempt = alloc.kernel(0x4000, page, prot, cpu)?;
         let usage = alloc.kernel(mmu::UAT_PGSZ, page, prot, cpu)?;
-        let operand = alloc.lower(if m5 { crate::g17::fw::m5::compute::OPERAND_BYTES }
-            else { operand_state.size }, page, prot, cpu)?;
+        let operand = alloc.lower(operand_state.size, page, prot, cpu)?;
         let mut support = alloc.kernel(if m5 { mmu::UAT_PGSZ } else { 0xc000 }, page, prot, cpu)?;
         if !m5 {
             let support_va = support.gpu_va();
@@ -2438,8 +2437,11 @@ impl Queue {
                 context_id: args.context_id, work_state: work_word,
                 object_ids: 0x0000_0001_0000_0001,
                 resource_policy: plan.map_or(0xf5_0040_0020, |p| u64::from(p.pressure) << 32 | 0x0040_0020),
-                preempt_state_offset: 0x1b80, operand_region_bytes: 0x1e000,
-                operand_aux_offset: 0x3d800, resource_control: plan.map_or(0x54b, |p| p.resource_flags),
+                preempt_state_offset: 0x1b80,
+                // The board's core layout sizes the operand state, as on G17P.
+                operand_region_bytes: self.graph.operand_state.bank_bytes(),
+                operand_aux_offset: self.graph.operand_state.tail_offset(),
+                operand_bytes: self.graph.operand_state.size, resource_control: plan.map_or(0x54b, |p| p.resource_flags),
                 dispatch_control: 0x14c08a60, auxiliary_control: 1,
             },
             descriptor_va: descriptor_low, submit_sequence: 0, work_state_va: work_node,
