@@ -585,6 +585,10 @@ pub(crate) fn apply_pass(args: &RenderArgs<'_>, c: &M5RenderControls,
     i.ta.tpc_va=r.tpc_va;i.ta.tpc_size=r.tpc_size;i.ta.deflake_state_va=deflake;
     let f=&mut i.fragment;
     f.empty_tile_flags[0]=u8::from(p.process_empty_tiles);
+    // The fragment command's pass flag: 1 in every ordinary render pass with the G17D forms. It
+    // follows the render context, not the attachments, sample count, layers or tile size. J714
+    // keeps 0.
+    f.fragment_pass_flag = u8::from(c.board.g17d_forms());
     // The admitted ordinary single-sample profile has one stored colour
     // attachment. Its clear-intent flag follows empty-tile intent; a LOAD
     // pass uses zero here, while partial-store ZLS addresses can
