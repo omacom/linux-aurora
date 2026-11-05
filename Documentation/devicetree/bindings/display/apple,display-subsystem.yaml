@@ -19,6 +19,7 @@ properties:
       - enum:
           - apple,display-subsystem
           - apple,t6031-display-subsystem
+          - apple,t6034-display-subsystem
           - apple,t8122-display-subsystem
           - apple,t8132-display-subsystem
       - const: apple,t8132-display-diagnostics
