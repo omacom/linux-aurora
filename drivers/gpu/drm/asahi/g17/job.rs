@@ -201,10 +201,19 @@ impl Packet {
             }
             check_status(fence)?;
         }
+        self.check_firmware_producers()?;
+        self.completion.check_source_inputs()?;
+        Ok(())
+    }
+
+    /// Producers this packet waits for in firmware (another engine's commands that
+    /// were published, not complete, when it was scheduled). Checked before
+    /// publication, and again at retirement: a producer that fails after this
+    /// packet was published fails it too, although the firmware ran it.
+    pub(crate) fn check_firmware_producers(&self) -> Result {
         for fence in &self.firmware {
             check_status(fence)?;
         }
-        self.completion.check_source_inputs()?;
         Ok(())
     }
 

@@ -1115,18 +1115,17 @@ impl Queue {
                         );
                     }
                     self.retire_pending = true;
-                    if self.graph.m5 {
-                        defer(Deferred::RetiredCompute(
-                            front.packet.completion.clone(),
+                    let completion = front.packet.completion.clone();
+                    let producers = front.packet.check_firmware_producers();
+                    defer(match producers {
+                        Ok(()) if self.graph.m5 => Deferred::RetiredCompute(
+                            completion,
                             [timestamps[0], timestamps[1], 0, 0],
                             front.observed.map(|record| record.timestamps),
-                        ))?;
-                    } else {
-                        defer(Deferred::Retired(
-                            front.packet.completion.clone(),
-                            Ok([timestamps[0], timestamps[1], 0, 0]),
-                        ))?;
-                    }
+                        ),
+                        Ok(()) => Deferred::Retired(completion, Ok([timestamps[0], timestamps[1], 0, 0])),
+                        Err(error) => Deferred::Retired(completion, Err(error)),
+                    })?;
                     self.retire_pending = false;
                     self.submitted = submitted;
                     let active = self.active.pop().ok_or(EIO)?;

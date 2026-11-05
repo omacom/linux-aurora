@@ -1843,7 +1843,7 @@ impl Pair {
         );
         defer(Deferred::Retired(
             front.packet.completion.clone(),
-            Ok(timestamps),
+            front.packet.check_firmware_producers().map(|()| timestamps),
         ))?;
         self.memory.retire(ordinal)?;
         self.active.pop().ok_or(EIO)?;
