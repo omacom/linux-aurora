@@ -267,7 +267,11 @@ impl Registry {
     /// An installed idle queue keeps its original QID and backing. Mapping a
     /// replacement context must succeed before its old binding is displaced.
     /// A vacant queue (USC backing given back) is offered for re-arming only
-    /// when no populated idle queue exists.
+    /// when no populated idle queue of the owner's VM exists. A populated pool
+    /// serves one VM: a queue whose backing served another VM is not bound.
+    /// An open owner's idle channel serving another VM is shared for fresh
+    /// backing; while any queue waits for such a release, none is shared, and
+    /// the requester waits for the vacant queue.
     pub(super) fn rebind_compute(&mut self, owner: u64, context: &Arc<Context>, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result<Rebind> {
         admission.check()?;
         if let Some(queue) = self.compute(owner) {
@@ -286,7 +290,35 @@ impl Registry {
         if self.qids.compute_fits(self.admission.queues() as usize) {
             return Ok(Rebind::Fresh);
         }
+        if self.compute.iter().flatten().filter_map(|entry| entry.queue.as_deref())
+            .any(|queue| queue.vacancy_pending())
+        {
+            return Err(ENOSPC);
+        }
         let teardown = &self.teardown;
+        let vm = context.vm();
+        // A released channel whose backing served another VM goes first: vacate it, then
+        // re-arm it fresh for this one.
+        let foreign = self
+            .compute
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.queue.as_deref())
+            .filter(|queue| queue.reusable() && !queue.pool_vacant() && !queue.pool_serves(vm))
+            .filter(|queue| !queue.context().is_some_and(|bound| teardown.releasing(bound)))
+            .map(|queue| (queue.released_at(), queue.qid()))
+            .min_by_key(|(key, _)| *key)
+            .map(|(_, qid)| qid);
+        if let Some(qid) = foreign {
+            self.compute
+                .iter_mut()
+                .flatten()
+                .filter_map(|entry| entry.queue.as_deref_mut())
+                .find(|queue| queue.qid() == qid)
+                .ok_or(EIO)?
+                .require_fresh_backing();
+            return Err(ENOSPC);
+        }
         let idle = self
             .compute
             .iter()
@@ -294,21 +326,28 @@ impl Registry {
             .filter_map(|entry| entry.queue.as_deref())
             .filter(|queue| queue.shareable())
             .filter(|queue| !queue.context().is_some_and(|bound| teardown.releasing(bound)))
-            .map(|queue| ((!queue.pool_fits(required), queue.last_published()), queue.qid()))
+            // A channel serving the requester's VM first, then the best fit, then the longest idle.
+            .map(|queue| ((!queue.pool_serves(vm), !queue.pool_fits(required), queue.last_published()), queue.qid()))
             .min_by_key(|(key, _)| *key)
             .map(|(_, qid)| qid);
         let Some(qid) = idle else { return Err(ENOSPC); };
         admission.check()?;
-        let shared = self
-            .compute
-            .iter_mut()
-            .flatten()
-            .filter_map(|entry| entry.queue.as_deref_mut())
-            .find(|queue| queue.qid() == qid)
-            .ok_or(EIO)?
-            .share_idle()?;
-        if !shared {
-            return Err(ENOSPC);
+        {
+            let mut queue = self
+                .compute
+                .iter_mut()
+                .flatten()
+                .filter_map(|entry| entry.queue.as_deref_mut())
+                .find(|queue| queue.qid() == qid)
+                .ok_or(EIO)?;
+            if !queue.share_idle()? {
+                return Err(ENOSPC);
+            }
+            if !queue.pool_serves(vm) {
+                // Its backing holds another VM's scratch: vacate it, then re-arm fresh.
+                queue.require_fresh_backing();
+                return Err(ENOSPC);
+            }
         }
         Ok(self.bind_reusable(owner, context, required, admission)?.unwrap_or(Rebind::Fresh))
     }
@@ -368,7 +407,7 @@ impl Registry {
                 vacant.get_or_insert(queue.qid());
                 continue;
             }
-            if !queue.pool_fits(required) { continue; }
+            if !queue.pool_fits(required) || !queue.pool_serves(context.vm()) { continue; }
             queue.bind_owner(owner, context.clone())?;
             return Ok(Some(Rebind::Done));
         }

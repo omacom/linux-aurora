@@ -558,6 +558,8 @@ pub(crate) struct RenderPool {
     epoch: AtomicU64,
     /// Residency of the client VM the backing is aliased into.
     client_residency: Option<Arc<mmu::ResidencyGate>>,
+    /// The one VM (`mmu::Vm::id`) this pool's backing is aliased into.
+    client_vm: u64,
     control: KernelObject,
     state: KernelObject,
     served: AtomicBool,
@@ -610,6 +612,7 @@ impl RenderPool {
         let serial = RENDER_POOL_SERIAL.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
             |value| value.checked_add(1)).map_err(|_| EOVERFLOW)? + 1;
         Ok(Self { storage, epoch: AtomicU64::new(0), client_residency: client.residency_gate(),
+            client_vm: client.id(),
             control, state, served: AtomicBool::new(true), serial, id,
             layout: PageLayout::M5(geometry) })
     }
@@ -660,6 +663,7 @@ impl RenderPool {
             storage,
             epoch: AtomicU64::new(0),
             client_residency: client.residency_gate(),
+            client_vm: client.id(),
             control,
             state,
             served: AtomicBool::new(false),
@@ -722,13 +726,17 @@ impl RenderPool {
         drop(pages);
     }
     /// Re-arms a vacant pool with fresh backing built here, without the device
-    /// mutex. `client` is the VM of the context that owns this pool.
+    /// mutex. `client` is the VM of the context that owns this pool; EPERM
+    /// for any other VM.
     pub(crate) fn ensure_backing(
         &self,
         alloc: &Allocator<'_>,
         render_global: &mmu::Vm,
         client: &mmu::Vm,
     ) -> Result {
+        if client.id() != self.client_vm {
+            return Err(EPERM);
+        }
         let geometry = match self.layout {
             PageLayout::M5(geometry) => geometry,
             PageLayout::Neo { blocks, .. } => {
@@ -979,8 +987,16 @@ impl Submitted<'_> {
 /// Idle retained queues may give their USC backing back (`pages` is `None`)
 /// once the firmware consumed the pool's release; the control and state
 /// objects the queue record names stay until processor stop.
+///
+/// A backing serves one VM: its blocks hold the stack and scratch memory of
+/// that VM's work, so a view of it in another VM is refused
+/// ([`Self::map_client`]). Another VM gets the queue only after the backing
+/// was given back and fresh, zeroed backing installed ([`Self::rearm`]).
 pub(crate) struct ComputePool {
     pages: Option<Pages>,
+    /// The VM (`mmu::Vm::id`) the backing serves, from its first client view
+    /// until it is given back; zero while no client has had a view of it.
+    client_vm: u64,
     control: KernelObject,
     state: KernelObject,
     id: u16,
@@ -1017,7 +1033,7 @@ impl ComputePool {
         )?;
         Self::initialize_control(&mut control, &pages, id, state.gpu_va(), [0; 8])?;
         fence(Ordering::SeqCst);
-        Ok(Self { pages: Some(pages), control, state, id, m5 })
+        Ok(Self { pages: Some(pages), client_vm: 0, control, state, id, m5 })
     }
     fn initialize_control(control: &mut KernelObject, pages: &Pages, id: u16,
         submitted: u64, completed: [u8; 8]) -> Result {
@@ -1069,6 +1085,10 @@ impl ComputePool {
     pub(crate) fn populated(&self) -> bool {
         self.pages.is_some()
     }
+    /// Whether a view of the backing may be given to `vm`.
+    pub(crate) fn serves(&self, vm: &mmu::Vm) -> bool {
+        self.client_vm == 0 || self.client_vm == vm.id()
+    }
     /// The release record for this pool's buffer slot under the free-list
     /// generation the queue last published.
     pub(crate) fn release_record(&self, generation: u64) -> super::fw::channels::FreeListRelease {
@@ -1077,6 +1097,7 @@ impl ComputePool {
     /// The caller has observed the firmware consume this pool's release and
     /// frees the returned backing after releasing the device mutex.
     pub(crate) fn take_pages(&mut self) -> Option<Pages> {
+        self.client_vm = 0;
         self.pages.take()
     }
     /// Rewrites the shared control header for fresh backing. The caller then
@@ -1093,6 +1114,8 @@ impl ComputePool {
     }
     /// Preserve both sets of pages on failure. The caller owns the consumed
     /// release and returns old pages for destruction outside the device mutex.
+    /// The grown backing's alias is in the VM the old backing served, which it
+    /// keeps serving.
     pub(crate) fn replace_pages(&mut self, pages: &mut Option<Pages>) -> Result {
         self.write_pages(pages.as_ref().ok_or(EINVAL)?)?;
         core::mem::swap(&mut self.pages, pages);
@@ -1106,12 +1129,18 @@ impl ComputePool {
         Ok(())
     }
 
+    /// EPERM for a VM other than the one the backing serves.
     pub(crate) fn map_client(&mut self, vm: &mmu::Vm) -> Result<mmu::KernelMapping> {
+        if !self.serves(vm) {
+            return Err(EPERM);
+        }
         let pages = self.pages.as_mut().ok_or(EAGAIN)?;
         let address = pages.page_list_va();
-        pages
+        let alias = pages
             .backing
-            .map_alias(vm, address, mmu::PROT_GPU_SHARED_RW)
+            .map_alias(vm, address, mmu::PROT_GPU_SHARED_RW)?;
+        self.client_vm = vm.id();
+        Ok(alias)
     }
     pub(crate) fn reserve_submission(&self) -> Result<u64> {
         let counter = self.state.dword(0)?;

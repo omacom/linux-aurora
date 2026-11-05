@@ -345,6 +345,15 @@ impl Graph {
     /// Detaches the descriptor ring of an idle vacant queue; the caller frees it
     /// off-lock. The job list and the context item only name consumed
     /// descriptors at this point.
+    /// Clears the client-visible state the last owner's work left (preemption
+    /// buffer, usage page, operand state) before another VM is given views of
+    /// it. The caller proved the queue idle.
+    fn clear_client_state(&mut self) {
+        self.preempt.bytes_mut().fill(0);
+        self.usage.bytes_mut().fill(0);
+        self.operand.bytes_mut().fill(0);
+        fence(Ordering::SeqCst);
+    }
     fn vacate_ring(&mut self) -> Option<DescriptorRing> {
         self.ring.take()
     }
@@ -1677,8 +1686,10 @@ impl Queue {
                 publication: None,
             });
         } else {
+            // Another VM: the pool must be fresh backing (EPERM otherwise).
             let kick_alias = self.kick.map_client(context.vm())?;
             let pool_alias = self.pool.map_client(context.vm())?;
+            self.graph.clear_client_state();
             let binding = self.graph.bind(context.clone(), kick_alias, pool_alias)?;
             self.graph.set_owner(&context)?;
             let old_binding = self.binding.replace(binding);
@@ -1762,6 +1773,8 @@ impl Queue {
         }
         let binding = self.binding.take()?;
         self.retained_owner = Some(binding.context.retain_firmware_pages());
+        // The backing served the exited VM only: give it back for fresh backing.
+        self.needs_fresh_backing = true;
         Some(binding)
     }
     /// An idle retained queue whose USC backing may be given back.
@@ -1785,6 +1798,20 @@ impl Queue {
     /// Recycled queues are vacated regardless of the warm cap.
     pub(crate) fn needs_fresh_backing(&self) -> bool {
         self.needs_fresh_backing
+    }
+    /// Whether this queue's pool backing may be bound for `vm`.
+    pub(crate) fn pool_serves(&self, vm: &mmu::Vm) -> bool {
+        self.pool.serves(vm)
+    }
+    /// Gives a released queue's backing back for fresh backing before reuse.
+    pub(crate) fn require_fresh_backing(&mut self) {
+        self.needs_fresh_backing = true;
+    }
+    /// A pool release is in flight, or a queue waits for one, that ends with a
+    /// vacant queue ready for re-arming.
+    pub(crate) fn vacancy_pending(&self) -> bool {
+        !self.growing && (self.pool_release_pending()
+            || (self.recycled_pending() && self.pool_phase == PoolPhase::Populated))
     }
     /// The firmware acknowledged the kill of this queue's closed owner (`ContextKilled`)
     /// and every killed command was settled. The QID stays killed in the firmware
