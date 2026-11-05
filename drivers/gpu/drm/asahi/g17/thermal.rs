@@ -22,14 +22,15 @@
 //! restores the calibrated maximum on release, when the GPU goes idle, when no sensor can be read
 //! and at shutdown. Below the engage temperature nothing is written.
 
-use core::ffi::{c_char, c_int, c_void, CStr};
+use core::ffi::{c_char, c_int, c_uint, c_void, CStr};
+use core::sync::atomic::{AtomicI32, Ordering};
 use kernel::{bindings, prelude::*};
 
+// fans.c: the SMC hwmon cell's fan requests and thermal zone reads, which have stubs where
+// their drivers are not built.
 extern "C" {
-    fn thermal_zone_get_zone_by_name(name: *const c_char) -> *mut c_void;
-    fn thermal_zone_get_temp(zone: *mut c_void, temp: *mut c_int) -> c_int;
-    fn apple_smc_read(smc: *mut c_void, key: u32, buf: *mut c_void, size: usize) -> c_int;
-    fn apple_smc_write(smc: *mut c_void, key: u32, buf: *const c_void, size: usize) -> c_int;
+    fn asahi_zone_temp(name: *const c_char, temp: *mut c_int) -> c_int;
+    fn asahi_fans_request(dev: *mut c_void, permille: c_uint, min_step_rpm: c_uint) -> c_int;
 }
 
 /// SoC hotspot temperature computed by the SMC (registered as a thermal zone by the SMC driver):
@@ -180,15 +181,10 @@ impl Drop for SensorProvider {
 /// The provider guard prevents its managed zones from disappearing during
 /// lookup and read. Do not retain a zone pointer after dropping the guard.
 fn zone_temperature_mc(_provider: &SensorProvider, name: &CStr) -> Option<i32> {
-    // SAFETY: name is a NUL-terminated string that outlives the call.
-    let zone = unsafe { thermal_zone_get_zone_by_name(name.as_ptr()) };
-    if zone.is_null() || (zone as usize) >= usize::MAX - 4095 {
-        return None;
-    }
     let mut temp: c_int = 0;
-    // SAFETY: the provider guard protects the zone's lifetime, and temp is a
-    // valid destination for this call.
-    (unsafe { thermal_zone_get_temp(zone, &mut temp) } == 0)
+    // SAFETY: name is a NUL-terminated string that outlives the call, and temp is a valid
+    // destination; the zone is looked up and read under the provider guard.
+    (unsafe { asahi_zone_temp(name.as_ptr(), &mut temp) } == 0)
         .then_some(temp)
         .filter(|temp| (0..=125_000).contains(temp))
 }
@@ -238,46 +234,15 @@ fn fan_curve_permille(temp_mc: i32, target_mc: i32) -> i32 {
     }
 }
 
-/// The integer value of a non-negative SMC float (truncated), without FPU use.
-fn f32_bits_to_u32(bits: u32) -> u32 {
-    let exponent = ((bits >> 23) & 0xff) as i32 - 127;
-    if bits >> 31 != 0 || exponent < 0 {
-        return 0;
-    }
-    let mantissa = (bits & 0x7f_ffff) | 0x80_0000;
-    if exponent >= 23 {
-        mantissa.checked_shl((exponent - 23) as u32).unwrap_or(u32::MAX)
-    } else {
-        mantissa >> (23 - exponent)
-    }
-}
-
-/// The SMC float encoding of `value` (exact below 2^24), without FPU use.
-fn u32_to_f32_bits(value: u32) -> u32 {
-    if value == 0 {
-        return 0;
-    }
-    let exponent = 31 - value.leading_zeros();
-    let mantissa = if exponent >= 23 { value >> (exponent - 23) } else { value << (23 - exponent) };
-    ((exponent + 127) << 23) | (mantissa & 0x7f_ffff)
-}
-
-fn smc_key(name: &[u8; 4]) -> u32 {
-    u32::from_be_bytes(*name)
-}
-
-/// Runs `f` with the SMC core of the sensor provider, under the provider lock (which serializes
-/// with its unbinding).
-fn with_smc<T>(f: impl FnOnce(*mut c_void) -> Option<T>) -> Option<T> {
+/// Sets every fan the SMC hwmon cell lets a kernel policy set to `permille` of its
+/// minimum-to-maximum range, or hands them back to the SMC for 0, under the provider lock (which
+/// serializes with its unbinding). A fan whose target is within `min_step_rpm` of the new one
+/// keeps it. Returns the first fan's target rpm, 0 once handed back.
+fn request_fans(permille: u32, min_step_rpm: u32) -> Option<u32> {
     let provider = SensorProvider::acquire()?;
-    // SAFETY: the provider lock keeps the device bound; the SMC core is its parent, whose driver
-    // data is the core's state for as long as a child is bound.
-    let smc = unsafe {
-        let parent = (*provider.0).parent;
-        if parent.is_null() { return None; }
-        (*parent).driver_data
-    };
-    if smc.is_null() { None } else { f(smc) }
+    // SAFETY: the provider lock keeps the device bound, as the request requires.
+    let rpm = unsafe { asahi_fans_request(provider.0.cast(), permille, min_step_rpm) };
+    u32::try_from(rpm).ok()
 }
 
 /// Fan boost: while the governor limits the GPU, every fan runs at its hardware maximum instead of
@@ -299,43 +264,7 @@ impl FanBoost {
     /// Puts every fan in manual mode at `permille` of its minimum-to-maximum range, or back in
     /// automatic mode for `None`. Returns the first fan's target rpm, 0 for automatic.
     fn set_curve(&mut self, permille: Option<i32>) -> Option<u32> {
-        with_smc(|smc| {
-            let mut count = 0u8;
-            // SAFETY: smc is the bound SMC core; the buffers are valid for their sizes.
-            if unsafe { apple_smc_read(smc, smc_key(b"FNum"), (&raw mut count).cast(), 1) } < 0 {
-                return None;
-            }
-            let mut first = 0;
-            for fan in 0..count.min(4) {
-                let digit = b'0' + fan;
-                let mode = u8::from(permille.is_some());
-                let (mut minimum, mut maximum) = ([0u8; 4], [0u8; 4]);
-                // SAFETY: as above.
-                unsafe {
-                    if let Some(permille) = permille {
-                        if apple_smc_read(smc, smc_key(&[b'F', digit, b'M', b'n']), minimum.as_mut_ptr().cast(), 4) < 0
-                            || apple_smc_read(smc, smc_key(&[b'F', digit, b'M', b'x']), maximum.as_mut_ptr().cast(), 4) < 0
-                        {
-                            return None;
-                        }
-                        let low = f32_bits_to_u32(u32::from_le_bytes(minimum));
-                        let high = f32_bits_to_u32(u32::from_le_bytes(maximum)).max(low);
-                        let rpm = low + (high - low) * permille.clamp(0, 1000) as u32 / 1000;
-                        if fan == 0 {
-                            first = rpm;
-                        }
-                        let target = u32_to_f32_bits(rpm).to_le_bytes();
-                        if apple_smc_write(smc, smc_key(&[b'F', digit, b'T', b'g']), target.as_ptr().cast(), 4) < 0 {
-                            return None;
-                        }
-                    }
-                    if apple_smc_write(smc, smc_key(&[b'F', digit, b'm', b'd']), (&raw const mode).cast(), 1) < 0 {
-                        return None;
-                    }
-                }
-            }
-            Some(first)
-        })
+        request_fans(permille.map_or(0, |permille| permille.clamp(1, 1000) as u32), 0)
     }
 
     /// One governor step of the proportional curve: `busy` while the governor runs a busy GPU.
@@ -357,56 +286,13 @@ impl FanBoost {
     }
 
     fn set_curve_if_moved(&mut self, permille: i32) -> Option<u32> {
-        // The range is read on every write; skip the write while the target barely moves.
-        let estimate = with_smc(|smc| {
-            let mut bytes = [[0u8; 4]; 2];
-            // SAFETY: smc is the bound SMC core; the buffers are valid for their sizes.
-            unsafe {
-                if apple_smc_read(smc, smc_key(b"F0Mn"), bytes[0].as_mut_ptr().cast(), 4) < 0
-                    || apple_smc_read(smc, smc_key(b"F0Mx"), bytes[1].as_mut_ptr().cast(), 4) < 0
-                {
-                    return None;
-                }
-            }
-            let low = f32_bits_to_u32(u32::from_le_bytes(bytes[0]));
-            let high = f32_bits_to_u32(u32::from_le_bytes(bytes[1])).max(low);
-            Some(low + (high - low) * permille.clamp(0, 1000) as u32 / 1000)
-        })?;
-        if self.curve_rpm != 0 && estimate.abs_diff(self.curve_rpm) < FAN_CURVE_STEP_RPM {
-            return None;
-        }
-        self.set_curve(Some(permille))
+        // A fan already on the curve keeps its target while the new one is within a step.
+        let step = if self.curve_rpm != 0 { FAN_CURVE_STEP_RPM } else { 0 };
+        request_fans(permille.clamp(1, 1000) as u32, step)
     }
 
     fn set(&mut self, boost: bool) -> bool {
-        with_smc(|smc| {
-            let mut count = 0u8;
-            // SAFETY: smc is the bound SMC core; the buffers are valid for their sizes.
-            if unsafe { apple_smc_read(smc, smc_key(b"FNum"), (&raw mut count).cast(), 1) } < 0 {
-                return None;
-            }
-            let mut ok = count != 0;
-            for fan in 0..count.min(4) {
-                let digit = b'0' + fan;
-                let mode = u8::from(boost);
-                let mut maximum = [0u8; 4];
-                // SAFETY: as above.
-                unsafe {
-                    if boost
-                        && apple_smc_read(smc, smc_key(&[b'F', digit, b'M', b'x']), maximum.as_mut_ptr().cast(), 4) < 0
-                    {
-                        ok = false;
-                        continue;
-                    }
-                    ok &= apple_smc_write(smc, smc_key(&[b'F', digit, b'm', b'd']), (&raw const mode).cast(), 1) >= 0;
-                    if boost {
-                        ok &= apple_smc_write(smc, smc_key(&[b'F', digit, b'T', b'g']), maximum.as_ptr().cast(), 4) >= 0;
-                    }
-                }
-            }
-            Some(ok)
-        })
-        .unwrap_or(false)
+        request_fans(if boost { 1000 } else { 0 }, 0).is_some()
     }
 
     /// Applies one governor step's request. Called from the governor work without driver locks:
