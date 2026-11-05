@@ -191,9 +191,10 @@ impl job::Backend for Backend {
                 let programs = resources.as_deref().ok_or(EINVAL)?;
                 *plan = Some(policy.plan(programs, priority)?);
             }
-            Validated::Compute { resources, plan, m5_scratch, .. } => {
+            Validated::Compute { resources, plan, m5_scratch, cdm_auxiliary_allocation, .. } => {
                 if let Some(programs) = resources {
-                    *plan = Some(policy.plan_compute_scs(programs, priority, m5_scratch.layout())?);
+                    *plan = Some(policy.plan_compute_scs(programs, priority, m5_scratch.layout(),
+                        *cdm_auxiliary_allocation)?);
                 } else if m5_scratch.enabled() {
                     // SCS needs the dispatch storage declarations to size its pool.
                     return Err(EINVAL);

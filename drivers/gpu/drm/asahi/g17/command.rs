@@ -649,6 +649,12 @@ impl Payload {
                 if (scratch.enabled() || intersection.enabled()) && !variant.ray_traversal {
                     return Err(refuse_ray_traversal());
                 }
+                // The auxiliary allocation is the per-USC page count of the dispatch's SCS
+                // storage, which the pool is sized for (`plan_compute_scs`). Without SCS there
+                // is no such storage, as render's programs require.
+                if !m5_scratch.enabled() && cmd.cdm_auxiliary_allocation != 0 {
+                    return Err(EINVAL);
+                }
                 if intersection.enabled() {
                     require_range(space, intersection.pool, intersection.pool_bytes, Access::Read)?;
                     let code = intersection.default_program & 0x0000_ffff_ffff_ffff;

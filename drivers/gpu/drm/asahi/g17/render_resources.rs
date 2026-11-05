@@ -239,11 +239,11 @@ impl M5Policy {
     }
 
     pub(crate) fn plan_compute(&self, programs: &ComputePrograms, priority: u8) -> Result<Plan> {
-        self.plan_compute_scs(programs, priority, 0)
+        self.plan_compute_scs(programs, priority, 0, 0)
     }
 
     pub(crate) fn plan_compute_scs(&self, programs: &ComputePrograms, priority: u8,
-        scs_layout: u64) -> Result<Plan> {
+        scs_layout: u64, auxiliary_pages: u32) -> Result<Plan> {
         let scratch = super::fw::m5::compute::ScratchRequest::new(scs_layout)?;
         // UMA pool class 1 is realtime; class 2 covers all other
         // public priorities. Its resident-kick count also depends on engine.
@@ -264,7 +264,8 @@ impl M5Policy {
             }, 96, 114688).map_err(|_| EINVAL)?;
         }
         let request = budget.compute_scs_requirements(
-            demand.requirements().map_err(|_| EINVAL)?, scratch.pages()).map_err(|_| EINVAL)?;
+            demand.requirements().map_err(|_| EINVAL)?, scratch.pages(), auxiliary_pages)
+            .map_err(|_| EINVAL)?;
         let sizes = budget.sizes(request, History::default()).map_err(|_| EINVAL)?;
         Ok(Plan {
             geometry: sizes.geometry().map_err(|_| EINVAL)?, sizes,
