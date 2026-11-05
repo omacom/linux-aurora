@@ -148,6 +148,8 @@ pub(crate) struct FirmwarePages {
 }
 
 pub(crate) struct Context {
+    /// The GPU runs the M5 firmware's protocol.
+    m5: bool,
     execution: Arc<ExecutionContext>,
     status: Arc<VmStatus>,
     scheduler: Arc<SchedulerStorage>,
@@ -257,6 +259,7 @@ impl Context {
         let order =
             Arc::pin_init(new_mutex!(Order::new(), "G17 context admission order"), GFP_KERNEL)?;
         Ok(Self {
+            m5: alloc.uat.is_m5(),
             execution,
             status,
             scheduler,
@@ -301,6 +304,18 @@ impl Context {
     pub(crate) fn compute_timestamps(&self) -> &Arc<super::completion::ComputeTimestampCache> {
         &self.compute_timestamps
     }
+    /// M5: this VM's client view of the shared metrics backing, mapped once
+    /// per VM in the compact range.
+    pub(crate) fn metrics_client(&self, backing: &Arc<KernelObject>) -> Result<u64> {
+        self.vm().metrics_alias(backing.gpu_va(), || {
+            backing.alias_in(
+                self.vm(),
+                super::buffer::BlockGeometry::M5_COMPACT,
+                UAT_PGSZ as u64,
+                mmu::PROT_GPU_SHARED_RW,
+            )
+        })
+    }
     pub(crate) fn status(&self) -> &Arc<VmStatus> {
         &self.status
     }
@@ -314,6 +329,24 @@ impl Context {
     pub(crate) fn is_current(&self) -> bool {
         self.execution.is_current()
     }
+    /// Claim the context's hardware identity for one published M5 command until it retires.
+    pub(crate) fn pin(&self) -> Result<mmu::ContextPin> {
+        self.execution.pin()
+    }
+    pub(crate) fn unpin(&self, pin: mmu::ContextPin) {
+        self.execution.unpin(pin)
+    }
+    /// Claim the queue's QoS slot for one published M5 command. Stage 1: the slot is the
+    /// context's own, taken at creation.
+    pub(crate) fn pin_qos(&self) -> Result<u8> {
+        Ok(self.qos_id())
+    }
+    pub(crate) fn unpin_qos(&self, _slot: u8) {}
+
+    pub(crate) fn is_m5(&self) -> bool {
+        self.m5
+    }
+
     pub(crate) fn owner_pid(&self) -> u32 {
         self.owner_pid
     }
@@ -425,21 +458,44 @@ impl Context {
         alloc: &Allocator<'_>,
         ids: &Arc<RenderIds>,
         render_global: &Vm,
+        plan: Option<super::render_resources::Plan>,
     ) -> Result<Arc<RenderPool>> {
         if !self.is_current() {
             return Err(EFAULT);
         }
+        if alloc.uat.is_m5() != plan.is_some() {
+            return Err(EINVAL);
+        }
         let mut render = self.render.lock();
         if let Some(pool) = &*render {
-            // A pool vacated under memory pressure is re-armed before reuse.
-            pool.ensure_backing(alloc, render_global, self.vm())?;
-            return Ok(pool.clone());
+            if pool.fits(plan.as_ref().map(|p| p.geometry)) {
+                // A pool vacated under memory pressure is re-armed before reuse.
+                // M5 backing is installed by the pair that pins the pool.
+                if !alloc.uat.is_m5() {
+                    pool.ensure_backing(alloc, render_global, self.vm())?;
+                }
+                return Ok(pool.clone());
+            }
+            // M5: existing pairs retain the old pool through their rebind and
+            // its release acknowledgement. Allocation failure leaves it installed.
         }
         let pool = Arc::new(
-            RenderPool::new(alloc, ids, render_global, self.vm(), self.render_blocks())?,
+            match plan {
+                Some(plan) => RenderPool::m5(
+                    alloc,
+                    super::freelist::RenderId::logical(ids)?,
+                    self.vm(),
+                    plan.geometry,
+                )?,
+                None => {
+                    RenderPool::new(alloc, ids, render_global, self.vm(), self.render_blocks())?
+                }
+            },
             GFP_KERNEL,
         )?;
-        *render = Some(pool.clone());
+        let previous = render.replace(pool.clone());
+        drop(render);
+        drop(previous);
         Ok(pool)
     }
     /// Drops the pool once its free-list release is consumed and the closed

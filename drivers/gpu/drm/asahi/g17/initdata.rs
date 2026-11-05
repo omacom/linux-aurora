@@ -187,9 +187,12 @@ pub(super) struct InitData {
     qos: usize,
     pb: usize,
     page_pool: usize,
-    compute_global: usize,
-    boot_control: usize,
-    boot_state: usize,
+    /// The G17P compute objects: the global state page and the boot free
+    /// list's control and state. M5 has none of them, and its build leaves
+    /// these `None`, so an unset handle can never name another object.
+    compute_global: Option<usize>,
+    boot_control: Option<usize>,
+    boot_state: Option<usize>,
     metrics_fw_va: u64,
     /// Client VA of the parameter-buffer metrics object (`Config::pm_metrics`).
     pm_metrics_va: u64,
@@ -292,9 +295,9 @@ impl InitData {
             qos: 0,
             pb: 0,
             page_pool: 0,
-            compute_global: 0,
-            boot_control: 0,
-            boot_state: 0,
+            compute_global: None,
+            boot_control: None,
+            boot_state: None,
             metrics_fw_va: 0,
             pm_metrics_va: 0,
             recovery_slot_keys: None,
@@ -367,16 +370,25 @@ impl InitData {
 
     /// Initialize a fresh physical compute QID's row before exposing its queue. An installed
     /// or rebound queue keeps the row's firmware-owned counters and must never call this again.
-    /// Called for a fresh row or after its free-list release was consumed.
-    pub(super) fn initialize_compute_pool_blocks(
-        &self,
-        slot: u16,
-        page_list_va: u64,
-        blocks: usize,
-    ) -> Result {
+    /// Called for a fresh row or after its free-list release was consumed. The row has the
+    /// family's format: a G17P block row, or the M5 pool's descriptor.
+    pub(super) fn install_compute_pool(&self, descriptor: super::freelist::PoolDescriptor) -> Result {
+        use super::freelist::PoolDescriptor;
+        let slot = match descriptor {
+            PoolDescriptor::Neo { slot, .. } | PoolDescriptor::M5 { slot, .. } => slot,
+        };
         if slot == 0 || slot > u16::from(super::fw::kick::QID_MAX) + 1 {
             return Err(EINVAL);
         }
+        match descriptor {
+            PoolDescriptor::Neo { slot, page_list, blocks } if !self.m5 =>
+                self.initialize_compute_pool_blocks(slot, page_list, blocks),
+            PoolDescriptor::M5 { slot, words } if self.m5 => self.set_m5_uma(slot, words),
+            _ => Err(EINVAL),
+        }
+    }
+
+    fn initialize_compute_pool_blocks(&self, slot: u16, page_list_va: u64, blocks: usize) -> Result {
         let entry = abi::PagePoolDescriptor::compute_blocks(page_list_va, blocks);
         let size = core::mem::size_of::<abi::PagePoolDescriptor>();
         let offset = usize::from(slot) * size;
@@ -395,6 +407,19 @@ impl InitData {
         page_list.store(entry.page_list, Ordering::Relaxed);
         counters.store(entry.counters, Ordering::Relaxed);
         count.store(entry.page_count, Ordering::Relaxed);
+        fence(Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// One M5 page-pool row: the pool's eight descriptor words at its 64-byte slot.
+    fn set_m5_uma(&self, slot: u16, words: [u64; 8]) -> Result {
+        let object = self.object(self.page_pool)?;
+        let offset = usize::from(slot) * core::mem::size_of::<[u64; 8]>();
+        // Check the full row before the first store.
+        object.pointer(offset, core::mem::size_of::<[u64; 8]>())?;
+        for (index, word) in words.into_iter().enumerate() {
+            object.dword(offset + index * 8)?.store(word, Ordering::Relaxed);
+        }
         fence(Ordering::SeqCst);
         Ok(())
     }
@@ -455,7 +480,9 @@ impl InitData {
         if self.compute_shared.is_some() {
             return Ok(());
         }
-        let state_va = self.object(self.boot_state)?.gpu_va();
+        let boot_control = self.boot_control.ok_or(ENODEV)?;
+        let boot_state = self.boot_state.ok_or(ENODEV)?;
+        let state_va = self.object(boot_state)?.gpu_va();
         let mut control = abi::FreeListControl::new(&abi::FreeListArgs {
             buffer_slot: u32::MAX,
             class: abi::FreeListClass::Two,
@@ -465,9 +492,9 @@ impl InitData {
             state_va,
         });
         control.run_cursor = COMPUTE_CONTROL_CURSOR;
-        self.object_mut(self.boot_control)?.bytes_mut().fill(0);
-        self.object_mut(self.boot_control)?.write(0, control)?;
-        self.object_mut(self.boot_state)?.bytes_mut().fill(0);
+        self.object_mut(boot_control)?.bytes_mut().fill(0);
+        self.object_mut(boot_control)?.write(0, control)?;
+        self.object_mut(boot_state)?.bytes_mut().fill(0);
         shared
             .pages
             .initialize::<[u64; low::RENDER_PAGE_LIST_SIZE / 8]>(0, |pages| {
@@ -487,10 +514,14 @@ impl InitData {
         Ok(())
     }
 
+    /// Whether `vm` has the shared compute aperture mapped. M5 has no shared
+    /// aperture: its compute queues need only their own pools, so every VM is ready.
     pub(super) fn compute_vm_cached(&self, vm: &mmu::Vm) -> bool {
-        self.compute_shared
-            .as_ref()
-            .is_some_and(|shared| vm.compute_pool_mappings_match(shared.id))
+        self.m5
+            || self
+                .compute_shared
+                .as_ref()
+                .is_some_and(|shared| vm.compute_pool_mappings_match(shared.id))
     }
 
     pub(super) fn cache_compute_vm(&self, vm: &mmu::Vm) -> Result {
@@ -560,7 +591,7 @@ impl InitData {
             return Ok(());
         }
         let scheduler = self.compute_scheduler.as_ref().ok_or(EIO)?.object.gpu_va();
-        let object = self.object(self.compute_global)?;
+        let object = self.object(self.compute_global.ok_or(ENODEV)?)?;
         let state = object
             .pointer(0, core::mem::size_of::<abi::ComputeGlobalState>())?
             .cast::<abi::ComputeGlobalState>();
@@ -1096,7 +1127,7 @@ impl InitData {
         };
         use CpuMap::{WriteBack as WB, WriteCombined as WC};
         self.cluster = self.add(env.fixed(high::PRIVATE_CLUSTER, cluster_size, FS, WC)?)?;
-        self.compute_global = self.add(env.fixed(high::ZERO_PAGE, mmu::UAT_PGSZ, FP, WC)?)?;
+        self.compute_global = Some(self.add(env.fixed(high::ZERO_PAGE, mmu::UAT_PGSZ, FP, WC)?)?);
         let pb = self.add(env.fixed(high::PB_DESCRIPTORS, mmu::UAT_PGSZ, FS, WC)?)?;
         self.object_mut(pb)?
             .initialize::<abi::PbDescriptorTable>(0, |table| {
@@ -1172,8 +1203,8 @@ impl InitData {
             let state = self.add(env.fixed(state, mmu::UAT_PGSZ, state_prot, WC)?)?;
             self.object_mut(state)?.write(0, initial)?;
             if class == abi::FreeListClass::Two {
-                self.boot_control = control;
-                self.boot_state = state;
+                self.boot_control = Some(control);
+                self.boot_state = Some(state);
             }
         }
         self.stamps[0] = self.add(env.fixed(high::DESCRIPTOR_PAGE_A, mmu::UAT_PGSZ, GFS, WC)?)?;

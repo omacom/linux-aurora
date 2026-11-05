@@ -169,16 +169,44 @@ impl job::Backend for Backend {
         Some(self.shared.feed.clone())
     }
 
+    fn supports_submission(&self) -> bool {
+        self.shared.submission_enabled
+    }
+
+    fn supports_engine(&self, engine: crate::g17::job::Engine) -> bool {
+        !self.shared.firmware_test || engine == crate::g17::job::Engine::Compute
+    }
+
+    fn prepare_command(&self, command: &mut crate::g17::command::Validated) -> Result {
+        use crate::g17::command::Validated;
+        let Some(policy) = self.shared.render_policy else { return Ok(()) };
+        let priority = self.context.policy().priority();
+        match command {
+            Validated::Render { resources, plan, .. } => {
+                let programs = resources.as_deref().ok_or(EINVAL)?;
+                *plan = Some(policy.plan(programs, priority)?);
+            }
+            Validated::Compute { resources, plan, m5_scratch, .. } => {
+                if let Some(programs) = resources {
+                    *plan = Some(policy.plan_compute_scs(programs, priority, m5_scratch.layout())?);
+                } else if m5_scratch.enabled() {
+                    // SCS needs the dispatch storage declarations to size its pool.
+                    return Err(EINVAL);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn render_scs_blocks(&self, pages: [u16; 2]) -> Result<usize> {
         crate::g17::fw::render_rt::required_blocks(self.shared.active_cores, pages)
     }
 
-    fn ensure_compute(&self, scs_pages: u16) -> Result {
+    fn ensure_compute(&self, command: &crate::g17::command::Validated) -> Result {
         // A reverse timeline chain must be submitted before the host signal.
         // Validate here, but do not consume physical capacity behind unsignalled
         // DRM dependencies. compute_packet admits it when the job can run.
-        crate::g17::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scs_pages)
-            .map(|_| ())
+        self.compute_capacity(command).map(|_| ())
     }
 
     fn fail_vm(&self, error: Error) {

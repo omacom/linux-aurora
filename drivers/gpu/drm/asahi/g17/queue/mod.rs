@@ -70,7 +70,7 @@ impl Frontend {
             return Err(EINVAL);
         }
         let window = UscWindow::new(usc_base, range.clone())?;
-        let fences = FenceContexts::new(1, c_str!("asahi_g17_queue"), FENCE_KEY)?;
+        let fences = FenceContexts::new(1, c_str!("aurora_g17_queue"), FENCE_KEY)?;
         let allocation_failure = super::fence::allocation_failure(&fences)?;
         Ok(Self {
             fences,
@@ -85,6 +85,7 @@ impl Frontend {
 pub(crate) struct Queue<B: Backend> {
     dev: AsahiDevRef,
     context: Arc<Context>,
+    usage: Arc<crate::usage::Client>,
     backend: Arc<B>,
     render: Option<Scheduler<B>>,
     compute: Option<Scheduler<B>>,
@@ -105,7 +106,10 @@ pub(crate) struct Queue<B: Backend> {
     _slot: admission::QueueSlot,
 }
 
-type ValidatedBatch = (KVec<(Validated, Order, Destinations)>, KVec<mmu::VmJobGuard>);
+type ValidatedBatch = (
+    KVec<(Validated, Order, Destinations)>,
+    KVec<mmu::VmJobGuard>,
+);
 
 impl<B: Backend> Queue<B> {
     pub(crate) fn new(
@@ -114,6 +118,7 @@ impl<B: Backend> Queue<B> {
         backend: Arc<B>,
         frontend: Frontend,
         slot: admission::QueueSlot,
+        usage: Arc<crate::usage::Client>,
     ) -> Result<Self> {
         let Frontend {
             fences,
@@ -126,6 +131,7 @@ impl<B: Backend> Queue<B> {
         Ok(Self {
             dev: dev.into(),
             context,
+            usage,
             backend,
             render,
             compute: None,
@@ -143,10 +149,10 @@ impl<B: Backend> Queue<B> {
         })
     }
 
-    fn ensure_compute(&mut self, scs_pages: u16) -> Result {
+    fn ensure_compute(&mut self, command: &Validated) -> Result {
         // Validate every request, including an existing scheduler. Physical
         // admission happens after its DRM dependencies, in backend publication.
-        self.backend.ensure_compute(scs_pages)?;
+        self.backend.ensure_compute(command)?;
         if self.compute.is_none() {
             self.compute = Some(Scheduler::new(
                 &self.dev,
@@ -160,7 +166,11 @@ impl<B: Backend> Queue<B> {
     fn prune_frontier(&mut self, index: usize) {
         let failure = &mut self.failures[index];
         // Without room the entries are released here, as they always could be.
-        let mut finished = if self.finished.reserve(self.frontiers[index].len(), GFP_KERNEL).is_ok() {
+        let mut finished = if self
+            .finished
+            .reserve(self.frontiers[index].len(), GFP_KERNEL)
+            .is_ok()
+        {
             Some(&mut self.finished)
         } else {
             None
@@ -198,35 +208,51 @@ impl<B: Backend> Queue<B> {
         };
         let index = engine.index();
         if let Validated::Render { ray_query, .. } = &command {
-            let blocks = self.backend.render_scs_blocks(ray_query.map(|stage| stage.scratch.pages()))?;
-            if blocks > self.context.render_blocks() { return Err(EINVAL); }
+            let blocks = self
+                .backend
+                .render_scs_blocks(ray_query.map(|stage| stage.scratch.pages()))?;
+            if blocks > self.context.render_blocks() {
+                return Err(EINVAL);
+            }
         }
         self.prune_frontier(index);
         self.frontiers[index].reserve(1, GFP_KERNEL)?;
         if engine == Engine::Compute {
-            let Validated::Compute { scratch, .. } = &command else { return Err(EINVAL); };
-            self.ensure_compute(scratch.pages())?;
+            self.ensure_compute(&command)?;
         }
         // Only convert inputs when no independent host-prefix wait could keep
         // the retained source bookkeeping queued behind an external signal.
         if engine == Engine::Compute {
             super::trace::inputs(self.context.id(), order.sequence, 0, inputs.len(), None);
         }
-        let sources = if engine == Engine::Compute && !inputs.is_empty()
+        let sources = if engine == Engine::Compute
+            && !inputs.is_empty()
             && !destinations.has_outputs()
-            && self.frontiers[0].iter().all(|(sequence, fences)|
-                !Order::contains(order.wait_through[0], *sequence)
-                    || fences.status() > 0)
-            && self.frontiers[1].iter().all(|(sequence, fences)|
+            && self.frontiers[0].iter().all(|(sequence, fences)| {
+                !Order::contains(order.wait_through[0], *sequence) || fences.status() > 0
+            })
+            && self.frontiers[1].iter().all(|(sequence, fences)| {
                 !Order::contains(order.wait_through[1], *sequence)
                     || fences.ready.raw() != fences.completed.raw()
-                    || fences.status() > 0)
-            && self.failures.iter_mut().enumerate().all(|(index, failure)|
-                failure.earliest().is_none_or(|(sequence, _)|
-                    !Order::contains(order.wait_through[index], sequence)))
-        { self.backend.input_sources(inputs) } else { None };
+                    || fences.status() > 0
+            })
+            && self.failures.iter_mut().enumerate().all(|(index, failure)| {
+                failure.earliest().is_none_or(|(sequence, _)| {
+                    !Order::contains(order.wait_through[index], sequence)
+                })
+            }) {
+            self.backend.input_sources(inputs)
+        } else {
+            None
+        };
         if engine == Engine::Compute {
-            super::trace::inputs(self.context.id(), order.sequence, 1, inputs.len(), sources.as_deref());
+            super::trace::inputs(
+                self.context.id(),
+                order.sequence,
+                1,
+                inputs.len(),
+                sources.as_deref(),
+            );
         }
 
         // Only earlier render ordinals covered by the explicit logical prefix
@@ -234,8 +260,7 @@ impl<B: Backend> Queue<B> {
         let host_predecessors = self.frontiers[index]
             .iter()
             .take_while(|(sequence, _)| {
-                engine == Engine::Render
-                    && Order::contains(order.wait_through[index], *sequence)
+                engine == Engine::Render && Order::contains(order.wait_through[index], *sequence)
             })
             .filter_map(|(_, fences)| fences.publication.as_ref());
         let completion = Completion::new(
@@ -249,8 +274,10 @@ impl<B: Backend> Queue<B> {
             host_predecessors.clone().next().is_some(),
             self.backend.feed(),
             sources.clone(),
+            self.usage.clone(),
         )?;
-        let publication = completion.publication()
+        let publication = completion
+            .publication()
             .map(|target| PreparedPublication::new(target, host_predecessors))
             .transpose()?;
         if engine == Engine::Compute {
@@ -294,8 +321,10 @@ impl<B: Backend> Queue<B> {
             });
         }
         let failure_count = failures.iter().flatten().count();
-        let mut dependencies =
-            KVec::with_capacity(inputs.len() + count + timestamp_count + failure_count, GFP_KERNEL)?;
+        let mut dependencies = KVec::with_capacity(
+            inputs.len() + count + timestamp_count + failure_count,
+            GFP_KERNEL,
+        )?;
         let mut checked_inputs =
             KVec::with_capacity(inputs.len() + timestamp_count + failure_count, GFP_KERNEL)?;
         let mut firmware = KVec::with_capacity(count, GFP_KERNEL)?;
@@ -333,7 +362,10 @@ impl<B: Backend> Queue<B> {
                 if job::fence_status(fence) > 0 {
                     continue;
                 }
-                if sources.as_ref().is_some_and(|sources| sources.contains_input(fence)) {
+                if sources
+                    .as_ref()
+                    .is_some_and(|sources| sources.contains_input(fence))
+                {
                     continue;
                 }
                 dependencies.push(fence.clone(), GFP_KERNEL)?;
@@ -363,10 +395,11 @@ impl<B: Backend> Queue<B> {
             Engine::Render => &mut self.render,
             Engine::Compute => &mut self.compute,
         };
-        let fences = scheduler
-            .as_mut()
-            .ok_or(ENODEV)?
-            .enqueue(packet, dependencies, early, publication)?;
+        let fences =
+            scheduler
+                .as_mut()
+                .ok_or(ENODEV)?
+                .enqueue(packet, dependencies, early, publication)?;
         self.sequence[index] = order.sequence;
         self.frontiers[index]
             .push_within_capacity((order.sequence, fences))
@@ -389,7 +422,7 @@ impl<B: Backend> Queue<B> {
         let mut preceding = [0; 2];
         let mut pending = KVec::with_capacity(1, GFP_KERNEL)?;
         while let Some(command) = parser.next()? {
-            let payload = self.proof.validate(
+            let mut payload = self.proof.validate(
                 self.context.vm(),
                 self.range.clone(),
                 &self.window,
@@ -400,7 +433,9 @@ impl<B: Backend> Queue<B> {
                 Validated::Render { .. } => Engine::Render,
                 Validated::Compute { .. } => Engine::Compute,
             };
-            let order = Order::new(
+            if !self.backend.supports_engine(engine) { return Err(ENOTSUPP); }
+            self.backend.prepare_command(&mut payload)?;
+            let mut order = Order::new(
                 base,
                 preceding,
                 command.barriers,
@@ -433,8 +468,10 @@ impl<B: Backend> Queue<B> {
 
 impl<B: Backend> crate::queue::Queue for Queue<B> {
     fn reserve_render_scs(&mut self, layouts: [u64; 2]) -> Result {
-        let pages = [super::fw::compute::ScratchRequest::new(layouts[0])?.pages(),
-                     super::fw::compute::ScratchRequest::new(layouts[1])?.pages()];
+        let pages = [
+            super::fw::compute::ScratchRequest::new(layouts[0])?.pages(),
+            super::fw::compute::ScratchRequest::new(layouts[1])?.pages(),
+        ];
         let blocks = self.backend.render_scs_blocks(pages)?;
         self.context.reserve_render_blocks(blocks)
     }
@@ -448,22 +485,25 @@ impl<B: Backend> crate::queue::Queue for Queue<B> {
         bytes: &[u8],
         objects: Pin<&xarray::XArray<KBox<file::Object>>>,
     ) -> Result {
-        let mut outputs = Outputs::new(
-            &self.fences,
-            syncs,
-            input_count,
-            &self.allocation_failure,
-        )?;
+        let mut outputs = Outputs::new(&self.fences, syncs, input_count, &self.allocation_failure)?;
         let result = (|| {
+            if !self.backend.supports_submission() {
+                return Err(ENOTSUPP);
+            }
             if self.context.status().get() != 0 {
                 return Err(EIO);
             }
             let (mut pending, guards) = self.prepare_submission(bytes, objects)?;
-            if pending.iter().any(|(command, _, _)| matches!(command, Validated::Render { .. })) {
+            if pending
+                .iter()
+                .any(|(command, _, _)| matches!(command, Validated::Render { .. }))
+            {
                 self.context.note_render();
             }
             if super::timeout::select_submission(pending.iter().map(|(cmd, _, _)| cmd.long_job())) {
-                for (command, _, _) in pending.iter_mut() { command.allow_long_job(); }
+                for (command, _, _) in pending.iter_mut() {
+                    command.allow_long_job();
+                }
             }
             let mut guards = guards.into_iter();
             let firmware_source = pending.len() == 1

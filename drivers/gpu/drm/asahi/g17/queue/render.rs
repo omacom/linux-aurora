@@ -726,6 +726,8 @@ impl Pair {
             event_mask: abi::RENDER_KICK_EVENT_MASK,
             register_arrays: arrays,
             scs_enabled: ray_query[stage].scratch.enabled(),
+            dependency_types: None,
+            compute_matrix: false,
             priority: policy.priority(),
         };
         let ta_args = args(

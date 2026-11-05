@@ -265,7 +265,7 @@ impl Registry {
     /// replacement context must succeed before its old binding is displaced.
     /// A vacant queue (USC backing given back) is offered for re-arming only
     /// when no populated idle queue exists.
-    pub(super) fn rebind_compute(&mut self, owner: u64, context: &Arc<Context>, required: usize, admission: &Admission<'_>) -> Result<Rebind> {
+    pub(super) fn rebind_compute(&mut self, owner: u64, context: &Arc<Context>, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result<Rebind> {
         admission.check()?;
         if let Some(queue) = self.compute(owner) {
             return Ok(if queue.matches(owner, queue.qid(), context)? {
@@ -312,8 +312,8 @@ impl Registry {
 
     /// Whether `owner` can bind a channel now, without changing any binding. Owner 0 asks
     /// only whether some channel is free for a new owner.
-    fn compute_readiness(&self, owner: u64, context: Option<&Arc<Context>>, required: usize) -> Readiness {
-        if let (Some(context), Some(queue)) = (context, self.compute(owner).filter(|_| owner != 0)) {
+    fn compute_readiness(&self, owner: u64, query: Option<(&Arc<Context>, super::freelist::ComputeCapacity)>) -> Readiness {
+        if let (Some((context, required)), Some(queue)) = (query, self.compute(owner).filter(|_| owner != 0)) {
             return if queue.spared_pending() {
                 Readiness::Progress
             } else if !matches!(queue.matches(owner, queue.qid(), context), Ok(true)) {
@@ -344,7 +344,7 @@ impl Registry {
 
     /// Binds `owner` to a reusable channel whose last owner released it, or
     /// names a vacant one to re-arm. None if no channel is reusable.
-    fn bind_reusable(&mut self, owner: u64, context: &Arc<Context>, required: usize, admission: &Admission<'_>) -> Result<Option<Rebind>> {
+    fn bind_reusable(&mut self, owner: u64, context: &Arc<Context>, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result<Option<Rebind>> {
         let mut vacant = None;
         let teardown = &self.teardown;
         for mut queue in self
@@ -379,7 +379,7 @@ impl Registry {
         qid: u8,
         pages: crate::g17::freelist::Pages,
         ring: compute::DescriptorRing,
-    ) -> Result<(u16, u64)> {
+    ) -> Result<super::freelist::PoolDescriptor> {
         let mut queue = self
             .compute
             .iter_mut()
@@ -795,6 +795,11 @@ impl Backend {
     /// The shared aperture has exactly one builder. Other queues sleep without
     /// holding the device mutex; recovery joins its lease before closing roots.
     fn shared_compute(&self, admission: &Admission<'_>) -> Result {
+        // The shared aperture is G17P compute state. M5 compute queues need only
+        // their own pools, and the objects it would install are not M5's.
+        if self.context.is_m5() {
+            return Ok(());
+        }
         loop {
             admission.check()?;
             let lease = self.shared.preparations.enter_until(admission)?;
@@ -937,7 +942,7 @@ impl Backend {
         Ok(())
     }
 
-    fn grow_compute(&self, required: usize, admission: &Admission<'_>) -> Result {
+    fn grow_compute(&self, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result {
         admission.check()?;
         {
             let state = self.shared.state.lock();
@@ -950,7 +955,7 @@ impl Backend {
         let dev = self.shared.drm()?;
         let uat = self.shared.state.lock().as_ref().ok_or(ENODEV)?.uat.clone();
         let alloc = super::object::Allocator { dev: &dev, uat: &uat };
-        let mut pages = Some(super::freelist::Pages::compute_sized(&alloc, required)?);
+        let mut pages = Some(super::freelist::Pages::for_compute(&alloc, required)?);
         let mut alias = Some(pages.as_ref().ok_or(EIO)?.map_client(self.context.vm())?);
         let mut deferred = DeferredBatch::publication()?;
         let mut growth = None;
@@ -977,7 +982,7 @@ impl Backend {
                         firmware.primary.notify(crate::g17::MSG_CONTROL_NOTIFY)?;
                     }
                 }
-                queue.finish_growth(&firmware.init, &mut pages, &mut alias, required).map(Some)
+                queue.finish_growth(&firmware.init, &mut pages, &mut alias).map(Some)
             })();
             deferred.finish();
             match result {
@@ -1018,7 +1023,7 @@ impl Backend {
         result
     }
 
-    fn build_compute(&self, required: usize, admission: &Admission<'_>) -> Result {
+    fn build_compute(&self, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result {
         admission.check()?;
         self.admission_open()?;
         loop {
@@ -1098,7 +1103,7 @@ impl Backend {
                     // Fresh zeroed backing is built without the device mutex; the
                     // queue may have been taken or re-armed by another owner since.
                     let built = (|| -> Result<_> {
-                        let pages = crate::g17::freelist::Pages::compute_sized(&alloc, required)?;
+                        let pages = crate::g17::freelist::Pages::for_compute(&alloc, required)?;
                         Ok((pages, compute::DescriptorRing::new(&alloc, &objects)?))
                     })();
                     let (pages, ring) = match built {
@@ -1123,13 +1128,13 @@ impl Backend {
                         .filter_map(|entry| entry.queue.as_deref())
                         .any(|queue| queue.qid() == qid && queue.can_rearm());
                     if !ready { drop(state); continue; }
-                    let (slot, page_list) = match firmware.queues.rearm_compute(qid, pages, ring) {
+                    let descriptor = match firmware.queues.rearm_compute(qid, pages, ring) {
                         Err(error) if error == EAGAIN => continue,
                         result => result?,
                     };
                     // The firmware consumed this slot's release before the backing
                     // was dropped; the row is rewritten before the queue is kicked.
-                    firmware.init.initialize_compute_pool_blocks(slot, page_list, required)?;
+                    firmware.init.install_compute_pool(descriptor)?;
                     firmware.queues.bind_rearmed(qid, self.owner, &self.context)?;
                     return Ok(());
                 }
@@ -1145,13 +1150,15 @@ impl Backend {
                     }
                     self.admission_open()?;
                     firmware.queues.reserved(reservation)?;
-                    let (slot, page_list) = pool.pool_descriptor()?;
-                    firmware.init.initialize_compute_pool_blocks(slot, page_list, required)?;
+                    firmware.init.install_compute_pool(pool.pool_descriptor()?)?;
                 }
                 let backing = compute::Backing::new(&alloc, pool)?;
                 // The global scheduler is created after pool/kick backing and
                 // retained even if this queue's later descriptor graph fails.
-                self.compute_scheduler(&alloc, &lease, admission)?;
+                // It is G17P compute state; M5 has none.
+                if !self.context.is_m5() {
+                    self.compute_scheduler(&alloc, &lease, admission)?;
+                }
                 let queue = compute::Queue::new(
                     &alloc,
                     &objects,
@@ -1161,6 +1168,7 @@ impl Backend {
                     self.shared.variant.pointers,
                     self.shared.operand_state,
                     self.shared.variant.compute,
+                    alloc.uat.is_m5(),
                 )?;
                 Ok(KBox::new(queue, GFP_KERNEL)?)
             })();
@@ -1305,8 +1313,9 @@ impl DeferredBatch {
             Deferred::Retired(completion, Err(error)) | Deferred::Drained(completion, Err(error))
             | Deferred::FailedOwned(completion, error) | Deferred::Unpublished(completion, error) =>
                 { completion.note_input_error(*error); },
-            Deferred::Retired(completion, Ok(_)) | Deferred::Drained(completion, Ok(_)) =>
-                completion.note_source_retired(),
+            Deferred::Retired(completion, Ok(_))
+            | Deferred::RetiredCompute(completion, _, _)
+            | Deferred::Drained(completion, Ok(_)) => completion.note_source_retired(),
             _ => {},
         }
         self.values.push_within_capacity(value).map_err(|_| EIO)?;
@@ -1315,6 +1324,7 @@ impl DeferredBatch {
         // succeeds; failure fences and rejected events are not retirement.
         if let Some(
             Deferred::Retired(completion, _)
+            | Deferred::RetiredCompute(completion, _, _)
             | Deferred::Drained(completion, _)
             | Deferred::Release(completion),
         ) = self.values.last()
@@ -1336,6 +1346,7 @@ impl DeferredBatch {
                 let mut changed = false;
                 for value in &self.values {
                     if let Deferred::Retired(completion, Ok(_))
+                        | Deferred::RetiredCompute(completion, _, _)
                         | Deferred::Drained(completion, Ok(_)) = value
                     {
                         if let Err(error) = completion.check_source_inputs() {
@@ -1367,6 +1378,7 @@ impl DeferredBatch {
 
 struct ComputeHost<'a> {
     init: &'a super::initdata::InitData,
+    regs: &'a crate::regs::G17Resources,
     port: &'a super::port::Port,
     outer: Option<super::port::OuterClaim<'a>>,
     effort: &'a mut super::power::Effort,
@@ -1384,6 +1396,10 @@ impl compute::Host for ComputeHost<'_> {
         ))
     }
     fn prepare_compute_shared(&mut self) -> Result {
+        // The global compute state is G17P's; M5 has none to activate.
+        if self.init.is_m5() {
+            return Ok(());
+        }
         self.init.activate_compute()
     }
     fn qos_publish(
@@ -1403,15 +1419,28 @@ impl compute::Host for ComputeHost<'_> {
     fn register_queue(&mut self, queue: &super::fw::kick::KsmQueue) -> Result {
         self.port.register_queues(core::slice::from_ref(queue))
     }
-    fn publish_outer(&mut self, _priority: u8, slot: &super::fw::channels::WorkSlot) -> Result {
+    fn publish_outer(&mut self, priority: u8, slot: &super::fw::channels::WorkSlot) -> Result {
+        if self.init.is_m5() {
+            return self.init.publish_work(priority, slot).map(|_| ());
+        }
         self.port.publish_compute(self.outer.take().ok_or(EIO)?, slot).map(|_| ())
     }
     fn notify(&mut self, message: u64) -> Result {
+        // Every M5 pipe-2 doorbell (0x83) is noted in the firmware's submission history first,
+        // as the render doorbell notes its pair.
+        if self.init.is_m5() && message >> super::MSG_TYPE_SHIFT == 0x83 && message & 3 == 2 {
+            if let Err(error) = self.init.note_m5_submission_history() {
+                pr_warn!("asahi: M5 submission history skipped: {:?}\n", error);
+            }
+        }
         self.port.notify(message)
     }
     fn note_submission(&mut self) -> Result {
         self.effort.submit();
         super::Firmware::apply_shared_effort(self.init, self.effort, self.port, super::power::FULL_EFFORT)
+    }
+    fn submit_m5(&mut self, submission: &super::fw::m5::queue::HardwareSubmission) -> Result {
+        self.regs.submit_m5_work(submission)
     }
 }
 
@@ -1459,6 +1488,10 @@ impl compute::Host for DirectHost<'_> {
     fn note_submission(&mut self) -> Result {
         Ok(())
     }
+    fn submit_m5(&mut self, _submission: &super::fw::m5::queue::HardwareSubmission) -> Result {
+        // M5 never publishes without the device mutex (see compute_direct).
+        Err(EINVAL)
+    }
 }
 
 impl super::Firmware {
@@ -1487,6 +1520,10 @@ impl super::Firmware {
         let mut holds = KVec::with_capacity(sources.sources.len(), GFP_KERNEL)?;
         let mut native: KVec<super::sync_input::NativeWait> =
             KVec::with_capacity(sources.sources.len(), GFP_KERNEL)?;
+        // M5 shared-ring queues have no completion-wait records: the consumer's kick entry names
+        // the source's kick, and the firmware orders it.
+        let m5 = self.init.is_m5();
+        let mut waited: u128 = 0;
         for source in &sources.sources {
             if source.submission.source_status()? { continue; }
             let found = self.queues.compute.iter_mut().flatten()
@@ -1499,6 +1536,12 @@ impl super::Firmware {
             let Some((sequence, dependency, stamp_va, event_slot, hold)) = found else {
                 return Err(EAGAIN);
             };
+            waited |= 1u128 << dependency.qid();
+            if m5 {
+                merged.insert(sequence, dependency)?;
+                holds.push(hold, GFP_KERNEL)?;
+                continue;
+            }
             // The completion-wait record orders the consumer behind its
             // source; naming the source in the kick entry as well only adds
             // a second, slower wait and a predecessor record.
@@ -1516,7 +1559,7 @@ impl super::Firmware {
         if packet.is_published() {
             for queue in self.queues.compute.iter().flatten()
                 .filter_map(|entry| entry.queue.as_deref())
-                .filter(|queue| native.iter().any(|wait| wait.dependency.qid() == queue.qid()))
+                .filter(|queue| waited & (1u128 << queue.qid()) != 0)
             {
                 for source in &sources.sources { queue.note_input_consumer(source); }
             }
@@ -1539,8 +1582,10 @@ impl super::Firmware {
             return Err(EAGAIN);
         }
         // No descriptor, accounting or inner producer changes precede this
-        // reservation; dropping it unused returns the work-ring slot.
-        let outer = self.port.reserve_compute(packet.context.policy().priority())?;
+        // reservation; dropping it unused returns the work-ring slot. M5 compute takes its
+        // credit from the shared ring under this mutex instead (InitData::publish_work).
+        let outer = if self.init.is_m5() { None }
+            else { Some(self.port.reserve_compute(packet.context.policy().priority())?) };
         let queues = &mut self.queues;
         let mut queue = queues
             .compute
@@ -1560,8 +1605,9 @@ impl super::Firmware {
         }
         let mut host = ComputeHost {
             init: &self.init,
+            regs: &self.bridge.regs,
             port: &self.port,
-            outer: Some(outer),
+            outer,
             effort: &mut self.effort,
             qids: &mut queues.qids,
             generation: self.recovery.generation(),
@@ -1579,7 +1625,7 @@ impl Registry {
     /// Everything ensure_compute establishes for `owner`: the shared compute
     /// objects mapped into its VM, and its queue bound to `context` with a
     /// pool that fits and no spared witness to release.
-    fn compute_bound(&self, owner: u64, context: &Arc<Context>, required: usize) -> Result<bool> {
+    fn compute_bound(&self, owner: u64, context: &Arc<Context>, required: super::freelist::ComputeCapacity) -> Result<bool> {
         let Some(queue) = self.compute(owner) else {
             return Ok(false);
         };
@@ -1739,9 +1785,20 @@ impl super::Firmware {
 }
 
 impl Backend {
-    fn ensure_compute(&self, scs_pages: u16, admission: &Admission<'_>) -> Result {
+    /// The compute pool capacity `command` needs, in its family's terms: the M5
+    /// plan's geometry, or the G17P block count of its SCS request.
+    pub(super) fn compute_capacity(&self, command: &super::command::Validated) -> Result<super::freelist::ComputeCapacity> {
+        use super::freelist::ComputeCapacity;
+        let super::command::Validated::Compute { scratch, plan, .. } = command else { return Err(EINVAL); };
+        if self.context.is_m5() {
+            return Ok(ComputeCapacity::M5(plan.map(|plan| plan.geometry)));
+        }
+        super::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scratch.pages())
+            .map(ComputeCapacity::Blocks)
+    }
+
+    fn ensure_compute(&self, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result {
         admission.check()?;
-        let required = super::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scs_pages)?;
         let mut deferred = DeferredBatch::publication()?;
         loop {
             admission.check()?;
@@ -1779,10 +1836,13 @@ impl Backend {
     fn compute_direct(
         &self,
         packet: &Arc<super::job::Packet>,
-        required: usize,
+        required: super::freelist::ComputeCapacity,
         deferred: &mut DeferredBatch,
     ) -> Option<Result> {
-        if packet.completion.sources().is_some()
+        // M5 compute is a shared-ring submission on the ring M5 render shares: it is published only
+        // under the device mutex, never through the classic compute ring producer.
+        if self.context.is_m5()
+            || packet.completion.sources().is_some()
             || self.context.render_seen()
             || packet.cancel_requested()
             || packet.completion.status().get() != 0
@@ -1839,8 +1899,7 @@ impl Backend {
         {
             return None;
         }
-        let super::command::Validated::Compute { scratch, .. } = &packet.command else { return None; };
-        let required = super::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scratch.pages()).ok()?;
+        let required = self.compute_capacity(&packet.command).ok()?;
         loop {
             let channels = self.shared.channels.observe();
             let progress = self.shared.progress.observe();
@@ -1858,7 +1917,7 @@ impl Backend {
         }
     }
 
-    fn compute_readiness(&self, packet: &Arc<super::job::Packet>, required: usize) -> Readiness {
+    fn compute_readiness(&self, packet: &Arc<super::job::Packet>, required: super::freelist::ComputeCapacity) -> Readiness {
         match packet.completion.work_state().and_then(|work| work.acquire(crate::g17::job::Engine::Compute)) {
             Err(error) if error == EBUSY => return Readiness::Progress,
             Err(_) => return Readiness::Ready,
@@ -1901,7 +1960,7 @@ impl Backend {
         {
             return Readiness::Progress;
         }
-        firmware.queues.compute_readiness(self.owner, Some(&self.context), required)
+        firmware.queues.compute_readiness(self.owner, Some((&self.context, required)))
     }
 
     /// Replaces the prepared packet's channel claim; None releases it after publication,
@@ -1980,10 +2039,7 @@ impl Backend {
         packet: &Arc<super::job::Packet>,
         deferred: &mut DeferredBatch,
     ) -> Option<Result> {
-        let super::command::Validated::Compute { scratch, .. } = &packet.command else {
-            return Some(Err(EINVAL));
-        };
-        let required = match super::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scratch.pages()) {
+        let required = match self.compute_capacity(&packet.command) {
             Ok(required) => required,
             Err(error) => return Some(Err(error)),
         };
@@ -1997,8 +2053,7 @@ impl Backend {
         packet: &Arc<super::job::Packet>,
         deferred: &mut DeferredBatch,
     ) -> Result {
-        let super::command::Validated::Compute { scratch, .. } = &packet.command else { return Err(EINVAL); };
-        let required = super::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scratch.pages())?;
+        let required = self.compute_capacity(&packet.command)?;
         if packet.cancel_requested() || self.admission_open().is_err() || packet.completion.status().get() != 0 {
             return Err(render::FALLBACK);
         }
@@ -2074,8 +2129,7 @@ impl Backend {
         deferred: &mut DeferredBatch,
     ) -> Result {
         packet.check_dependencies()?;
-        let super::command::Validated::Compute { scratch, .. } = &packet.command else { return Err(EINVAL); };
-        let required = super::fw::compute_pool::required_blocks(self.shared.compute_blocks, self.shared.active_cores, scratch.pages())?;
+        let required = self.compute_capacity(&packet.command)?;
         if let Some(result) = self.compute_direct(packet, required, deferred) {
             return result;
         }
@@ -2115,7 +2169,7 @@ impl Backend {
             // admission and publication without changing this logical queue.
             if !bound {
                 demand.get_or_insert_with(|| ComputeDemand::new(&self.shared));
-                Backend::ensure_compute(self, scratch.pages(), &admission)?;
+                Backend::ensure_compute(self, required, &admission)?;
                 admission.check()?;
             }
             let lease = self.shared.preparations.enter_until(&admission)?;
@@ -2340,7 +2394,7 @@ impl super::Firmware {
         // states) still ends a scheduler wait that has no timeout of its own.
         if freed
             || (shared.channels.has_waiters()
-                && self.queues.compute_readiness(0, None, 0) == Readiness::Ready)
+                && self.queues.compute_readiness(0, None) == Readiness::Ready)
         {
             shared.channels.notify();
         }

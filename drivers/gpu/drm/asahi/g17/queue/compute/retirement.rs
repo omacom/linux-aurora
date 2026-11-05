@@ -141,6 +141,18 @@ pub(crate) fn note_stampless(qid: u8, kick: u64) {
     }
 }
 
+/// Firmware retires the compute commands in flight at a restart without executing them and
+/// stores a record whose end is at most this many timer ticks after its start (0 or 1 tick
+/// observed). The shortest executed command record seen is 18 ticks.
+pub(crate) const CANCELLED_TICKS: u64 = 1;
+
+/// The record shows the command never executed: zero duration, or, for a command that was in
+/// flight across a recovery (`crossed`), the restart's cancellation record.
+pub(crate) fn unexecuted(record: Observation, crossed: bool) -> bool {
+    let [start, end] = record.timestamps;
+    start == end || (crossed && start != 0 && end >= start && end - start <= CANCELLED_TICKS)
+}
+
 /// A zero-duration record fails before visibility polling. It proves execution did not occur;
 /// ownership still requires a separate retirement witness before mappings can be released.
 /// The command is complete when its stamp covers it, or when its exact completion record has

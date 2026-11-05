@@ -246,6 +246,31 @@ impl Drop for PooledTimestamps {
 /// Republications of one command whose earlier publications firmware dropped unexecuted.
 pub(crate) const MAX_REPLAYS: u8 = 3;
 
+/// M5 timestamp pairs share a retained page of the physical compute queue.
+/// A completion keeps its backing alive through quarantine and replay.
+struct M5ComputeTimestamps {
+    object: Arc<KernelObject>,
+    offset: usize,
+}
+
+impl M5ComputeTimestamps {
+    fn clear(&self) -> Result {
+        let start = self.object.dword(self.offset)?;
+        let end = self.object.dword(self.offset + 8)?;
+        start.store(0, Ordering::Relaxed);
+        end.store(0, Ordering::Relaxed);
+        barrier(Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn words(&self) -> Result<[u64; 2]> {
+        let words = [self.object.dword(self.offset)?.load(Ordering::Relaxed),
+            self.object.dword(self.offset + 8)?.load(Ordering::Relaxed)];
+        barrier(Ordering::Acquire);
+        Ok(words)
+    }
+}
+
 #[pin_data]
 pub(crate) struct Completion {
     status: Arc<VmStatus>,
@@ -254,6 +279,11 @@ pub(crate) struct Completion {
     // predecessor's host writes. DRM credits must follow the terminal result.
     terminal: Option<UserFence<CompletionFence>>,
     compute: Option<PooledTimestamps>,
+    #[pin]
+    m5_compute: Mutex<Option<M5ComputeTimestamps>>,
+    /// A compute command. M5 compute binds its timestamps at publication, so
+    /// `compute` alone does not identify the engine.
+    is_compute: bool,
     feed: Option<Arc<super::feed::Feed>>,
     usage: Arc<crate::usage::Client>,
     sources: Option<Arc<super::sync_input::Sources>>,
@@ -312,7 +342,9 @@ impl Completion {
         } else {
             HostOutput::Immediate(output)
         };
-        let compute = if compute {
+        // M5 compute binds its timestamp pair in its physical queue's page at publication.
+        let is_compute = compute;
+        let compute = if compute && !context.is_m5() {
             Some(context.compute_timestamps().take(dev, context.vm())?)
         } else {
             None
@@ -323,6 +355,8 @@ impl Completion {
                 output,
                 terminal,
                 compute,
+                m5_compute <- new_mutex!(None, "M5 queue timestamps"),
+                is_compute,
                 feed,
                 usage,
                 sources,
@@ -421,14 +455,33 @@ impl Completion {
     }
 
     pub(crate) fn compute_timestamp_va(&self) -> Result<u64> {
-        Ok(self.compute.as_ref().ok_or(EINVAL)?.page()?.mapping.iova())
+        if let Some(compute) = &self.compute { return Ok(compute.page()?.mapping.iova()); }
+        let compute = self.m5_compute.lock();
+        let compute = compute.as_ref().ok_or(EINVAL)?;
+        Ok(compute.object.gpu_va() + compute.offset as u64)
+    }
+
+    /// The queue checked its record-slot retirement before calling this.
+    /// Clearing and binding precede descriptor publication under the device lock.
+    pub(crate) fn bind_m5_compute_timestamps(&self, object: &Arc<KernelObject>, offset: usize) -> Result<u64> {
+        if self.compute.is_some() || self.signalled.load(Ordering::Acquire) {
+            return Err(EINVAL);
+        }
+        let timestamps = M5ComputeTimestamps { object: object.clone(), offset };
+        timestamps.clear()?;
+        let address = timestamps.object.gpu_va() + offset as u64;
+        *self.m5_compute.lock() = Some(timestamps);
+        Ok(address)
     }
 
     /// The caller has proved that firmware retired this command, or has
     /// received its scheduler kill acknowledgement with recovery closed.
     /// These are the command's public timestamp words, not queue-private state.
     pub(crate) fn compute_words(&self) -> Result<[u64; 2]> {
-        let object = &self.compute.as_ref().ok_or(EINVAL)?.page()?.object;
+        let Some(compute) = self.compute.as_ref() else {
+            return self.m5_compute.lock().as_ref().ok_or(EINVAL)?.words();
+        };
+        let object = &compute.page()?.object;
         let words = [
             object.dword(0)?.load(Ordering::Relaxed),
             object.dword(8)?.load(Ordering::Relaxed),
@@ -442,6 +495,10 @@ impl Completion {
             return None;
         }
         self.compute_words().ok()
+    }
+
+    pub(crate) fn signalled(&self) -> bool {
+        self.signalled.load(Ordering::Acquire)
     }
 
     pub(crate) fn begin_replay(&self) -> bool {
@@ -481,7 +538,10 @@ impl Completion {
         if self.signalled.load(Ordering::Acquire) {
             return Err(ECANCELED);
         }
-        let object = &self.compute.as_ref().ok_or(EINVAL)?.page()?.object;
+        let Some(compute) = self.compute.as_ref() else {
+            return self.m5_compute.lock().as_ref().ok_or(EINVAL)?.clear();
+        };
+        let object = &compute.page()?.object;
         let start = object.dword(0)?;
         let end = object.dword(8)?;
         start.store(0, Ordering::Relaxed);
@@ -648,7 +708,21 @@ impl Completion {
     /// Exact retirement permits the physical lease and VM pin to be released
     /// before waking userspace. A failure fence alone never establishes this.
     #[track_caller]
-    pub(crate) fn complete(&self, mut result: Result<[u64; 4]>) {
+    pub(crate) fn complete(&self, result: Result<[u64; 4]>) {
+        // M5 compute feeds the refill detector only from its exact execution record
+        // (RetiredCompute); M5 compute is the compute without pooled timestamps.
+        let execution = if self.is_compute && self.compute.is_none() {
+            None
+        } else {
+            result.as_ref().ok().map(|ticks| [ticks[0], ticks[1]])
+        };
+        self.complete_with_compute(result, execution);
+    }
+
+    /// Compute feedback is separate from public timestamps, which may contain
+    /// a synthesized retirement envelope when the execution record is absent.
+    #[track_caller]
+    fn complete_with_compute(&self, mut result: Result<[u64; 4]>, compute: Option<[u64; 2]>) {
         if result.is_ok() {
             if let Err(error) = self.check_source_inputs() {
                 result = Err(error);
@@ -663,7 +737,7 @@ impl Completion {
         if let Ok(ticks) = &result {
             use crate::usage::Engine;
             let hz = cfg::COMMAND_TIMESTAMP_HZ as u32;
-            if self.compute.is_some() {
+            if self.is_compute {
                 self.usage.add(Engine::Compute, ticks[0], ticks[1], hz);
             } else {
                 self.usage.add(Engine::Vertex, ticks[0], ticks[1], hz);
@@ -673,8 +747,10 @@ impl Completion {
         if let (Some(feed), Ok(ticks)) = (&self.feed, &result) {
             // Compute reports its dispatch envelope in the first pair, a
             // render its fragment pass in the second.
-            if self.compute.is_some() {
-                feed.note_pass(ticks[0], ticks[1]);
+            if self.is_compute {
+                if let Some([start, end]) = compute {
+                    feed.note_pass(start, end);
+                }
             } else {
                 feed.note_pass(ticks[2], ticks[3]);
             }
@@ -737,6 +813,8 @@ fn discarded(error: Error) -> bool {
 /// or `Release`; `FailedOwned` leaves their physical and VM ownership intact.
 pub(crate) enum Deferred {
     Retired(Arc<Completion>, Result<[u64; 4]>),
+    /// Only the optional interval comes from an exact compute execution record.
+    RetiredCompute(Arc<Completion>, [u64; 4], Option<[u64; 2]>),
     Drained(Arc<Completion>, Result<[u64; 4]>),
     FailedOwned(Arc<Completion>, Error),
     Unpublished(Arc<Completion>, Error),
@@ -746,6 +824,10 @@ pub(crate) enum Deferred {
 impl Deferred {
     pub(crate) fn finish(self) {
         match self {
+            Self::RetiredCompute(completion, ticks, execution) => {
+                completion.complete_with_compute(Ok(ticks), execution);
+                completion.release_after_retirement();
+            }
             Self::Retired(completion, result) => {
                 completion.complete(result);
                 // An earlier failure may already have signalled this fence while

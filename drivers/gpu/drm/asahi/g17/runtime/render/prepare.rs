@@ -259,7 +259,7 @@ impl super::super::Backend {
         let built = (|| -> Result<KBox<Pair>> {
             let free_list =
                 self.context
-                    .render_pool(alloc, &resources.ids, &resources.global)?;
+                    .render_pool(alloc, &resources.ids, &resources.global, None)?;
             Pair::new(
                 alloc,
                 &resources.objects,
@@ -340,7 +340,7 @@ impl super::super::Backend {
         let built = (|| -> Result<_> {
             let free_list =
                 self.context
-                    .render_pool(alloc, &resources.ids, &resources.global)?;
+                    .render_pool(alloc, &resources.ids, &resources.global, None)?;
             let prepared = parked.prepare(
                 alloc,
                 &resources.objects,
@@ -456,7 +456,7 @@ impl super::super::Backend {
         let prepared = (|| {
             let free_list =
                 self.context
-                    .render_pool(alloc, &resources.ids, &resources.global)?;
+                    .render_pool(alloc, &resources.ids, &resources.global, None)?;
             pair.prepare_bind(
                 alloc,
                 &resources.objects,

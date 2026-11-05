@@ -275,9 +275,17 @@ pub(crate) trait Backend: Send + Sync {
         None
     }
 
+    /// The device accepts command submission (an M5 GPU before its queues take submission
+    /// does not).
+    fn supports_submission(&self) -> bool { true }
+    fn supports_engine(&self, _engine: Engine) -> bool { true }
+    /// Device policy applied to a validated command before it is ordered (the M5 resource
+    /// plan).
+    fn prepare_command(&self, _command: &mut super::command::Validated) -> Result { Ok(()) }
+
     /// Validate compute sizing without reserving a physical channel. Queued
     /// commands may wait on a host signal submitted after this ioctl returns.
-    fn ensure_compute(&self, scs_pages: u16) -> Result;
+    fn ensure_compute(&self, command: &super::command::Validated) -> Result;
     fn render_scs_blocks(&self, pages: [u16; 2]) -> Result<usize> {
         if pages != [0; 2] { return Err(EINVAL); }
         Ok(super::fw::freelist::RENDER_BLOCKS)

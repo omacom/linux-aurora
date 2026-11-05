@@ -962,6 +962,10 @@ struct Shared {
     descriptor_flags: [u32; 2],
     /// Firmware events and work run: off for an M5 GPU until the M5 queues take submission.
     submission_enabled: bool,
+    /// An M5 GPU before its render queues take submission: compute only.
+    firmware_test: bool,
+    /// The M5 shared-queue resource policy (frozen device topology).
+    render_policy: Option<render_resources::M5Policy>,
     crashed: AtomicBool,
     feed: Arc<feed::Feed>,
     #[pin]
@@ -1310,7 +1314,7 @@ impl Gpu {
         let preparations = preparation::Gate::with_waiters(Some(progress.clone()))?;
         let renders = availability::Availability::new()?;
         let reclaim = runtime::teardown::ReclaimBatch::new()?;
-        let feed = feed::Feed::new()?;
+        let feed = feed::Feed::new(m5)?;
         let active_cores = id.core_masks.iter().map(|mask| mask.count_ones()).sum();
         let alternate = cfg.core_layout.cores.is_some_and(|(clusters, cores)| {
             clusters == id.num_clusters
@@ -1341,6 +1345,7 @@ impl Gpu {
                 "Experimental GPU topology admission: command-buffer offsets are not yet validated\n"
             );
         }
+        let render_policy = if m5 { Some(render_resources::M5Policy::new(&id)?) } else { None };
         let shared = Arc::pin_init(
             pin_init!(Shared {
                 drm <- new_mutex!(Some(dev.into()), "g17::Shared::drm"),
@@ -1353,6 +1358,8 @@ impl Gpu {
                 compute_blocks: cfg.core_layout.compute_blocks,
                 descriptor_flags: [id.perf_control, id.perf_map[0]],
                 submission_enabled: !m5,
+                firmware_test: m5,
+                render_policy,
                 crashed: AtomicBool::new(false),
                 feed,
                 feed_work <- new_work!("g17::Shared::feed_work"),

@@ -65,6 +65,9 @@ enum Phase {
     Published,
     Acknowledged,
     Unproven,
+    /// M5: the full-queue retirement witness covered the killed commands. Cached across
+    /// collector failures, since `submitted` still counts entries a retry already drained.
+    Witnessed,
     Released,
 }
 
@@ -196,13 +199,13 @@ impl Queue {
         let Some(phase) = self.exit.as_ref().map(|exit| exit.phase) else {
             return Ok(());
         };
-        if !matches!(phase, Phase::Acknowledged | Phase::Unproven) {
+        if !matches!(phase, Phase::Acknowledged | Phase::Unproven | Phase::Witnessed) {
             return Ok(());
         }
         // An unproven kill (acknowledged before the scheduler page showed the killed
         // state) is re-read on later passes and settles only once the page proves it,
         // even after its commands were retired by other means.
-        if self.active.len != 0 || phase == Phase::Unproven {
+        if (self.active.len != 0 || phase == Phase::Unproven) && phase != Phase::Witnessed {
             if !recovery_closed {
                 return Ok(());
             }
@@ -217,7 +220,33 @@ impl Queue {
                 self.exit.as_mut().ok_or(EIO)?.phase = Phase::Unproven;
                 return Ok(());
             }
-            if !self.active.iter().all(|active| {
+            if self.graph.m5 {
+                // A kill acknowledgement and the killed flag identify the control
+                // transaction, not the end of the firmware's reads, and M5 compute
+                // timestamp words stay zero even for executed work. The commands stay
+                // until the full-queue retirement witness covers the newest of them.
+                if self.active.len != 0 {
+                    for active in self.active.iter() {
+                        let Some(ticket) = active.ticket.as_ref() else {
+                            return Ok(());
+                        };
+                        if self.valid_ticket(active, ticket).is_err() {
+                            return Ok(());
+                        }
+                    }
+                    let newest = self.active.back().and_then(|active| active.ticket).ok_or(EIO)?;
+                    if !super::retirement::quarantined_retired(
+                        &newest,
+                        self.graph.cursors()?,
+                        self.witness_stamp()?,
+                        self.active.len as u32,
+                        self.submitted,
+                    )? {
+                        return Ok(());
+                    }
+                }
+                self.exit.as_mut().ok_or(EIO)?.phase = Phase::Witnessed;
+            } else if !self.active.iter().all(|active| {
                 active
                     .packet
                     .completion

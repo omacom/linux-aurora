@@ -249,10 +249,20 @@ impl Drop for RenderId {
     }
 }
 
+/// What one command needs of its compute queue's USC pool, in the family's
+/// terms: G17P pools count blocks, M5 pools have the command plan's geometry
+/// (`None`: the default M5 pool). Derived once per command
+/// (`Backend::compute_capacity`); every admission check and allocation takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComputeCapacity {
+    Blocks(usize),
+    M5(Option<super::fw::m5::pool::PoolGeometry>),
+}
+
 /// Profile-specific descriptor data for a fresh physical pool. The runtime
 /// installs this only before publication, or after an acknowledged release.
 pub(crate) enum PoolDescriptor {
-    Neo { slot: u16, page_list: u64 },
+    Neo { slot: u16, page_list: u64, blocks: usize },
     M5 { slot: u16, words: [u64; 8] },
 }
 
@@ -346,17 +356,23 @@ impl Pages {
             layout: PageLayout::Neo { blocks, runs },
         })
     }
-    /// Fresh compute backing at the admitted capacity, built off-lock.
-    pub(crate) fn compute_sized(alloc: &Allocator<'_>, blocks: usize) -> Result<Self> {
+    /// Fresh compute backing at the admitted capacity, built off-lock, in the
+    /// capacity's family format.
+    pub(crate) fn for_compute(alloc: &Allocator<'_>, capacity: ComputeCapacity) -> Result<Self> {
+        match capacity {
+            ComputeCapacity::Blocks(blocks) => Self::compute_sized(alloc, blocks),
+            ComputeCapacity::M5(geometry) => Self::compute_m5(alloc, geometry),
+        }
+    }
+    fn compute_sized(alloc: &Allocator<'_>, blocks: usize) -> Result<Self> {
         if blocks < COMPUTE_BLOCKS || blocks > PAGE_LIST_SIZE / (FREE_LIST_BLOCK_PAGES as usize * 8) {
             return Err(EINVAL);
         }
         Self::new(alloc, blocks, RunLayout::Compute)
     }
-    /// Fresh zeroed compute backing, built without the device mutex. M5 keeps
+    /// Fresh zeroed M5 compute backing, built without the device mutex. M5 keeps
     /// its directory, block list and initial 32 MiB in one retained allocation.
-    pub(crate) fn compute(alloc: &Allocator<'_>, m5: bool, required: Option<super::fw::m5::pool::PoolGeometry>) -> Result<Self> {
-        if !m5 { return Self::new(alloc, COMPUTE_BLOCKS, RunLayout::Compute); }
+    fn compute_m5(alloc: &Allocator<'_>, required: Option<super::fw::m5::pool::PoolGeometry>) -> Result<Self> {
         use super::fw::m5::pool;
         let geometry = match required { Some(geometry) => geometry,
             None => pool::PoolGeometry::g17s(8).map_err(|_| EINVAL)?, };
@@ -406,10 +422,13 @@ impl Pages {
             _ => false,
         }
     }
-    /// Block capacity of block-sized (non-M5) backing; M5 backing is sized by
-    /// its geometry and never matches.
-    fn fits_blocks(&self, required: usize) -> bool {
-        matches!(self.layout, PageLayout::Neo { blocks, .. } if blocks >= required)
+    /// Whether this backing holds `required`; backing of the other family never does.
+    pub(crate) fn fits_capacity(&self, required: ComputeCapacity) -> bool {
+        match (self.layout, required) {
+            (PageLayout::Neo { blocks, .. }, ComputeCapacity::Blocks(required)) => blocks >= required,
+            (PageLayout::M5(_), ComputeCapacity::M5(geometry)) => self.fits(geometry),
+            _ => false,
+        }
     }
     fn is_m5(&self) -> bool { matches!(self.layout, PageLayout::M5(_)) }
     pub(crate) fn page_list_va(&self) -> u64 { self.backing.gpu_va() }
@@ -424,12 +443,17 @@ impl Pages {
         Ok(super::fw::m5::pool::PoolLayout { geometry, directory: self.page_list_va(),
             freelist: self.run_list_va(), hardware_id: u32::from(slot) })
     }
-    fn descriptor(&self, slot: u16) -> Result<PoolDescriptor> {
-        if self.is_m5() {
-            let words = super::fw::m5::pool::initial_uma_descriptor(self.m5_layout(slot)?)
-                .map_err(|_| EINVAL)?;
-            Ok(PoolDescriptor::M5 { slot, words })
-        } else { Ok(PoolDescriptor::Neo { slot, page_list: self.page_list_va() }) }
+    /// The descriptor row of this backing installed at `slot`.
+    pub(crate) fn descriptor(&self, slot: u16) -> Result<PoolDescriptor> {
+        match self.layout {
+            PageLayout::M5(_) => {
+                let words = super::fw::m5::pool::initial_uma_descriptor(self.m5_layout(slot)?)
+                    .map_err(|_| EINVAL)?;
+                Ok(PoolDescriptor::M5 { slot, words })
+            }
+            PageLayout::Neo { blocks, .. } =>
+                Ok(PoolDescriptor::Neo { slot, page_list: self.page_list_va(), blocks }),
+        }
     }
     fn repopulate(&self) -> Result {
         let PageLayout::Neo { blocks, runs } = self.layout else { return Err(EINVAL); };
@@ -962,25 +986,19 @@ pub(crate) struct ComputePool {
     m5: bool,
 }
 impl ComputePool {
-    /// Block-sized (non-M5) capacity check for admitted growth.
-    pub(crate) fn fits_blocks(&self, blocks: usize) -> bool {
-        self.pages.as_ref().is_some_and(|pages| pages.fits_blocks(blocks))
+    /// Capacity check for admission and growth.
+    pub(crate) fn fits_capacity(&self, required: ComputeCapacity) -> bool {
+        self.pages.as_ref().is_some_and(|pages| pages.fits_capacity(required))
     }
 
-    pub(crate) fn new(alloc: &Allocator<'_>, qid: u8, m5: bool, required: Option<super::fw::m5::pool::PoolGeometry>) -> Result<Self> {
+    /// A pool at the admitted capacity, in the capacity's family format.
+    pub(crate) fn new(alloc: &Allocator<'_>, qid: u8, required: ComputeCapacity) -> Result<Self> {
         if qid > super::fw::kick::QID_MAX {
             return Err(EINVAL);
         }
-        let pages = Pages::compute(alloc, m5, required)?;
+        let pages = Pages::for_compute(alloc, required)?;
+        let m5 = pages.is_m5();
         Self::with_pages(alloc, qid, m5, pages)
-    }
-    /// A block-sized (non-M5) pool at the admitted capacity.
-    pub(crate) fn sized(alloc: &Allocator<'_>, qid: u8, blocks: usize) -> Result<Self> {
-        if qid > super::fw::kick::QID_MAX {
-            return Err(EINVAL);
-        }
-        let pages = Pages::compute_sized(alloc, blocks)?;
-        Self::with_pages(alloc, qid, false, pages)
     }
     fn with_pages(alloc: &Allocator<'_>, qid: u8, m5: bool, pages: Pages) -> Result<Self> {
         let id = u16::from(qid) + 1;
@@ -1040,10 +1058,6 @@ impl ComputePool {
     }
     pub(crate) fn id(&self) -> u16 {
         self.id
-    }
-    /// EAGAIN while the pool is vacant: the owner must re-arm it first.
-    pub(crate) fn page_list_va(&self) -> Result<u64> {
-        self.pages.as_ref().map(Pages::page_list_va).ok_or(EAGAIN)
     }
     pub(crate) fn control_va(&self) -> u64 {
         self.control.gpu_va()

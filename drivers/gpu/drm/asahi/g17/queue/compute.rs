@@ -4,6 +4,8 @@
 //! installed graph; the device retains it until both firmware processors have stopped.
 
 pub(crate) mod exit;
+mod activation;
+mod configuration;
 pub(crate) mod retirement;
 
 use crate::g17::{
@@ -87,7 +89,7 @@ pub(crate) struct Binding {
     preempt: mmu::KernelMapping,
     usage: mmu::KernelMapping,
     operand: mmu::KernelMapping,
-    _queue_context: mmu::KernelMapping,
+    _queue_context: Option<mmu::KernelMapping>,
     context: Arc<Context>,
 }
 
@@ -126,14 +128,16 @@ impl DescriptorRing {
 /// Firmware-shared storage of one compute QID, separate from its common kick ring.
 /// `ring` is `None` while the queue is vacant (idle, no owner, pool given back).
 struct Graph {
+    m5: bool,
     ring: Option<DescriptorRing>,
     preempt: KernelObject,
     usage: KernelObject,
     operand: KernelObject,
     support: KernelObject,
+    m5_timestamps: Option<Arc<KernelObject>>,
     graph: PooledObject,
-    context_low: KernelObject,
-    context_high: KernelObject,
+    context_low: Option<KernelObject>,
+    context_high: Option<KernelObject>,
     /// Announcements, which stay uncached for the firmware.
     records: KernelObject,
     /// Configuration, predecessor and completion-wait records at the same
@@ -156,6 +160,7 @@ impl Graph {
         pointers: PointerLayout,
         operand_state: &'static OperandState,
         program: ComputeProgram,
+        m5: bool,
     ) -> Result<Self> {
         let page = mmu::UAT_PGSZ as u64;
         let prot = mmu::PROT_GPU_FW_SHARED_RW;
@@ -163,13 +168,16 @@ impl Graph {
         let ring = DescriptorRing::new(alloc, objects)?;
         let preempt = alloc.kernel(0x4000, page, prot, cpu)?;
         let usage = alloc.kernel(mmu::UAT_PGSZ, page, prot, cpu)?;
-        let operand = alloc.lower(operand_state.size, page, prot, cpu)?;
-        let mut support = alloc.kernel(0xc000, page, prot, cpu)?;
-        let support_va = support.gpu_va();
-        support.write(0, support_va + page)?;
-        support.write(0x100, support_va + page + 4)?;
-        support.write(0x110, 0x50u32)?;
-        support.write(mmu::UAT_PGSZ + 4, 1u32)?;
+        let operand = alloc.lower(if m5 { crate::g17::fw::m5::compute::OPERAND_BYTES }
+            else { operand_state.size }, page, prot, cpu)?;
+        let mut support = alloc.kernel(if m5 { mmu::UAT_PGSZ } else { 0xc000 }, page, prot, cpu)?;
+        if !m5 {
+            let support_va = support.gpu_va();
+            support.write(0, support_va + page)?;
+            support.write(0x100, support_va + page + 4)?;
+            support.write(0x110, 0x50u32)?;
+            support.write(mmu::UAT_PGSZ + 4, 1u32)?;
+        }
         let mut graph = objects.allocate(
             alloc,
             Family::QueueState,
@@ -180,14 +188,6 @@ impl Graph {
         )?;
         let graph_va = graph.gpu_va();
         graph.initialize::<GraphLayout>(0, |view| {
-            view.queue = QueueRecord::new(&QueueRecordArgs {
-                pointers_va: graph_va + CURSORS as u64,
-                items_va: graph_va + ITEMS as u64,
-                job_list_va: context.work_head_va(),
-                scheduler_va: context.scheduler_va(),
-                owner_pid: context.owner_pid(),
-                policy: context.policy(),
-            });
             view.pointers = PointerBlock::new(&pointers)?;
             view.jobs = JobListHead::new(graph_va + 0x200);
             Ok(())
@@ -196,9 +196,29 @@ impl Graph {
             *view = PointerBlock::new(&pointers)?;
             Ok(())
         })?;
-        let context_low = alloc.lower(CONTEXT_SIZE, page, prot, cpu)?;
-        let context_high = alloc.kernel(CONTEXT_SIZE, page, prot, cpu)?;
+        let record = QueueRecordArgs {
+            pointers_va: graph_va + CURSORS as u64,
+            items_va: graph_va + ITEMS as u64,
+            job_list_va: context.work_head_va(),
+            scheduler_va: context.scheduler_va(),
+            owner_pid: context.owner_pid(),
+            policy: context.policy(),
+        };
+        // One queue record, the firmware's own: the M5 record is shorter than the G17P one the
+        // layout's slot holds, and the zeroed layout leaves the rest of the slot zero.
+        if m5 {
+            graph.write(0, crate::g17::fw::m5::queue::QueueRecord::new(&record)?)?;
+        } else {
+            graph.write(0, QueueRecord::new(&record))?;
+        }
+        let (context_low, context_high) = if m5 { (None, None) } else {
+            (Some(alloc.lower(CONTEXT_SIZE, page, prot, cpu)?),
+             Some(alloc.kernel(CONTEXT_SIZE, page, prot, cpu)?))
+        };
         let records = alloc.kernel(RECORD_SLOTS * RECORD_STRIDE, page, prot, cpu)?;
+        let m5_timestamps = if m5 {
+            Some(Arc::new(alloc.kernel(RECORD_SLOTS * 16, page, prot, cpu)?, GFP_KERNEL)?)
+        } else { None };
         let cached_records = objects.allocate(
             alloc,
             Family::QueueConfig,
@@ -208,11 +228,13 @@ impl Graph {
             cpu,
         )?;
         Ok(Self {
+            m5,
             ring: Some(ring),
             preempt,
             usage,
             operand,
             support,
+            m5_timestamps,
             graph,
             context_low,
             context_high,
@@ -237,9 +259,9 @@ impl Graph {
             return Err(EFAULT);
         }
         let vm = context.vm();
-        vm.install_job_context_aliases()?;
+        if !self.m5 { vm.install_job_context_aliases()?; }
         let descriptors = self.descriptor_alias(vm)?;
-        let prot = mmu::PROT_GPU_FW_SHARED_RW;
+        let prot = if self.m5 { mmu::PROT_GPU_SHARED_RW } else { mmu::PROT_GPU_FW_SHARED_RW };
         let page = mmu::UAT_PGSZ as u64;
         let preempt = self
             .preempt
@@ -248,9 +270,8 @@ impl Graph {
         let operand = self
             .operand
             .alias_in(vm, dynamic::CLIENT_LOWER, page, prot)?;
-        let queue_context = self
-            .context_low
-            .alias_in(vm, dynamic::CLIENT_LOWER, page, prot)?;
+        let queue_context = self.context_low.as_ref()
+            .map(|context| context.alias_in(vm, dynamic::CLIENT_LOWER, page, prot)).transpose()?;
         Ok(Binding {
             _kick_alias: kick_alias,
             pool_alias: Some(pool_alias),
@@ -265,6 +286,15 @@ impl Graph {
 
     /// Caller has excluded publication and proved the retained graph idle.
     fn set_owner(&mut self, context: &Context) -> Result {
+        if self.m5 {
+            let pointer = self.graph.pointer(0,
+                core::mem::size_of::<crate::g17::fw::m5::queue::QueueRecord>())?
+                .cast::<crate::g17::fw::m5::queue::QueueRecord>();
+            // SAFETY: The checked packed record stays mapped. The device mutex
+            // and idle witness exclude access by another owner during this update.
+            return unsafe { (*pointer).set_compute_owner(context.work_head_va(),
+                context.scheduler_va(), context.owner_pid(), context.policy()) };
+        }
         let pointer = self
             .graph
             .pointer(0, core::mem::size_of::<QueueRecord>())?
@@ -373,7 +403,8 @@ impl Graph {
 }
 
 use crate::g17::{
-    completion::Deferred, context::WorkStateLease, freelist::ComputePool, job::Packet, kick, qos,
+    completion::Deferred, context::WorkStateLease,
+    freelist::{ComputeCapacity, ComputePool, PoolDescriptor}, job::Packet, kick, qos,
     recovery, status::VmStatus,
 };
 use retirement::{Batch, Observation, Recordless, Ticket, IN_FLIGHT};
@@ -496,14 +527,14 @@ pub(crate) struct PoolBacking {
 }
 
 impl PoolBacking {
-    pub(crate) fn new(alloc: &Allocator<'_>, id: kick::Id, blocks: usize) -> Result<Self> {
-        let pool = ComputePool::sized(alloc, id.qid(), blocks)?;
+    pub(crate) fn new(alloc: &Allocator<'_>, id: kick::Id, required: ComputeCapacity) -> Result<Self> {
+        let pool = ComputePool::new(alloc, id.qid(), required)?;
         Ok(Self { pool, id })
     }
 
     /// Fresh page-pool row data, installed once while the QID is still unpublished.
-    pub(crate) fn pool_descriptor(&self) -> Result<(u16, u64)> {
-        Ok((self.pool.id(), self.pool.page_list_va()?))
+    pub(crate) fn pool_descriptor(&self) -> Result<PoolDescriptor> {
+        self.pool.descriptor()
     }
 }
 
@@ -549,7 +580,8 @@ pub(crate) struct Queue {
     pool_phase: PoolPhase,
     release_sent_ns: Option<u64>,
     growing: bool,
-    growth_blocks: usize,
+    /// What the growth in progress must provide.
+    growth: Option<ComputeCapacity>,
     /// A killed queue was recycled: its pool/ring must be vacated and re-armed
     /// fresh before any owner binds it (set by `recycle_killed`, cleared by `rearm`).
     needs_fresh_backing: bool,
@@ -575,6 +607,8 @@ pub(crate) struct Queue {
     /// and whether that wait was reported.
     kill_wait: Option<(u64, bool)>,
     installed: bool,
+    configuration: Option<configuration::Configuration>,
+    m5_install: Option<u32>,
     /// Bit `p` set once a work slot of priority class `p` named this queue.
     outer_started: u8,
     published_config: Option<ConfigIdentity>,
@@ -618,9 +652,10 @@ impl Queue {
         pointers: PointerLayout,
         operand_state: &'static OperandState,
         program: ComputeProgram,
+        m5: bool,
     ) -> Result<Self> {
         let Backing { mut pool, mut kick } = backing;
-        let mut graph = Graph::new(alloc, objects, &context, pointers, operand_state, program)?;
+        let mut graph = Graph::new(alloc, objects, &context, pointers, operand_state, program, m5)?;
         let kick_alias = kick.map_client(context.vm())?;
         let pool_alias = pool.map_client(context.vm())?;
         let binding = graph.bind(context.clone(), kick_alias, pool_alias)?;
@@ -633,7 +668,7 @@ impl Queue {
             pool_phase: PoolPhase::Populated,
             release_sent_ns: None,
             growing: false,
-            growth_blocks: 0,
+            growth: None,
             needs_fresh_backing: false,
             released_at: 0,
             free_list_generation: 0,
@@ -651,6 +686,8 @@ impl Queue {
             exit: None,
             kill_wait: None,
             installed: false,
+            configuration: None,
+            m5_install: None,
             outer_started: 0,
             published_config: None,
             config_cache: None,
@@ -740,10 +777,16 @@ impl Queue {
         !self
             .context()
             .is_some_and(|bound| Arc::ptr_eq(bound, context))
-            || (self.active.len == 0 && self.replays.len == 0)
+            || (self.active.len == 0 && self.replays.len == 0 && self.configuration.is_none())
     }
     pub(crate) fn in_flight(&self) -> bool {
-        self.active.len != 0 && !self.quarantined
+        (self.active.len != 0 || self.configuration.is_some()) && !self.quarantined
+    }
+    /// Cold M5 installation publishes one configuration before the first kick.
+    /// A prepared claim prevents reassignment while these credits are owned.
+    #[allow(dead_code)] // Read by M5 lazy admission, a follow-up.
+    pub(crate) fn outer_slots(&self) -> u32 {
+        if self.graph.m5 && self.m5_install.is_none() { 2 } else { 1 }
     }
     /// The oldest command is a published long job (ray traversal or AS build) whose
     /// completion record the driver has not seen yet.
@@ -826,7 +869,7 @@ impl Queue {
     /// A completion hint can require a second visibility/recordless pass even
     /// when firmware has no more events to send. Do not poll idle or failed queues.
     pub(crate) fn retirement_polling(&self) -> bool {
-        !self.quarantined && self.retire_pending
+        self.configuration.is_some() || (!self.quarantined && self.retire_pending)
     }
 
     /// A release has no completion event: keep observing the control consumer
@@ -981,6 +1024,7 @@ impl Queue {
         mut complete_qos: impl FnMut(qos::Owner) -> Result,
         defer: &mut impl FnMut(Deferred) -> Result,
     ) -> Result {
+        if recovery_state == 0 { self.retire_configuration(epoch)?; }
         if self.quarantined || !self.selected(masks) {
             return Ok(());
         }
@@ -1028,7 +1072,7 @@ impl Queue {
                     recordless,
                     self.last_end,
                     next_end,
-                    record_aged,
+                    record_aged && !self.graph.m5,
                 )?;
                 if timestamps.is_some() && !retirement::stamp_covers(stamp, ticket.kick) {
                     retirement::note_stampless(self.qid(), ticket.kick);
@@ -1062,10 +1106,18 @@ impl Queue {
                         );
                     }
                     self.retire_pending = true;
-                    defer(Deferred::Retired(
-                        front.packet.completion.clone(),
-                        Ok([timestamps[0], timestamps[1], 0, 0]),
-                    ))?;
+                    if self.graph.m5 {
+                        defer(Deferred::RetiredCompute(
+                            front.packet.completion.clone(),
+                            [timestamps[0], timestamps[1], 0, 0],
+                            front.observed.map(|record| record.timestamps),
+                        ))?;
+                    } else {
+                        defer(Deferred::Retired(
+                            front.packet.completion.clone(),
+                            Ok([timestamps[0], timestamps[1], 0, 0]),
+                        ))?;
+                    }
                     self.retire_pending = false;
                     self.submitted = submitted;
                     let active = self.active.pop().ok_or(EIO)?;
@@ -1139,21 +1191,42 @@ impl Queue {
             )? {
                 return Ok(());
             }
+            let unexecuted = if self.graph.m5 {
+                // M5 command words stay zero even for executed commands. The
+                // front needs its exact zero-duration ring record; a later
+                // command, chained to its predecessor by the kick parent, must
+                // not show a record with a real duration. As on G17P, work a
+                // render consumes through a firmware dependency is never spared.
+                self.active.iter().enumerate().all(|(index, active)| {
+                    !active.packet.completion.has_firmware_consumer()
+                        && !active.packet.completion.signalled()
+                        && match active.observed {
+                            // Only reached for spared work quarantined after a
+                            // recovery: every retained command crossed it.
+                            Some(record) => {
+                                record.timestamps[0] != 0 && retirement::unexecuted(record, true)
+                            }
+                            None => index != 0,
+                        }
+                })
+            } else {
+                !self
+                    .active
+                    .iter()
+                    .any(|active| active.packet.completion.has_firmware_consumer())
+                    && self.active.iter().all(|active| {
+                        active
+                            .packet
+                            .completion
+                            .replay_witness_words()
+                            .is_some_and(|words| words[0] == words[1])
+                    })
+            };
             let candidate = self.spared_deferred
                 && self.spared_quarantine
                 && !self.released
                 && self.owner == Some(newest.owner)
-                && !self
-                    .active
-                    .iter()
-                    .any(|active| active.packet.completion.has_firmware_consumer())
-                && self.active.iter().all(|active| {
-                    active
-                        .packet
-                        .completion
-                        .replay_witness_words()
-                        .is_some_and(|words| words[0] == words[1])
-                });
+                && unexecuted;
             if candidate && !replay {
                 return Ok(());
             }
@@ -1262,6 +1335,7 @@ impl Queue {
 
     /// Caller already stopped both processors. No firmware owner can access retained mappings.
     pub(crate) fn stopped(&mut self, defer: &mut impl FnMut(Deferred) -> Result) -> Result {
+        if let Some(configuration) = self.configuration.take() { configuration.release(); }
         while let Some(packet) = self.replays.front() {
             defer(Deferred::Retired(packet.completion.clone(), Err(EIO)))?;
             drop(self.replays.pop());
@@ -1539,6 +1613,7 @@ impl Queue {
             return false;
         }
         self.installed
+            && self.configuration.is_none()
             // A pool release in flight must be witnessed before any successor.
             && !matches!(self.pool_phase, PoolPhase::ReleaseSent(_))
             // A recycled killed queue is offered only once its backing is vacant (re-arm path).
@@ -1625,7 +1700,7 @@ impl Queue {
             return Ok(true);
         }
         self.released = true;
-        if self.active.len == 0 && !self.quarantined {
+        if self.active.len == 0 && !self.quarantined && self.configuration.is_none() {
             if let Some(previous) = self.previous.as_ref().filter(|p| p.publication.is_none()) {
                 if let Err(error) = self.graph.set_owner(&previous.context) {
                     self.quarantined = true;
@@ -1700,7 +1775,7 @@ impl Queue {
     /// ring is reset to empty at the firmware's consumer cursor; the USC pool and
     /// descriptor ring are vacated and re-armed fresh before the next owner binds.
     pub(crate) fn recycle_killed(&mut self) -> Result<bool> {
-        if !self.installed
+        if self.configuration.is_some() || !self.installed
             || !self.exit.as_ref().is_some_and(|exit| exit.released())
             || self.active.len != 0
             || self.replays.len != 0
@@ -1824,7 +1899,7 @@ impl Queue {
         &mut self,
         pages: crate::g17::freelist::Pages,
         ring: DescriptorRing,
-    ) -> Result<(u16, u64)> {
+    ) -> Result<PoolDescriptor> {
         if !self.can_rearm() {
             return Err(EAGAIN);
         }
@@ -1833,10 +1908,10 @@ impl Queue {
         self.pool_phase = PoolPhase::Populated;
         self.release_sent_ns = None;
         self.needs_fresh_backing = false;
-        Ok((self.pool.id(), self.pool.page_list_va()?))
+        self.pool.descriptor()
     }
-    pub(crate) fn pool_fits(&self, required: usize) -> bool {
-        !self.growing && self.pool_phase == PoolPhase::Populated && self.pool.fits_blocks(required)
+    pub(crate) fn pool_fits(&self, required: ComputeCapacity) -> bool {
+        !self.growing && self.pool_phase == PoolPhase::Populated && self.pool.fits_capacity(required)
     }
 
     /// Only a capacity increase waits for this queue's previously published work.
@@ -1844,7 +1919,7 @@ impl Queue {
     pub(crate) fn begin_growth(
         &mut self,
         init: &crate::g17::initdata::InitData,
-        blocks: usize,
+        required: ComputeCapacity,
     ) -> Result<bool> {
         if self.growing {
             return Err(EAGAIN);
@@ -1871,7 +1946,7 @@ impl Queue {
             self.release_sent_ns = None;
         }
         self.growing = true;
-        self.growth_blocks = blocks;
+        self.growth = Some(required);
         Ok(self.installed)
     }
 
@@ -1880,9 +1955,10 @@ impl Queue {
         init: &crate::g17::initdata::InitData,
         pages: &mut Option<crate::g17::freelist::Pages>,
         alias: &mut Option<mmu::KernelMapping>,
-        blocks: usize,
     ) -> Result<Vacated> {
-        if !self.growing || blocks < self.growth_blocks {
+        // The fresh backing must provide what the growth was begun for.
+        let target = self.growth.filter(|_| self.growing).ok_or(EAGAIN)?;
+        if !pages.as_ref().ok_or(EINVAL)?.fits_capacity(target) {
             return Err(EAGAIN);
         }
         if let PoolPhase::ReleaseSent(cursor) = self.pool_phase {
@@ -1899,13 +1975,13 @@ impl Queue {
         let binding = self.binding.as_mut().ok_or(EFAULT)?;
         // No ownership moves before every fallible descriptor/header operation.
         // The old release is consumed; no queue can use this row until commit.
-        init.initialize_compute_pool_blocks(self.pool.id(), fresh.page_list_va(), blocks)?;
+        init.install_compute_pool(fresh.descriptor(self.pool.id())?)?;
         self.pool.replace_pages(pages)?;
         let old_alias = core::mem::replace(&mut binding.pool_alias, alias.take());
         self.pool_phase = PoolPhase::Populated;
         self.release_sent_ns = None;
         self.growing = false;
-        self.growth_blocks = 0;
+        self.growth = None;
         Ok(Vacated {
             _alias: old_alias,
             _pages: pages.take(),
@@ -1929,7 +2005,7 @@ impl Queue {
             return Ok(None);
         }
         self.growing = false;
-        self.growth_blocks = 0;
+        self.growth = None;
         self.release_owner().map(Some)
     }
 
@@ -2157,6 +2233,7 @@ pub(crate) trait Host {
     fn publish_outer(&mut self, priority: u8, slot: &crate::g17::fw::channels::WorkSlot) -> Result;
     fn notify(&mut self, message: u64) -> Result;
     fn note_submission(&mut self) -> Result;
+    fn submit_m5(&mut self, submission: &crate::g17::fw::m5::queue::HardwareSubmission) -> Result;
 }
 
 impl Queue {
@@ -2191,6 +2268,11 @@ impl Queue {
         };
         let (epoch, addresses) = self.publication_preflight(&packet, host)?;
         let crate::g17::command::Validated::Compute {
+            matrix_ops: requested_matrix_ops,
+            cdm_auxiliary_allocation,
+            plan,
+            m5_intersection,
+            m5_scratch,
             intersection,
             scratch,
             usc_base,
@@ -2203,20 +2285,26 @@ impl Queue {
         else {
             return Err(EINVAL);
         };
+        let m5_scratch = *m5_scratch;
+        if !self.graph.m5 && (*requested_matrix_ops || *cdm_auxiliary_allocation != 0) { return Err(EINVAL); }
+        if self.graph.m5 {
+            if *sampler_count != 0 || !native.is_empty() { return Err(ENOTSUPP); }
+            if plan.is_some_and(|plan| !self.pool.fits(Some(plan.geometry))) { return Err(EINVAL); }
+            self.install_m5(&packet, host)?;
+        }
         let work = packet.completion.work_state()?;
         let work_word = work.word();
         if work_word == u32::MAX {
             return Err(EINVAL);
         }
         let work_node = work.node_va()?;
-        let timestamp_va = packet.completion.compute_timestamp_va()?;
         let kick_timestamp = self.kick.timestamp();
         let kick_parent = self.kick.parent();
         let qid = self.qid();
         let ordinal = self.ordinal.checked_add(1).ok_or(EOVERFLOW)?;
         let (descriptor_high, descriptor_low) =
             self.graph.descriptor_vas(kick_timestamp.slot() as u8)?;
-        let first = !self.installed && self.ordinal == 0;
+        let first = self.ordinal == 0 && (self.graph.m5 || !self.installed);
         // The first prototype only waits on an installed consumer channel.
         // A retry without a published source falls back to completion on CPU.
         if first && !native.is_empty() {
@@ -2229,7 +2317,22 @@ impl Queue {
             || dependencies
                 .iter()
                 .any(|dependency| dependency.qid() != qid);
-        item_capacity(self.graph.cursors()?, entry_signal)?;
+        if self.graph.m5 {
+            // The configuration and its notification are the only items an M5 kick appends.
+            let cursors = self.graph.cursors()?;
+            if cursors.count != ITEM_RING_ENTRIES {
+                return Err(EIO);
+            }
+            if cursors.producer >= cursors.count || cursors.consumer >= cursors.count {
+                return Err(ERANGE);
+            }
+            let free = (cursors.consumer + cursors.count - cursors.producer - 1) % cursors.count;
+            if free < 2 {
+                return Err(ENOSPC);
+            }
+        } else {
+            item_capacity(self.graph.cursors()?, entry_signal)?;
+        }
         if !native.is_empty() {
             let cursors = self.graph.cursors()?;
             let free = (cursors.consumer + cursors.count - cursors.producer - 1) % cursors.count;
@@ -2237,10 +2340,15 @@ impl Queue {
                 return Err(EAGAIN);
             }
         }
-        let record_slot = (!first).then_some(self.ordinal as usize % RECORD_SLOTS);
+        let record_slot = (self.graph.m5 || !first).then_some(self.ordinal as usize % RECORD_SLOTS);
         if let Some(slot) = record_slot {
             self.graph.ensure_record_slot(slot)?;
         }
+        let timestamp_va = if self.graph.m5 {
+            packet.completion.bind_m5_compute_timestamps(
+                self.graph.m5_timestamps.as_ref().ok_or(EINVAL)?,
+                record_slot.ok_or(EINVAL)? * 16)?
+        } else { packet.completion.compute_timestamp_va()? };
         let args = ComputeArgs {
             program: self.graph.program,
             intersection: *intersection,
@@ -2280,20 +2388,48 @@ impl Queue {
         };
         self.free_list_generation = u64::from(packet.context.scheduler_generation());
         let policy = packet.context.policy();
-        let ring = 1u8 << policy.priority();
-        let config = self.queue_config(&identity, first, args.context_id, policy, &packet)?;
+        let activation = activation::Publication::new(
+            self.outer_started, policy.priority(), self.graph.m5);
+        let config = self.queue_config(&identity, first, activation.refresh,
+            args.context_id, policy, &packet)?;
         let cached = self
             .config_cache
             .and_then(|(config, at)| (at == epoch).then_some(config));
-        let send_config = first || super::render::publication::required(cached, config);
+        let send_config = self.graph.m5 || first || super::render::publication::required(cached, config);
         let announce =
             KickAnnounce::new(qid, DataMaster::Compute, kick_timestamp, policy.priority())?;
         let predecessor = KickPredecessor::new(qid, kick_parent)?;
+        let matrix_ops = self.graph.m5 && *requested_matrix_ops;
+        let m5_args = crate::g17::fw::m5::compute::DescriptorArgs {
+            registers: crate::g17::fw::m5::compute::RegisterArgs {
+                matrix_ops,
+                scratch: m5_scratch,
+                intersection: *m5_intersection,
+                auxiliary_allocation: *cdm_auxiliary_allocation,
+                preempt_va: addresses.preempt, cdm_va: *cdm_va, operand_va: addresses.operand,
+                usage_va: addresses.usage, free_list_slot: u32::from(self.pool.id()),
+                context_id: args.context_id, work_state: work_word,
+                object_ids: 0x0000_0001_0000_0001,
+                resource_policy: plan.map_or(0xf5_0040_0020, |p| u64::from(p.pressure) << 32 | 0x0040_0020),
+                preempt_state_offset: 0x1b80, operand_region_bytes: 0x1e000,
+                operand_aux_offset: 0x3d800, resource_control: plan.map_or(0x54b, |p| p.resource_flags),
+                dispatch_control: 0x14c08a60, auxiliary_control: 1,
+            },
+            descriptor_va: descriptor_low, submit_sequence: 0, work_state_va: work_node,
+            cdm_end_va: *cdm_end_va, stamp_va: [args.stamp_va, args.aux_stamp_va],
+            stamp_value: crate::g17::fw::stamp_value(kick_timestamp.get() as u32), qid: u32::from(qid),
+            kick_timestamp: kick_timestamp.get(), completion_ordinal: 0,
+            status_va: args.status_va, timestamp_va: [timestamp_va, timestamp_va + 8],
+            shared_control_va: self.pool.control_va(), event_metadata: [0;16],
+            usage_fw_va: self.graph.usage.gpu_va(), completion_identity: 1,
+        };
+        let m5_dependency_types = [2u8; crate::g17::fw::kick::QID_MAX as usize + 1];
         let kick_args = KickArgs {
             qid,
             timestamp: kick_timestamp,
             parent: kick_parent,
             barriers: dependencies,
+            dependency_types: self.graph.m5.then_some(&m5_dependency_types[..dependencies.len() + 1]),
             descriptor_va: descriptor_high,
             queue_va: self.graph.graph.gpu_va(),
             qos: KickQos {
@@ -2301,9 +2437,14 @@ impl Queue {
                 class: COMPUTE_QOS_CLASS,
             },
             mcache: None,
-            event_mask: COMPUTE_KICK_EVENT_MASK,
-            register_arrays: ComputeDescriptor::register_bindings(descriptor_low, *scratch, self.graph.program)?,
-            scs_enabled: scratch.enabled(),
+            event_mask: if self.graph.m5 { [0, 0, 8, 0] } else { COMPUTE_KICK_EVENT_MASK },
+            register_arrays: if self.graph.m5 {
+                crate::g17::fw::m5::compute::bindings(descriptor_low, m5_scratch, matrix_ops)?
+            } else {
+                ComputeDescriptor::register_bindings(descriptor_low, *scratch, self.graph.program)?
+            },
+            scs_enabled: if self.graph.m5 { m5_scratch.enabled() } else { scratch.enabled() },
+            compute_matrix: matrix_ops,
             priority: policy.priority(),
         };
         let published = host.next_compute_publication()?;
@@ -2326,17 +2467,16 @@ impl Queue {
         let result = (|| -> Result {
             work.add_submitted_kicks(1)?;
             accounted = true;
-            self.graph
-                .ring
-                .as_mut()
-                .ok_or(EAGAIN)?
-                .object
-                .initialize::<ComputeDescriptor>(
-                    kick_timestamp.slot() % DESCRIPTORS * COMPUTE_DESCRIPTOR_SIZE,
-                    |descriptor| descriptor.write_zeroed(&args),
-                )?;
-            if first {
-                self.graph.context_high.write(
+            let object = &mut self.graph.ring.as_mut().ok_or(EAGAIN)?.object;
+            let offset = kick_timestamp.slot() % DESCRIPTORS * COMPUTE_DESCRIPTOR_SIZE;
+            if self.graph.m5 {
+                object.initialize::<crate::g17::fw::m5::compute::Descriptor>(offset,
+                    |descriptor| descriptor.write_zeroed(&m5_args))?;
+            } else {
+                object.initialize::<ComputeDescriptor>(offset, |descriptor| descriptor.write_zeroed(&args))?;
+            }
+            if !self.graph.m5 && first {
+                self.graph.context_high.as_mut().ok_or(EINVAL)?.write(
                     0x200,
                     crate::g17::fw::compute::QueueContextItem::new(
                         descriptor_high,
@@ -2344,12 +2484,13 @@ impl Queue {
                         qid,
                     ),
                 )?;
-            } else {
+            } else if !self.graph.m5 {
                 // The retained context item remains at index one; only its descriptor changes.
-                self.graph.context_high.write(0x210, descriptor_high)?;
+                self.graph.context_high.as_mut().ok_or(EINVAL)?.write(0x210, descriptor_high)?;
                 let cursors = self.graph.cursors()?;
                 let _ = self.graph.recycle(cursors);
             }
+            if self.graph.m5 { let cursors = self.graph.cursors()?; self.graph.recycle(cursors)?; }
             let config_va = if send_config {
                 Some(self.graph.record(record_slot, CONFIG, 0xc0, config)?)
             } else {
@@ -2373,7 +2514,26 @@ impl Queue {
             let kick_ring_va = self.kick.low_va();
             let prepared_kick = self.kick.prepare_entry(&kick_args)?;
             let mut producer;
-            if first {
+            if self.graph.m5 {
+                let target = self.pool.reserve_submission()?;
+                let qos = host.qos_publish(qos::Owner { qid, qos: identity.qos, data_master: 2 },
+                    identity.scheduler, policy).or_else(|error| {
+                        self.pool.cancel_unpublished(target)?; Err(error)
+                    })?;
+                self.active.back_mut().ok_or(EIO)?.qos_pending = true;
+                producer = self.graph.append(cursors.producer, config_va.ok_or(EINVAL)?,
+                    || packet.mark_published())
+                    .or_else(|error| {
+                        self.pool.cancel_unpublished(target)?;
+                        host.qos_cancel(qos)?;
+                        self.active.back_mut().ok_or(EIO)?.qos_pending = false;
+                        Err(error)
+                    })?;
+                visible = true;
+                self.unpublished_binding = false;
+                // This Active and its Packet pins now own all visible records.
+                if let Some(configuration) = self.configuration.take() { configuration.release(); }
+            } else if first {
                 host.register_queue(&crate::g17::fw::kick::KsmQueue::new(
                     qid,
                     kick_ring_va,
@@ -2458,10 +2618,13 @@ impl Queue {
             }
             prepared_kick.commit();
             self.submitted = self.submitted.checked_add(1).ok_or(EOVERFLOW)?;
-            let announce_va = self.graph.record(record_slot, ANNOUNCE, 0x40, announce)?;
+            let announce_va = if self.graph.m5 {
+                self.graph.record(record_slot, ANNOUNCE, 0x40,
+                    crate::g17::fw::m5::queue::notification(qid, kick_timestamp)?)?
+            } else { self.graph.record(record_slot, ANNOUNCE, 0x40, announce)? };
             producer = self.graph.append(producer, announce_va, || {})?;
             fence(Ordering::SeqCst);
-            if entry_signal {
+            if entry_signal && !self.graph.m5 {
                 let predecessor_va =
                     self.graph
                         .record(record_slot, PREDECESSOR, 0x400, predecessor)?;
@@ -2478,10 +2641,11 @@ impl Queue {
                     self.graph.graph.gpu_va(),
                     qid,
                     producer.try_into()?,
-                    self.outer_started & ring == 0,
+                    activation.first,
                 )?,
             )?;
-            self.outer_started |= ring;
+            let notify_activation = activation.first;
+            self.outer_started = activation.next_started;
             self.installed = true;
             self.published_config = Some(identity);
             if send_config {
@@ -2517,6 +2681,13 @@ impl Queue {
             // ring itself and delayed dispatch.
             fence(Ordering::SeqCst);
             host.notify((0x83 << 48) | 0x02 | u64::from(policy.priority()) << 2)?;
+            if self.graph.m5 {
+                // The firmware work notification must precede a deferred host
+                // doorbell: an idle-policy hold alone does not wake gated cores.
+                host.submit_m5(&crate::g17::fw::m5::queue::HardwareSubmission::compute(
+                    qid, self.kick.low_va(), policy.priority(),
+                    first || notify_activation)?)?;
+            }
             crate::g17::trace::publish(crate::g17::trace::COMPUTE, qid, ordinal, &packet);
             host.note_submission()
         })();
@@ -2536,6 +2707,58 @@ impl Queue {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// The firmware consumes an empty channel installation before host-port
+    /// configuration. EAGAIN leaves the packet unpublished and is retried by
+    /// the common runtime with the device mutex released.
+    fn retire_configuration(&mut self, epoch: u64) -> Result {
+        let Some(configuration) = self.configuration.as_ref() else { return Ok(()); };
+        if !configuration.consumed(self.graph.cursors()?, epoch) { return Ok(()); }
+        self.configuration.take().ok_or(EIO)?.release();
+        if self.ordinal == 0 && self.active.len == 0 && self.replays.len == 0 {
+            self.retirement_ready = true;
+            if self.released { self.owner = None; }
+        }
+        Ok(())
+    }
+
+    fn install_m5(&mut self, packet: &Arc<Packet>, host: &mut impl Host) -> Result {
+        let (epoch, state) = host.epoch()?;
+        if state == 0 { self.retire_configuration(epoch)?; }
+        if let Some(end) = self.m5_install {
+            return if self.graph.cursors()?.consumer == end || self.ordinal != 0 { Ok(()) }
+                else { Err(EAGAIN) };
+        }
+        let context = &packet.context;
+        let policy = context.policy();
+        let config = QueueConfig::new(&QueueConfigArgs {
+            target: QueueConfigTarget::Compute, kick_ring_va: self.kick.low_va(),
+            kick_ring_fw_va: self.kick.firmware_va(), qid: self.qid(), install: true,
+            completion_seed: None, context_id: context.id().try_into()?,
+            free_list: FreeListBinding { va: 0, generation: u64::MAX, slot: u32::MAX },
+            scheduler_va: context.scheduler_va(), policy, qos_slot: context.qos_id(),
+            qos_update: true, owner_pid: context.owner_pid(), context_update: false,
+        })?;
+        if self.configuration.is_some() { return Err(EBUSY); }
+        self.configuration = Some(configuration::Configuration::new(context, 1, epoch)?);
+        let result = (|| {
+            let va = self.graph.record(None, CONFIG, 0xc0, config)?;
+            let configuration = self.configuration.as_mut().ok_or(EIO)?;
+            let producer = self.graph.append(0, va, || configuration.mark_visible())?;
+            self.m5_install = Some(producer);
+            self.installed = true;
+            host.publish_qid(self.kick.id())?;
+            host.publish_outer(policy.priority(), &crate::g17::fw::channels::WorkSlot::new(DataMaster::Compute,
+                self.graph.graph.gpu_va(), self.qid(), producer.try_into()?, true)?)?;
+            self.outer_started = 1 << policy.priority();
+            host.notify((0x83 << 48) | 0x02 | u64::from(policy.priority()) << 2)?;
+            Err(EAGAIN)
+        })();
+        if result.is_err() && self.configuration.as_ref().is_some_and(|owner| !owner.visible()) {
+            self.configuration.take().ok_or(EIO)?.release();
+        }
+        result
     }
 
     /// Everything that must hold before a publication changes any state: a healthy device
@@ -2590,6 +2813,7 @@ impl Queue {
         &self,
         identity: &ConfigIdentity,
         first: bool,
+        priority_refresh: bool,
         context_id: u16,
         policy: crate::g17::fw::queue::Policy,
         packet: &Arc<Packet>,
@@ -2599,8 +2823,12 @@ impl Queue {
             kick_ring_va: self.kick.low_va(),
             kick_ring_fw_va: self.kick.firmware_va(),
             qid: self.qid(),
-            install: first,
-            completion_seed: None,
+            // An existing M5 queue needs the firmware install/update path to
+            // replace its private scheduling state when its class changes.
+            // The ordinary binding fields below are still processed afterward;
+            // no completion seed is supplied for a retained queue.
+            install: (first && !self.graph.m5) || priority_refresh,
+            completion_seed: (first && self.graph.m5).then_some(0),
             context_id,
             free_list: FreeListBinding {
                 va: self.pool.control_va(),
