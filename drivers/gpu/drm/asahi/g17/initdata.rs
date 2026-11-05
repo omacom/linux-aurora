@@ -959,9 +959,8 @@ impl InitData {
             qos: self
                 .qos()?
                 .pointer(0, core::mem::size_of::<super::fw::qos::Qos>())?,
-            recovery: self
-                .object(self.cluster)?
-                .word(abi::private::STATUS_B + abi::PrimaryStatusB::RECOVERY_STATE)?,
+            // The word recovery_state() reads: the status block moves with the firmware build.
+            recovery: self.object(self.cluster)?.word(self.recovery_state_offset())?,
             mailbox,
         })
     }
