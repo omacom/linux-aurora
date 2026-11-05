@@ -2752,6 +2752,9 @@ pub(crate) fn encode_m5_policy_controller_defaults_j775d(out: &mut [u8]) -> Resu
     for offset in [0xb94, 0xbd4, 0xbf9] {
         put_u32(policy, offset, J775D_PERF_FLOOR as u32 * 100);
     }
+    // The fast-active boost may continue while the GPU idles for 20 percent of a boost window
+    // (byte-packed in the boost block) on the Ultra's core type; the default is 10.
+    policy[0xbfd] = 20;
     const DIE_CHANNELS: u64 = 0x6fcc_3fcc_6fcc_3fcc;
     for (offset, words) in [
         (0x2324, [0x6fcc_3fcc_0000_0000, DIE_CHANNELS, DIE_CHANNELS, DIE_CHANNELS, 0x6fcc_3fcc]),
