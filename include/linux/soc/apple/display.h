@@ -12,6 +12,7 @@ struct device;
 int apple_drm_t6030_link_device(struct device *consumer);
 int apple_drm_t6031_link_device(struct device *consumer);
 int apple_drm_t8132_link_device(struct device *consumer);
+int apple_drm_t6034_link_device(struct device *consumer);
 
 /* T6041 DCP image shipped with macOS 27.2 (26B123). */
 #define APPLE_T6041_DCP_26B123_UUID "964EDE5B-8F78-38C2-A727-519CC9F0AF27"

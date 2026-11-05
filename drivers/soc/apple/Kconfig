@@ -373,6 +373,11 @@ config APPLE_DISPLAY_GATE
 	  displays up. The Type-C ports work as USB ports after 20 seconds
 	  meanwhile, and take the display routes once the chain is up.
 
+	  J514M/T6034 uses an independent apple,t6034-handoff profile and the
+	  same checked PMP firmware layout. It starts on normal boots of that
+	  exact board and SoC pair; apple_t6034_display.enable=0 retains the
+	  boot framebuffer and keeps its GPU off. Other T6034 boards stay off.
+
 	  Say 'y' if you want the native display on M3 Pro, M3 Max, M3 and
 	  M4 Pro Macs.
 
