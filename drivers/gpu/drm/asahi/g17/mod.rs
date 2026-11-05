@@ -869,16 +869,16 @@ impl Firmware {
         port: &port::Port,
         effort: u32,
     ) -> Result {
-        // The state machine and the performance-controller demand follow the requested effort;
-        // the firmware is given the M5 value (InitData::submission_effort).
+        // The performance-controller demand follows the requested effort; the firmware is
+        // given, and the state records, the M5 value (InitData::submission_effort).
         let published = init.submission_effort(effort, state.waited());
-        if state.applied() == effort && init.effort()? == published {
+        port.set_effort_full(effort == power::FULL_EFFORT);
+        if state.applied() == published && init.effort()? == published {
             return Ok(());
         }
         init.publish_effort(published)?;
         trace::message(trace::EFFORT, u64::from(published));
-        state.did_apply(effort);
-        port.set_effort_full(effort == power::FULL_EFFORT);
+        state.did_apply(published);
         Ok(())
     }
 
