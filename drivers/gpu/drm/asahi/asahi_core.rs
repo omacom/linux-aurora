@@ -186,10 +186,6 @@ module! {
             default: 0,
             description: "G15: admit an unpinned GPU firmware build whose TEXT SHA-256 starts with these 8 bytes (bring-up only)",
         },
-        g15_j514c_bringup: u32 {
-            default: 0,
-            description: "G15: opt into J514C/T6031 bring-up with the J516C reference power/thermal words (1 only; unqualified on J514C)",
-        },
         stats_export: u8 {
             default: 1,
             // permissions: 0,
