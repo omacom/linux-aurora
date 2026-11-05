@@ -20,7 +20,7 @@ use crate::g17::{
     },
     object::{Allocator, CpuMap, Family, KernelObject, Pool, PooledObject},
 };
-use crate::{hw::t8140::dynamic, mmu};
+use crate::mmu;
 use core::sync::atomic::{fence, Ordering};
 use kernel::{prelude::*, sync::Arc};
 use retirement::{Cursors, RECORD_SLOTS};
@@ -118,7 +118,7 @@ impl DescriptorRing {
         )?;
         let low = object.alias_in(
             alloc.uat.kernel_lower_vm(),
-            dynamic::LOWER,
+            alloc.uat.kernel_lower_dynamic_range(),
             mmu::UAT_PGSZ as u64,
             mmu::PROT_GPU_SHARED_RW,
         )?;
@@ -267,15 +267,16 @@ impl Graph {
         let descriptors = self.descriptor_alias(vm)?;
         let prot = if self.m5 { mmu::PROT_GPU_SHARED_RW } else { mmu::PROT_GPU_FW_SHARED_RW };
         let page = mmu::UAT_PGSZ as u64;
+        let private = mmu::client_private_range(self.m5);
         let preempt = self
             .preempt
-            .alias_in(vm, dynamic::CLIENT_LOWER, page, prot)?;
-        let usage = self.usage.alias_in(vm, dynamic::CLIENT_LOWER, page, prot)?;
+            .alias_in(vm, private.clone(), page, prot)?;
+        let usage = self.usage.alias_in(vm, private.clone(), page, prot)?;
         let operand = self
             .operand
-            .alias_in(vm, dynamic::CLIENT_LOWER, page, prot)?;
+            .alias_in(vm, private.clone(), page, prot)?;
         let queue_context = self.context_low.as_ref()
-            .map(|context| context.alias_in(vm, dynamic::CLIENT_LOWER, page, prot)).transpose()?;
+            .map(|context| context.alias_in(vm, private.clone(), page, prot)).transpose()?;
         Ok(Binding {
             _kick_alias: kick_alias,
             pool_alias: Some(pool_alias),

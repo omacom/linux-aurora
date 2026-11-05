@@ -369,6 +369,16 @@ impl Drop for MappingMutation {
     }
 }
 
+/// Where client-private aliases are placed: [`layout::CLIENT_PRIVATE_RANGE`] on M5,
+/// outside every Mesa window; the A18 Pro's arena otherwise.
+pub(crate) fn client_private_range(m5: bool) -> Range<u64> {
+    if m5 {
+        layout::CLIENT_PRIVATE_RANGE
+    } else {
+        crate::hw::t8140::dynamic::CLIENT_LOWER
+    }
+}
+
 /// Inner data for a Vm instance.
 struct VmInner {
     dev: driver::AsahiDevRef,
@@ -3682,6 +3692,13 @@ impl Uat {
             crate::hw::t8140::dynamic::LOWER
         }
     }
+
+    /// Ranges an M5 client VM keeps from userspace binds, even while they hold
+    /// nothing: the canonical arena its queues alias and the client-private one.
+    pub(crate) fn m5_client_reserved_ranges(&self) -> [Range<u64>; 2] {
+        [layout::CANONICAL_RANGE, layout::CLIENT_PRIVATE_RANGE]
+    }
+
     /// Returns the address space geometry of this UAT.
     pub(crate) fn geometry(&self) -> UatGeometry {
         self.geometry

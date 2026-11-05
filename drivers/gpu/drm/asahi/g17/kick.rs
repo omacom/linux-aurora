@@ -20,7 +20,7 @@ use super::{
     fw::{kick::*, queue::DataMaster},
     object::{Allocator, CpuMap, KernelObject},
 };
-use crate::{hw::t8140, mem, mmu};
+use crate::{mem, mmu};
 
 pub(super) const QID_COUNT: usize = QID_MAX as usize + 1;
 
@@ -600,7 +600,7 @@ impl Queue {
             mmu::PROT_GPU_FW_SHARED_RW,
             CpuMap::WriteCombined,
         )?;
-        let mut range = t8140::dynamic::LOWER;
+        let mut range = alloc.uat.kernel_lower_dynamic_range();
         let (low, client) = loop {
             let low = high.alias_in(
                 alloc.uat.kernel_lower_vm(),

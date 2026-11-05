@@ -2186,6 +2186,15 @@ impl gpu::Gpu for Gpu {
             .new_vm(self.ids.vm.next(), kernel_range)?
             .with_status()?;
         if self.cfg.profile.is_m5() {
+            // The canonical arena the client's queues alias and the client-private one stay
+            // reserved against userspace binds from creation, so no bind replaces a kernel alias
+            // the firmware reads.
+            let ranges = firmware.uat.m5_client_reserved_ranges();
+            let mut reserved = KVec::with_capacity(ranges.len(), GFP_KERNEL)?;
+            for range in ranges {
+                reserved.push(range, GFP_KERNEL)?;
+            }
+            vm.install_driver_mappings(KVec::new(), reserved)?;
             return Ok(vm);
         }
         let mappings = firmware.init.user_aliases(&vm, &firmware._pm_metrics)?;
