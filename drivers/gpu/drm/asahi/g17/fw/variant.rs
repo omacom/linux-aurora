@@ -64,6 +64,9 @@ pub(crate) struct Variant {
     pub(crate) few_primitives: bool,
     /// The firmware runs ray-traversal work (ray queries and intersection programs).
     pub(crate) ray_traversal: bool,
+    /// Renders may carry ray-query stages. The M5 command set has none: it encodes no render
+    /// ray-query state.
+    pub(crate) render_ray_query: bool,
     /// Tiling descriptors report whether the fragment queue still had earlier kicks
     /// outstanding (`fragment_busy`).
     pub(crate) fragment_busy: bool,
@@ -121,6 +124,7 @@ pub(crate) const V26A428: Variant = Variant {
     mcache: true,
     few_primitives: true,
     ray_traversal: true,
+    render_ray_query: true,
     fragment_busy: true,
     lead_commands: false,
     programs: super::render::RegisterPrograms::G17P,
@@ -152,6 +156,7 @@ pub(crate) const V25G83: Variant = Variant {
     // A fragment stage with the few-primitives flag hangs.
     few_primitives: false,
     ray_traversal: true,
+    render_ray_query: true,
     // When a tiling pass runs out of memory with this set, the firmware resumes it without
     // adding memory and the tiler stops silently; macOS always writes 0.
     fragment_busy: false,
@@ -169,6 +174,7 @@ pub(crate) const V25G83: Variant = Variant {
 /// command set).
 pub(crate) const V26A428_M5: Variant = Variant {
     m5_commands: true,
+    render_ray_query: false,
     registration_power_hold: false,
     ..V26A428
 };

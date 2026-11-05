@@ -2106,7 +2106,7 @@ impl gpu::Gpu for Gpu {
         if variant.few_primitives {
             params.features |= u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FEW_PRIMITIVES);
         }
-        if variant.ray_traversal {
+        if variant.render_ray_query {
             params.features |=
                 u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_RAY_QUERY);
         }

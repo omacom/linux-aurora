@@ -584,7 +584,7 @@ impl Payload {
                 };
                 for stage in ray_query {
                     if (stage.intersection.enabled() || stage.scratch.enabled())
-                        && !variant.ray_traversal
+                        && !(variant.ray_traversal && variant.render_ray_query)
                     {
                         return Err(refuse_ray_traversal());
                     }
