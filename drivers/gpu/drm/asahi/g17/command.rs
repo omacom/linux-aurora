@@ -91,6 +91,35 @@ impl Attachments {
         }
         Ok(())
     }
+
+    /// An M5 render's lists: the firmware never sees them (the pass's tile stores are encoded from
+    /// its surfaces), so each range is only the host's ordering hint, its footprint
+    /// (`Vm::render_footprint`). A range may then cover several mappings and the gaps between them:
+    /// a coarser footprint only orders more. It must still be a range.
+    fn validate_hint(&self) -> Result {
+        for range in self.as_slice() {
+            if range.size == 0 || range.va.checked_add(range.size).is_none() {
+                return Err(EINVAL);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_as(&self, space: &impl AddressSpace, rule: AttachmentRule) -> Result {
+        match rule {
+            AttachmentRule::Mapped => self.validate(space),
+            AttachmentRule::Hint => self.validate_hint(),
+        }
+    }
+}
+
+/// What a render's attachment lists must prove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AttachmentRule {
+    /// Every range is mapped writable: the firmware reads the lists.
+    Mapped,
+    /// Every range is a non-empty range that does not wrap: the lists only order renders (M5).
+    Hint,
 }
 
 /// Where a render command's stage-prefix fields start: after the ray-query stages.
@@ -444,6 +473,7 @@ impl Payload {
         // Everything M5 accepts beyond the G17P command set is gated on this.
         let m5 = variant.m5_commands;
         let max_tile_buffer = if m5 { M5_MAX_TILE_BUFFER } else { MAX_TILE_BUFFER };
+        let attachment_rule = if m5 { AttachmentRule::Hint } else { AttachmentRule::Mapped };
         match self {
             Self::Render(cmd, attachments, ray_query, resources) => {
                 if cmd.flags & !(if m5 { RENDER_FLAGS } else { RENDER_FLAGS & !M5_RENDER_FLAGS }) != 0
@@ -500,7 +530,7 @@ impl Payload {
                     window.program(space, program.usc)?;
                 }
                 for list in attachments {
-                    list.validate(space)?;
+                    list.validate_as(space, attachment_rule)?;
                 }
                 let pass = RenderPass {
                     width: cmd.width_px.into(),
@@ -663,4 +693,43 @@ impl Payload {
 fn refuse_ray_traversal() -> Error {
     kernel::pr_warn_once!("G17: ray-traversal work refused on this firmware\n");
     Error::from_errno(-(kernel::bindings::EOPNOTSUPP as i32))
+}
+
+#[kunit_tests(asahi_g17_attachments)]
+mod attachment_tests {
+    use super::*;
+
+    /// A VM with nothing mapped.
+    struct Unmapped;
+
+    impl AddressSpace for Unmapped {
+        fn covers(&self, _address: u64, _size: u64, _access: Access) -> bool {
+            false
+        }
+    }
+
+    fn list(ranges: &[(u64, u64)]) -> Attachments {
+        let mut list = Attachments::EMPTY;
+        for (slot, &(va, size)) in list.ranges.iter_mut().zip(ranges) {
+            *slot = WriteRange { va, size };
+            list.count += 1;
+        }
+        list
+    }
+
+    #[test]
+    fn an_m5_hint_may_span_unmapped_gaps() {
+        // One range over two attachments and the gap between them, as userspace merges more
+        // attachments than a list holds.
+        let merged = list(&[(0x1_0000_0000, 0x40_0000), (0x2_0000_0000, 0x1_0000_0000)]);
+        assert_eq!(merged.validate_as(&Unmapped, AttachmentRule::Hint), Ok(()));
+        assert_eq!(merged.validate_as(&Unmapped, AttachmentRule::Mapped), Err(EINVAL));
+    }
+
+    #[test]
+    fn an_m5_hint_is_still_a_range() {
+        assert_eq!(list(&[(0x1_0000_0000, 0)]).validate_hint(), Err(EINVAL));
+        assert_eq!(list(&[(u64::MAX - 0xfff, 0x2000)]).validate_hint(), Err(EINVAL));
+        assert_eq!(list(&[]).validate_hint(), Ok(()));
+    }
 }
