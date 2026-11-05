@@ -1629,9 +1629,18 @@ impl super::Firmware {
         }
         // No descriptor, accounting or inner producer changes precede this
         // reservation; dropping it unused returns the work-ring slot. M5 compute takes its
-        // credit from the shared ring under this mutex instead (InitData::publish_work).
-        let outer = if self.init.is_m5() { None }
-            else { Some(self.port.reserve_compute(packet.context.policy().priority())?) };
+        // slot on the work ring M5 render shares, under this mutex (InitData::publish_work):
+        // a full ring is refused here, before a queue install or kick changes any state.
+        let outer = if self.init.is_m5() {
+            if !self.init.work_ready(packet.context.policy().priority(),
+                super::fw::queue::DataMaster::Compute)?
+            {
+                return Err(EAGAIN);
+            }
+            None
+        } else {
+            Some(self.port.reserve_compute(packet.context.policy().priority())?)
+        };
         let queues = &mut self.queues;
         let mut queue = queues
             .compute
