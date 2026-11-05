@@ -578,6 +578,15 @@ impl WorkStateLease {
     pub(crate) fn word(&self) -> u32 {
         self.word.load(Ordering::Acquire)
     }
+    /// The oldest node of this ioctl's context still in use ahead of this ioctl's node, whose
+    /// draining the firmware's flush of this node waits for; none without a node of its own.
+    pub(crate) fn older_node(&self) -> Option<u32> {
+        let word = self.word();
+        if word == FREE {
+            return None;
+        }
+        self.context.states.older_live(word)
+    }
     pub(crate) fn node_va(&self) -> Result<u64> {
         let word = self.word();
         if word == FREE {

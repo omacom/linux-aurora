@@ -372,6 +372,14 @@ impl job::Backend for Backend {
             if let Some(deferred) = deferred.as_mut() {
                 firmware.scan_renders(deferred)?;
             }
+            if let Some((older, own)) = self.behind_own_head(packet, &firmware.init) {
+                if renewals == 0 {
+                    dev_info!(self.shared.dev.as_ref(),
+                        "Render watchdog owner={} behind its context's older node {:#x} (own {:#x}); the firmware progresses: renewed\n",
+                        self.owner, older, own);
+                }
+                return Ok(true);
+            }
             // Borrowed-graph and queued-retirement deferrals share the renewal bound.
             if timeout::transaction_grace(renewals)
                 && firmware.queues.defer_render_timeout(packet, ETIMEDOUT)

@@ -1737,6 +1737,10 @@ pub(crate) const M5_STATUS_B_SPAN: usize =
     M5_PRIVATE_LAYOUT.roles[0].status_a - M5_PRIVATE_LAYOUT.status_b;
 
 pub(crate) const M5_RECOVERY_STATE: usize = 0x4ae0;
+/// The firmware's progress word in the primary status B, beside the recovery state: the
+/// firmware moves it as it works, and a reader that finds it changed since its previous read
+/// counts the GPU as progressing.
+pub(crate) const M5_PROGRESS: usize = 0x4b00;
 pub(crate) const M5_HOST_RECOVERY: usize = 0x4af0;
 pub(crate) const M5_RECOVERY_INFO: usize = 0x4298;
 pub(crate) const M5_RECOVERY_SLOT_MASK: usize = 0x4ab8;

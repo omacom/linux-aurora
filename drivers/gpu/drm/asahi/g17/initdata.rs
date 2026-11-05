@@ -1812,6 +1812,20 @@ impl InitData {
 }
 
 impl InitData {
+    /// The M5 firmware's progress word ([`super::fw::m5::initdata::M5_PROGRESS`]); ENODEV on
+    /// other firmware.
+    pub(super) fn m5_progress(&self) -> Result<u32> {
+        use super::fw::m5::initdata as m;
+        if !self.m5 {
+            return Err(ENODEV);
+        }
+        fence(Ordering::Acquire);
+        Ok(self
+            .object(self.cluster)?
+            .word(m::M5_PRIVATE_LAYOUT.status_b + m::M5_PROGRESS)?
+            .load(Ordering::Relaxed))
+    }
+
     fn recovery_state_offset(&self) -> usize {
         if self.m5 {
             super::fw::m5::initdata::M5_PRIVATE_LAYOUT.status_b

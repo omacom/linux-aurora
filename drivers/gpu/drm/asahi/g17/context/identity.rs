@@ -251,6 +251,18 @@ impl RenderSlots {
 }
 
 impl WorkStates {
+    /// The oldest node in use that the firmware lists ahead of `word`: a live word older than
+    /// it by the signed 32-bit difference the firmware sorts by. Its ioctl was submitted
+    /// earlier ([`Order`]), and until that node drains the firmware withholds every stamp of
+    /// `word`'s node behind it.
+    pub(super) fn older_live(&self, word: u32) -> Option<u32> {
+        self.live
+            .iter()
+            .map(|live| live.load(Ordering::Acquire))
+            .filter(|&live| live != FREE && (live.wrapping_sub(word) as i32) < 0)
+            .min_by_key(|&live| live.wrapping_sub(word) as i32)
+    }
+
     pub(super) fn used(&self) -> usize {
         self.live.iter().filter(|word| word.load(Ordering::Acquire) != FREE).count()
     }

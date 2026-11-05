@@ -157,6 +157,39 @@ pub(crate) fn attribute(own: Head, renewals: u8, others: impl Iterator<Item = He
     }
 }
 
+/// The progress watchdog's interval: the firmware counts as progressing for this long after a
+/// read found its progress word changed.
+const PROGRESS_INTERVAL_NS: u64 = 5_000_000_000;
+
+/// The firmware's progress word as a watchdog last read it, and [`crate::g17::now_ns`] of the
+/// latest read that found it changed (zero before the first).
+static PROGRESS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static LAST_PROGRESS_NS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// A watchdog read the firmware's progress word. Returns whether the firmware changed it within
+/// [`PROGRESS_INTERVAL_NS`].
+pub(crate) fn note_progress(word: u32) -> bool {
+    use core::sync::atomic::Ordering;
+    let now = crate::g17::now_ns();
+    if PROGRESS.swap(word, Ordering::Relaxed) != word {
+        LAST_PROGRESS_NS.store(now, Ordering::Relaxed);
+    }
+    match LAST_PROGRESS_NS.load(Ordering::Relaxed) {
+        0 => false,
+        last => now.saturating_sub(last) < PROGRESS_INTERVAL_NS,
+    }
+}
+
+/// Work whose context has an older node in use ahead of its own is not late: the firmware
+/// lists a context's nodes by their words and flushes from the head, so this work's stamps wait
+/// behind the older node until it drains. That wait has no ceiling while the firmware works, so
+/// a published job behind its context's older node is renewed, without a count, while the
+/// firmware's progress word moves; a firmware that stops progressing for the interval expires it
+/// as before, and an older node of another VM still goes through [`attribute`].
+pub(crate) fn behind_own_head(published: bool, older: Option<u32>, progressing: bool) -> bool {
+    published && older.is_some() && progressing
+}
+
 #[cfg_attr(not(test), kernel::macros::kunit_tests(asahi_g17_execution_allowance))]
 mod tests {
     use super::*;
