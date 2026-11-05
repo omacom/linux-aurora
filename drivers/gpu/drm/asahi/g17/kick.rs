@@ -398,6 +398,11 @@ enum Backing {
     Render(RenderRing),
 }
 
+/// A client VM's view of a kick ring. The host writes the entries through the kernel's mapping
+/// and the firmware reads them through its own; a client's GPU work only reads them, so its
+/// view is read-only: a client cannot rewrite an entry after the kernel built and checked it.
+const CLIENT_KICK_PROT: mmu::Prot = mmu::PROT_GPU_SHARED_RO;
+
 /// A render ring's pages and the shared lower reservation clients alias.
 struct RenderStorage {
     // The lower alias drops before its backing.
@@ -588,7 +593,7 @@ impl Queue {
             let alias =
                 ring.storage
                     .high
-                    .prepare_alias(client, address, mmu::PROT_GPU_SHARED_RW, true);
+                    .prepare_alias(client, address, CLIENT_KICK_PROT, false);
             // On failure the storage returns to the stock and a fresh ring is built.
             if let Ok(alias) = alias {
                 return Ok((
@@ -620,7 +625,7 @@ impl Queue {
                 .iova()
                 .checked_add(KICK_RING_SIZE as u64)
                 .ok_or(EOVERFLOW)?;
-            match high.map_alias(client, low.iova(), mmu::PROT_GPU_SHARED_RW) {
+            match high.map_alias(client, low.iova(), CLIENT_KICK_PROT) {
                 Ok(client) => break (low, client),
                 Err(error) if error == ENOSPC && end < range.end => {
                     drop(low);
@@ -676,7 +681,7 @@ impl Queue {
     pub(crate) fn map_client(&mut self, vm: &mmu::Vm) -> Result<mmu::KernelMapping> {
         let address = self.low_va();
         self.object()
-            .map_alias(vm, address, mmu::PROT_GPU_SHARED_RW)
+            .map_alias(vm, address, CLIENT_KICK_PROT)
     }
 
     /// Clears an idle compute ring before another VM is given a view of it, so the new owner
@@ -709,7 +714,7 @@ impl Queue {
             Backing::Compute { low, .. } => low,
             Backing::Render(ring) => &ring.storage.high,
         };
-        object.prepare_alias(vm, self.low_va(), mmu::PROT_GPU_SHARED_RW, true)
+        object.prepare_alias(vm, self.low_va(), CLIENT_KICK_PROT, false)
     }
 
     /// Both aliases are owned mappings of the same full ring. Publish their
