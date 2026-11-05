@@ -2388,6 +2388,12 @@ impl super::Shared {
             state.take()
         };
         if let Some(mut firmware) = firmware {
+            if !firmware.init.has_engine_retirement_witness() {
+                // Engines may still write into the session's pages after the processors
+                // stop, and nothing here proves they have stopped: keep the session.
+                core::mem::forget(firmware);
+                return;
+            }
             firmware.finish_stopped_queues();
             // RTKit destruction still dereferences the mailbox provider.
             drop(firmware);

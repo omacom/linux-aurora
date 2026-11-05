@@ -422,6 +422,12 @@ impl InitData {
         Ok(())
     }
 
+    /// Whether a stopped session can prove its GPU engines retired, so that its pages may be
+    /// freed. M5 has no engine-retirement witness yet.
+    pub(super) fn has_engine_retirement_witness(&self) -> bool {
+        !self.m5
+    }
+
     /// The statistics record tags the family's firmware emits.
     pub(super) fn statistics_types(&self) -> u64 {
         if self.m5 {
