@@ -1783,6 +1783,8 @@ pub(crate) struct Board {
     pub(crate) controller_defaults: Option<fn(&mut [u8]) -> Result<(), InitdataError>>,
     /// Region C's idle standby timer where the board's differs from the image's 1500 us, us.
     pub(crate) idle_standby_us: Option<u32>,
+    /// The active memory cache controller mask, where it differs from the inherited 0xf.
+    mcc_mask: Option<u64>,
 }
 
 /// M5 Pro: two clusters of ten cores.
@@ -1801,6 +1803,7 @@ pub(crate) const J714: Board = Board {
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
     controller_defaults: Some(encode_m5_policy_controller_defaults),
     idle_standby_us: None,
+    mcc_mask: None,
 };
 
 /// M5 Max: four clusters of ten cores.
@@ -1820,6 +1823,7 @@ pub(crate) const J716C: Board = Board {
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
     controller_defaults: Some(encode_m5_policy_controller_defaults),
     idle_standby_us: None,
+    mcc_mask: None,
 };
 
 /// J775D's performance controllers run from P3.
@@ -1845,6 +1849,8 @@ pub(crate) const J775D: Board = Board {
     calibration: None,
     controller_defaults: Some(encode_m5_policy_controller_defaults_j775d),
     idle_standby_us: Some(3500),
+    // The ADT GPU node's active-mcc-bit-vector: eight memory cache controllers.
+    mcc_mask: Some(0xff),
 };
 
 const _: () = {
@@ -2264,6 +2270,9 @@ pub(crate) fn encode_m5_hw_data(
     put_u32(out, 0x2660, 0);
     put_u32(out, 0x2728, 0);
     put_u32(out, 0x272c, 1);
+    if let Some(mask) = board.mcc_mask {
+        put_u64(out, 0x10a8, mask);
+    }
     // The inherited J813 minimum parameter-buffer size is replaced per board.
     put_u32(out, 0x26b0, board.min_parameter_buffer);
     Ok(())
