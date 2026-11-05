@@ -206,11 +206,13 @@ pub(crate) fn hotspot_temperature_mc() -> Option<i32> {
 /// (a loading screen) does not cycle them.
 const FAN_HOLD_NS: u64 = 30_000_000_000;
 
-/// Proportional fan curve on the hotspot while the GPU is busy: the SMC's automatic mode keeps
-/// the fans near their minimum under sustained GPU load on Linux. From FAN_CURVE_START_MC to
-/// the governor target the fans ramp from the minimum to two thirds of the range, and on to
-/// FAN_CURVE_TOP_PERMILLE at FAN_CURVE_TOP_MC.
-const FAN_CURVE_START_MC: i32 = 84_000;
+/// Proportional fan curve on the hotspot while the GPU is busy: on J714 the SMC's automatic mode
+/// keeps the fans near their minimum under sustained GPU load on Linux. From the board's curve
+/// start ([`super::fw::m5::initdata::Board::fan_curve_start_mc`]) to the governor target the fans
+/// ramp from the minimum to two thirds of the range, and on to FAN_CURVE_TOP_PERMILLE at
+/// FAN_CURVE_TOP_MC.
+static FAN_CURVE_START_MC: AtomicI32 =
+    AtomicI32::new(super::fw::m5::initdata::J714.fan_curve_start_mc);
 const FAN_CURVE_TOP_MC: i32 = 98_000;
 const FAN_CURVE_TARGET_PERMILLE: i32 = 660;
 const FAN_CURVE_TOP_PERMILLE: i32 = 800;
@@ -219,13 +221,19 @@ const FAN_CURVE_RELEASE_MC: i32 = 82_000;
 /// A new target is written only when it moves at least this far.
 const FAN_CURVE_STEP_RPM: u32 = 150;
 
+/// Selects the board's thermal settings at probe; J714's until then.
+pub(crate) fn select_board(board: &super::fw::m5::initdata::Board) {
+    FAN_CURVE_START_MC.store(board.fan_curve_start_mc, Ordering::Relaxed);
+}
+
 /// The permille of the fan range the curve asks for at hotspot `temp_mc`.
 fn fan_curve_permille(temp_mc: i32, target_mc: i32) -> i32 {
-    let target_mc = target_mc.max(FAN_CURVE_START_MC + 1000);
-    if temp_mc <= FAN_CURVE_START_MC {
+    let start_mc = FAN_CURVE_START_MC.load(Ordering::Relaxed);
+    let target_mc = target_mc.max(start_mc + 1000);
+    if temp_mc <= start_mc {
         0
     } else if temp_mc <= target_mc {
-        (temp_mc - FAN_CURVE_START_MC) * FAN_CURVE_TARGET_PERMILLE / (target_mc - FAN_CURVE_START_MC)
+        (temp_mc - start_mc) * FAN_CURVE_TARGET_PERMILLE / (target_mc - start_mc)
     } else {
         let top = FAN_CURVE_TOP_MC.max(target_mc + 1000);
         (FAN_CURVE_TARGET_PERMILLE + (temp_mc.min(top) - target_mc)

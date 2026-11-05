@@ -1785,6 +1785,8 @@ pub(crate) struct Board {
     pub(crate) idle_standby_us: Option<u32>,
     /// The active memory cache controller mask, where it differs from the inherited 0xf.
     mcc_mask: Option<u64>,
+    /// The hotspot at which the thermal governor's fan curve starts, millidegrees C.
+    pub(crate) fan_curve_start_mc: i32,
 }
 
 /// M5 Pro: two clusters of ten cores.
@@ -1804,6 +1806,7 @@ pub(crate) const J714: Board = Board {
     controller_defaults: Some(encode_m5_policy_controller_defaults),
     idle_standby_us: None,
     mcc_mask: None,
+    fan_curve_start_mc: 84_000,
 };
 
 /// M5 Max: four clusters of ten cores.
@@ -1824,6 +1827,7 @@ pub(crate) const J716C: Board = Board {
     controller_defaults: Some(encode_m5_policy_controller_defaults),
     idle_standby_us: None,
     mcc_mask: None,
+    fan_curve_start_mc: 84_000,
 };
 
 /// J775D's performance controllers run from P3.
@@ -1851,6 +1855,10 @@ pub(crate) const J775D: Board = Board {
     idle_standby_us: Some(3500),
     // The ADT GPU node's active-mcc-bit-vector: eight memory cache controllers.
     mcc_mask: Some(0xff),
+    // The SMC raises the fans in its automatic mode from a 97 C hotspot under a sustained
+    // full-chip load, with the CPU and GPU still at their top states: the curve starts there,
+    // above the SMC's own start rather than below it.
+    fan_curve_start_mc: 97_000,
 };
 
 const _: () = {

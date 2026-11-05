@@ -1416,6 +1416,7 @@ impl Gpu {
                 return Err(ENODEV);
             }
             fw::m5::pool::select_render_pool(board);
+            thermal::select_board(board);
         }
 
         let geometry = mmu::UatGeometry {
