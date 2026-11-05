@@ -103,6 +103,12 @@ pub(crate) fn accept_text_prefix() -> u64 {
     *module_parameters::g15_accept_text_prefix.value()
 }
 
+/// Opt into the J514C candidate only at exactly 1. The default keeps the
+/// qualified J516C-only board admission. This does not override firmware identity.
+pub(crate) fn j514c_bringup() -> bool {
+    *module_parameters::g15_j514c_bringup.value() == 1
+}
+
 /// The parameter for the PB growth maximum the firmware is given, in blocks, clamped to
 /// 64..=4095. [`super::pools::Pools::soft_max`] raises it to at least the initial posting; the
 /// blocks above it, up to the 4095 posted at most, answer the synchronous requests of partial

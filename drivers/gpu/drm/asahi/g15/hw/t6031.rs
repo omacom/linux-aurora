@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! T6031 (M3 Max, G15C) configuration, admitted on J516C only.
+//! T6031 (M3 Max, G15C) configuration, qualified on J516C only.
+//!
+//! J514C may explicitly opt into a bring-up candidate using these reference
+//! words with `g15_j514c_bringup=1`. This is not J514C power/thermal qualification.
 //!
 //! One die, four clusters of ten core slots. The firmware is the same RTKit 2419 generation as
 //! the T6030's and the initdata graph keeps the T6030 canonical VAs; what differs is the SoC

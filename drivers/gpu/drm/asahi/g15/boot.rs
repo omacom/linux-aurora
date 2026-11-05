@@ -46,7 +46,7 @@ use super::fw::initdata::runtime;
 use super::hw;
 use super::initdata::{self, InitData};
 use super::object::Objects;
-use super::{identity, regs, uat, Config, Shared};
+use super::{identity, params, regs, uat, Config, Shared};
 use crate::driver::AsahiDrmDevice as AsahiDevice;
 use crate::mmu;
 
@@ -467,6 +467,16 @@ pub(crate) fn admit(
 ) -> Result<Admitted> {
     let dev = pdev.as_ref();
     let pmp = cfg.platform == hw::Platform::AdtWithPmp;
+    // Experimental same-die candidate, not a qualification of the J516C
+    // reference words for the 14-inch chassis. Keep exact board AND SoC checks;
+    // T6034 boards must never inherit this four-cluster T6031 configuration.
+    // The remaining display, DT/ADT, full firmware identity, hardware identity
+    // and record-builder admission below is unchanged.
+    let j514c_candidate = cfg.chip_id == 0x6031
+        && cfg.platform == hw::Platform::DeviceTree
+        && params::j514c_bringup()
+        && glue::machine(kernel::c_str!("apple,j514c"))
+        && glue::machine(kernel::c_str!("apple,t6031"));
     if pmp {
         if !glue::board() {
             return Err(ENODEV);
@@ -481,7 +491,7 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
-    } else if !glue::machine(cfg.machine) {
+    } else if !glue::machine(cfg.machine) && !j514c_candidate {
         dev_err!(dev, "G15: not a {} machine\n", cfg.name);
         return Err(ENODEV);
     } else {
@@ -495,6 +505,12 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
+    }
+    if j514c_candidate {
+        dev_warn!(
+            dev,
+            "J514C bring-up: using J516C reference power/thermal words; this board is not qualified\n"
+        );
     }
     let adt = adt::read(dev, cfg)
         .inspect_err(|e| dev_err!(dev, "GPU regions not admitted: {:?}\n", e))?;
