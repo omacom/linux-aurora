@@ -527,17 +527,20 @@ pub(crate) struct WorkStateLease {
 }
 impl WorkStateLease {
     pub(super) fn status(&self) -> &Arc<VmStatus> { self.context.status() }
-    pub(crate) fn deferred(context: Arc<Context>) -> Self {
-        let ordinal = context.order.lock().assign();
-        Self {
+    /// The lease of a new ioctl, ordered after every earlier one of its context. EBUSY while
+    /// too many of the context's ioctls are queued behind its oldest waiting one
+    /// (see `identity::Order`).
+    pub(crate) fn deferred(context: Arc<Context>) -> Result<Self> {
+        let ordinal = context.order.lock().assign().ok_or(EBUSY)?;
+        Ok(Self {
             context,
             word: AtomicU32::new(FREE),
             engine: AtomicU8::new(0),
             ordinal,
-        }
+        })
     }
-    /// The ioctl's node, taking one for `engine`'s admission if it has none yet. EBUSY: too many
-    /// older ioctls still wait for theirs (see `identity::Order`), or no node may be taken now
+    /// The ioctl's node, taking one for `engine`'s admission if it has none yet. EBUSY: an older
+    /// ioctl still waits for its node (see `identity::Order`), or no node may be taken now
     /// (see `identity::may_take`); an older ioctl's admission or a return lets it try again.
     pub(crate) fn acquire(&self, engine: Engine) -> Result<u32> {
         let current = self.word();

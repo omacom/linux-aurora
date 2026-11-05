@@ -199,7 +199,7 @@ pub(crate) struct Submission {
 
 impl Submission {
     fn new(context: Arc<Context>, firmware_source: bool) -> Result<Arc<Self>> {
-        let work = Arc::new(WorkStateLease::deferred(context), GFP_KERNEL)?;
+        let work = Arc::new(WorkStateLease::deferred(context)?, GFP_KERNEL)?;
         Self::with_work(Some(work), firmware_source)
     }
     fn with_work(work: Option<Arc<WorkStateLease>>, firmware_source: bool) -> Result<Arc<Self>> {
