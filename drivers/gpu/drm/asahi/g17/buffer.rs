@@ -11,6 +11,7 @@ use crate::hw::t8140::resources as cfg;
 pub(crate) mod target;
 mod geometry;
 pub(crate) use geometry::BlockGeometry;
+mod layout;
 
 use kernel::prelude::*;
 

@@ -26,3 +26,12 @@ pub(crate) mod queue;
 pub(crate) mod compute;
 
 pub(crate) mod render_demand;
+
+pub(crate) mod render;
+pub(crate) mod render_tail;
+
+pub(crate) mod render_registers;
+
+pub(crate) mod render_assembly;
+
+pub(crate) mod target;

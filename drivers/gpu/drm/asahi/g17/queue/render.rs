@@ -2,6 +2,7 @@
 
 //! Physical paired tiling and fragment queues and their retained command storage.
 
+pub(in crate::g17) mod generation;
 mod observation;
 pub(crate) use observation::Observed;
 mod dependencies;
