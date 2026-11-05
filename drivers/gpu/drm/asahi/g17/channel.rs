@@ -23,19 +23,20 @@ enum ReportRing {
 }
 
 impl ReportRing {
-    fn geometry(self) -> (usize, usize, u32, u32) {
+    /// State and entry offsets, capacity and the record tags the family allows.
+    fn geometry(self, init: &InitData) -> (usize, usize, u32, u64) {
         match self {
             Self::Trace => (
                 status::TRACE_STATE as usize,
                 status::TRACE_RING as usize,
                 TRACE_SLOTS,
-                TRACE_TYPES,
+                u64::from(TRACE_TYPES),
             ),
             Self::Statistics => (
                 status::STATS_STATE as usize,
                 status::STATS_RING as usize,
                 STATISTICS_SLOTS,
-                STATISTICS_TYPES,
+                init.statistics_types(),
             ),
         }
     }
@@ -154,7 +155,7 @@ impl Rings {
         max_age_ns: u64,
         accept_statistics: bool,
     ) -> Result {
-        let (state, entries, capacity, allowed_types) = ring.geometry();
+        let (state, entries, capacity, allowed_types) = ring.geometry(init);
         let consumer_word = init.status_word(role, state)?;
         let producer_word = init.status_word(role, state + RX_PRODUCER_OFFSET)?;
         fence(Ordering::Acquire);
@@ -172,12 +173,12 @@ impl Rings {
             let words = init.status_read_words::<EVENT_WORDS>(role, offset)?;
             super::trace::report(role as u8, ring as u8, &words);
             let tag = words[0];
-            if tag >= u32::BITS || allowed_types & (1 << tag) == 0 {
+            if tag >= u64::BITS || allowed_types & (1u64 << tag) == 0 {
                 return Err(EIO);
             }
             if matches!(ring, ReportRing::Statistics) {
                 let host_ns = super::now_ns();
-                reports.record(role, words, host_ns);
+                reports.record(role, words, host_ns, allowed_types);
                 if accept_statistics {
                     telemetry.record(&words, host_ns, max_age_ns);
                 }
@@ -215,7 +216,7 @@ impl Rings {
         init.publish_control(
             producer,
             record.bytes(),
-            record.opcode().asserts_gpu_power(),
+            init.control_asserts_gpu_power(record.opcode()),
             next,
         )?;
         super::trace::message(super::trace::CONTROL, record.opcode() as u64);

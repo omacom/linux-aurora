@@ -115,17 +115,42 @@ impl WorkStorage {
     }
 }
 
+/// A context's scheduler page. The M5 firmware caches its mapping, so on M5 it
+/// comes from the retention pool and stays mapped until firmware stop; elsewhere
+/// it is an ordinary allocation.
+pub(crate) enum SchedulerStorage {
+    Ordinary(KernelObject),
+    Retained(PooledObject),
+}
+impl core::ops::Deref for SchedulerStorage {
+    type Target = KernelObject;
+    fn deref(&self) -> &KernelObject {
+        match self {
+            Self::Ordinary(object) => object,
+            Self::Retained(object) => object,
+        }
+    }
+}
+impl core::ops::DerefMut for SchedulerStorage {
+    fn deref_mut(&mut self) -> &mut KernelObject {
+        match self {
+            Self::Ordinary(object) => object,
+            Self::Retained(object) => object,
+        }
+    }
+}
+
 /// Firmware-visible pages of a context, retained by an installed queue whose
 /// last owner has exited (see [`Context::retain_firmware_pages`]).
 pub(crate) struct FirmwarePages {
-    _scheduler: Arc<KernelObject>,
+    _scheduler: Arc<SchedulerStorage>,
     _work: Arc<Mutex<WorkStorage>>,
 }
 
 pub(crate) struct Context {
     execution: Arc<ExecutionContext>,
     status: Arc<VmStatus>,
-    scheduler: Arc<KernelObject>,
+    scheduler: Arc<SchedulerStorage>,
     scheduler_generation: u32,
     published: AtomicBool,
     /// A kill of this context was published, through a compute queue or on its render pairs'
@@ -173,12 +198,23 @@ impl Context {
     ) -> Result<Self> {
         let status = execution.vm().status().ok_or(EINVAL)?.clone();
         let qos = qos.acquire()?;
-        let mut scheduler = alloc.kernel(
-            UAT_PGSZ,
-            UAT_PGSZ as u64,
-            mmu::PROT_GPU_FW_SHARED_RW,
-            CpuMap::WriteCombined,
-        )?;
+        let mut scheduler = if alloc.uat.is_m5() {
+            SchedulerStorage::Retained(pool.allocate(
+                alloc,
+                Family::Scheduler,
+                UAT_PGSZ,
+                UAT_PGSZ,
+                mmu::PROT_GPU_FW_SHARED_RW,
+                CpuMap::WriteCombined,
+            )?)
+        } else {
+            SchedulerStorage::Ordinary(alloc.kernel(
+                UAT_PGSZ,
+                UAT_PGSZ as u64,
+                mmu::PROT_GPU_FW_SHARED_RW,
+                CpuMap::WriteCombined,
+            )?)
+        };
         scheduler.initialize::<fw::Scheduler>(0, |value| {
             value.init();
             Ok(())
@@ -292,7 +328,7 @@ impl Context {
     }
     /// Installed physical channels retain this page after the logical execution
     /// context and its VM lease have completed their scheduler release.
-    pub(crate) fn scheduler_owner(&self) -> Arc<KernelObject> {
+    pub(crate) fn scheduler_owner(&self) -> Arc<SchedulerStorage> {
         self.scheduler.clone()
     }
     /// Scheduler release and command retirement have both been witnessed.

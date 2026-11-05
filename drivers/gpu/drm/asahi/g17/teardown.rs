@@ -4,7 +4,7 @@
 //! private-memory release and control-ring consumption are separate ownership witnesses.
 //! The device mutex serializes this state with the Registry's displaced graph ownership.
 
-use super::{context::Context, freelist::control_consumed, fw::channels::SchedulerStateRelease};
+use super::{context::Context, freelist::control_consumed};
 use core::sync::atomic::{fence, Ordering};
 use kernel::{prelude::*, sync::Arc};
 
@@ -82,7 +82,9 @@ pub(crate) trait Host {
     fn compute_idle(&self, context: &Arc<Context>) -> bool;
     fn flists_released(&self, context: &Arc<Context>) -> bool;
     fn control_backpressured(&self) -> bool;
-    fn publish(&mut self, record: &SchedulerStateRelease) -> Result<u32>;
+    /// Publishes the release of the scheduler page at `page_va`, identity bytes in record
+    /// order, in the family's record.
+    fn publish_release(&mut self, page_va: u64, id: [u8; 4]) -> Result<u32>;
     fn notify(&mut self) -> Result;
     fn detach(&mut self, context: &Arc<Context>) -> Result;
     fn report(&mut self, context: &Arc<Context>, failure: Failure);
@@ -215,11 +217,7 @@ impl Pending {
                 }
                 let result = (|| {
                     let id = entry.context.release_identity()?;
-                    let record = SchedulerStateRelease::new(
-                        entry.context.scheduler_va(),
-                        [id[3], id[0], id[1], id[2]],
-                    );
-                    host.publish(&record)
+                    host.publish_release(entry.context.scheduler_va(), [id[3], id[0], id[1], id[2]])
                 })();
                 let next = match result {
                     Ok(next) => next,

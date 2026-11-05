@@ -610,6 +610,55 @@ impl G17Resources {
         Ok(true)
     }
 
+    /// Publishes through the M5 host command port, including the kick that
+    /// makes an idle queue runnable. Core activity is not a prerequisite.
+    pub(crate) fn submit_m5_work(
+        &self,
+        submission: &crate::g17::fw::m5::queue::HardwareSubmission,
+    ) -> Result {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        for &(offset, value) in submission.writes() {
+            sgx.try_write64(value, offset)?;
+        }
+        Ok(())
+    }
+
+    /// The M5 fault window, read for recovery evidence: the fault status, the MMU fault status
+    /// and address, and three further fault words. The selector is observed, never changed.
+    pub(crate) fn m5_fault_registers(&self) -> Result<[u64; 6]> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        if sgx.relaxed().read32(G17_HOST_IRQ_SUMMARY) & G17_HOST_POWERED == 0 {
+            return Err(EAGAIN);
+        }
+        Ok([
+            sgx.try_read64(0xd800)?,
+            sgx.try_read64(0xd8c0)?,
+            sgx.try_read64(0xd8c8)?,
+            sgx.try_read64(0xc078)?,
+            sgx.try_read64(0xc008)?,
+            sgx.try_read64(0xc028)?,
+        ])
+    }
+
+    /// Sample only the two owned queue configuration words through the
+    /// host tag/data port. The caller holds the device mutex and power hold.
+    pub(crate) fn m5_queue_configurations(&self, qids: [u8; 2]) -> Result<[u64; 2]> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        let sgx = (&*sgx).as_view();
+        if sgx.relaxed().read32(G17_HOST_IRQ_SUMMARY) & G17_HOST_POWERED == 0 {
+            return Err(EAGAIN);
+        }
+        let mut values = [0; 2];
+        for (value, qid) in values.iter_mut().zip(qids) {
+            let tag = crate::g17::fw::m5::queue::HardwareSubmission::configuration_tag(qid)?;
+            sgx.try_write64(tag, 0x4090)?;
+            *value = sgx.try_read64(0x4098)?;
+        }
+        Ok(values)
+    }
+
     /// Registers a queue KSM slot through the firmware mailbox.
     pub(crate) fn register_ksm_queue(&self, qid: u8, descriptor: u64) -> Result {
         if qid > 127 {
@@ -770,6 +819,22 @@ impl G17Resources {
 
     /// Enable dynamic power gating of idle G17 GPU cores. The firmware expects this before it is
     /// initialized.
+    /// Prepares the GPU for the M5 firmware before its initialization: sets bit 0 of the
+    /// firmware start control, which reads 0x30000 or 0x30001 until then, and enables dynamic
+    /// core power gating.
+    pub(crate) fn prepare_m5_firmware(&self) -> Result {
+        {
+            let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+            let sgx = (&*sgx).as_view();
+            let value = sgx.try_read32(0xe90000)?;
+            if value != 0x30000 && value != 0x30001 {
+                return Err(EIO);
+            }
+            sgx.try_write32(value | 1, 0xe90000)?;
+        }
+        self.enable_g17_gating()
+    }
+
     pub(crate) fn enable_g17_gating(&self) -> Result {
         let sgx = self.sgx.try_access().ok_or(ENODEV)?;
         let sgx = (&*sgx).as_view();

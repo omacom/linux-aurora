@@ -629,12 +629,12 @@ impl Pair {
         for stage in 0..2 {
             configs[stage] = Some(QueueConfig::new(&QueueConfigArgs {
                 target: if stage == 0 {
-                    QueueConfigTarget::Tiling(TilingBinding {
+                    QueueConfigTarget::Tiling(Some(TilingBinding {
                         pb_va: self.memory.manager.state_va(),
                         pb_token: lease.buffer_token,
                         pb_slot: self.buffer_id().into(),
                         fragment_qid: qids[1],
-                    })
+                    }))
                 } else {
                     QueueConfigTarget::Fragment
                 },

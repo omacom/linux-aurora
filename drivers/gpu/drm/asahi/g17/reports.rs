@@ -5,7 +5,7 @@
 //! Writers and readers hold the device mutex; reads never power the GPU up.
 
 use super::{
-    fw::channels::{EVENT_WORDS, STATISTICS_TYPES},
+    fw::channels::EVENT_WORDS,
     Role,
 };
 use kernel::prelude::*;
@@ -17,6 +17,9 @@ struct Sample {
     words: [u32; EVENT_WORDS],
 }
 
+/// One sample per statistics tag a family's 64-bit mask can name.
+const TAGS: usize = u64::BITS as usize;
+
 pub(super) struct Reports {
     samples: KVec<Sample>,
 }
@@ -24,19 +27,20 @@ pub(super) struct Reports {
 impl Reports {
     pub(super) fn new() -> Result<Self> {
         // Allocate before firmware starts; receive and debugfs paths allocate nothing.
-        let mut samples = KVec::with_capacity(64, GFP_KERNEL)?;
-        for _ in 0..64 {
+        let mut samples = KVec::with_capacity(2 * TAGS, GFP_KERNEL)?;
+        for _ in 0..2 * TAGS {
             samples.push(Sample::default(), GFP_KERNEL)?;
         }
         Ok(Self { samples })
     }
 
-    pub(super) fn record(&mut self, role: Role, words: [u32; EVENT_WORDS], host_ns: u64) {
+    /// `allowed` is the family's statistics tag mask (`InitData::statistics_types`).
+    pub(super) fn record(&mut self, role: Role, words: [u32; EVENT_WORDS], host_ns: u64, allowed: u64) {
         let tag = words[0];
-        if tag >= u32::BITS || STATISTICS_TYPES & (1 << tag) == 0 {
+        if tag >= u64::BITS || allowed & (1u64 << tag) == 0 {
             return;
         }
-        let sample = &mut self.samples[role as usize * 32 + tag as usize];
+        let sample = &mut self.samples[role as usize * TAGS + tag as usize];
         sample.count = sample.count.saturating_add(1);
         sample.host_ns = host_ns;
         sample.words = words;
@@ -56,8 +60,8 @@ impl Reports {
             writeln!(
                 f,
                 "role={} tag={:#x} count={} host_ns={} words={:08x?}",
-                index / 32,
-                index % 32,
+                index / TAGS,
+                index % TAGS,
                 sample.count,
                 sample.host_ns,
                 sample.words

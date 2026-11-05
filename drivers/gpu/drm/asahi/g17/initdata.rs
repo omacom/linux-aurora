@@ -20,6 +20,9 @@ mod v25g83;
 // The M5 graph is built only once an M5 board has a page-table boot path.
 #[allow(dead_code)]
 mod m5;
+mod work_pair;
+pub(crate) mod outer_credit;
+pub(crate) use outer_credit::{OuterClaim, OuterScope};
 
 const EVENT_RING_RECHECK: u32 = 256;
 
@@ -138,6 +141,7 @@ impl ComputeScheduler {
 /// Checked views used only within one publication call. Every fallible operation completes
 /// before either member of a paired render publication is copied into shared memory.
 struct WorkPublication<'a> {
+    published: Option<&'a AtomicU64>,
     record: &'a super::fw::channels::WorkSlot,
     destination: *mut u8,
     producer: &'a AtomicU32,
@@ -156,11 +160,21 @@ impl WorkPublication<'_> {
             );
         }
     }
+
+    fn commit(self) -> u32 {
+        self.copy_record();
+        fence(Ordering::SeqCst);
+        self.producer.store(self.next, Ordering::Relaxed);
+        if let Some(published) = self.published { published.fetch_add(1, Ordering::Release); }
+        fence(Ordering::SeqCst);
+        self.next
+    }
 }
 
 /// Session-long storage and mappings. Aliases are released before their backing objects.
 pub(super) struct InitData {
     m5: bool,
+    outer_credits: Option<Arc<outer_credit::Credits>>,
     // Live publication uses interior writes under the device mutex. This owner is Send but not
     // Sync, so safe host code cannot issue those writes concurrently through shared references.
     _single_publisher: core::marker::PhantomData<core::cell::Cell<()>>,
@@ -267,6 +281,7 @@ impl InitData {
     pub(super) fn new() -> Self {
         Self {
             m5: false,
+            outer_credits: None,
             _single_publisher: core::marker::PhantomData,
             aliases: KVec::new(),
             objects: KVec::new(),
@@ -382,6 +397,34 @@ impl InitData {
         count.store(entry.page_count, Ordering::Relaxed);
         fence(Ordering::SeqCst);
         Ok(())
+    }
+
+    /// The statistics record tags the family's firmware emits.
+    pub(super) fn statistics_types(&self) -> u64 {
+        if self.m5 {
+            super::fw::m5::STATISTICS_TYPES
+        } else {
+            u64::from(super::fw::channels::STATISTICS_TYPES)
+        }
+    }
+
+    /// A scheduler-state release record in the family's opcode.
+    pub(super) fn scheduler_release(&self, page_va: u64, id: [u8; 4]) -> super::fw::channels::SchedulerStateRelease {
+        let mut record = super::fw::channels::SchedulerStateRelease::new(page_va, id);
+        if self.m5 {
+            record.opcode = super::fw::m5::queue::SCHEDULER_RELEASE_OPCODE;
+        }
+        record
+    }
+
+    /// Whether a control record of `opcode` holds the GPU powered until the firmware drains
+    /// it, by the family's rule.
+    pub(super) fn control_asserts_gpu_power(&self, opcode: super::fw::channels::DeviceControlOp) -> bool {
+        if self.m5 {
+            super::fw::m5::power::asserts_gpu_power(opcode as u32)
+        } else {
+            opcode.asserts_gpu_power()
+        }
     }
 
     pub(super) fn qos(&self) -> Result<&KernelObject> {
@@ -543,15 +586,72 @@ impl InitData {
         Ok(())
     }
 
+    /// Resource-specific wait domain; register only after dropping the device
+    /// mutex. A successful claim allocates no waiter fence.
+    pub(crate) fn outer_available(&mut self) -> Result<Arc<super::availability::Availability>> {
+        if self.outer_credits.is_none() {
+            self.outer_credits = Some(outer_credit::Credits::new()?);
+        }
+        Ok(self.outer_credits.as_ref().ok_or(EIO)?.available())
+    }
+
+    /// M5 TA, fragment and compute share the compute outer ring per priority.
+    /// The physical queue claim prevents reassignment while this credit lives.
+    pub(crate) fn reserve_outer(&mut self, priority: u8, count: u32) -> Result<OuterClaim> {
+        if !self.m5 { return Err(EINVAL); }
+        self.outer_available()?;
+        let cursors = self.work_cursors(priority, super::fw::queue::DataMaster::Compute)?;
+        self.outer_credits.as_ref().ok_or(EIO)?.reserve(priority, count, cursors)
+    }
+
+    /// Hold the device mutex for this scope, including its Drop. The result
+    /// borrows only the claim, allowing the caller to publish through Firmware.
+    pub(crate) fn outer_scope<'a>(&self, claim: &'a mut OuterClaim) -> Result<OuterScope<'a>> {
+        self.outer_credits.as_ref().ok_or(EINVAL)?.scope(claim)
+    }
+
+    pub(crate) fn outer_waiting(&self) -> bool {
+        self.outer_credits.as_ref().is_some_and(|credits| credits.waiting())
+    }
+
+    /// Return a notification for off-lock dispatch only on consumer progress.
+    /// Call while actual outer waiters exist; firmware may consume a config
+    /// without generating a GPU completion IRQ, so those waiters need polling.
+    pub(crate) fn poll_outer_progress(&self) -> Result<Option<Arc<super::availability::Availability>>> {
+        let Some(credits) = self.outer_credits.as_ref().filter(|credits| credits.waiting()) else {
+            return Ok(None);
+        };
+        let mut progressed = false;
+        for priority in 0..4 {
+            progressed |= credits.progressed(priority,
+                self.work_cursors(priority, super::fw::queue::DataMaster::Compute)?)?;
+        }
+        Ok(progressed.then(|| credits.available()))
+    }
+
+    fn outer_capacity(&self, priority: u8, cursors: [u32; 3]) -> Result<u32> {
+        match &self.outer_credits {
+            Some(credits) => credits.capacity(priority, cursors),
+            None => outer_credit::free(cursors),
+        }
+    }
+
     /// The sole host publisher holds the device mutex through the following
     /// inner and outer publication. Firmware consumers can only free capacity;
     /// neither this check nor waiting for room reserves or limits other queues.
-    /// `priority` selects the engine's ring of that priority class.
+    /// `priority` selects the engine's ring of that priority class. On M5, tiling,
+    /// fragment and compute share the compute ring, whose unclaimed credits this checks.
     pub(super) fn work_ready(
         &self,
         priority: u8,
         engine: super::fw::queue::DataMaster,
     ) -> Result<bool> {
+        use super::fw::queue::DataMaster;
+        if self.m5 {
+            let needed = if engine == DataMaster::Compute { 1 } else { 2 };
+            return Ok(self.outer_capacity(priority,
+                self.work_cursors(priority, DataMaster::Compute)?)? >= needed);
+        }
         let [consumer, consumer_b, producer] = self.work_cursors(priority, engine)?;
         let next = (producer + 1) % super::fw::channels::WORK_RING_SLOTS;
         Ok(next != consumer && next != consumer_b)
@@ -566,11 +666,17 @@ impl InitData {
         let engine = match record.data_master {
             0 => DataMaster::Tiling,
             1 => DataMaster::Fragment,
-            // Compute publications reserve their slots through the port.
+            // M5 compute is a shared-ring submission on the compute ring, published here
+            // under the device mutex; the classic compute path reserves through the port.
+            2 if self.m5 => DataMaster::Compute,
             _ => return Err(EINVAL),
         };
         let channel = channels::work_ring_index(priority, engine).ok_or(EINVAL)?;
         let [consumer, consumer_b, producer] = self.work_cursors(priority, engine)?;
+        if self.m5 && engine == DataMaster::Compute
+            && self.outer_capacity(priority, [consumer, consumer_b, producer])? < 1 {
+            return Err(EBUSY);
+        }
         let next = (producer + 1) % channels::WORK_RING_SLOTS;
         if next == consumer || next == consumer_b {
             return Err(EINVAL);
@@ -584,7 +690,11 @@ impl InitData {
                 + abi::work_state_offset(channel)
                 + abi::ChannelState::PRODUCER,
         )?;
+        let published = if self.m5 && engine == DataMaster::Compute {
+            self.outer_credits.as_ref().map(|credits| credits.counter(priority)).transpose()?
+        } else { None };
         Ok(WorkPublication {
+            published,
             record,
             destination,
             producer,
@@ -619,6 +729,53 @@ impl InitData {
         Ok(values)
     }
 
+    /// Publishes an M5 compute record on the shared compute ring under the device mutex.
+    pub(super) fn publish_work(
+        &self,
+        priority: u8,
+        record: &super::fw::channels::WorkSlot,
+    ) -> Result<u32> {
+        Ok(self.work_publication(priority, record)?.commit())
+    }
+
+    /// Reserve both common-ring slots before touching either host port. The
+    /// returned views retain the graph borrow until the pair is published.
+    pub(super) fn m5_work_pair(
+        &self,
+        priority: u8,
+        fragment: &super::fw::channels::WorkSlot,
+        tiling: &super::fw::channels::WorkSlot,
+    ) -> Result<work_pair::Publication<'_>> {
+        use super::fw::{channels, queue::DataMaster};
+        if !self.m5
+            || !matches!(fragment.data_master, 1 | 2)
+            || !matches!(tiling.data_master, 0 | 2)
+        {
+            return Err(EINVAL);
+        }
+        let cursors = self.work_cursors(priority, DataMaster::Compute)?;
+        if self.outer_capacity(priority, cursors)? < 2 { return Err(EBUSY); }
+        let window = work_pair::Window::new(cursors)?;
+        let channel = channels::work_ring_index(priority, DataMaster::Compute).ok_or(EINVAL)?;
+        let bundle = self.object(self.bundle)?;
+        let destinations = [window.start, window.next[0]].map(|index| {
+            bundle.pointer(self.work_ring_offset(channel)
+                + index as usize * size_of::<channels::WorkSlot>(), size_of::<channels::WorkSlot>())
+        });
+        let [fragment_destination, tiling_destination] = destinations;
+        let destinations = [fragment_destination?, tiling_destination?];
+        let producer = self.object(self.cluster)?.word(self.state_offset(Role::Primary)
+            + abi::work_state_offset(channel) + abi::ChannelState::PRODUCER)?;
+        let copy = |slot: &channels::WorkSlot| channels::WorkSlot::new(
+            DataMaster::Compute, slot.queue_va, slot.qid, slot.items_end, slot.first != 0,
+        );
+        let records = [copy(fragment)?, copy(tiling)?];
+        // SAFETY: Complete, distinct slots were checked in the retained bundle;
+        // the device's single publisher holds its mutex across this borrow.
+        let published = self.outer_credits.as_ref().map(|credits| credits.counter(priority)).transpose()?;
+        Ok(unsafe { work_pair::Publication::new(records, destinations, producer, window, published) })
+    }
+
     /// Validate both destinations before exposing fragment, then tiling. The accounting token
     /// is committed after copying fragment; late tiling state is published before its slot.
     /// Deferred pairs retain both slot bodies without exposing either producer.
@@ -636,6 +793,13 @@ impl InitData {
             || tiling.data_master != DataMaster::Tiling as u32
         {
             return Err(EINVAL);
+        }
+        if self.m5 {
+            let pair = self.m5_work_pair(priority, fragment, tiling)?;
+            pair.prepare();
+            commit_accounting()?;
+            publish_late_tiling();
+            return Ok(if deferred { pair.next() } else { pair.publish() });
         }
         let fragment = self.work_publication(priority, fragment)?;
         let tiling = self.work_publication(priority, tiling)?;
@@ -683,6 +847,7 @@ impl InitData {
             core::mem::size_of_val(record),
         )?;
         Ok(WorkPublication {
+            published: None,
             record,
             destination,
             producer,
@@ -700,6 +865,12 @@ impl InitData {
         next: [u32; 2],
     ) -> Result {
         use super::fw::queue::DataMaster;
+        if self.m5 {
+            let pair = self.m5_work_pair(priority, fragment, tiling)?;
+            if pair.next() != next { return Err(EBUSY); }
+            pair.publish();
+            return Ok(());
+        }
         if fragment.data_master != DataMaster::Fragment as u32
             || tiling.data_master != DataMaster::Tiling as u32
         {

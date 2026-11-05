@@ -447,9 +447,11 @@ pub(crate) enum Family {
     WorkState = 1,
     QueueState = 2,
     QueueConfig = 3,
+    /// An M5 context's scheduler page, whose mapping the M5 firmware caches.
+    Scheduler = 4,
 }
 
-const POOL_FAMILIES: usize = 4;
+const POOL_FAMILIES: usize = 5;
 const POOL_SLOTS: usize = 64;
 const POOL_BYTES: usize = 128 * 1024 * 1024;
 

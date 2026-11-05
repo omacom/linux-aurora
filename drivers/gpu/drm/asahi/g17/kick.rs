@@ -538,11 +538,11 @@ impl Queue {
             mmu::PROT_GPU_SHARED_RW,
             CpuMap::WriteCombined,
         )?;
-        let mut range = alloc.uat.geometry().kernel_range();
-        range.start += t8140::dynamic::KERNEL_OFFSET;
+        // The UAT's dynamic range: on M5 it lies past the boot graph, its unmapped sentinel and the
+        // firmware register aperture.
         let high = low.alias_in(
             alloc.uat.kernel_vm(),
-            range,
+            alloc.uat.kernel_dynamic_range(),
             mmu::UAT_PGSZ as u64,
             mmu::PROT_FW_SHARED_RW,
         )?;

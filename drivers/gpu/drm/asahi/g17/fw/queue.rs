@@ -386,8 +386,8 @@ pub(crate) struct TilingBinding {
 /// Queue whose configuration a [`QueueConfig`] carries.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum QueueConfigTarget {
-    /// A tiling queue and its parameter-buffer binding.
-    Tiling(TilingBinding),
+    /// A tiling queue, optionally carrying a parameter-buffer binding.
+    Tiling(Option<TilingBinding>),
     /// A fragment queue.
     Fragment,
     /// A compute queue.
@@ -513,7 +513,7 @@ impl QueueConfig {
             return Err(EINVAL);
         }
         let (data_master, pb_va, pb_token, pb_slot, fragment_qid) = match args.target {
-            QueueConfigTarget::Tiling(binding) => {
+            QueueConfigTarget::Tiling(Some(binding)) => {
                 if binding.fragment_qid > QID_MAX {
                     return Err(EINVAL);
                 }
@@ -525,6 +525,8 @@ impl QueueConfig {
                     u32::from(binding.fragment_qid),
                 )
             }
+            QueueConfigTarget::Tiling(None) =>
+                (DataMaster::Tiling, 0, u64::MAX, u32::MAX, u32::MAX),
             QueueConfigTarget::Fragment => (DataMaster::Fragment, 0, u64::MAX, u32::MAX, u32::MAX),
             QueueConfigTarget::Compute => (DataMaster::Compute, 0, u64::MAX, u32::MAX, u32::MAX),
         };

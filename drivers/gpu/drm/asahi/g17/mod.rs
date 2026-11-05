@@ -747,6 +747,51 @@ impl Firmware {
         power::release(self)
     }
 
+    /// Retry a temporarily unavailable transaction once under a registration
+    /// power hold. Other access errors propagate to the retained owner.
+    fn submit_m5_work(&mut self, submission: &fw::m5::queue::HardwareSubmission) -> Result {
+        match self.bridge.regs.submit_m5_work(submission) {
+            Err(error) if error == EAGAIN => {
+                self.acquire_registration_power()?;
+                self.bridge.regs.submit_m5_work(submission)
+            }
+            result => result,
+        }
+    }
+
+    /// Both outer slots and their capacity are checked before any host-port
+    /// write. An EAGAIN retry drops the old views and revalidates them under a
+    /// power hold. After a successful transaction, publication is infallible.
+    fn submit_m5_render_pair(
+        &mut self,
+        priority: u8,
+        records: &[fw::channels::WorkSlot; 2],
+        submission: &fw::m5::queue::HardwareSubmission,
+        commit_accounting: impl FnOnce() -> Result,
+        publish_inner: impl FnOnce(),
+        deferred: bool,
+    ) -> Result<[u32; 2]> {
+        let mut commit_accounting = Some(commit_accounting);
+        let mut publish_inner = Some(publish_inner);
+        for attempt in 0..2 {
+            let pair = self.init.m5_work_pair(priority, &records[0], &records[1])?;
+            pair.prepare();
+            if let Some(commit) = commit_accounting.take() { commit()?; }
+            match self.bridge.regs.submit_m5_work(submission) {
+                Err(error) if error == EAGAIN && attempt == 0 => {
+                    drop(pair);
+                    self.acquire_registration_power()?;
+                }
+                Err(error) => return Err(error),
+                Ok(()) => {
+                    if let Some(publish) = publish_inner.take() { publish(); }
+                    return Ok(if deferred { pair.next() } else { pair.publish() });
+                }
+            }
+        }
+        Err(EAGAIN)
+    }
+
     /// Called at actual submission publication, not while a queued job is merely being built.
     fn note_submission(&mut self) -> Result {
         self.port.note_gpu_activity();
@@ -1810,6 +1855,9 @@ impl gpu::Gpu for Gpu {
             .uat
             .new_vm(self.ids.vm.next(), kernel_range)?
             .with_status()?;
+        if self.cfg.profile.is_m5() {
+            return Ok(vm);
+        }
         let mappings = firmware.init.user_aliases(&vm, &firmware._pm_metrics)?;
         let ranges =
             hw::t8140::resources::client_reserved_ranges(self.cfg.pm_metrics()?.va).ok_or(EINVAL)?;
@@ -1838,7 +1886,9 @@ impl gpu::Gpu for Gpu {
             self.geometry.user_usable_range(),
             self.shared.variant,
         )?;
-        let policy = scheduling_policy(priority)?;
+        let policy = if self.cfg.profile.is_m5() {
+            fw::m5::queue::scheduling_policy(priority)?
+        } else { scheduling_policy(priority)? };
         let admission_started = now_ns();
         let (backend, slot) = loop {
             let observed = self.shared.queues.observe();
@@ -1889,8 +1939,7 @@ impl gpu::Gpu for Gpu {
         let mapping = {
             let state = self.shared.state.lock();
             let firmware = (*state).as_ref().ok_or(ENODEV)?;
-            let mut addresses = firmware.uat.geometry().kernel_range();
-            addresses.start += hw::t8140::dynamic::KERNEL_OFFSET;
+            let addresses = firmware.uat.kernel_dynamic_range();
             bo.map_range_into_range(
                 firmware.uat.kernel_vm(),
                 range,

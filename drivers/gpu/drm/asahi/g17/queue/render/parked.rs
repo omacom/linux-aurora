@@ -20,7 +20,7 @@ use kernel::{prelude::*, sync::Arc};
 /// context awaiting an executed replacement keeps its separate retirement owner.
 pub(crate) struct ParkedPair {
     kicks: Option<[kick::Queue; 2]>,
-    _scheduler: Arc<KernelObject>,
+    _scheduler: Arc<crate::g17::context::SchedulerStorage>,
     ids: [kick::Id; 2],
     slot: u8,
     ordinal: u64,
