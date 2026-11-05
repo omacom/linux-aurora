@@ -39,18 +39,19 @@ pub(crate) const CONFIG: Config = Config {
     ]),
     // Read by the firmware through the kernel lower root, whose top-level entries it only
     // samples when it starts.
-    pm_metrics: FixedBuffer {
+    profile: crate::g17::FirmwareProfile::PublishedRoots,
+    pm_metrics: Some(FixedBuffer {
         va: 0x10_0008_0000,
         size: 0x8000,
-    },
+    }),
     recovery_slot_keys: Some(recovery::SLOT_KEYS),
     gpu_generation: GpuGen::G17,
     windows: &REGISTER_WINDOWS,
     reserved_slots: &RESERVED_REGISTER_SLOTS,
-    perf: &PERF,
+    perf: Some(&PERF),
     opps: OPPS,
     uat_quirks: crate::mmu::UatQuirks::DEFAULT,
-    region_c: &crate::g17::fw::initdata::REGION_C_26A428,
+    region_c: Some(&crate::g17::fw::initdata::REGION_C_26A428),
     chip: None,
     adopt_root_entries: true,
     fabric_bridge: true,

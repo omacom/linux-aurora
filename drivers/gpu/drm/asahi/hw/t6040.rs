@@ -33,13 +33,14 @@ pub(crate) const CONFIG: Config = Config {
     crash_buffers: CrashBuffers::FirmwareData,
     // Read by the firmware through the kernel lower root, whose top-level entries it only
     // samples when it starts.
-    pm_metrics: FixedBuffer {
+    profile: crate::g17::FirmwareProfile::PublishedRoots,
+    pm_metrics: Some(FixedBuffer {
         va: 0x10_0008_0000,
         size: 0x8000,
-    },
+    }),
     windows: &REGISTER_WINDOWS,
     reserved_slots: &[],
-    perf: &PERF,
+    perf: Some(&PERF),
     opps: OPPS,
     // The no-map tables are needed until the boot loader adds the UAT ranges to /memory. The
     // rest is the policy the M4 Pro has run with; none of it was tested otherwise.
@@ -51,7 +52,7 @@ pub(crate) const CONFIG: Config = Config {
         handoff_slot: 0xffff_ffff,
         native_gpu_permissions: true,
     },
-    region_c: &REGION_C,
+    region_c: Some(&REGION_C),
     chip: None,
     adopt_root_entries: false,
     fabric_bridge: false,

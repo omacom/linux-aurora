@@ -24,13 +24,14 @@ pub(crate) const CONFIG: Config = Config {
     secondary_root_offset: None,
     crash_buffers: CrashBuffers::FirmwareData,
     // Unverified placement; use the M4 Pro layout.
-    pm_metrics: FixedBuffer {
+    profile: crate::g17::FirmwareProfile::PublishedRoots,
+    pm_metrics: Some(FixedBuffer {
         va: 0x10_0008_0000,
         size: 0x8000,
-    },
+    }),
     windows: &REGISTER_WINDOWS,
     reserved_slots: &RESERVED_SLOTS,
-    perf: &PERF,
+    perf: Some(&PERF),
     opps: OPPS,
     uat_quirks: UatQuirks {
         reserved_tables: true,
@@ -40,7 +41,7 @@ pub(crate) const CONFIG: Config = Config {
         handoff_slot: 0xffff_ffff,
         native_gpu_permissions: true,
     },
-    region_c: &REGION_C,
+    region_c: Some(&REGION_C),
     chip: Some(&CHIP),
     adopt_root_entries: false,
     fabric_bridge: false,

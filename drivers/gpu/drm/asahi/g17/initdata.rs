@@ -849,7 +849,7 @@ impl InitData {
         active_cores: u32,
         variant: &super::fw::Variant,
     ) -> Result {
-        self.pm_metrics_va = cfg.pm_metrics.va;
+        self.pm_metrics_va = cfg.pm_metrics()?.va;
         self.recovery_slot_keys = cfg.recovery_slot_keys;
         let range = uat.geometry().kernel_range();
         let env = BuildEnv {
@@ -1137,7 +1137,7 @@ impl InitData {
         self.qos = qos;
         fence(Ordering::SeqCst);
         let metrics_alias =
-            metrics.alias_in(env.vm, env.dynamic.clone(), cfg.pm_metrics.size as u64, GFS)?;
+            metrics.alias_in(env.vm, env.dynamic.clone(), cfg.pm_metrics()?.size as u64, GFS)?;
         self.metrics_fw_va = metrics_alias.iova();
         self.aliases.push(metrics_alias, GFP_KERNEL)?;
         fence(Ordering::SeqCst);
@@ -1178,7 +1178,7 @@ impl InitData {
             windows: cfg.windows,
             reserved_slots: cfg.reserved_slots,
             opps: &opps,
-            perf: cfg.perf,
+            perf: cfg.perf()?,
             completion_rings: bundle.completion_rings,
             qos_va: self.object(bundle.qos)?.gpu_va(),
         };
@@ -1186,7 +1186,7 @@ impl InitData {
             .initialize::<abi::HwData>(abi::bundle::HW_DATA, |hw| hw.init(&hw_args))?;
         self.object_mut(self.region_c)?
             .initialize::<abi::RegionC>(0, |region| {
-                region.init(cfg.region_c);
+                region.init(cfg.region_c()?);
                 Ok(())
             })?;
         self.object_mut(self.cluster)?

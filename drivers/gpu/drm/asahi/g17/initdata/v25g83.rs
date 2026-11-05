@@ -130,7 +130,7 @@ impl InitData {
                 calibration.max_power_mw,
                 &calibration.leakage,
             ),
-            (None, Some(chip)) => (cfg.perf, chip.max_power_mw, &chip.leakage),
+            (None, Some(chip)) => (cfg.perf()?, chip.max_power_mw, &chip.leakage),
             _ => return Err(EINVAL),
         };
         let hw_args = abi::HwDataArgs {
@@ -165,7 +165,7 @@ impl InitData {
             })?;
         self.object_mut(self.region_c)?
             .initialize::<abi::RegionC>(0, |region| {
-                region.init(cfg.region_c);
+                region.init(cfg.region_c()?);
                 region.max_power_mw = max_power_mw;
                 Ok(())
             })?;

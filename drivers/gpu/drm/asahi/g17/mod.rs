@@ -157,6 +157,40 @@ pub(crate) struct FixedBuffer {
     pub(crate) size: usize,
 }
 
+/// Firmware protocol of a G17 GPU.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub(crate) enum FirmwareProfile {
+    /// The firmware publishes its kernel roots and the driver owns the page tables (A18 Pro,
+    /// M4 Pro).
+    PublishedRoots,
+    /// An M5 board without bare-metal GPU tables yet: probe refuses it.
+    M5NoBareMetalTables,
+}
+
+impl Config {
+    /// The fixed parameter-buffer metrics buffer of a 26A428 or 25G83 graph.
+    pub(crate) fn pm_metrics(&self) -> Result<&FixedBuffer> {
+        self.pm_metrics.as_ref().ok_or(EINVAL)
+    }
+
+    /// The performance tables of a 26A428 or 25G83 graph.
+    pub(crate) fn perf(&self) -> Result<&'static fw::initdata::PerfConfig> {
+        self.perf.ok_or(EINVAL)
+    }
+
+    /// Region C of a 26A428 or 25G83 graph.
+    pub(crate) fn region_c(&self) -> Result<&'static fw::initdata::RegionCConfig> {
+        self.region_c.ok_or(EINVAL)
+    }
+}
+
+impl FirmwareProfile {
+    /// The M5 firmware's protocol (26A428 InitData graph, queues and submission).
+    pub(crate) const fn is_m5(self) -> bool {
+        matches!(self, Self::M5NoBareMetalTables)
+    }
+}
+
 /// Static configuration of a SoC with a G17 GPU.
 pub(crate) struct Config {
     /// SoC identifier.
@@ -172,14 +206,18 @@ pub(crate) struct Config {
     pub(crate) secondary_root_offset: Option<u64>,
     /// Where the coprocessors' crash log buffers live.
     pub(crate) crash_buffers: CrashBuffers,
-    /// Parameter buffer page metrics shared with the firmware.
-    pub(crate) pm_metrics: FixedBuffer,
+    /// Firmware protocol.
+    pub(crate) profile: FirmwareProfile,
+    /// Parameter buffer page metrics shared with the firmware; `None` where the firmware graph
+    /// places its own (M5).
+    pub(crate) pm_metrics: Option<FixedBuffer>,
     /// Register windows the firmware maps through the hardware data.
     pub(crate) windows: &'static [fw::initdata::RegisterWindow],
     /// Register-map slots that are reserved but have no window.
     pub(crate) reserved_slots: &'static [usize],
-    /// Per-SoC parts of the performance tables.
-    pub(crate) perf: &'static fw::initdata::PerfConfig,
+    /// Per-SoC parts of the performance tables; `None` where the firmware graph has its own
+    /// (M5, [`fw::m5::initdata`]).
+    pub(crate) perf: Option<&'static fw::initdata::PerfConfig>,
     /// Number of operating points the device tree lists.
     pub(crate) opps: usize,
     /// UAT policy where it differs from the A18 Pro's.
@@ -191,8 +229,8 @@ pub(crate) struct Config {
     /// Enable the GPU-to-fabric bridge and dynamic core power gating before the firmware
     /// starts (A18 Pro). The M4 Pro has only run with neither written.
     pub(crate) fabric_bridge: bool,
-    /// The SoC's values of region C.
-    pub(crate) region_c: &'static fw::initdata::RegionCConfig,
+    /// The SoC's values of region C; `None` where the firmware graph has its own (M5).
+    pub(crate) region_c: Option<&'static fw::initdata::RegionCConfig>,
     pub(crate) chip: Option<&'static fw::initdata::v25g83::Chip>,
     /// Physical address of the firmware's per-slot recovery keys, read while the firmware is
     /// halted to attribute a fault; `None` where it is unknown (recovery then relies on the
@@ -1394,6 +1432,19 @@ impl Gpu {
         Ok((freq_hz.ok_or(EINVAL)? / 1000).try_into()?)
     }
 
+    /// Starts the M5 firmware. It runs only on page tables the driver owns, which no M5 board
+    /// has yet.
+    fn boot_m5(
+        _pdev: &platform::Device<Core<'_>>,
+        _dev: &AsahiDrmDevice,
+        _cfg: &'static Config,
+        _regs: regs::G17Resources,
+        _geometry: mmu::UatGeometry,
+        _shared: &Arc<Shared>,
+    ) -> Result<KBox<Firmware>> {
+        Err(ENODEV)
+    }
+
     /// Starts both coprocessors and initializes their firmware.
     fn boot(
         pdev: &platform::Device<Core<'_>>,
@@ -1403,6 +1454,9 @@ impl Gpu {
         geometry: mmu::UatGeometry,
         shared: &Arc<Shared>,
     ) -> Result<KBox<Firmware>> {
+        if cfg.profile.is_m5() {
+            return Self::boot_m5(pdev, dev, cfg, regs, geometry, shared);
+        }
         let uat = Arc::new(
             mmu::Uat::new(
                 dev.into(),
@@ -1421,8 +1475,8 @@ impl Gpu {
         let pm_metrics = KernelObject::new(
             dev,
             uat.kernel_lower_vm(),
-            Placement::At(cfg.pm_metrics.va),
-            cfg.pm_metrics.size,
+            Placement::At(cfg.pm_metrics()?.va),
+            cfg.pm_metrics()?.size,
             mmu::PROT_GPU_FW_SHARED_RW,
             CpuMap::WriteCombined,
         )?;
@@ -1744,7 +1798,7 @@ impl gpu::Gpu for Gpu {
             .with_status()?;
         let mappings = firmware.init.user_aliases(&vm, &firmware._pm_metrics)?;
         let ranges =
-            hw::t8140::resources::client_reserved_ranges(self.cfg.pm_metrics.va).ok_or(EINVAL)?;
+            hw::t8140::resources::client_reserved_ranges(self.cfg.pm_metrics()?.va).ok_or(EINVAL)?;
         let mut reserved = KVec::with_capacity(ranges.len(), GFP_KERNEL)?;
         for range in ranges {
             reserved.push(range, GFP_KERNEL)?;

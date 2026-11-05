@@ -19,6 +19,7 @@ mod t604x;
 pub(crate) mod t8103;
 pub(crate) mod t8112;
 pub(crate) mod t8140;
+pub(crate) mod t6050;
 
 /// GPU generation enumeration. Note: Part of the UABI.
 #[derive(Debug, PartialEq, Copy, Clone)]
