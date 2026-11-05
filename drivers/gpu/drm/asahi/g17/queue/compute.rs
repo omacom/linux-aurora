@@ -623,6 +623,9 @@ pub(crate) struct Queue {
     /// and whether that wait was reported.
     kill_wait: Option<(u64, bool)>,
     installed: bool,
+    /// The owner re-arming this vacant queue: only it builds the fresh backing, so concurrent
+    /// waiters do not each build a pool for the same queue.
+    rearm_for: Option<u64>,
     configuration: Option<configuration::Configuration>,
     m5_install: Option<u32>,
     /// Bit `p` set once a work slot of priority class `p` named this queue.
@@ -704,6 +707,7 @@ impl Queue {
             exit: None,
             kill_wait: None,
             installed: false,
+            rearm_for: None,
             configuration: None,
             m5_install: None,
             outer_started: 0,
@@ -1717,6 +1721,7 @@ impl Queue {
             if same_vm { 2 } else { 1 },
         );
         self.owner = Some(owner);
+        self.rearm_for = None;
         self.unpublished_binding = true;
         self.released = false;
         self.retirement_ready = false;
@@ -1905,6 +1910,18 @@ impl Queue {
     }
     pub(crate) fn pool_vacant(&self) -> bool {
         self.pool_phase == PoolPhase::Vacant
+    }
+    /// No other owner is re-arming this queue.
+    pub(crate) fn rearm_open(&self, owner: u64) -> bool {
+        self.rearm_for.is_none_or(|reserved| reserved == owner)
+    }
+    pub(crate) fn reserve_rearm(&mut self, owner: u64) {
+        self.rearm_for = Some(owner);
+    }
+    pub(crate) fn release_rearm(&mut self, owner: u64) {
+        if self.rearm_for == Some(owner) {
+            self.rearm_for = None;
+        }
     }
     /// Publishes the release of this idle queue's free list. The caller holds the
     /// device mutex and rings the control doorbell afterwards.

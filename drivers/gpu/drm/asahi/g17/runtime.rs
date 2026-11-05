@@ -404,14 +404,24 @@ impl Registry {
                 continue;
             }
             if queue.pool_vacant() {
-                vacant.get_or_insert(queue.qid());
+                if queue.rearm_open(owner) {
+                    vacant.get_or_insert(queue.qid());
+                }
                 continue;
             }
             if !queue.pool_fits(required) || !queue.pool_serves(context.vm()) { continue; }
             queue.bind_owner(owner, context.clone())?;
             return Ok(Some(Rebind::Done));
         }
-        Ok(vacant.map(Rebind::Rearm))
+        let Some(qid) = vacant else { return Ok(None) };
+        // Reserved for this owner until it binds the queue or gives up: other owners wait for
+        // a channel instead of each building a pool for the same queue.
+        self.compute.iter_mut().flatten()
+            .filter_map(|entry| entry.queue.as_deref_mut())
+            .find(|queue| queue.qid() == qid)
+            .ok_or(EIO)?
+            .reserve_rearm(owner);
+        Ok(Some(Rebind::Rearm(qid)))
     }
 
     /// Installs fresh USC backing into the vacant queue `qid`; the caller writes
@@ -430,6 +440,16 @@ impl Registry {
             .find(|queue| queue.qid() == qid)
             .ok_or(EAGAIN)?;
         queue.rearm(pages, ring)
+    }
+
+    /// Ends `owner`'s re-arm reservation of `qid` when it did not bind the queue.
+    pub(super) fn release_rearm(&mut self, qid: u8, owner: u64) {
+        if let Some(mut queue) = self.compute.iter_mut().flatten()
+            .filter_map(|entry| entry.queue.as_deref_mut())
+            .find(|queue| queue.qid() == qid)
+        {
+            queue.release_rearm(owner);
+        }
     }
 
     pub(super) fn bind_rearmed(&mut self, qid: u8, owner: u64, context: &Arc<Context>) -> Result {
@@ -1076,6 +1096,51 @@ impl Backend {
         result
     }
 
+    /// Re-arms the vacant queue `qid` reserved for this owner with fresh zeroed backing, built
+    /// without the device mutex, and binds it. Some(true): bound; Some(false): retry (the
+    /// preparation epoch changed or the queue is no longer re-armable); None: no memory for
+    /// the backing now.
+    fn rearm_vacant(
+        &self,
+        qid: u8,
+        required: super::freelist::ComputeCapacity,
+        alloc: &super::object::Allocator<'_>,
+        objects: &Arc<super::object::Pool>,
+        lease: &super::preparation::Lease,
+        admission: &Admission<'_>,
+    ) -> Result<Option<bool>> {
+        let built = (|| -> Result<_> {
+            let pages = crate::g17::freelist::Pages::for_compute(alloc, required)?;
+            Ok((pages, compute::DescriptorRing::new(alloc, objects)?))
+        })();
+        let (pages, ring) = match built {
+            Err(error) if error == ENOSPC => return Ok(None),
+            result => result?,
+        };
+        let mut state = self.shared.state.lock();
+        admission.check()?;
+        let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
+        if !lease.is_current() {
+            return Ok(Some(false));
+        }
+        if let Err(error) = self.admission_open() { drop(state); return Err(error); }
+        // Leave rejected backing local so it is dropped after the device guard, not in
+        // rearm().
+        let ready = firmware.queues.compute.iter().flatten()
+            .filter_map(|entry| entry.queue.as_deref())
+            .any(|queue| queue.qid() == qid && queue.can_rearm() && queue.rearm_open(self.owner));
+        if !ready { drop(state); return Ok(Some(false)); }
+        let descriptor = match firmware.queues.rearm_compute(qid, pages, ring) {
+            Err(error) if error == EAGAIN => return Ok(Some(false)),
+            result => result?,
+        };
+        // The firmware consumed this slot's release before the backing
+        // was dropped; the row is rewritten before the queue is kicked.
+        firmware.init.install_compute_pool(descriptor)?;
+        firmware.queues.bind_rearmed(qid, self.owner, &self.context)?;
+        Ok(Some(true))
+    }
+
     fn build_compute(&self, required: super::freelist::ComputeCapacity, admission: &Admission<'_>) -> Result {
         admission.check()?;
         self.admission_open()?;
@@ -1153,43 +1218,23 @@ impl Backend {
             let reservation = match reservation {
                 Ok(reservation) => reservation,
                 Err(qid) => {
-                    // Fresh zeroed backing is built without the device mutex; the
-                    // queue may have been taken or re-armed by another owner since.
-                    let built = (|| -> Result<_> {
-                        let pages = crate::g17::freelist::Pages::for_compute(&alloc, required)?;
-                        Ok((pages, compute::DescriptorRing::new(&alloc, &objects)?))
-                    })();
-                    let (pages, ring) = match built {
-                        Err(error) if error == ENOSPC => {
+                    // bind_reusable reserved `qid` for this owner: any outcome but binding it
+                    // ends the reservation, so another owner may re-arm it.
+                    let result = self.rearm_vacant(qid, required, &alloc, &objects, &lease, admission);
+                    if !matches!(result, Ok(Some(true))) {
+                        if let Some(firmware) = self.shared.state.lock().as_deref_mut() {
+                            firmware.queues.release_rearm(qid, self.owner);
+                        }
+                    }
+                    match result? {
+                        Some(true) => return Ok(()),
+                        Some(false) => continue,
+                        None => {
                             drop(lease);
                             self.wait_channels(observed, admission, true)?;
                             continue;
                         }
-                        result => result?,
-                    };
-                    let mut state = self.shared.state.lock();
-                    admission.check()?;
-                    let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
-                    if !lease.is_current() {
-                        continue;
                     }
-                    if let Err(error) = self.admission_open() { drop(state); return Err(error); }
-                    // A competing ready owner may have taken/rearmed it while
-                    // backing was built off-lock. Leave rejected backing local
-                    // so it is dropped after the device guard, not in rearm().
-                    let ready = firmware.queues.compute.iter().flatten()
-                        .filter_map(|entry| entry.queue.as_deref())
-                        .any(|queue| queue.qid() == qid && queue.can_rearm());
-                    if !ready { drop(state); continue; }
-                    let descriptor = match firmware.queues.rearm_compute(qid, pages, ring) {
-                        Err(error) if error == EAGAIN => continue,
-                        result => result?,
-                    };
-                    // The firmware consumed this slot's release before the backing
-                    // was dropped; the row is rewritten before the queue is kicked.
-                    firmware.init.install_compute_pool(descriptor)?;
-                    firmware.queues.bind_rearmed(qid, self.owner, &self.context)?;
-                    return Ok(());
                 }
             };
             let built = (|| {
