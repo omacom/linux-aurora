@@ -420,6 +420,7 @@ struct brcmf_pciedev_info {
 	bool irq_ready;
 	bool have_msi;
 	bool wowl_enabled;
+	bool d3_ack_missed;
 	u8 dma_idx_sz;
 	void *idxbuf;
 	u32 idxbuf_sz;
@@ -1080,7 +1081,10 @@ static irqreturn_t brcmf_pcie_quick_check_isr(int irq, void *arg)
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)arg;
 
 	if (brcmf_pcie_read_pcie32(devinfo, devinfo->reginfo->mailboxint)) {
-		brcmf_pcie_intr_disable(devinfo);
+		/* Mask the dongle only: irq_ready gates ring servicing while the
+		 * rings are not set up or are being torn down, not this IRQ.
+		 */
+		brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxmask, 0);
 		brcmf_dbg(PCIE, "Enter\n");
 		return IRQ_WAKE_THREAD;
 	}
@@ -1113,8 +1117,13 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 	}
 
 	brcmf_pcie_bus_console_read(devinfo, false);
-	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
-		brcmf_pcie_intr_enable(devinfo);
+	/* Unmask, but leave irq_ready to the code that sets the rings up and
+	 * tears them down.
+	 */
+	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && READ_ONCE(devinfo->irq_ready))
+		brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxmask,
+					devinfo->reginfo->int_d2h_db |
+					devinfo->reginfo->int_fn0);
 	devinfo->in_irq = false;
 	return IRQ_HANDLED;
 }
@@ -3059,24 +3068,40 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 {
 	struct brcmf_pciedev_info *devinfo;
 	struct brcmf_bus *bus;
+	int err;
 
 	brcmf_dbg(PCIE, "Enter\n");
 
 	bus = dev_get_drvdata(dev);
+	if (!bus)	/* a reload on resume failed: nothing to suspend */
+		return 0;
 	devinfo = bus->bus_priv.pcie->devinfo;
 
 	brcmf_pcie_fwcon_timer(devinfo, false);
 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
 
 	devinfo->mbdata_completed = false;
-	brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D3_INFORM);
-
-	wait_event_timeout(devinfo->mbdata_resp_wait, devinfo->mbdata_completed,
-			   BRCMF_PCIE_MBDATA_TIMEOUT);
+	err = brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D3_INFORM);
+	if (err)
+		brcmf_err(bus, "Failed to send D3_INFORM: %d\n", err);
+	else
+		wait_event_timeout(devinfo->mbdata_resp_wait,
+				   devinfo->mbdata_completed,
+				   BRCMF_PCIE_MBDATA_TIMEOUT);
 	if (!devinfo->mbdata_completed) {
-		brcmf_err(bus, "Timeout on response for entering D3 substate\n");
-		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
-		return -EIO;
+		if (devinfo->wowl_enabled) {
+			brcmf_err(bus, "Timeout on response for entering D3 substate\n");
+			brcmf_bus_change_state(bus, BRCMF_BUS_UP);
+			return -EIO;
+		}
+
+		/* Without WoWL nothing needs the dongle's state across the
+		 * suspend, so continue. If the chip stays powered (s2idle),
+		 * leave_D3 would find it up and carry on with firmware that did
+		 * not acknowledge: reload it on resume instead.
+		 */
+		brcmf_err(bus, "D3_INFORM not acknowledged, reloading firmware on resume\n");
+		devinfo->d3_ack_missed = true;
 	}
 
 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
@@ -3095,11 +3120,14 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 	brcmf_dbg(PCIE, "Enter\n");
 
 	bus = dev_get_drvdata(dev);
+	if (!bus)	/* an earlier reload failed */
+		return 0;
 	devinfo = bus->bus_priv.pcie->devinfo;
 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
 
 	/* Check if device is still up and running, if so we are ready */
-	if (brcmf_pcie_read_pcie32(devinfo, devinfo->reginfo->intmask) != 0) {
+	if (!devinfo->d3_ack_missed &&
+	    brcmf_pcie_read_pcie32(devinfo, devinfo->reginfo->intmask) != 0) {
 		brcmf_dbg(PCIE, "Try to wakeup device....\n");
 		/* Set the device up, so we can write the MB data message in ring mode */
 		devinfo->state = BRCMFMAC_PCIE_STATE_UP;
