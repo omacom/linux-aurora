@@ -318,7 +318,7 @@ pub(crate) mod resources {
     ];
     pub(crate) const TVB_GROWTH: u64 = USER_BASE + 0x0400_0000;
     pub(crate) const TVB_PAIR_STRIDE: u64 = 0x2800_0000;
-    pub(crate) const RESERVED_RANGES: usize = 48;
+    pub(crate) const RESERVED_RANGES: usize = 50;
 
     /// Compact allocations search these shared client arenas in this order.
     pub(crate) fn compact_ranges() -> [Range<u64>; 4] {
@@ -365,6 +365,13 @@ pub(crate) mod resources {
         }
         add(AUXILIARY);
         add(metrics_va..metrics_va.checked_add(METRICS_SIZE)?);
+        // The dynamic arenas the kernel places a client's queue aliases in (kick and
+        // descriptor rings, render generation state, client-private compute and render
+        // backing) stay reserved from creation too, as the fixed windows above are: an alias
+        // created later is then never mapped over a user bind, and the bind check's view of the
+        // reserved ranges cannot change between parsing a bind and committing it.
+        add(super::dynamic::LOWER);
+        add(super::dynamic::CLIENT_LOWER);
         Some(ranges)
     }
 }

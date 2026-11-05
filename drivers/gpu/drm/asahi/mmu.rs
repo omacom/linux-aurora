@@ -612,6 +612,11 @@ impl gpuvm::DriverGpuVm for VmInner {
         if ctx.dev.is_none() {
             return Err(ENODEV);
         }
+        // A live leaf in the range belongs to another mapping, such as a kernel alias in a
+        // driver window: refuse before writing anything, so the rollback below never clears
+        // that mapping's leaves.
+        self.page_table
+            .ensure_unmapped(map_addr..map_addr + map_length as u64)?;
         if is_sparse_tile(op.flags()) {
             // Kernel tile fill: the GEM only anchors the GPUVA.
             let result = if one_page {
@@ -1002,6 +1007,12 @@ impl VmInner {
         self.page_table.prepare_map(node.start()..end)?;
         let uat_inner = self.uat_inner.clone();
         let handoff = uat_inner.lock_m4_upper(self.is_kernel)?;
+        // Refuse a range holding another mapping's leaves before writing anything: the
+        // discard below clears the whole range.
+        if let Err(error) = self.page_table.ensure_unmapped(node.start()..end) {
+            drop(handoff);
+            return Err(error);
+        }
         let result = self.map_node_prepared(node, prot);
         let discard = if result.is_err() {
             // Rollback still changes live leaves and must remain under the PPL lease.
@@ -2896,6 +2907,13 @@ impl Vm {
         let transaction_uat = inner.uat_inner.clone();
         let handoff = transaction_uat.lock_m4_upper(inner.is_kernel)?;
         let mutation = inner.mapping_mutation();
+        // As for kernel mappings: refuse another mapping's leaves before the discard below
+        // could clear them.
+        if let Err(error) = inner.page_table.ensure_unmapped(iova..end) {
+            drop(mutation);
+            drop(handoff);
+            return Err(error);
+        }
         let ret = inner
             .page_table
             .map_pages(iova..end, phys as PhysicalAddr, prot, false);

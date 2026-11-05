@@ -986,11 +986,15 @@ impl UatPageTable {
             for (idx, pte) in ptes.iter().enumerate() {
                 let ptev = pte.load(Ordering::Relaxed);
                 if ptev != 0 {
+                    // Never replace a live leaf: it belongs to another mapping. The callers
+                    // check their whole range first (`ensure_unmapped`), so this is reached
+                    // only by a collision they missed.
                     pr_err!(
                         "UATPageTable::map_pages: Page at IOVA {:#x} is mapped (PTE: {:#x})\n",
                         iova + (idx * UAT_PGSZ) as u64,
                         ptev
                     );
+                    return Err(EBUSY);
                 }
                 pte.store(phys | prot.as_pte() | pte_bits, Ordering::Relaxed);
                 if !one_page {
@@ -998,6 +1002,28 @@ impl UatPageTable {
                 }
             }
             Ok(())
+        })
+    }
+
+    /// Refuses with `EBUSY`, writing nothing, when any leaf of `iova_range` is live.
+    ///
+    /// Every PTE store writes either zero or a complete entry, so a nonzero leaf belongs to
+    /// another mapping. A map operation checks its whole range with this before its first
+    /// store: its failure path clears the whole range it asked for, which would otherwise
+    /// also clear the other mapping's leaves.
+    pub(crate) fn ensure_unmapped(&mut self, iova_range: Range<u64>) -> Result {
+        self.walk(iova_range, false, false, false, |iova, ptes| {
+            match ptes.iter().position(|pte| pte.load(Ordering::Relaxed) != 0) {
+                Some(idx) => {
+                    pr_err!(
+                        "UATPageTable::ensure_unmapped: Page at IOVA {:#x} is mapped (PTE: {:#x})\n",
+                        iova + (idx * UAT_PGSZ) as u64,
+                        ptes[idx].load(Ordering::Relaxed)
+                    );
+                    Err(EBUSY)
+                }
+                None => Ok(()),
+            }
         })
     }
 
