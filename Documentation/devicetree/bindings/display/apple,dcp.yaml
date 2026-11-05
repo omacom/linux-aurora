@@ -17,6 +17,7 @@ description:
 properties:
   compatible:
     oneOf:
+      - const: apple,t6034-dcp
       - items:
           - enum:
               - apple,t8103-dcp
