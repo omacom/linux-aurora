@@ -259,10 +259,22 @@ impl Backend {
         sleep: bool,
         packet: &Packet,
     ) -> Result {
+        self.wait_render_retirement(clock, observed, sleep, packet, super::super::WORK_RING_WAIT_NS)
+    }
+
+    /// [`Self::wait_render_busy`] bounded at `bound_ns`.
+    fn wait_render_retirement(
+        &self,
+        clock: &mut WaitClock,
+        observed: &mut Option<u64>,
+        sleep: bool,
+        packet: &Packet,
+        bound_ns: u64,
+    ) -> Result {
         if !sleep {
             return Err(FALLBACK);
         }
-        let deadline = self.wait_deadline(clock, super::super::WORK_RING_WAIT_NS)?;
+        let deadline = self.wait_deadline(clock, bound_ns)?;
         // Sample, then retry once: only a refusal after the sample waits.
         let Some(sample) = observed.take() else {
             *observed = Some(self.shared.renders.observe());
@@ -405,6 +417,7 @@ impl Backend {
         let mut seen = None;
         let mut states = None;
         let mut outer_wait = None;
+        let mut channel = WaitClock::default();
         loop {
             if packet.cancel_requested() {
                 return Err(ECANCELED);
@@ -473,6 +486,15 @@ impl Backend {
                 result => result?,
             }
             match self.prepare_render(slot, packet, deferred, sleep, &mut outer_wait) {
+                Err(error)
+                    if !packet.is_published() && error == crate::g17::context::RENDER_CHANNEL_PENDING =>
+                {
+                    // Both of the context's render channels serve other pairs: one moves here
+                    // once its publications retire. Like a compute queue, it frees only as this
+                    // context's earlier work retires, so wait as long.
+                    self.wait_render_retirement(&mut channel, &mut seen, sleep, packet,
+                        crate::g17::preparation::QUEUE_WAIT_NS)?;
+                }
                 Err(error) if !packet.is_published() && error == ENOSPC => {
                     self.wait_render_capacity(&mut seen, &mut capacity, sleep)?;
                     continue;
