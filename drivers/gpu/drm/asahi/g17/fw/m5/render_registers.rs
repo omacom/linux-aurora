@@ -166,7 +166,10 @@ pub(crate) fn build_ta_registers_into(
                 out.push(0x0d499, controls.ta.resource_flags)?;
                 out.push(0x0d419, controls.ta.resource_control)?;
                 out.push(0x0a5a1, ptc_control(controls.ta.ptc_max))?;
-                register.value = controls.ta_tile_control;
+                // Above four clusters the tiler's control word takes the topology term, as
+                // compute's dispatch control does; the fragment side's must agree with it.
+                register.value =
+                    super::compute::dispatch_control(controls.board, controls.ta_tile_control);
             }
             0x10171 => {
                 for (number, source) in [(0x1ca50, 0x101b9), (0x1ca58, 0x10149), (0x1ca60, 0x10141)]
@@ -231,7 +234,10 @@ pub(crate) fn build_fragment_registers_into(
             0x0a301 | 0x15109 | 0x15101 | 0x160a8 | 0x0a5a9 | 0x0d429 => continue,
             0x100b1 => register.reg = 0x16469,
             0x100d9 => register.reg = 0x16471,
-            0x100b8 => register.reg = 0x16138,
+            0x100b8 => {
+                register.reg = 0x16138;
+                register.value = super::compute::dispatch_control(controls.board, register.value);
+            }
             0x10791 => {
                 let scratch = controls.fragment.scs.scratch;
                 register.value = if scratch.enabled() {
