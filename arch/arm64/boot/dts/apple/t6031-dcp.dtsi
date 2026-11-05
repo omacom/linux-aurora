@@ -11,8 +11,8 @@
  * Every node stays status = "disabled". The display gate enables the DCP,
  * its mailbox, the two DARTs and the display subsystem only when the boot
  * loader has set apple,t6031-handoff = <1> and the native display is
- * requested: by default on the J516C, with apple_t6031_display.enable=1 on
- * the other boards, never with apple_t6031_display.enable=0. Compatibles are t6031-specific,
+ * requested: by default on J514C and J516C, with apple_t6031_display.enable=1 on
+ * other T6031 boards, never with apple_t6031_display.enable=0. Compatibles are t6031-specific,
  * so a kernel that does not know them leaves the nodes unbound.
  *
  * Only the T6031 board files include this file: t6034.dtsi includes
