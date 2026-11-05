@@ -184,6 +184,35 @@ esp_bootbin() {{ [[ -f '{self.esp}/m1n1/boot.bin' ]] && echo '{self.esp}/m1n1/bo
         self.assertIn("stage 1 is v1.7.0", proc.stderr)
         self.assertIn("Nothing was installed", proc.stderr)
 
+    def asahi_installer_mac(self, board, os_fw="14.7"):
+        # A Mac set up by the Asahi installer: clean v1.6.1 stage 1, same 14.8.3 stub.
+        self.mac(board, stage1="v1.6.1")
+        (self.dt / "chosen" / "asahi,os-fw-version").write_bytes(os_fw.encode() + b"\0")
+
+    def test_stage1_clean_on_j514s_with_handoff(self):
+        self.asahi_installer_mac("j514s")
+        self.assertEqual(self.run_sh("M3_TRY=1\nm3_stage1_problem").stdout, "")
+        self.assertEqual(self.plan(try_=1), "handoff")
+
+    def test_stage1_clean_on_j514s_without_handoff(self):
+        # A plain run keeps the kernel-only install, as before.
+        self.asahi_installer_mac("j514s")
+        self.assertIn("stage 1 is v1.6.1", self.run_sh("m3_stage1_problem").stdout)
+        self.assertEqual(self.plan(), "kernel")
+
+    def test_stage1_clean_on_j514s_needs_the_stub(self):
+        for os_fw, stub in [("13.5", "14.8.3"), ("14.7", "15.6")]:
+            with self.subTest(os_fw=os_fw, stub=stub):
+                self.asahi_installer_mac("j514s", os_fw=os_fw)
+                self.mac("j514s", stage1="v1.6.1", stub=stub)
+                proc = self.run_sh("M3_TRY=1\nm3_plan", check=False)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("Nothing was installed", proc.stderr)
+
+    def test_stage1_clean_stays_refused_on_j516s(self):
+        self.asahi_installer_mac("j516s")
+        self.assertIn("stage 1 is v1.6.1", self.run_sh("M3_TRY=1\nm3_stage1_problem").stdout)
+
     def test_overlap_marker(self):
         self.mac("j516s")
         self.assertEqual(self.run_sh("m3_oslog_overlap_check").stderr, "")

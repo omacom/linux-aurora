@@ -1099,10 +1099,17 @@ m3_stub_problem() {
 # M3_STAGE1_VERSIONS); nothing when it is.
 # Clean v1.6.1 has the same base/entry/BootArgs chainload ABI as aurora13.
 # Both supported Air boards use the same T8122 chainload ABI and exact stub.
+# The 14" M3 Pro (J514S) qualifies on the same terms: an Asahi-installer
+# Mac reports clean v1.6.1 where an Omarchy-installer Mac reports
+# v1.6.1-dirty, with the same 14.8.3 stub. Only with --m3-handoff.
 m3_clean_stage1_14_qualified() {
   local fw target version
-  [[ $M3_GPU_PROFILE == legacy && ($(this_board) == j613 || $(this_board) == j615) && $(this_soc) == t8122 &&
-      " $M3_PERSISTENT_BOARDS " == *" $(this_board) "* ]] || return 1
+  if [[ $M3_GPU_PROFILE == legacy && $(this_board) == j514s && $(this_soc) == t6030 ]]; then
+    ((M3_TRY)) || return 1
+  else
+    [[ $M3_GPU_PROFILE == legacy && ($(this_board) == j613 || $(this_board) == j615) && $(this_soc) == t8122 &&
+        " $M3_PERSISTENT_BOARDS " == *" $(this_board) "* ]] || return 1
+  fi
   [[ ! -e $DT/$M3_OSLOG_OVERLAP ]] || return 1
   fw=$({ tr -d '\0' <"$DT/chosen/asahi,os-fw-version"; } 2>/dev/null) || return 1
   [[ ($fw == 14.7 || $fw == 14.8.3) && -z $(m3_stub_problem) ]] || return 1
