@@ -623,20 +623,17 @@ impl InitData {
         Ok(())
     }
 
-    /// Resource-specific wait domain; register only after dropping the device
-    /// mutex. A successful claim allocates no waiter fence.
-    pub(crate) fn outer_available(&mut self) -> Result<Arc<super::availability::Availability>> {
-        if self.outer_credits.is_none() {
-            self.outer_credits = Some(outer_credit::Credits::new()?);
-        }
-        Ok(self.outer_credits.as_ref().ok_or(EIO)?.available())
+    /// The domain outer-ring waiters sleep on: unposted claims returned, or firmware
+    /// consumption seen by `poll_outer_progress`. Register only after dropping the device
+    /// mutex; a successful claim allocates no waiter fence. ENODEV off M5.
+    pub(crate) fn outer_available(&self) -> Result<Arc<super::availability::Availability>> {
+        Ok(self.outer_credits.as_ref().ok_or(ENODEV)?.available())
     }
 
     /// M5 TA, fragment and compute share the compute outer ring per priority.
     /// The physical queue claim prevents reassignment while this credit lives.
-    pub(crate) fn reserve_outer(&mut self, priority: u8, count: u32) -> Result<OuterClaim> {
+    pub(crate) fn reserve_outer(&self, priority: u8, count: u32) -> Result<OuterClaim> {
         if !self.m5 { return Err(EINVAL); }
-        self.outer_available()?;
         let cursors = self.work_cursors(priority, super::fw::queue::DataMaster::Compute)?;
         self.outer_credits.as_ref().ok_or(EIO)?.reserve(priority, count, cursors)
     }

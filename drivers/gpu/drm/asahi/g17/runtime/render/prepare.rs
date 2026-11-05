@@ -844,7 +844,9 @@ impl super::super::Backend {
         packet: &Arc<Packet>,
         deferred: &mut super::super::DeferredBatch,
         sleep: bool,
+        outer_wait: &mut Option<(Arc<crate::g17::availability::Availability>, u64)>,
     ) -> Result {
+        *outer_wait = None;
         let lease = self.enter_preparation(sleep)?;
         let dev = self.shared.drm()?;
         let (uat, mut pair, addresses, growth_target) = {
@@ -867,6 +869,15 @@ impl super::super::Backend {
                     firmware.init.stamp_addresses(qids[1])?,
                 ],
             };
+            // M5: the pair's two slots on the shared work ring are claimed before preparing
+            // and lent to its publication. Sampled first: a miss waits for the next return.
+            if let Ok(domain) = firmware.init.outer_available() {
+                let observed = domain.observe();
+                if !self.claim_outer(firmware, crate::g17::job::Engine::Render)? {
+                    *outer_wait = Some((domain, observed));
+                    return Err(EBUSY);
+                }
+            }
             let pair = firmware
                 .queues
                 .render
@@ -956,6 +967,12 @@ impl super::super::Backend {
             if packet.cancel_requested() || firmware.queues.render.entry(slot)?.closed {
                 return Err(ECANCELED);
             }
+            let mut held = self.outer_render.lock();
+            let _scope = (*held)
+                .as_mut()
+                .filter(|claim| claim.remaining() != 0)
+                .map(|claim| firmware.init.outer_scope(claim))
+                .transpose()?;
             firmware.publish_render(self.owner, slot, packet, deferred)
         })();
         let result = (|| {

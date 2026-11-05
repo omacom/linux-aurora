@@ -541,8 +541,12 @@ impl crate::g17::Shared {
                 self.queue_reclaims();
             }
         }
+        // The firmware may consume M5 work-ring slots without a completion interrupt: while
+        // a preparation waits for unclaimed room, every pass polls the consumers.
+        let outer = firmware.init.poll_outer_progress()?;
         let backpressured = firmware.render_control_backpressured();
         let polling = backpressured
+            || firmware.init.outer_waiting()
             || firmware.queues.replay_outer_wait.is_some()
             || firmware.queues.replay_consumer_wait.is_some()
             || firmware.queues.render.replay_polling()
@@ -593,6 +597,10 @@ impl crate::g17::Shared {
         drop(state);
         if grow_ready {
             self.queue_grow();
+        }
+        // Outside the device mutex: the notification can run DMA-fence callbacks.
+        if let Some(domain) = outer {
+            domain.notify();
         }
         // Firmware ring room, consumed releases and teardown steps have no
         // event of their own: recheck render publishers' conditions every pass.

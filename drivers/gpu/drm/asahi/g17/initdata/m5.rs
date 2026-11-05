@@ -86,6 +86,9 @@ impl InitData {
         use mmu::{PROT_FW_SHARED_RW as RW, PROT_FW_SHARED_RO as RO,
                   PROT_GPU_SHARED_RW as GPU};
         self.m5 = true;
+        // TA, fragment and compute share the compute work ring per priority; every
+        // preparation's claim on it is counted from the first publication on.
+        self.outer_credits = Some(super::outer_credit::Credits::new()?);
         let fixed = |address, size, protection| KernelObject::new(dev,
             uat.kernel_vm(), Placement::At(address), size, protection, CpuMap::WriteCombined);
         let fixed_controller = |address, size| {

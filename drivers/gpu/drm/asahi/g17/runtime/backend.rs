@@ -94,6 +94,8 @@ impl Backend {
         // Record intent before scanning queues; every later install/rearm checks it.
         self.closed.store(true, Ordering::Release);
         self.hold_claim(None);
+        self.release_outer(Engine::Compute);
+        self.release_outer(Engine::Render);
         let mut state = self.shared.state.lock();
         let Some(firmware) = (*state).as_deref_mut() else {
             return Ok(());
@@ -281,6 +283,7 @@ impl job::Backend for Backend {
         if packet.engine() == Engine::Compute {
             self.hold_claim(None);
         }
+        self.release_outer(packet.engine());
         self.release_backlog(&packet);
         self.finish_publication(&packet, result, &mut deferred)
     }
@@ -312,6 +315,7 @@ impl job::Backend for Backend {
         if packet.engine() == Engine::Compute {
             self.hold_claim(None);
         }
+        self.release_outer(packet.engine());
         if packet.request_cancel() {
             Deferred::Unpublished(packet.completion.clone(), ECANCELED).finish();
             return;

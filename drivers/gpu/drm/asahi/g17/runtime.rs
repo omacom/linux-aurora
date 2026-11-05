@@ -659,6 +659,8 @@ pub(super) enum Readiness {
     Channel,
     /// Retirement-bound capacity or reopened publication.
     Progress,
+    /// M5: no unclaimed room on the shared work ring.
+    Outer,
 }
 
 /// Outcome of offering an owner a retained compute queue.
@@ -718,6 +720,13 @@ pub(super) struct Backend {
     /// channel from being shared away between prepare_job and run_job.
     #[pin]
     claimed: kernel::sync::Mutex<Option<Arc<ComputeCell>>>,
+    /// M5: this owner's claims on the work ring M5 TA, fragment and compute share, one per
+    /// engine, taken while preparing a publication and consumed by it
+    /// ([`Backend::claim_outer`], [`Backend::publish_claimed`]).
+    #[pin]
+    outer_compute: kernel::sync::Mutex<Option<super::initdata::OuterClaim>>,
+    #[pin]
+    outer_render: kernel::sync::Mutex<Option<super::initdata::OuterClaim>>,
     /// Render pair admission, shared by every logical queue of the session.
     admission: Arc<admission::Pool>,
     /// The render pair this owner last published to without the device mutex
@@ -825,6 +834,8 @@ impl Backend {
                     closed: core::sync::atomic::AtomicBool::new(false),
                     direct <- kernel::new_mutex!(None, "g17::Backend::direct"),
                     claimed <- kernel::new_mutex!(None, "g17::Backend::claimed"),
+                    outer_compute <- kernel::new_mutex!(None, "g17::Backend::outer_compute"),
+                    outer_render <- kernel::new_mutex!(None, "g17::Backend::outer_render"),
                     admission,
                     direct_slot: core::sync::atomic::AtomicU32::new(0),
                 }),
@@ -1957,21 +1968,92 @@ impl Backend {
             return None;
         }
         let required = self.compute_capacity(&packet.command).ok()?;
+        let outer = self.outer_domain();
         loop {
             let channels = self.shared.channels.observe();
             let progress = self.shared.progress.observe();
-            let (domain, observed) = match self.compute_readiness(packet, required) {
-                Readiness::Ready => return None,
-                Readiness::Channel => (&self.shared.channels, channels),
-                Readiness::Progress => (&self.shared.progress, progress),
+            let claimed = outer.as_ref().map(|domain| domain.observe());
+            let (domain, observed) = match (self.compute_readiness(packet, required), &outer, claimed) {
+                (Readiness::Ready, ..) => return None,
+                (Readiness::Channel, ..) => (&self.shared.channels, channels),
+                (Readiness::Progress, ..) => (&self.shared.progress, progress),
+                (Readiness::Outer, Some(domain), Some(observed)) => (domain, observed),
+                (Readiness::Outer, ..) => return None,
             };
-            self.shared.queue_events();
             match domain.wait(observed) {
-                Ok(Some(fence)) => return Some(fence),
+                Ok(Some(fence)) => {
+                    // Registered first: the event worker polls outer consumption only for waiters.
+                    self.shared.queue_events();
+                    return Some(fence);
+                }
                 Ok(None) => continue,
                 Err(_) => return None,
             }
         }
+    }
+
+    /// M5: the domain outer-ring claims wait on. None off M5 or without firmware.
+    fn outer_domain(&self) -> Option<Arc<super::availability::Availability>> {
+        self.shared.state.lock().as_deref().and_then(|firmware| firmware.init.outer_available().ok())
+    }
+
+    /// M5: holds this owner's claim on the shared work ring for the next compute or render
+    /// publication, reserving one under the device mutex unless one with credits left is
+    /// held. False: no unclaimed room; wait on [`Self::outer_domain`] from a sample taken
+    /// before this call. Always true off M5.
+    fn claim_outer(&self, firmware: &super::Firmware, engine: crate::g17::job::Engine) -> Result<bool> {
+        if !firmware.init.is_m5() {
+            return Ok(true);
+        }
+        let (held, count) = match engine {
+            crate::g17::job::Engine::Compute => (
+                &self.outer_compute,
+                firmware.queues.compute(self.owner).map_or(2, |queue| queue.outer_slots()),
+            ),
+            // Tiling and fragment: one slot each.
+            crate::g17::job::Engine::Render => (&self.outer_render, 2),
+        };
+        let mut held = held.lock();
+        if held.as_ref().is_some_and(|claim| claim.remaining() != 0) {
+            return Ok(true);
+        }
+        match firmware.init.reserve_outer(self.context.policy().priority(), count) {
+            Ok(claim) => {
+                // Replaces only a spent claim, whose drop notifies nobody.
+                *held = Some(claim);
+                Ok(true)
+            }
+            Err(error) if error == EBUSY => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Publishes into this owner's compute channel, lending the held outer claim's credits.
+    fn publish_claimed(
+        &self,
+        firmware: &mut super::Firmware,
+        packet: &Arc<super::job::Packet>,
+        dependencies: &[super::fw::kick::KickDependency],
+        deferred: &mut DeferredBatch,
+    ) -> Result {
+        let mut held = self.outer_compute.lock();
+        let _scope = (*held)
+            .as_mut()
+            .filter(|claim| claim.remaining() != 0)
+            .map(|claim| firmware.init.outer_scope(claim))
+            .transpose()?;
+        firmware.publish_compute(self.owner, packet.clone(), dependencies, deferred)
+    }
+
+    /// Returns an engine's unspent outer claim after its publication, cancellation or close.
+    /// Outside the device mutex: returned credits notify waiters.
+    pub(super) fn release_outer(&self, engine: crate::g17::job::Engine) {
+        let held = match engine {
+            crate::g17::job::Engine::Compute => &self.outer_compute,
+            crate::g17::job::Engine::Render => &self.outer_render,
+        };
+        let claim = held.lock().take();
+        drop(claim);
     }
 
     fn compute_readiness(&self, packet: &Arc<super::job::Packet>, required: super::freelist::ComputeCapacity) -> Readiness {
@@ -1995,7 +2077,15 @@ impl Backend {
                 });
                 if bound {
                     self.hold_claim(Some(cell));
-                    return Readiness::Ready;
+                    if !self.context.is_m5() {
+                        return Readiness::Ready;
+                    }
+                    let state = self.shared.state.lock();
+                    let Some(firmware) = state.as_deref() else { return Readiness::Ready; };
+                    return match self.claim_outer(firmware, crate::g17::job::Engine::Compute) {
+                        Ok(false) => Readiness::Outer,
+                        _ => Readiness::Ready,
+                    };
                 }
             }
         }
@@ -2017,7 +2107,13 @@ impl Backend {
         {
             return Readiness::Progress;
         }
-        firmware.queues.compute_readiness(self.owner, Some((&self.context, required)))
+        match firmware.queues.compute_readiness(self.owner, Some((&self.context, required))) {
+            Readiness::Ready => match self.claim_outer(firmware, crate::g17::job::Engine::Compute) {
+                Ok(false) => Readiness::Outer,
+                _ => Readiness::Ready,
+            },
+            other => other,
+        }
     }
 
     /// Replaces the prepared packet's channel claim; None releases it after publication,
@@ -2143,8 +2239,11 @@ impl Backend {
         {
             return Err(render::FALLBACK);
         }
+        if !self.claim_outer(firmware, crate::g17::job::Engine::Compute)? {
+            return Err(render::FALLBACK);
+        }
         let dependencies = firmware.queues.render_prefix(self.owner, packet)?;
-        match firmware.publish_compute(self.owner, packet.clone(), dependencies.as_slice(), deferred) {
+        match self.publish_claimed(firmware, packet, dependencies.as_slice(), deferred) {
             Err(error) if (error == EBUSY || error == EAGAIN) && !packet.is_published() => {
                 Err(render::FALLBACK)
             }
@@ -2206,9 +2305,11 @@ impl Backend {
         };
         let admission = Admission::new(deadline, &check);
         let progress = &self.shared.progress;
+        let outer = self.outer_domain();
         loop {
             admission.check()?;
             let observed = progress.observe();
+            let claimed = outer.as_ref().map(|domain| domain.observe());
             if !self.sources_published(packet)? {
                 let recovering = self.shared.state.lock().as_deref().is_some_and(|firmware| {
                     firmware.recovery.pending()
@@ -2274,14 +2375,19 @@ impl Backend {
                 drop(lease);
                 continue;
             }
+            let held = self.claim_outer(firmware, crate::g17::job::Engine::Compute)?;
+            if let (false, Some(domain), Some(claimed)) = (held, &outer, claimed) {
+                // The shared work ring has no unclaimed room: consumption or returned claims
+                // free it.
+                drop(state);
+                drop(lease);
+                self.shared.queue_events();
+                self.wait_release(domain, claimed, &admission)?;
+                continue;
+            }
             let dependencies = firmware.queues.render_prefix(self.owner, packet)?;
             admission.check()?;
-            let result = firmware.publish_compute(
-                self.owner,
-                packet.clone(),
-                dependencies.as_slice(),
-                deferred,
-            );
+            let result = self.publish_claimed(firmware, packet, dependencies.as_slice(), deferred);
             if !packet.is_published()
                 && (matches!(result, Err(EAGAIN))
                     || (matches!(result, Err(EBUSY))

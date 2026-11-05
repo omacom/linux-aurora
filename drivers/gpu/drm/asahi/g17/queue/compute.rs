@@ -809,7 +809,6 @@ impl Queue {
     }
     /// Cold M5 installation publishes one configuration before the first kick.
     /// A prepared claim prevents reassignment while these credits are owned.
-    #[allow(dead_code)] // Read by M5 lazy admission, a follow-up.
     pub(crate) fn outer_slots(&self) -> u32 {
         if self.graph.m5 && self.m5_install.is_none() { 2 } else { 1 }
     }

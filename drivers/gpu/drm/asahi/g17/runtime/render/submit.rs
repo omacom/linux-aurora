@@ -404,6 +404,7 @@ impl Backend {
         let mut recovery_since = None;
         let mut seen = None;
         let mut states = None;
+        let mut outer_wait = None;
         loop {
             if packet.cancel_requested() {
                 return Err(ECANCELED);
@@ -471,7 +472,7 @@ impl Backend {
                 }
                 result => result?,
             }
-            match self.prepare_render(slot, packet, deferred, sleep) {
+            match self.prepare_render(slot, packet, deferred, sleep, &mut outer_wait) {
                 Err(error) if !packet.is_published() && error == ENOSPC => {
                     self.wait_render_capacity(&mut seen, &mut capacity, sleep)?;
                     continue;
@@ -498,6 +499,15 @@ impl Backend {
                         self.shared
                             .preparations
                             .wait_closure(gate, since.saturating_add(recovery_wait_ns()))?;
+                    } else if let Some((domain, observed)) = outer_wait.take() {
+                        // No unclaimed room on the shared work ring: consumption or a
+                        // returned claim frees it.
+                        if !sleep {
+                            return Err(FALLBACK);
+                        }
+                        let deadline = self.wait_deadline(&mut busy, super::super::WORK_RING_WAIT_NS)?;
+                        self.shared.queue_events();
+                        self.wait_domain(&domain, observed, deadline, packet)?;
                     } else if error == EBUSY {
                         self.wait_render_busy(&mut busy, &mut seen, sleep, packet)?;
                     } else if !sleep {
@@ -544,6 +554,7 @@ impl Backend {
             packet.abandon_publication();
             return false;
         }
+        self.release_outer(crate::g17::job::Engine::Render);
         let result = self
             .finish_publication(packet, result, &mut deferred)
             .map(|_| ());

@@ -110,6 +110,14 @@ impl Drop for OuterScope<'_> {
     }
 }
 
+impl OuterClaim {
+    /// Credits not yet consumed by a publication. A claim with none left can be dropped
+    /// anywhere: only returned credits notify waiters.
+    pub(crate) fn remaining(&self) -> u32 {
+        self.remaining
+    }
+}
+
 impl Drop for OuterClaim {
     /// As for physical queue claims, drop outside the device mutex because
     /// availability notification can run DMA-fence callbacks.

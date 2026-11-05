@@ -94,7 +94,14 @@ impl Firmware {
                     .and_then(|entry| entry.queue.as_deref_mut())
                     .ok_or(EIO)?
                     .clear_consumer_wait();
-                let outer_ready = self.port.compute_ready(packet.context.policy().priority())?;
+                // M5 compute takes its slot on the work ring M5 render shares, whose unclaimed
+                // room the publication checks (InitData::work_ready).
+                let priority = packet.context.policy().priority();
+                let outer_ready = if self.init.is_m5() {
+                    self.init.work_ready(priority, crate::g17::fw::queue::DataMaster::Compute)?
+                } else {
+                    self.port.compute_ready(priority)?
+                };
                 if !outer_ready {
                     let now = super::now_ns();
                     let since = *self.queues.replay_outer_wait.get_or_insert(now);
