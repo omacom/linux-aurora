@@ -301,8 +301,8 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
         e.mapping_count(),
         storage::IOMAP_BASE
     );
-    // J613/J615 have no SoC die temperature zone yet, so a cap above the no-feedback limit runs
-    // the fanless GPU without any temperature feedback (`m3_thermal` holds the cap but gets no
+    // J615 and J504 have no SoC die temperature zone yet, so a cap above the no-feedback limit
+    // runs the GPU without any temperature feedback (`m3_thermal` holds the cap but gets no
     // reading). The runtime cap and the firmware ceiling stay equal, because the cap is at most
     // the no-feedback limit.
     if v.pstate_cap > knobs::PSTATE_CAP {
