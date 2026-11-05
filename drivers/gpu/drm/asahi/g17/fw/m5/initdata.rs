@@ -1857,7 +1857,8 @@ pub(crate) const J775D: Board = Board {
     register_windows: &J775D_REGISTER_WINDOWS,
     // The minimum parameter buffer for eight clusters.
     min_parameter_buffer: 0x0050_0000,
-    render_pool: (0x40_0000, 1 << 32),
+    // 16 MiB render blocks in a 16 GiB inventory.
+    render_pool: (0x100_0000, 1 << 34),
     // The power model's synthetic leakage inputs hold for every J775D: no calibration words.
     calibration: None,
     controller_defaults: Some(encode_m5_policy_controller_defaults_j775d),
@@ -1875,6 +1876,7 @@ const _: () = {
     use super::target::min_parameter_buffer_pages;
     assert!(J714.min_parameter_buffer as u64 == min_parameter_buffer_pages(J714.clusters) << 15);
     assert!(J716C.min_parameter_buffer as u64 == min_parameter_buffer_pages(J716C.clusters) << 15);
+    assert!(J775D.min_parameter_buffer as u64 == min_parameter_buffer_pages(J775D.clusters) << 15);
 };
 
 /// Populate the enabled-USC count from the device's sampled core masks.
