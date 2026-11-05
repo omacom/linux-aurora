@@ -45,6 +45,9 @@ struct DirectHost<'a> {
 }
 
 impl crate::g17::queue::render::Host for DirectHost<'_> {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
     fn next_publication(&mut self) -> Result<u64> {
         Ok(self.port.next_publication())
     }
@@ -65,7 +68,7 @@ impl crate::g17::queue::render::Host for DirectHost<'_> {
     fn qos_cancel(&mut self, publication: crate::g17::qos::Publication) -> Result {
         self.port.qos_cancel(publication)
     }
-    fn install_pair(&mut self, _registration: &crate::g17::fw::kick::RenderRegistration) -> Result {
+    fn install_pair(&mut self, _registration: &crate::g17::queue::render::Registration) -> Result {
         Err(EAGAIN)
     }
     fn publish_qid(&mut self, _id: crate::g17::kick::Id) -> Result {
@@ -85,6 +88,16 @@ impl crate::g17::queue::render::Host for DirectHost<'_> {
         }
         self.port
             .write_render_pair(self.render, &self.room, fragment, tiling, commit, late_tiling)
+    }
+    fn publish_configuration_pair(
+        &mut self,
+        _priority: u8,
+        _fragment: &crate::g17::fw::channels::WorkSlot,
+        _tiling: &crate::g17::fw::channels::WorkSlot,
+        _prepare: impl FnOnce(),
+    ) -> Result {
+        // Only M5 publishes configuration pairs, never on this path.
+        Err(EINVAL)
     }
     fn activate_render_pool(&mut self, id: u16, generation: u64) -> Result {
         // The lease leaves preparation when the pair is returned; nothing can
@@ -186,6 +199,7 @@ impl crate::g17::Firmware {
         let lease = PublicationLease {
             free_list_generation: preparation.generation,
             buffer_token,
+            buffer_context: None,
         };
         let pair = match self.queues.render.take_pair(slot, owner, packet) {
             Ok(pair) => pair,
@@ -263,8 +277,10 @@ impl Backend {
         deferred: &mut DeferredBatch,
     ) -> Option<Result> {
         // A compute prefix needs the compute queue's state; leave it to the
-        // device-mutex path.
-        if packet.is_published()
+        // device-mutex path. M5 renders publish through the device mutex
+        // only: their host-port transaction is part of the publication.
+        if packet.context.is_m5()
+            || packet.is_published()
             || packet.cancel_requested()
             || packet.completion.status().get() != 0
             || packet.order.wait_through[1].unwrap_or(0) != 0

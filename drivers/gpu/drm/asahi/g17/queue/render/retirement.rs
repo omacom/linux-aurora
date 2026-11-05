@@ -39,7 +39,7 @@ pub(crate) struct Window {
 
 impl Window {
     pub(crate) fn new(base: u32, count: u32, capacity: u32) -> Result<Self> {
-        if base >= capacity || !(2..=MAX_GROUP_ITEMS).contains(&count) || count >= capacity {
+        if base >= capacity || !(1..=MAX_GROUP_ITEMS).contains(&count) || count >= capacity {
             return Err(EINVAL);
         }
         Ok(Self {
@@ -230,8 +230,7 @@ pub(crate) fn poll_stampless(ticket: &mut Ticket, memory: &mut impl Memory) -> R
     if !observation.complete {
         return Ok(Poll::Pending);
     }
-    let [start, end] = memory.pass(ticket.ordinal)?;
-    Ok(Poll::Complete([start, start, start, end]))
+    Ok(Poll::Complete(memory.stage_timestamps(ticket.ordinal)?))
 }
 
 /// Outstanding publications span less than half the 24-bit stamp sequence.
@@ -255,6 +254,11 @@ pub(crate) trait Memory {
     fn snapshot(&mut self, ordinal: u64) -> Result<Snapshot>;
     fn stamps(&mut self) -> Result<[u32; 2]>;
     fn pass(&mut self, ordinal: u64) -> Result<[u64; 2]>;
+    /// Four stage timestamps: M5 records them, G17P derives them from its pass.
+    fn stage_timestamps(&mut self, ordinal: u64) -> Result<[u64; 4]> {
+        let [start, end] = self.pass(ordinal)?;
+        Ok([start, start, start, end])
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,8 +318,7 @@ fn complete_poll(
         // Refresh this generation's pass after observing the post-maintenance
         // stamps. The pre-stamp snapshot alone cannot authorize export.
         fence(Ordering::Acquire);
-        let [start, end] = memory.pass(ticket.ordinal)?;
-        return Ok(Poll::Complete([start, start, start, end]));
+        return Ok(Poll::Complete(memory.stage_timestamps(ticket.ordinal)?));
     }
     ticket.previous = snapshot.cursors;
     Ok(Poll::Pending)

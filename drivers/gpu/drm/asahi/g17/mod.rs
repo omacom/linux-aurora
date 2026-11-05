@@ -1807,6 +1807,23 @@ impl gpu::Gpu for Gpu {
             params.features |=
                 u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_RAY_QUERY);
         }
+        if variant.m5_commands {
+            params.features |= u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_RESOURCES)
+                | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_RESOURCES)
+                | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2)
+                | crate::file::DRM_ASAHI_FEATURE_SPARSE_TILES
+                | crate::file::DRM_ASAHI_FEATURE_COMPUTE_MATRIX
+                | crate::file::DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES
+                | crate::file::DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES
+                | crate::file::DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS;
+            if queue::render::m5_render_submission::depth_msaa_compression_enabled() {
+                params.features |= crate::file::DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION
+                    | crate::file::DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION;
+            }
+            if crate::module_parameters::m5_mesh_storage_chunks.value() != 0 {
+                params.features |= crate::file::DRM_ASAHI_FEATURE_TASK_MESH_STORAGE;
+            }
+        }
         params.gpu_generation = self.cfg.gpu_generation as u32;
         params.gpu_variant = self.cfg.identity.gpu_variant as u32;
         params.gpu_revision = self.id.gpu_rev as u32;

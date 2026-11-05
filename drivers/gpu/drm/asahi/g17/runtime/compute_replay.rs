@@ -6,6 +6,9 @@ use super::DeferredBatch;
 use crate::g17::{completion::Deferred, recovery, Firmware};
 use kernel::prelude::*;
 
+/// Bound for a compute replay waiting on its owner's render abandonment proof.
+const CONSUMER_WAIT_NS: u64 = 300_000_000;
+
 impl Firmware {
     /// Called only from an outer worker or client submission, never from event
     /// dispatch or a recovery callback nested within publication. All candidate
@@ -18,6 +21,7 @@ impl Firmware {
         if state != 0 {
             return Ok(());
         }
+        self.queues.replay_consumer_wait = None;
         let commands = self
             .queues
             .compute
@@ -53,6 +57,43 @@ impl Firmware {
                 else {
                     break;
                 };
+                // A render consumer named this command through a firmware dependency.
+                // Republish only while no render of the owner has executed since this recovery
+                // (none consumed the dead token), after every live render of the owner is
+                // parked for replay; the render replay then depends on the new command. A
+                // parked render this command waits through is republished first, so the new
+                // command depends on it again.
+                let generation = self.recovery.generation();
+                let parked_prefix = owner.is_some_and(|owner| {
+                    self.queues.render.owner_parked_through(owner, packet.order.wait_through[0])
+                });
+                let (executed, live) = if packet.completion.has_firmware_consumer() {
+                    owner.map_or((true, false), |owner| self.queues.render.owner_render_state(owner, generation))
+                } else {
+                    (false, false)
+                };
+                let must_wait = parked_prefix || (!executed && live);
+                let now = super::now_ns();
+                let waited = if must_wait {
+                    self.queues.compute[index]
+                        .as_mut()
+                        .and_then(|entry| entry.queue.as_deref_mut())
+                        .ok_or(EIO)?
+                        .consumer_wait(now)
+                } else {
+                    0
+                };
+                if must_wait && waited < CONSUMER_WAIT_NS {
+                    // The event worker polls while this waits.
+                    self.queues.replay_consumer_wait = Some(now);
+                    return Ok(());
+                }
+                let consumer = (executed || must_wait).then_some(ENODATA);
+                self.queues.compute[index]
+                    .as_mut()
+                    .and_then(|entry| entry.queue.as_deref_mut())
+                    .ok_or(EIO)?
+                    .clear_consumer_wait();
                 let outer_ready = self.port.compute_ready(packet.context.policy().priority())?;
                 if !outer_ready {
                     let now = super::now_ns();
@@ -66,7 +107,9 @@ impl Firmware {
                     self.queues.replay_outer_wait = None;
                 }
 
-                let result = if !outer_ready {
+                let result = if let Some(error) = consumer {
+                    Err(error)
+                } else if !outer_ready {
                     // This replay has no live firmware ownership. Persistent
                     // backpressure uses the existing failed-replay retirement.
                     Err(EBUSY)

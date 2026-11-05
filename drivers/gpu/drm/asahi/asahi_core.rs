@@ -91,6 +91,14 @@ module! {
     description: "AGX GPU driver for Apple silicon SoCs",
     license: "Dual MIT/GPL",
     params: {
+        m5_mesh_storage_chunks: u32 {
+            default: 0x200,
+            description: "M5 mesh rendering buffer bound to API task (object-stage) render kicks only, in 64 KiB chunks; 0 disables the binding and the task feature",
+        },
+        m5_depth_msaa_compression: u32 {
+            default: 1,
+            description: "Enable single-layer D32 compressed 2x/4x ZLS admission",
+        },
         debug_flags: u64 {
             default: 0,
             // permissions: 0o644,

@@ -77,7 +77,13 @@ impl RenderState {
         }
         let mut index = 0;
         while index < self.retired.len() {
-            if self.retired[index].buffer_id().is_some() {
+            // An M5 pool replaced by a same-context rebind stays until
+            // firmware acknowledged its release.
+            let pool = self.retired[index].pool();
+            if self.retired[index].buffer_id().is_some()
+                || (self.retired[index].wait_for_pool_release()
+                    && !self.pools.released(u32::from(pool.id()), pool.control_va()))
+            {
                 index += 1;
                 continue;
             }

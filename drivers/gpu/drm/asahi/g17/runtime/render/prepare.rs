@@ -6,6 +6,7 @@
 use super::{Config, Reservation};
 use crate::g17::{
     buffer::MetricsLease,
+    freelist::{PoolPin, RenderPool},
     preparation::Lease,
     job::Packet,
     object::{Allocator, KernelObject, Pool},
@@ -44,6 +45,28 @@ impl BuildResources {
     fn metrics(&self) -> Result<MetricsLease> {
         MetricsLease::new(&self.metrics_ids, &self.metrics, self.metrics_bases)
     }
+    /// The render pool geometry the command needs: M5 commands carry a plan.
+    fn pool_plan(&self, packet: &Packet) -> Result<Option<crate::g17::render_resources::Plan>> {
+        let crate::g17::command::Validated::Render { plan, .. } = &packet.command else {
+            return Err(EINVAL);
+        };
+        if self.uat.is_m5() != plan.is_some() {
+            return Err(EINVAL);
+        }
+        Ok(*plan)
+    }
+    /// M5 places the client view of the metrics backing per VM. Called during
+    /// off-lock preparation, after the context's bindings exist.
+    fn bind_metrics(
+        &self,
+        context: &crate::g17::context::Context,
+        metrics: &mut MetricsLease,
+    ) -> Result {
+        if self.uat.is_m5() {
+            metrics.set_client_base(context.metrics_client(&self.metrics)?)?;
+        }
+        Ok(())
+    }
 }
 
 #[expect(
@@ -78,6 +101,148 @@ struct BuildContext<'a> {
 }
 
 impl super::super::Backend {
+    /// Reserves scarce M5 pool identities before the pair build transfers a
+    /// physical render pair: the owner's fitting pool, or the context's pool
+    /// for the command's plan, pinned. The pin is held across the build; the
+    /// pair takes its own.
+    fn claim_render_pool(
+        &self,
+        first: &Arc<Packet>,
+        lease: &Lease,
+    ) -> Result<(Arc<RenderPool>, Option<PoolPin>)> {
+        let dev = self.shared.drm()?;
+        let (resources, existing) = {
+            let state = self.shared.state.lock();
+            let firmware = (*state).as_deref().ok_or(ENODEV)?;
+            let resources = BuildResources::new(firmware)?;
+            let geometry = resources.pool_plan(first)?.map(|plan| plan.geometry);
+            let mut existing = None;
+            for entry in firmware.queues.render.entries.iter().flatten() {
+                let Some(pair) = entry.pair.as_ref() else {
+                    continue;
+                };
+                if pair.matches(self.owner, &self.context)?
+                    && pair.pool().fits(geometry)
+                    && !pair.pool().vacant()
+                {
+                    existing = Some(pair.pool().clone());
+                    break;
+                }
+            }
+            (resources, existing)
+        };
+        let alloc = Allocator {
+            dev: &dev,
+            uat: &resources.uat,
+        };
+        let pool = match existing {
+            Some(pool) => pool,
+            None => self.context.render_pool(
+                &alloc,
+                &resources.ids,
+                &resources.global,
+                resources.pool_plan(first)?,
+            )?,
+        };
+        let pin = self.pin_render_pool(&pool, &resources, lease)?;
+        Ok((pool, pin))
+    }
+
+    /// Pins `pool`'s identity. When every M5 identity is taken, an identity
+    /// whose final free-list release firmware consumed is reclaimed and its
+    /// physical storage kept for `pool`. ENOSPC when none is reclaimable: the
+    /// caller waits for render capacity.
+    fn pin_render_pool(
+        &self,
+        pool: &Arc<RenderPool>,
+        resources: &BuildResources,
+        lease: &Lease,
+    ) -> Result<Option<PoolPin>> {
+        let mut reclaimed_pages = None;
+        loop {
+            if !lease.is_current() {
+                return Err(EAGAIN);
+            }
+            match pool.pin_id() {
+                Ok(pin) => {
+                    if let Some(reclaimed) = reclaimed_pages.take() {
+                        pool.cache_reclaimed(reclaimed);
+                    }
+                    return Ok(pin);
+                }
+                Err(error) if error == ENOSPC && resources.uat.is_m5() => {
+                    // Repeat the release observation after a failed claim: a
+                    // concurrent pin may have taken the reclaimed identity.
+                    let reclaimed = {
+                        let mut state = self.shared.state.lock();
+                        let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
+                        if !lease.is_current() {
+                            return Err(EAGAIN);
+                        }
+                        if firmware.recovery.pending()
+                            || crate::g17::recovery::Memory::recovery_state(&firmware.init)? != 0
+                        {
+                            return Err(EAGAIN);
+                        }
+                        firmware.queues.render.pools.observe(&firmware.init)?;
+                        resources
+                            .ids
+                            .reclaim_one(|id| firmware.queues.render.pools.released(u32::from(id), 0))
+                    };
+                    // Dropped outside the device lock: its mappings may take
+                    // memory-management locks.
+                    drop(reclaimed_pages.take());
+                    if reclaimed.is_some() {
+                        reclaimed_pages = reclaimed;
+                        continue;
+                    }
+                    self.shared.queue_events();
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Arms an M5 pool's backing for the pair build. A pool without storage
+    /// takes the physical storage of a released identity first, without
+    /// evicting a metadata-only owner. The caller holds the pool's pin.
+    fn prepare_pool_backing(
+        &self,
+        pool: &Arc<RenderPool>,
+        resources: &BuildResources,
+        lease: &Lease,
+        client: &crate::mmu::Vm,
+    ) -> Result {
+        if resources.uat.is_m5() && pool.needs_storage() {
+            let reclaimed = {
+                let mut state = self.shared.state.lock();
+                let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
+                if !lease.is_current() {
+                    return Err(EAGAIN);
+                }
+                if firmware.recovery.pending()
+                    || crate::g17::recovery::Memory::recovery_state(&firmware.init)? != 0
+                {
+                    return Err(EAGAIN);
+                }
+                firmware.queues.render.pools.observe(&firmware.init)?;
+                resources
+                    .ids
+                    .reclaim_backing(|id| firmware.queues.render.pools.released(u32::from(id), 0))
+            };
+            if let Some(reclaimed) = reclaimed {
+                pool.cache_reclaimed(reclaimed);
+            }
+        }
+        let dev = self.shared.drm()?;
+        let alloc = Allocator {
+            dev: &dev,
+            uat: &resources.uat,
+        };
+        pool.ensure_backing(&alloc, &resources.global, client)
+    }
+
     fn build_render_pair(
         &self,
         slot: u8,
@@ -87,6 +252,12 @@ impl super::super::Backend {
     ) -> Result {
         let lease = self.enter_preparation(sleep)?;
         let dev = self.shared.drm()?;
+        // M5 pool identities are scarce: reserve one before any pair moves.
+        let _pool_claim = if self.context.is_m5() {
+            Some(self.claim_render_pool(first, &lease)?)
+        } else {
+            None
+        };
         let (resources, build) = {
             let mut state = self.shared.state.lock();
             let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
@@ -130,7 +301,12 @@ impl super::super::Backend {
                         )
                     } else {
                         let pair = entry.pair.as_ref().ok_or(EBUSY)?;
-                        if pair.matches(self.owner, &self.context)? {
+                        // An M5 pool that no longer fits the command's geometry
+                        // is replaced by a same-owner rebind below.
+                        let plan = resources.pool_plan(first)?;
+                        if pair.matches(self.owner, &self.context)?
+                            && pair.pool().fits(plan.map(|p| p.geometry))
+                        {
                             if !pair.pool().vacant() {
                                 return Ok(());
                             }
@@ -140,9 +316,17 @@ impl super::super::Backend {
                                 dev: &dev,
                                 uat: &resources.uat,
                             };
+                            if resources.uat.is_m5() {
+                                return self.prepare_pool_backing(
+                                    &pool,
+                                    &resources,
+                                    &lease,
+                                    self.context.vm(),
+                                );
+                            }
                             return pool.ensure_backing(&alloc, &resources.global, self.context.vm());
                         }
-                        if !pair.reusable()? {
+                        if !pair.bindable(self.owner, &self.context)? {
                             return Err(EBUSY);
                         }
                         // The release of the pair's scheduler is armed or still being
@@ -152,7 +336,14 @@ impl super::super::Backend {
                         if firmware.queues.teardown.releasing(pair.context()) {
                             return Err(EBUSY);
                         }
-                        let foreign = !Arc::ptr_eq(pair.context().status(), self.context.status());
+                        // On M5 a different logical context, even of the same VM,
+                        // gets its own graph; only a pool rebind of the same
+                        // context keeps the graph and its queue records.
+                        let foreign = if resources.uat.is_m5() {
+                            !Arc::ptr_eq(pair.context(), &self.context)
+                        } else {
+                            !Arc::ptr_eq(pair.context().status(), self.context.status())
+                        };
                         if foreign {
                             firmware
                                 .queues
@@ -247,7 +438,7 @@ impl super::super::Backend {
         ctx: &BuildContext<'_>,
         reservation: Reservation,
         pm_generation: u64,
-        metrics: MetricsLease,
+        mut metrics: MetricsLease,
     ) -> Result {
         let BuildContext {
             lease,
@@ -257,9 +448,16 @@ impl super::super::Backend {
             first,
         } = *ctx;
         let built = (|| -> Result<KBox<Pair>> {
-            let free_list =
-                self.context
-                    .render_pool(alloc, &resources.ids, &resources.global, None)?;
+            let free_list = self.context.render_pool(
+                alloc,
+                &resources.ids,
+                &resources.global,
+                resources.pool_plan(first)?,
+            )?;
+            resources.bind_metrics(&self.context, &mut metrics)?;
+            if resources.uat.is_m5() {
+                self.prepare_pool_backing(&free_list, resources, lease, self.context.vm())?;
+            }
             Pair::new(
                 alloc,
                 &resources.objects,
@@ -328,7 +526,7 @@ impl super::super::Backend {
         mut parked: crate::g17::queue::render::parked::ParkedPair,
         buffer: (u8, u64),
         pm_generation: u64,
-        metrics: MetricsLease,
+        mut metrics: MetricsLease,
     ) -> Result {
         let BuildContext {
             lease,
@@ -338,9 +536,16 @@ impl super::super::Backend {
             first,
         } = *ctx;
         let built = (|| -> Result<_> {
-            let free_list =
-                self.context
-                    .render_pool(alloc, &resources.ids, &resources.global, None)?;
+            let free_list = self.context.render_pool(
+                alloc,
+                &resources.ids,
+                &resources.global,
+                resources.pool_plan(first)?,
+            )?;
+            resources.bind_metrics(&self.context, &mut metrics)?;
+            if resources.uat.is_m5() {
+                self.prepare_pool_backing(&free_list, resources, lease, self.context.vm())?;
+            }
             let prepared = parked.prepare(
                 alloc,
                 &resources.objects,
@@ -444,7 +649,7 @@ impl super::super::Backend {
         mut pair: KBox<Pair>,
         buffer: Option<(u8, u64)>,
         pm_generation: Option<u64>,
-        metrics: Option<MetricsLease>,
+        mut metrics: Option<MetricsLease>,
     ) -> Result {
         let BuildContext {
             lease,
@@ -454,9 +659,18 @@ impl super::super::Backend {
             first,
         } = *ctx;
         let prepared = (|| {
-            let free_list =
-                self.context
-                    .render_pool(alloc, &resources.ids, &resources.global, None)?;
+            let free_list = self.context.render_pool(
+                alloc,
+                &resources.ids,
+                &resources.global,
+                resources.pool_plan(first)?,
+            )?;
+            if let Some(metrics) = metrics.as_mut() {
+                resources.bind_metrics(&self.context, metrics)?;
+            }
+            if resources.uat.is_m5() {
+                self.prepare_pool_backing(&free_list, resources, lease, self.context.vm())?;
+            }
             pair.prepare_bind(
                 alloc,
                 &resources.objects,

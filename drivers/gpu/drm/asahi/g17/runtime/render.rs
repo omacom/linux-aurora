@@ -524,6 +524,8 @@ impl Registry {
 struct Host<'a> {
     firmware: &'a mut crate::g17::Firmware,
     registration_powered: bool,
+    /// An M5 pair's installation, submitted with its first outer publication.
+    m5_registration: Option<crate::g17::fw::m5::queue::HardwareSubmission>,
 }
 impl Host<'_> {
     fn release_registration(&mut self) {
@@ -542,6 +544,9 @@ impl Host<'_> {
     }
 }
 impl crate::g17::queue::render::Host for Host<'_> {
+    fn generation(&self) -> u64 {
+        self.firmware.recovery.generation()
+    }
     fn epoch(&self) -> Result<(u64, u32)> {
         Ok((
             self.firmware.recovery.generation(),
@@ -571,8 +576,18 @@ impl crate::g17::queue::render::Host for Host<'_> {
     /// Idle descent is held for the whole first install. A point-in-time power
     /// check let the firmware gate the cores between the host's configuration
     /// writes while several clients installed their first pairs at once.
-    fn install_pair(&mut self, registration: &crate::g17::fw::kick::RenderRegistration) -> Result {
+    /// M5's host command port installs and kicks the pair in one transaction:
+    /// its registration is retained until the outer publication, without the
+    /// core-power hold.
+    fn install_pair(&mut self, registration: &crate::g17::queue::render::Registration) -> Result {
         use crate::g17::fw::variant::QueueRegistration;
+        let registration = match registration {
+            crate::g17::queue::render::Registration::M5(submission) => {
+                self.m5_registration = Some(*submission);
+                return Ok(());
+            }
+            crate::g17::queue::render::Registration::Neo(registration) => registration,
+        };
         match self.firmware.variant.registration {
             QueueRegistration::Firmware => return Ok(()),
             QueueRegistration::Mailbox => {
@@ -611,12 +626,44 @@ impl crate::g17::queue::render::Host for Host<'_> {
         commit: impl FnOnce() -> Result,
         late_tiling: impl FnOnce(),
     ) -> Result<[u32; 2]> {
+        if self.firmware.init.is_m5() {
+            let submission = match self.m5_registration.take() {
+                Some(submission) => submission,
+                None => crate::g17::fw::m5::queue::HardwareSubmission::advance_pair(
+                    fragment.qid,
+                    tiling.qid,
+                )?,
+            };
+            return self.firmware.submit_m5_render_pair(
+                priority,
+                &[copy_slot(fragment), copy_slot(tiling)],
+                &submission,
+                commit,
+                late_tiling,
+                true,
+            );
+        }
         self.firmware
             .init
             .publish_work_pair(priority, fragment, tiling, true, commit, late_tiling)
     }
+    fn publish_configuration_pair(
+        &mut self,
+        priority: u8,
+        fragment: &crate::g17::fw::channels::WorkSlot,
+        tiling: &crate::g17::fw::channels::WorkSlot,
+        prepare: impl FnOnce(),
+    ) -> Result {
+        let pair = self.firmware.init.m5_work_pair(priority, fragment, tiling)?;
+        pair.prepare();
+        prepare();
+        pair.publish();
+        Ok(())
+    }
     fn activate_render_pool(&mut self, id: u16, generation: u64) -> Result {
-        self.release_registration();
+        if !self.firmware.init.is_m5() {
+            self.release_registration();
+        }
         let result = self.firmware.queues.render.pools.activate(id, generation);
         if result.is_err() {
             self.firmware.primary.state.shared.lose_device_quietly();
@@ -639,16 +686,28 @@ impl crate::g17::queue::render::Host for Host<'_> {
         }
         result
     }
-    /// Pipe 0 (tiling) in bits 1:0, priority class in bits 3:2.
+    /// Pipe 0 (tiling) in bits 1:0, priority class in bits 3:2. M5 renders
+    /// use the common compute work ring, pipe 2.
     fn notify_render(&mut self, priority: u8) -> Result {
         self.release_registration();
-        crate::g17::trace::doorbell(crate::g17::trace::RENDER, || {
-            self.firmware.bridge.regs.g17_core_power()
-        });
-        let result = self
-            .firmware
-            .primary
-            .notify((0x83 << crate::g17::MSG_TYPE_SHIFT) | u64::from(priority) << 2);
+        let m5 = self.firmware.init.is_m5();
+        if m5 {
+            // A paired publication is one tiling and one fragment submission.
+            for _ in 0..2 {
+                if let Err(error) = self.firmware.init.note_m5_submission_history() {
+                    pr_warn!("asahi: M5 submission history skipped: {:?}\n", error);
+                }
+            }
+        } else {
+            crate::g17::trace::doorbell(crate::g17::trace::RENDER, || {
+                self.firmware.bridge.regs.g17_core_power()
+            });
+        }
+        let result = self.firmware.primary.notify(
+            (0x83 << crate::g17::MSG_TYPE_SHIFT)
+                | u64::from(priority) << 2
+                | if m5 { 2 } else { 0 },
+        );
         if result.is_err() {
             self.firmware.primary.state.shared.lose_device_quietly();
         }
@@ -684,6 +743,18 @@ impl crate::g17::queue::render::Host for Host<'_> {
     }
 }
 
+/// The M5 pair submission takes both work slots as one array.
+fn copy_slot(slot: &crate::g17::fw::channels::WorkSlot) -> crate::g17::fw::channels::WorkSlot {
+    crate::g17::fw::channels::WorkSlot {
+        unk_00: slot.unk_00,
+        queue_va: slot.queue_va,
+        data_master: slot.data_master,
+        items_end: slot.items_end,
+        qid: slot.qid,
+        first: slot.first,
+    }
+}
+
 impl crate::g17::Firmware {
     /// The pair is returned even when transport, accounting or collection fails.
     /// No off-lock operation or callback which can re-enter the device runs here.
@@ -703,6 +774,7 @@ impl crate::g17::Firmware {
         let mut host = Host {
             firmware: self,
             registration_powered: false,
+            m5_registration: None,
         };
         let result = operation(&mut pair, &mut host);
         host.release_registration();

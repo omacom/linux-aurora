@@ -568,9 +568,22 @@ impl Registry {
                 .ok_or(EOVERFLOW)? = *dependency;
             dependencies.render_count += 1;
         }
-        if dependencies.render_count != 0
-            && matches!(&packet.command, crate::g17::command::Validated::Render { pass, .. }
-                if pass.fragment_barriers)
+        let staged = matches!(&packet.command, crate::g17::command::Validated::Render { pass, .. }
+            if pass.stage_prefixes);
+        if staged {
+            let tiling = self.render_prefix_at(owner, packet, packet.order.tiling_wait_through[0])?;
+            for dependency in tiling.as_slice() {
+                *dependencies
+                    .render_tiling
+                    .get_mut(dependencies.render_tiling_count)
+                    .ok_or(EOVERFLOW)? = *dependency;
+                dependencies.render_tiling_count += 1;
+            }
+        }
+        if staged
+            || (dependencies.render_count != 0
+                && matches!(&packet.command, crate::g17::command::Validated::Render { pass, .. }
+                    if pass.fragment_barriers))
         {
             let tiling = self.tiling_prefix(owner, packet)?;
             for dependency in tiling.as_slice() {
@@ -585,9 +598,20 @@ impl Registry {
             dependencies.compute = queue.dependency(
                 owner,
                 packet.completion.status(),
-                packet.order.wait_through[1],
+                packet.order.tiling_wait_through[1],
                 state,
             )?;
+            if packet.order.tiling_wait_through[1] != packet.order.wait_through[1] {
+                let whole = queue.dependency(
+                    owner,
+                    packet.completion.status(),
+                    packet.order.wait_through[1],
+                    state,
+                )?;
+                if whole != dependencies.compute {
+                    dependencies.fragment_compute = whole;
+                }
+            }
         }
         Ok(dependencies)
     }
@@ -700,7 +724,14 @@ impl crate::g17::Firmware {
         }
         let pool = pair.pool().clone();
         let buffer_id = pair.buffer_id();
-        let (buffer_id, buffer_token) = self.queues.buffers.acquire_owner(buffer_id)?;
+        // An M5 PB token is bound to the hardware context and PB state it names.
+        let buffer_context = pair.m5_pb_state_va().map(|pb_va| (packet.context.id(), pb_va));
+        let (buffer_id, buffer_token) = match buffer_context {
+            Some((context, pb_va)) => {
+                self.queues.buffers.acquire_owner_bound(buffer_id, context, pb_va)?
+            }
+            None => self.queues.buffers.acquire_owner(buffer_id)?,
+        };
         let preparation = match self.queues.render.pools.prepare(&self.init, &pool) {
             Ok(preparation) => preparation,
             Err(error) => {
@@ -711,6 +742,7 @@ impl crate::g17::Firmware {
         let lease = PublicationLease {
             free_list_generation: preparation.generation,
             buffer_token,
+            buffer_context: buffer_context.map(|(context, _)| context),
         };
         let result = self.with_render(usize::from(slot), |pair, host| {
             pair.publish(

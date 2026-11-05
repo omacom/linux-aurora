@@ -174,6 +174,8 @@ pub(super) struct Registry {
     pub(super) compute_building: bool,
     compute_scheduler_building: bool,
     replay_outer_wait: Option<u64>,
+    /// A compute replay waits for its owner's renders to park or idle (compute_replay).
+    replay_consumer_wait: Option<u64>,
     pub(super) observations: compute::retirement::Batch,
     /// Completion-ring slot where the next compute scan starts.
     completion_cursor: usize,
@@ -211,7 +213,7 @@ impl Registry {
                 qids.reserve_initial_render()
             }),
             buffers <- BufferIds::new(),
-            metrics: Arc::new(MetricsIds::new(), GFP_KERNEL)?,
+            metrics: Arc::new(MetricsIds::for_firmware(variant.m5_commands)?, GFP_KERNEL)?,
             qos_ids: QosIds::new()?,
             admission: admission::Pool::with_waiters(kick::queue_limit(variant.qid_floor), queues, renders)?,
             render: render::RenderState::new(clusters, deflake, descriptor_flags)?,
@@ -226,6 +228,7 @@ impl Registry {
             compute_building: false,
             compute_scheduler_building: false,
             replay_outer_wait: None,
+            replay_consumer_wait: None,
             observations: compute::retirement::Batch::new()?,
             completion_cursor: 0,
             completion_seen: {

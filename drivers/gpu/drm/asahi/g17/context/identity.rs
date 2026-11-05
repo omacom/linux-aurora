@@ -172,19 +172,35 @@ impl Order {
     }
 }
 
-/// Two stable logical ordinals, independent of physical pair numbering.
+/// Two stable logical ordinals (render channels), independent of physical pair numbering. A
+/// context's render work can move between physical pairs (sibling pairs, lending, relocation,
+/// QID recycling), so a channel is rebound to a new pair once every publication this context
+/// made through it has retired. A context's channel counts its passes up for the whole
+/// process, so a rebound channel continues its pass sequence.
 pub(super) struct RenderSlots {
     pairs: [Option<u8>; 2],
     origins: [Option<u64>; 2],
+    /// Pass of the channel's last publication on its previous pair.
+    bases: [u8; 2],
+    /// QIDs and visibility target (ordinal + 1) of the last publication made through each
+    /// channel.
+    last: [Option<([u8; 2], u64)>; 2],
+    /// Recency of each channel's last publication.
+    used: [u64; 2],
+    epoch: u64,
 }
 impl RenderSlots {
     pub(super) const fn new() -> Self {
         Self {
             pairs: [None; 2],
             origins: [None; 2],
+            bases: [0; 2],
+            last: [None; 2],
+            used: [0; 2],
+            epoch: 0,
         }
     }
-    pub(super) fn get(&mut self, pair: u8) -> Option<u32> {
+    fn get(&mut self, pair: u8) -> Option<u32> {
         if let Some(index) = self.pairs.iter().position(|value| *value == Some(pair)) {
             return Some(index as u32);
         }
@@ -192,10 +208,45 @@ impl RenderSlots {
         self.pairs[index] = Some(pair);
         Some(index as u32)
     }
+    /// The channel of `pair`, rebinding the least recently used channel whose publications
+    /// have all retired (`retired(qids, ordinal)`) when both are bound to other pairs. `None`:
+    /// no channel can move yet.
+    pub(super) fn bind(
+        &mut self,
+        pair: u8,
+        retired: impl Fn([u8; 2], u64) -> bool,
+    ) -> Option<(u32, Option<u8>)> {
+        if let Some(index) = self.get(pair) {
+            return Some((index, None));
+        }
+        let index = (0..2)
+            .filter(|index| self.last[*index].is_none_or(|(qids, ordinal)| retired(qids, ordinal)))
+            .min_by_key(|index| self.used[*index])?;
+        let previous = self.pairs[index];
+        // `last` holds the ordinal after the last publication (its visibility target), so that
+        // publication's pass is base + (next - origin).
+        if let (Some(origin), Some((_, next))) = (self.origins[index], self.last[index]) {
+            self.bases[index] = self.bases[index].wrapping_add(next.wrapping_sub(origin) as u8);
+        }
+        self.pairs[index] = Some(pair);
+        self.origins[index] = None;
+        self.last[index] = None;
+        Some((index as u32, previous))
+    }
     pub(super) fn payload(&mut self, pair: u8, ordinal: u64) -> Option<u8> {
-        let index = self.get(pair)? as usize;
+        let index = self.pairs.iter().position(|value| *value == Some(pair))?;
         let origin = *self.origins[index].get_or_insert(ordinal);
-        Some(ordinal.checked_sub(origin)?.wrapping_add(1) as u8)
+        Some(self.bases[index].wrapping_add(ordinal.checked_sub(origin)?.wrapping_add(1) as u8))
+    }
+    /// Records a publication that reached firmware through `pair`'s channel.
+    pub(super) fn published(&mut self, pair: u8, qids: [u8; 2], ordinal: u64) -> bool {
+        let Some(index) = self.pairs.iter().position(|value| *value == Some(pair)) else {
+            return false;
+        };
+        self.epoch = self.epoch.wrapping_add(1);
+        self.used[index] = self.epoch;
+        self.last[index] = Some((qids, ordinal));
+        true
     }
 }
 

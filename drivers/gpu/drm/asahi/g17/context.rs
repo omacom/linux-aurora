@@ -16,6 +16,10 @@ use super::{
 use crate::mmu::{self, ExecutionContext, Vm, UAT_PGSZ};
 use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use identity::{Order, RenderSlots, WorkStates, FREE, NODE_STRIDE, STATE_COUNT};
+
+/// Both of a context's render channels are bound to other pairs whose publications have not
+/// all retired: the publisher waits for that retirement.
+pub(crate) const RENDER_CHANNEL_PENDING: Error = ERECALLCONFLICT;
 use super::job::Engine;
 use kernel::{
     new_mutex,
@@ -604,9 +608,35 @@ impl WorkStateLease {
             .change_count(self.word(), kicks, false)
     }
 
-    pub(crate) fn render_slot(&self, pair: u8) -> Result<u32> {
-        self.context.work.lock().render.get(pair).ok_or_else(||
-            super::capacity::refused(super::capacity::Site::RenderWorkSlots))
+    /// The render channel of `pair` for a publication. When both channels are bound to other
+    /// pairs, the least recently used one whose every publication `retired(qids, ordinal)`
+    /// moves to `pair`; otherwise [`RENDER_CHANNEL_PENDING`]: the caller waits for retirement
+    /// instead of failing the client.
+    pub(crate) fn render_channel(
+        &self,
+        pair: u8,
+        retired: impl Fn([u8; 2], u64) -> bool,
+    ) -> Result<u32> {
+        let (index, previous) = self
+            .context
+            .work
+            .lock()
+            .render
+            .bind(pair, retired)
+            .ok_or(RENDER_CHANNEL_PENDING)?;
+        if let Some(previous) = previous {
+            static REBINDS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let n = REBINDS.fetch_add(1, Ordering::Relaxed) + 1;
+            if n <= 8 || n.is_power_of_two() {
+                pr_info!("asahi: render channel {} of context {} moved from pair {} to pair {} (rebind {})\n",
+                    index, self.context.id(), previous, pair, n);
+            }
+        }
+        Ok(index)
+    }
+    /// Records a publication through `pair`'s channel once it reached firmware.
+    pub(crate) fn channel_published(&self, pair: u8, qids: [u8; 2], ordinal: u64) {
+        self.context.work.lock().render.published(pair, qids, ordinal);
     }
     pub(crate) fn channel_payload(&self, pair: u8, ordinal: u64) -> Result<u8> {
         self.context

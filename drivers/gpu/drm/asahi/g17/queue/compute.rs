@@ -602,6 +602,8 @@ pub(crate) struct Queue {
     replay_retirement: bool,
     replay_error: Option<Error>,
     replay_prepared: bool,
+    /// Since when the replay front waits for its render consumers (see compute_replay).
+    consumer_wait_since: Option<u64>,
     exit: Option<exit::Transaction>,
     /// Since when the kill of this failed queue's context waits for other contexts' compute,
     /// and whether that wait was reported.
@@ -683,6 +685,7 @@ impl Queue {
             replay_retirement: false,
             replay_error: None,
             replay_prepared: false,
+            consumer_wait_since: None,
             exit: None,
             kill_wait: None,
             installed: false,
@@ -781,6 +784,13 @@ impl Queue {
     }
     pub(crate) fn in_flight(&self) -> bool {
         (self.active.len != 0 || self.configuration.is_some()) && !self.quarantined
+    }
+    /// Per-queue consumer wait (see compute_replay).
+    pub(crate) fn consumer_wait(&mut self, now: u64) -> u64 {
+        now.saturating_sub(*self.consumer_wait_since.get_or_insert(now))
+    }
+    pub(crate) fn clear_consumer_wait(&mut self) {
+        self.consumer_wait_since = None;
     }
     /// Cold M5 installation publishes one configuration before the first kick.
     /// A prepared claim prevents reassignment while these credits are owned.
@@ -1195,11 +1205,12 @@ impl Queue {
                 // M5 command words stay zero even for executed commands. The
                 // front needs its exact zero-duration ring record; a later
                 // command, chained to its predecessor by the kick parent, must
-                // not show a record with a real duration. As on G17P, work a
-                // render consumes through a firmware dependency is never spared.
+                // not show a record with a real duration. A render consumer of
+                // this work (firmware dependency) is checked by the replay pass:
+                // it republishes only while every render of the owner is parked
+                // or idle and none executed since recovery.
                 self.active.iter().enumerate().all(|(index, active)| {
-                    !active.packet.completion.has_firmware_consumer()
-                        && !active.packet.completion.signalled()
+                    !active.packet.completion.signalled()
                         && match active.observed {
                             // Only reached for spared work quarantined after a
                             // recovery: every retained command crossed it.

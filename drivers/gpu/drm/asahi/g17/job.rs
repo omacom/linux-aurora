@@ -41,6 +41,9 @@ impl Engine {
 pub(crate) struct Order {
     pub(crate) sequence: u64,
     pub(crate) wait_through: [Option<u64>; 2],
+    /// What a render's tiling half waits on: `wait_through` unless the command
+    /// carries its own, never later, tiling prefixes.
+    pub(crate) tiling_wait_through: [Option<u64>; 2],
 }
 
 impl Order {
@@ -81,7 +84,20 @@ impl Order {
         Ok(Self {
             sequence: sequences[engine.index()],
             wait_through,
+            tiling_wait_through: wait_through,
         })
+    }
+
+    /// Give the tiling half the narrower prefixes of `tiling`, which resolves the
+    /// command's tail against the same ioctl position.
+    pub(crate) fn narrow_tiling(&mut self, tiling: &Self) -> Result {
+        for index in 0..2 {
+            if tiling.wait_through[index].unwrap_or(0) > self.wait_through[index].unwrap_or(0) {
+                return Err(EINVAL);
+            }
+        }
+        self.tiling_wait_through = tiling.wait_through;
+        Ok(())
     }
 
     pub(crate) fn contains(prefix: Option<u64>, sequence: u64) -> bool {
@@ -115,8 +131,8 @@ impl Packet {
         firmware: KVec<Fence>,
     ) -> Result<Arc<Self>> {
         let footprint = match &command {
-            Validated::Render { attachments, .. } => {
-                context.vm().render_footprint(&attachments[1])?
+            Validated::Render { attachments, pass, .. } => {
+                context.vm().render_footprint(&attachments[1], pass.whole_attachments)?
             }
             Validated::Compute { .. } => None,
         };

@@ -2,10 +2,9 @@
 
 //! Installed kick storage retained after a logical scheduler release is acknowledged.
 
-use super::{install_memory, memory, target, Pair, RetiredBinding, Tracker};
+use super::{install_memory, memory, Pair, RetiredBinding, Tracker};
 use crate::g17::{
     buffer,
-    command::Validated,
     context::Context,
     freelist::RenderPool,
     job::Packet,
@@ -42,6 +41,7 @@ pub(crate) struct ParkedPair {
 
 /// All new graph ownership stays separate from the installed kick storage until commit.
 pub(crate) struct Prepared {
+    pool_pin: Option<crate::g17::freelist::PoolPin>,
     memory: Option<KBox<memory::Memory>>,
     pool: Arc<RenderPool>,
     aliases: Option<KVec<mmu::KernelMapping>>,
@@ -109,6 +109,7 @@ impl Pair {
             buffer_id,
             publication: None,
             ready: true,
+            wait_for_pool_release: false,
         };
         (parked, retired)
     }
@@ -143,19 +144,24 @@ impl ParkedPair {
         pm_generation: u64,
         first: &Arc<Packet>,
     ) -> Result<Prepared> {
+        let pool_pin = free_list.pin_id()?;
+        if alloc.uat.is_m5() {
+            free_list.ensure_backing(alloc, context.vm(), context.vm())?;
+        }
         if owner == 0 || !Arc::ptr_eq(&context, &first.context) || !context.is_current() {
             return Err(EINVAL);
         }
         let kicks = self.kicks.as_ref().ok_or(EBUSY)?;
-        let Validated::Render { pass, .. } = &first.command else {
-            return Err(EINVAL);
-        };
         let word = first.completion.work_state()?.word();
         if word == u32::MAX {
             return Err(EINVAL);
         }
         alloc.uat.vm_context_mask(context.vm())?;
-        let layout = target::Layout::new(pass, self.clusters, self.variant.programs)?;
+        let layout = super::m5_render_submission::layout(
+            &first.command,
+            self.clusters,
+            self.variant.programs,
+        )?;
         let aliases = [
             kicks[0].prepare_client_alias(context.vm())?,
             kicks[1].prepare_client_alias(context.vm())?,
@@ -174,6 +180,7 @@ impl ParkedPair {
             self.variant,
         )?;
         Ok(Prepared {
+            pool_pin,
             memory: Some(memory),
             pool: free_list,
             aliases: Some(persistent),
@@ -221,6 +228,7 @@ impl ParkedPair {
             return Err(EIO);
         };
         storage.write_init(kernel::try_init!(Pair {
+            pool_pin: next.pool_pin.take(),
             graph_started: false,
             kick_aliases: None,
             memory,
@@ -248,11 +256,16 @@ impl ParkedPair {
             previous: self.previous.take(),
             displaced: None,
             replay: Tracker::new(),
+            executed_generation: None,
             replay_since: None,
             context_update: true,
             executed: self.executed,
             switch: None,
             published_completions: None,
+            identity_update: true,
+            configuration: None,
+            configured_context: None,
+            configured_qos: None,
         }))
     }
 }

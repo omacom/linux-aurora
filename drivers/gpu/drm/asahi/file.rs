@@ -66,29 +66,23 @@ use kernel::{
 /// sink) instead of the GEM's first page. The GEM only anchors the GPUVA.
 pub(crate) const DRM_ASAHI_BIND_SPARSE_TILE: u32 = uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SPARSE_TILE;
 /// DRM_ASAHI_FEATURE_SPARSE_TILES: BIND_SPARSE_TILE accepted.
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_SPARSE_TILES: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SPARSE_TILES as u64;
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_COMPUTE_MATRIX: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_MATRIX as u64;
 /// DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: render programs accept
 /// DRM_ASAHI_RENDER_PROGRAM_TASK and such task (object-stage) kicks get the
 /// TA mesh rendering buffer, which backs the object stage's payload address.
 /// Reported only while m5_mesh_storage_chunks != 0.
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_TASK_MESH_STORAGE as u64;
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES as u64;
 /// D32 2x/4x ZLS admission; no compressed stencil or resolve bits.
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION as u64;
 /// DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: single-layer
 /// 2x/4x ZLS admission in the compressed Z/S form, stencil included.
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION as u64;
 #[allow(dead_code)]
@@ -96,7 +90,6 @@ pub(crate) const DRM_ASAHI_RENDER_SHADER_WRITES: u32 =
     uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_SHADER_WRITES;
 /// Renders may carry separate tiling prefixes of both subqueues
 /// (DRM_ASAHI_RENDER_STAGE_PREFIXES).
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES as u64;
 /// The tiling half waits only on the render and compute prefixes of the command's stage-prefix
@@ -106,7 +99,6 @@ pub(crate) const DRM_ASAHI_RENDER_STAGE_PREFIXES: u32 =
     uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_STAGE_PREFIXES;
 /// Renders may declare that they write whole attachments only
 /// (DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS).
-#[allow(dead_code)]
 pub(crate) const DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS: u64 =
     uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS as u64;
 /// The render area covers every attachment's full extent, so its tile stores
