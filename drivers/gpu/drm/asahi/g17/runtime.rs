@@ -1442,6 +1442,7 @@ impl compute::Host for ComputeHost<'_> {
     fn note_submission(&mut self) -> Result {
         self.shared.note_gpu_activity();
         self.effort.submit();
+        self.effort.note_waiters(super::now_ns(), super::fence::waiters());
         super::Firmware::apply_shared_effort(self.init, self.effort, self.port, super::power::FULL_EFFORT)
     }
     fn submit_m5(&mut self, submission: &super::fw::m5::queue::HardwareSubmission) -> Result {

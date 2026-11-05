@@ -814,6 +814,7 @@ impl Firmware {
         self.port.note_gpu_activity();
         self.primary.state.shared.note_gpu_activity();
         self.effort.submit();
+        self.effort.note_waiters(now_ns(), fence::waiters());
         self.apply_effort(power::FULL_EFFORT)
     }
 
@@ -870,7 +871,7 @@ impl Firmware {
     ) -> Result {
         // The state machine and the performance-controller demand follow the requested effort;
         // the firmware is given the M5 value (InitData::submission_effort).
-        let published = init.submission_effort(effort);
+        let published = init.submission_effort(effort, state.waited());
         if state.applied() == effort && init.effort()? == published {
             return Ok(());
         }
@@ -900,6 +901,10 @@ impl Firmware {
         self.seen_submissions = submissions;
         if submitted {
             self.effort.submit();
+        }
+        // A waiter that began or ended since the last note moves the effort while work streams.
+        if self.effort.streaming() && self.effort.note_waiters(now_ns, fence::waiters()) {
+            self.apply_effort(power::FULL_EFFORT)?;
         }
         let effort = match self.effort.idle(now_ns, in_flight || submitted) {
             power::IdleAction::None => None,

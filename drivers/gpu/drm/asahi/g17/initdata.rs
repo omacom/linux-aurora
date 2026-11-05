@@ -1560,9 +1560,12 @@ impl InitData {
         self.m5
     }
 
-    /// The effort value the firmware is given for a requested `effort`: M5 runs with 0.
-    pub(super) fn submission_effort(&self, effort: u32) -> u32 {
-        if self.m5 { 0 }
+    /// The effort value the firmware is given for a requested `effort`. M5 publishes none while
+    /// work streams, except while a host thread waits for it (`waited`): then the full effort,
+    /// which the firmware takes as a floor for its performance state, so a submit-and-wait loop
+    /// runs at the top state.
+    pub(super) fn submission_effort(&self, effort: u32, waited: bool) -> u32 {
+        if self.m5 && !waited { 0 }
         else { effort }
     }
 

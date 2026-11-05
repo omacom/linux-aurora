@@ -7,7 +7,7 @@
 
 use super::context::{Context, WorkStateLease};
 use crate::file::SyncItem;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use kernel::{
     bindings, c_str,
     dma_fence::{Fence, FenceContexts, FenceObject, FenceOps, RawDmaFence, UniqueFence, UserFence},
@@ -63,8 +63,43 @@ pub(crate) fn allocation_failure(contexts: &FenceContexts) -> Result<Fence> {
 pub(crate) struct ExportFence {
     source: Option<Arc<Submission>>,
     scoped: bool,
+    /// A waiter enabled signalling on this ioctl output fence before it signalled ([`waiters`]).
+    waited: AtomicBool,
 }
 static EXPORT_OPS: AtomicUsize = AtomicUsize::new(0);
+
+/// Output fences a waiter is waiting on: signalling enabled and not yet signalled.
+static WAITERS: AtomicU32 = AtomicU32::new(0);
+/// Waits begun on output fences, ever.
+static WAITS: AtomicU64 = AtomicU64::new(0);
+
+/// The output fences a waiter is blocked on now, and the waits begun so far: the work a host
+/// thread waits for, which the M5 performance effort follows ([`super::power::Effort`]).
+pub(crate) fn waiters() -> (u32, u64) {
+    (WAITERS.load(Ordering::Acquire), WAITS.load(Ordering::Acquire))
+}
+
+/// The first waiter on an unsignalled output fence (the fence core calls this once, under the
+/// fence's lock).
+fn waited(flag: &AtomicBool) {
+    if !flag.swap(true, Ordering::AcqRel) {
+        WAITERS.fetch_add(1, Ordering::AcqRel);
+        WAITS.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+/// The fence signalled or went away: a waiter on it no longer waits.
+fn unwaited(flag: &AtomicBool) {
+    if flag.swap(false, Ordering::AcqRel) {
+        WAITERS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for ExportFence {
+    fn drop(&mut self) {
+        unwaited(&self.waited);
+    }
+}
 
 #[vtable]
 impl FenceOps for ExportFence {
@@ -73,6 +108,10 @@ impl FenceOps for ExportFence {
     }
     fn get_timeline_name<'a>(self: &'a FenceObject<Self>) -> &'a CStr {
         c_str!("g17-aggregate")
+    }
+    fn enable_signaling(self: &FenceObject<Self>) -> bool {
+        waited(&self.waited);
+        true
     }
 }
 
@@ -83,6 +122,7 @@ fn export_fallback(contexts: &FenceContexts) -> Result<UniqueFence<ExportFence>>
         ExportFence {
             source: None,
             scoped: false,
+            waited: AtomicBool::new(false),
         },
     )?;
     // SAFETY: Unique, initialized and still private. Only this constructor
@@ -238,6 +278,7 @@ impl Submission {
             } else {
                 fence.signal();
             }
+            unwaited(&fence.waited);
         }
     }
 }
@@ -510,6 +551,7 @@ impl Drop for Outputs {
                 );
             }
             fallback.signal();
+            unwaited(&fallback.waited);
         }
     }
 }

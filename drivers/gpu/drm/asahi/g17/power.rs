@@ -40,6 +40,13 @@ pub(super) struct Effort {
     idle_since: Option<u64>,
     applied: u32,
     submissions: u64,
+    /// A host thread waits, or waited within [`IDLE_HOLD_NS`], for submitted work
+    /// ([`Self::note_waiters`]).
+    waited: bool,
+    /// The waits begun when the waiters were last noted.
+    seen_waits: u64,
+    /// When a waiter was last seen.
+    last_wait_ns: u64,
 }
 
 impl Effort {
@@ -49,7 +56,34 @@ impl Effort {
             idle_since: None,
             applied: 0,
             submissions: 0,
+            waited: false,
+            seen_waits: 0,
+            last_wait_ns: 0,
         }
+    }
+
+    pub(super) fn streaming(&self) -> bool {
+        self.streaming
+    }
+
+    /// Whether a host thread waits for the work ([`Self::note_waiters`]).
+    pub(super) fn waited(&self) -> bool {
+        self.waited
+    }
+
+    /// Notes the waiters on submitted work at `now_ns` ([`super::fence::waiters`]): a thread
+    /// waits now or began a wait since the last note. The note holds for [`IDLE_HOLD_NS`] after
+    /// the last waiter, across a submit-and-wait loop's turns between its waits. Returns whether
+    /// that changed.
+    pub(super) fn note_waiters(&mut self, now_ns: u64, (waiters, waits): (u32, u64)) -> bool {
+        if waiters > 0 || waits != self.seen_waits {
+            self.last_wait_ns = now_ns.max(1);
+        }
+        self.seen_waits = waits;
+        let waited = self.last_wait_ns != 0 && now_ns.saturating_sub(self.last_wait_ns) < IDLE_HOLD_NS;
+        let changed = waited != self.waited;
+        self.waited = waited;
+        changed
     }
 
     pub(super) fn submit(&mut self) {
@@ -84,6 +118,8 @@ impl Effort {
         let idle = now_ns.saturating_sub(since);
         if idle >= IDLE_HOLD_NS {
             self.streaming = false;
+            self.waited = false;
+            self.last_wait_ns = 0;
             self.idle_since = None;
             IdleAction::Clear
         } else {
