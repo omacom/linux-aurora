@@ -39,6 +39,13 @@ pub(crate) fn parent_dependency(board: &Board, pipelined: bool) -> u8 {
     if pipelined || !board.g17d_forms() { COMPUTE_PIPELINED_DEPENDENCY } else { 1 }
 }
 
+/// The completion ordinal of a compute command on `board`. With the G17D forms it is the count of
+/// compute commands its hardware queue published before it (zero for a new queue), wrapping as a
+/// u32; render commands count separately. Otherwise it is 0 on every kick.
+pub(crate) fn completion_ordinal(board: &Board, published_before: u32) -> u32 {
+    if board.g17d_forms() { published_before } else { 0 }
+}
+
 /// Contexts per engine in the event space: a pool's event is 64 x its engine + its context.
 const POOL_EVENT_CONTEXTS: u32 = 64;
 /// The engine of a compute pool in the event space: the firmware's record of each compute pool
