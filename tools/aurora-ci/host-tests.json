@@ -2235,7 +2235,7 @@
     "python3",
     "tools/asahi/t6034-display-tests.py"
    ],
-   "note": "Production J514M/T6034 display default, board/image selection and PMP report OF table; compiled wrong-SoC, lost-disable, firmware-identity, missing-report-match, halted-owner and ACK-aperture mutants. No hardware or private fixtures."
+   "note": "Production J514M/T6034 display admission, PMP report OF table, DCP/platform matching and component enumeration; compiled board/image, report-owner/aperture, missing-component/binding and disabled-filter mutants. No hardware or private fixtures."
   },
   {
    "name": "tools/testing/selftests/drivers/gpu/asahi-g15/run.py",
