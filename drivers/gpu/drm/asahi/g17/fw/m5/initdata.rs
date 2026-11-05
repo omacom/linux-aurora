@@ -1781,6 +1781,8 @@ pub(crate) struct Board {
     pub(crate) calibration: Option<[u32; 3]>,
     /// The policy controllers' configuration, where the board has one.
     pub(crate) controller_defaults: Option<fn(&mut [u8]) -> Result<(), InitdataError>>,
+    /// Region C's idle standby timer where the board's differs from the image's 1500 us, us.
+    pub(crate) idle_standby_us: Option<u32>,
 }
 
 /// M5 Pro: two clusters of ten cores.
@@ -1798,6 +1800,7 @@ pub(crate) const J714: Board = Board {
     render_pool: (0x40_0000, 1 << 32),
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
     controller_defaults: Some(encode_m5_policy_controller_defaults),
+    idle_standby_us: None,
 };
 
 /// M5 Max: four clusters of ten cores.
@@ -1816,6 +1819,7 @@ pub(crate) const J716C: Board = Board {
     // J714's controller configuration, for a part with J714's calibration only.
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
     controller_defaults: Some(encode_m5_policy_controller_defaults),
+    idle_standby_us: None,
 };
 
 /// J775D's performance controllers run from P3.
@@ -1840,6 +1844,7 @@ pub(crate) const J775D: Board = Board {
     // The power model's synthetic leakage inputs hold for every J775D: no calibration words.
     calibration: None,
     controller_defaults: Some(encode_m5_policy_controller_defaults_j775d),
+    idle_standby_us: Some(3500),
 };
 
 const _: () = {
@@ -2265,6 +2270,15 @@ pub(crate) fn encode_m5_hw_data(
 }
 
 pub(crate) const M5_POLICY_MAXIMUM_POWER: usize = 0xa18;
+
+/// Region C's idle standby timer: how long the idle GPU waits before it goes to standby, us.
+pub(crate) fn set_m5_region_idle_standby(out: &mut [u8], microseconds: u32)
+    -> Result<(), InitdataError> {
+    if out.len() < M5_REGION_C_ALLOCATION { return Err(InitdataError::BufferSize); }
+    if microseconds == 0 { return Err(InitdataError::InterfaceMismatch); }
+    put_u32(out, 0x7c8, microseconds);
+    Ok(())
+}
 
 /// Apply the calibrated maximum shared by the policy and host power input.
 pub(crate) fn set_m5_region_maximum_power(out: &mut [u8], maximum: u32)

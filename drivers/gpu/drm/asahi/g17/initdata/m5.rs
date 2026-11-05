@@ -190,6 +190,10 @@ impl InitData {
             m::set_m5_region_maximum_power(self.object_mut(self.region_c)?.bytes_mut(), maximum)
                 .map_err(|_| EINVAL)?;
         }
+        if let Some(microseconds) = board.idle_standby_us {
+            m::set_m5_region_idle_standby(self.object_mut(self.region_c)?.bytes_mut(), microseconds)
+                .map_err(|_| EINVAL)?;
+        }
         for (index, role) in [m::InstanceRole::Primary, m::InstanceRole::Secondary].into_iter().enumerate() {
             let instance = m::InstanceAddresses {
                 root: ROOTS + index as u64 * 0x8000,
