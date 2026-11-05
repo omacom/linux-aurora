@@ -74,6 +74,29 @@ pub(crate) fn kick_event_mask(board: &Board, context_id: u32) -> Result<[u64; 4]
     Ok(mask)
 }
 
+/// The descriptor words of a DRM compute kick that follow the part, not the command: the
+/// preemption-state offset, the dispatch control base (before [`dispatch_control`]'s topology
+/// term) and the auxiliary control's first write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct KickTuple {
+    pub(crate) preempt_state_offset: u32,
+    pub(crate) dispatch_base: u64,
+    pub(crate) auxiliary_control: u64,
+}
+
+/// The tuple of J714 compute.
+pub(crate) const NORMAL_TUPLE: KickTuple =
+    KickTuple { preempt_state_offset: 0x1b80, dispatch_base: 0x14c0_8a60, auxiliary_control: 1 };
+/// The tuple the arithmetic qualification runs with on every part. The G17D runs DRM compute with
+/// it: with [`NORMAL_TUPLE`] its kicks never complete.
+pub(crate) const QUALIFIED_TUPLE: KickTuple =
+    KickTuple { preempt_state_offset: 0x1480, dispatch_base: 0x10c0_8860, auxiliary_control: 0 };
+
+/// The DRM compute tuple of `board` ([`Board::g17d_forms`]).
+pub(crate) fn kick_tuple(board: &Board) -> KickTuple {
+    if board.g17d_forms() { QUALIFIED_TUPLE } else { NORMAL_TUPLE }
+}
+
 const _: () = {
     assert!(topology_dispatch_control(0x14c0_8a60, 8) == 0x14c0_8afc);
     assert!(topology_dispatch_control(0x10c0_8860, 8) == 0x10c0_88fc);

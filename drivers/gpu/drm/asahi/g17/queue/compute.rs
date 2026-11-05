@@ -2433,7 +2433,9 @@ impl Queue {
         let predecessor = KickPredecessor::new(qid, kick_parent)?;
         let matrix_ops = self.graph.m5 && *requested_matrix_ops;
         let m5_board = if self.graph.m5 { Some(self.graph.board.ok_or(EINVAL)?) } else { None };
-        let m5_args = m5_board.map(|board| crate::g17::fw::m5::compute::DescriptorArgs {
+        let m5_args = m5_board.map(|board| {
+            let tuple = crate::g17::fw::m5::compute::kick_tuple(board);
+            crate::g17::fw::m5::compute::DescriptorArgs {
             registers: crate::g17::fw::m5::compute::RegisterArgs {
                 matrix_ops,
                 scratch: m5_scratch,
@@ -2444,13 +2446,13 @@ impl Queue {
                 context_id: args.context_id, work_state: work_word,
                 object_ids: 0x0000_0001_0000_0001,
                 resource_policy: plan.map_or(0xf5_0040_0020, |p| u64::from(p.pressure) << 32 | 0x0040_0020),
-                preempt_state_offset: 0x1b80,
+                preempt_state_offset: tuple.preempt_state_offset,
                 // The board's core layout sizes the operand state, as on G17P.
                 operand_region_bytes: self.graph.operand_state.bank_bytes(),
                 operand_aux_offset: self.graph.operand_state.tail_offset(),
                 operand_bytes: self.graph.operand_state.size, resource_control: plan.map_or(0x54b, |p| p.resource_flags),
-                dispatch_control: crate::g17::fw::m5::compute::dispatch_control(board, 0x14c08a60),
-                auxiliary_control: 1,
+                dispatch_control: crate::g17::fw::m5::compute::dispatch_control(board, tuple.dispatch_base),
+                auxiliary_control: tuple.auxiliary_control,
             },
             descriptor_va: descriptor_low, submit_sequence: 0, work_state_va: work_node,
             cdm_end_va: *cdm_end_va, stamp_va: [args.stamp_va, args.aux_stamp_va],
@@ -2460,7 +2462,7 @@ impl Queue {
             status_va: args.status_va, timestamp_va: [timestamp_va, timestamp_va + 8],
             shared_control_va: self.pool.control_va(), event_metadata: [0;16],
             usage_fw_va: self.graph.usage.gpu_va(), completion_identity: 1,
-        });
+        }});
         // Explicit dependencies keep the pipelined class; the implicit parent, last, takes its
         // own ([`crate::g17::fw::m5::compute::parent_dependency`]).
         let mut m5_dependency_types = [crate::g17::fw::m5::compute::COMPUTE_PIPELINED_DEPENDENCY;
