@@ -26,6 +26,7 @@ properties:
           - enum:
               - apple,t6030-pmp-v2
               - apple,t6031-pmp-v2
+              - apple,t6034-pmp-v2
               - apple,t6041-pmp-v2
               - apple,t6050-pmp-v2
               - apple,t8122-pmp-v2
