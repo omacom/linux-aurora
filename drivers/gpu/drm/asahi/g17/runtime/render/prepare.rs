@@ -714,11 +714,15 @@ impl super::super::Backend {
                 {
                     return Err(crate::g17::capacity::refused(crate::g17::capacity::Site::RetiredRenderBindings));
                 }
-                firmware.queues.teardown.displace(
-                    pair.context(),
-                    true,
-                    super::super::now_ns(),
-                )?;
+                // A rebind of the same context (a render that needs a bigger pool) keeps its
+                // live scheduler state; only another context's is displaced.
+                if !pair.matches(self.owner, &self.context)? {
+                    firmware.queues.teardown.displace(
+                        pair.context(),
+                        true,
+                        super::super::now_ns(),
+                    )?;
+                }
                 pair.bind_owner(
                     prepared.as_mut().ok_or(EIO)?,
                     alloc,
