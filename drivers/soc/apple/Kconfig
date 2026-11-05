@@ -237,6 +237,11 @@ config APPLE_T6030_DISPLAY_GATE
 	  not come up, also keeps the GPU off for that boot. It is not a
 	  display-only switch.
 
+	  J514M/T6034 uses an independent apple,t6034-handoff profile and the
+	  same checked PMP firmware layout. It starts on normal boots of that
+	  exact board and SoC pair; apple_t6034_display.enable=0 retains the
+	  boot framebuffer and keeps its GPU off. Other T6034 boards stay off.
+
 	  Say 'y' if you want the native display on M3 Pro MacBook Pros.
 
 config APPLE_T8122_GPU_PMP_LINK

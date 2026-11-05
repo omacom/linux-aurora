@@ -19,6 +19,8 @@ struct dcp_v14_board {
 	const char *dcp_compatible;
 	/* The machine compatible; NULL for any machine with this DCP. */
 	const char *machine;
+	/* Optional additional root SoC restriction. */
+	const char *soc;
 	/* The firmware image whose layouts were tested on this board. */
 	const char *firmware_uuid;
 	/* Set to <1> by the boot loader on the DCP, display and PIODMA nodes. */

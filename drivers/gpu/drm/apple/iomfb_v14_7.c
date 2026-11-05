@@ -215,6 +215,19 @@ static const struct dcp_v14_board dcp_v14_board_j514c = {
 	.log_bringup = true,
 };
 
+/* J514M's 14.7 DCP image and panel geometry; the root SoC is required too. */
+static const struct dcp_v14_board dcp_v14_board_j514m = {
+	.name = "J514M",
+	.debugfs = "dcp-j514m",
+	.dcp_compatible = "apple,t6034-dcp",
+	.machine = "apple,j514m",
+	.soc = "apple,t6034",
+	.firmware_uuid = DCP_V14_J516C_FIRMWARE_UUID,
+	.handoff = "apple,t6034-handoff",
+	.promotion = true,
+	.log_bringup = true,
+};
+
 static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_t6030,
 	&dcp_v14_board_j613,
@@ -222,6 +235,7 @@ static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_j504,
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
+	&dcp_v14_board_j514m,
 };
 
 struct dcp_v14_property {
@@ -1681,7 +1695,8 @@ const struct dcp_v14_board *dcp_v14_board_select(dcp_v14_compat_fn dcp_is,
 		if (!dcp_is(ctx, board->dcp_compatible))
 			continue;
 		*dcp_known = true;
-		if (board->machine && !machine_is(ctx, board->machine))
+		if ((board->machine && !machine_is(ctx, board->machine)) ||
+		    (board->soc && !machine_is(ctx, board->soc)))
 			continue;
 		return board;
 	}

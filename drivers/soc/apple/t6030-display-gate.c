@@ -183,6 +183,21 @@ static bool __init gate_t6031_wanted(int sw, bool default_board)
 	return sw < 0 ? default_board : sw;
 }
 
+/* T6034 has an independent owner disable and never admits an unmeasured board. */
+static int gate_t6034_switch __initdata = -1;
+static bool gate_t6034_requested __initdata;
+
+static bool __init gate_t6034_default_board(void)
+{
+	return of_machine_is_compatible("apple,t6034") &&
+	       of_machine_is_compatible("apple,j514m");
+}
+
+static bool __init gate_t6034_wanted(int sw)
+{
+	return gate_t6034_default_board() && gate_t6031_wanted(sw, true);
+}
+
 /* One SoC's internal display handoff, as the gate checks and completes it */
 struct gate_soc {
 	const char *machine;		/* root compatible */
@@ -307,10 +322,35 @@ static const struct gate_soc gate_t6031 __initconst = {
 	.fw_uuids = "asahi,t6031-fw-uuids",
 };
 
+/* Fresh J514M ADT: shared PMP image/layout, separate root and handoff. */
+static const struct gate_soc gate_t6034 __initconst = {
+	.machine = "apple,t6034",
+	.prefix = "apple-t6034-display: ",
+	.name = "T6034",
+	.dcp_compat = "apple,t6034-dcp",
+	.display_compat = "apple,t6034-display-subsystem",
+	.marker = "apple,t6034-handoff",
+	.pwrstate_compat = "apple,t6031-pmgr-pwrstate",
+	.dcp_full_name = "dcp@386c00000",
+	.pmp_values = "/chosen/asahi,t6034-pmp",
+	.pmp_uuid = gate_t6031_pmp_uuid,
+	.report_compat = "apple,t6034-pmp-v2-report",
+	.disp_entry = "report@10",
+	.reuse_pmp = true,
+	.pmp_compat = "apple,t6034-pmp-v2",
+	.ans_entry = "report@21",
+	.requested = &gate_t6034_requested,
+	.ps_chain = { PMP_PS_DISP_FE, PMP_PS_DISP_CPU, PMP_PS_DISP_SYS },
+	.pmp_ps_any_pmgr = true,
+	.describe = true,
+	.fw_uuids = "asahi,t6034-fw-uuids",
+};
+
 static const struct gate_soc *const gate_socs[] __initconst = {
 	&gate_t6030,
 	&gate_t8122,
 	&gate_t6031,
+	&gate_t6034,
 };
 
 /* The SoC this boot runs on, if the gate serves it. */
@@ -382,6 +422,17 @@ static int __init gate_setup_t6031(char *arg)
 	return ret;
 }
 early_param("apple_t6031_display.enable", gate_setup_t6031);
+
+static int __init gate_setup_t6034(char *arg)
+{
+	bool on;
+	int ret = kstrtobool(arg, &on);
+
+	if (!ret)
+		gate_t6034_switch = on;
+	return ret;
+}
+early_param("apple_t6034_display.enable", gate_setup_t6034);
 
 /* Returns the only node compatible with @compat, or NULL if there are none or several. */
 static struct device_node *__init gate_find_one(const char *compat)
@@ -2000,6 +2051,16 @@ static void __init gate_run(void)
 		if (gate_t6031_switch < 0 && board)
 			gate_info("native display on by default on %s; apple_t6031_display.enable=0 keeps the boot framebuffer\n",
 				  board);
+	}
+
+	if (gate_soc == &gate_t6034) {
+		if (!gate_t6034_default_board()) {
+			gate_info("unsupported board; native display stays disabled\n");
+			return;
+		}
+		gate_t6034_requested = gate_t6034_wanted(gate_t6034_switch);
+		if (gate_t6034_switch < 0)
+			gate_info("native display on by default on J514M; apple_t6034_display.enable=0 keeps the boot framebuffer\n");
 	}
 
 	if (!*gate_soc->requested) {
