@@ -42,6 +42,9 @@ const J714_GPU_DIE_ZONES: [&CStr; 8] = [
     c"smc-Tg43",
 ];
 const GPU_DIE_TO_HOTSPOT_MC: i32 = 6000;
+/// Where the SMC driver discovers the temperatures and the device tree names the hotspot key
+/// (TCMb) as the SoC die zone's only key (J775D), that zone reads the hotspot.
+const SOC_DIE_ZONE: &CStr = c"macsmc_soc_die";
 
 /// Region C word holding the host GPU power budget (mW).
 pub(crate) const REGION_C_POWER_BUDGET: usize = 0x88;
@@ -195,10 +198,12 @@ fn zone_temperature_mc(_provider: &SensorProvider, name: &CStr) -> Option<i32> {
 /// lookups and sensor reads may sleep.
 pub(crate) fn hotspot_temperature_mc() -> Option<i32> {
     let provider = SensorProvider::acquire()?;
-    zone_temperature_mc(&provider, J714_HOTSPOT_ZONE).or_else(|| {
-        J714_GPU_DIE_ZONES.iter().filter_map(|name| zone_temperature_mc(&provider, name)).max()
-            .map(|temp| temp + GPU_DIE_TO_HOTSPOT_MC)
-    })
+    zone_temperature_mc(&provider, J714_HOTSPOT_ZONE)
+        .or_else(|| zone_temperature_mc(&provider, SOC_DIE_ZONE))
+        .or_else(|| {
+            J714_GPU_DIE_ZONES.iter().filter_map(|name| zone_temperature_mc(&provider, name)).max()
+                .map(|temp| temp + GPU_DIE_TO_HOTSPOT_MC)
+        })
 }
 
 /// Keeps the fans boosted at least this long once boosted, so a short release or idle period
