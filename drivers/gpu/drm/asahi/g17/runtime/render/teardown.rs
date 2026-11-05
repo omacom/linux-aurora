@@ -38,7 +38,11 @@ impl RenderState {
                 return Ok(false);
             }
             if let Some(pair) = entry.pair.as_ref() {
-                if !pair.idle_for_context(context)? && !pair.executed_for_kill(context) {
+                // Commands that ran unstamped leave nothing for the firmware to run only once a
+                // kill of the context has been published; until then they still hold it.
+                if !pair.idle_for_context(context)?
+                    && !(context.kill_published() && pair.executed_for_kill(context))
+                {
                     return Ok(false);
                 }
             }
