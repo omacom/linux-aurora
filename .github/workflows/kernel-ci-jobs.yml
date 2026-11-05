@@ -81,6 +81,10 @@ jobs:
             : > "$RUNNER_TEMP/VOUCHED.td"
             echo "::warning title=Vouch list::no .github/VOUCHED.td on $BASE_REF; no author is trusted"
           fi
+      - name: Canary, is the runner variable visible here
+        env:
+          HAS_RUNNER_VAR: ${{ vars.KERNEL_CI_RUNNER != '' }}
+        run: echo "KERNEL_CI_RUNNER visible=$HAS_RUNNER_VAR"
       - name: Plan the run
         id: plan
         run: |

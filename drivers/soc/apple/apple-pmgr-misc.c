@@ -547,3 +547,5 @@ MODULE_DESCRIPTION("PMGR misc driver for Apple SoCs");
 MODULE_LICENSE("GPL v2");
 
 module_platform_driver(apple_pmgr_misc_driver);
+
+/* Runner canary, never merged. */
