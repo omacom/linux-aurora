@@ -2755,6 +2755,17 @@ pub(crate) fn encode_m5_policy_controller_defaults_j775d(out: &mut [u8]) -> Resu
     // The fast-active boost may continue while the GPU idles for 20 percent of a boost window
     // (byte-packed in the boost block) on the Ultra's core type; the default is 10.
     policy[0xbfd] = 20;
+    // The AON temperature records the GPU's and the auxiliary domain's controllers read, with
+    // each list's found mask: both dies' g0TR-g3TR and r0TR-r1TR, the six records of J775D's
+    // AON table (encode_common26_aon_ptd).
+    for (index, tag) in [0x6730_5452, 0x6731_5452, 0x6732_5452, 0x6733_5452].into_iter().enumerate() {
+        put_u32(policy, 0x11a24 + index * 4, tag);
+    }
+    put_u32(policy, 0x11a64, 0xf);
+    for (index, tag) in [0x7230_5452, 0x7231_5452].into_iter().enumerate() {
+        put_u32(policy, 0x11a6c + index * 4, tag);
+    }
+    put_u32(policy, 0x11a74, 0x3);
     const DIE_CHANNELS: u64 = 0x6fcc_3fcc_6fcc_3fcc;
     for (offset, words) in [
         (0x2324, [0x6fcc_3fcc_0000_0000, DIE_CHANNELS, DIE_CHANNELS, DIE_CHANNELS, 0x6fcc_3fcc]),
