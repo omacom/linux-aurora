@@ -369,10 +369,15 @@ pub(crate) struct KickArgs<'a> {
     /// queue. A queue's first kick names `timestamp.prev()` on render queues
     /// and [`KickTimestamp::ZERO`] on compute queues.
     pub(crate) parent: KickTimestamp,
+    /// The parent's own predecessor on the same queue, a further implicit dependency after the
+    /// parent: with the G17D forms a fragment kick names it while its queue remembers a previous
+    /// kick ([`super::super::kick::Queue::ancestor`]); `None` elsewhere.
+    pub(crate) ancestor: Option<KickTimestamp>,
     /// Kicks of other queues this kick must wait for.
     pub(crate) barriers: &'a [KickDependency],
     /// Two-bit completion classes for each explicit dependency followed by
-    /// the implicit parent. Interfaces without typed dependencies use `None`.
+    /// the implicit parent and the ancestor if any. Interfaces without typed
+    /// dependencies use `None`.
     pub(crate) dependency_types: Option<&'a [u8]>,
     /// GPU address of the work descriptor (firmware alias).
     pub(crate) descriptor_va: u64,
@@ -469,8 +474,10 @@ impl KickEntry {
     /// Builds the entry described by `args`.
     pub(crate) fn new(args: &KickArgs<'_>) -> Result<Self> {
         let barriers = args.barriers.len();
+        let count = barriers + 1 + usize::from(args.ancestor.is_some());
         if args.qid > QID_MAX
             || barriers > KICK_BARRIERS_MAX
+            || count > KICK_DEPENDENCIES
             || args.qos.class > Self::QOS_CLASS_MAX
             || args.priority >= Policy::PRIORITIES
         {
@@ -498,12 +505,12 @@ impl KickEntry {
         for (slot, barrier) in dependencies.iter_mut().zip(args.barriers) {
             *slot = barrier.word();
         }
-        dependencies[barriers] = KickDependency {
-            qid: args.qid,
-            timestamp: args.parent,
+        // The implicit dependencies on this queue follow the barriers: the parent, then the
+        // ancestor if any (`count` fits the array).
+        let implicit = [Some(args.parent), args.ancestor].into_iter().flatten();
+        for (slot, timestamp) in dependencies[barriers..].iter_mut().zip(implicit) {
+            *slot = KickDependency { qid: args.qid, timestamp }.word();
         }
-        .word();
-        let count = barriers + 1;
         let mut dependency_types = 0;
         if let Some(types) = args.dependency_types {
             if types.len() != count || types.iter().any(|kind| *kind > 3) {

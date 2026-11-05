@@ -721,10 +721,17 @@ impl Queue {
             _ => self.timestamp.prev(),
         })
     }
+    /// The parent's predecessor, while this queue remembers a previous kick: a G17D fragment
+    /// kick names it after its pipelined self-parent. Never on the first kick's synthetic
+    /// parent; recovery clears the history, and with it this.
+    pub(crate) fn ancestor(&self) -> Option<KickTimestamp> {
+        self.previous.map(KickTimestamp::prev)
+    }
     pub(crate) fn prepare_entry(&mut self, args: &KickArgs<'_>) -> Result<PreparedKick<'_>> {
         if args.qid != self.id.qid
             || args.timestamp != self.timestamp
             || args.parent != self.parent()
+            || args.ancestor.is_some_and(|ancestor| Some(ancestor) != self.ancestor())
         {
             return Err(EINVAL);
         }

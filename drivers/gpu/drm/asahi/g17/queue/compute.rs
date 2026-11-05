@@ -2501,6 +2501,7 @@ impl Queue {
             qid,
             timestamp: kick_timestamp,
             parent: kick_parent,
+            ancestor: None,
             barriers: dependencies,
             dependency_types: self.graph.m5.then_some(&m5_dependency_types[..dependencies.len() + 1]),
             descriptor_va: descriptor_high,

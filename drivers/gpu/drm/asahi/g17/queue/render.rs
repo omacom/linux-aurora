@@ -892,9 +892,22 @@ impl Pair {
         let barriers =
             render_barriers(pass.fragment_barriers, pass.stage_prefixes, dependencies, own_tiling);
         let tiling_barriers = &barriers.tiling[..barriers.tiling_count];
+        // With the G17D forms a fragment kick with history also names its parent's
+        // predecessor, in class 1, after the self-parent (classes [1, 3, 1] for a lone pass).
+        // STUB(G): super::compute::g17d_forms.
+        let ancestor = if m5 && crate::g17::fw::m5::topology::g17d_forms() {
+            self.kicks[1].ancestor()
+        } else {
+            None
+        };
+        let mut fragment_types = [0u8; 5 + crate::g17::hazard::PUBLICATION_BARRIERS];
+        fragment_types[..barriers.fragment_count + 1]
+            .copy_from_slice(&barriers.fragment_types[..barriers.fragment_count + 1]);
+        fragment_types[barriers.fragment_count + 1] = 1;
+        let fragment_typed = barriers.fragment_count + 1 + usize::from(ancestor.is_some());
         let barrier_types = [
             &barriers.tiling_types[..barriers.tiling_count + 1],
-            &barriers.fragment_types[..barriers.fragment_count + 1],
+            &fragment_types[..fragment_typed],
         ];
         let prepared = self.prepared.as_ref().ok_or(EIO)?;
         let m5_kick = match (prepared.register_arrays, prepared.kick_flags) {
@@ -906,6 +919,7 @@ impl Pair {
             qid: qids[stage],
             timestamp: kicks[stage],
             parent: parents[stage],
+            ancestor: if stage == 1 { ancestor } else { None },
             barriers,
             dependency_types: m5.then_some(barrier_types[stage]),
             descriptor_va: self.memory.graph.descriptor_va(stage, ordinal),
