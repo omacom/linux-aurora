@@ -149,7 +149,34 @@ pub(crate) const CONFIG_ULTRA: Config = Config {
     fabric_bridge: false,
     recovery_slot_keys: None,
     gpu_generation: GpuGen::G17,
-    firmware: crate::g17::fw::variant::Firmware::Fixed(&crate::g17::fw::variant::V26A428_M5),
+    // On bare metal nothing vouches for the firmware the boot loader left in `fw-text`: it
+    // must be this build, or the GPU is refused before anything is written to it.
+    firmware: crate::g17::fw::variant::Firmware::Identified(&[crate::g17::fw::variant::Build {
+        os_version: [27, 0, 0],
+        name: "27.0 (26A428)",
+        images: &[crate::fwid::FirmwareBuild {
+            // The boot loader loads both roles' TEXT back to back into `fw-text`: the primary's
+            // 0x50000, then the secondary's 0x58000, each with its own GKTS/ECAP entropy
+            // records. The digest is that of the firmware's TEXT with the boot-filled ranges
+            // zeroed, so a loaded copy normalizes to it on every boot.
+            name: "26A428 for T6050, primary then secondary",
+            text_size: 0xa8000,
+            data_size: 0x184000,
+            entropy: &[[0x49e60, 0x49f43], [0xa1918, 0xa19fb]],
+            // Per role: two load fields of the image header, then the two sections the boot
+            // loader fills with the boot arguments (the entropy included).
+            boot_filled: &[
+                (0x224, 4), (0x23c, 8), (0x49720, 0x740), (0x49e60, 0x231),
+                (0x50224, 4), (0x5023c, 8), (0xa11d8, 0x740), (0xa1918, 0x231),
+            ],
+            text_sha256: [
+                0xc3, 0x53, 0x54, 0x40, 0x76, 0x02, 0x48, 0x44, 0x04, 0xaa, 0x6f, 0xc9, 0x46,
+                0xcd, 0xd2, 0x4c, 0xb8, 0x2c, 0x64, 0xa8, 0xbb, 0xd1, 0x07, 0xa4, 0x94, 0x79,
+                0xa0, 0x8c, 0xe9, 0xcc, 0x82, 0x51,
+            ],
+        }],
+        variant: &crate::g17::fw::variant::V26A428_M5,
+    }]),
     // Eight clusters of ten cores. M5 renders lay out their tiler context store themselves
     // (`fw::m5::render_registers`), so the deflake layout is the M5 Pro's. As on the M5 Pro, the
     // buffers are sized for all 80 core slots and the board admits the GPU by clusters and slots:
