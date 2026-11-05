@@ -21,7 +21,23 @@ const COMPLETION_STRIDE: u64 = 0x2_8000;
 const PB: u64 = BASE + 0x15e_0000;
 const UMA: u64 = BASE + 0x15e_8000;
 
+/// Lower-root entry 1 of the M5 layout (Mesa's driver window), linked before the firmware starts
+/// as the bare-metal J775D boot has always run.
+const BOOT_LINK: u64 = 0x10_0008_0000;
+
 impl InitData {
+    /// The kernel lower-root ranges a bare-metal M5 firmware reaches, whose top-level links must
+    /// exist before it starts: entry 1, the descriptor tables and completion rings (entry 7) and
+    /// the first page of the canonical arena (`canonical`, entry 8), where queues go later.
+    pub(in crate::g17) fn m5_lower_links(canonical: core::ops::Range<u64>)
+        -> [core::ops::Range<u64>; 8]
+    {
+        let page = |address: u64| address..address + mmu::UAT_PGSZ as u64;
+        let ring = |index: u64| page(COMPLETION_LOW + index * COMPLETION_STRIDE);
+        [page(BOOT_LINK), page(m::REGION_VIEW_LOW_ADDRS[0]), page(m::REGION_VIEW_LOW_ADDRS[1]),
+            ring(0), ring(1), ring(2), ring(3), page(canonical.start)]
+    }
+
     /// Diagnostic-only read of an aligned word within the existing policy allocation.
     /// Callers hold the device state mutex, retaining this mapping for the entire sample.
     pub(crate) fn m5_policy_telemetry_word(&self, offset: usize) -> Result<u32> {
@@ -167,9 +183,8 @@ impl InitData {
                 calibration.as_ref().is_ok_and(|words| words.as_slice() == expected)
             }
         };
-        if calibrated {
-            (board.controller_defaults)(self.object_mut(self.bundle)?.bytes_mut())
-                .map_err(|_| EINVAL)?;
+        if let Some(defaults) = board.controller_defaults.filter(|_| calibrated) {
+            defaults(self.object_mut(self.bundle)?.bytes_mut()).map_err(|_| EINVAL)?;
             let maximum = self.object(self.bundle)?.word(shared.policy + m::M5_POLICY_MAXIMUM_POWER)?
                 .load(Ordering::Relaxed);
             m::set_m5_region_maximum_power(self.object_mut(self.region_c)?.bytes_mut(), maximum)

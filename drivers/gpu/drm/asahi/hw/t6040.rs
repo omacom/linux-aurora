@@ -50,6 +50,7 @@ pub(crate) const CONFIG: Config = Config {
         page_tlbi: true,
         handoff_lock: false,
         handoff_slot: 0xffff_ffff,
+        handoff_unk2: 0,
         native_gpu_permissions: true,
     },
     region_c: Some(&REGION_C),

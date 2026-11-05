@@ -169,6 +169,9 @@ pub(crate) enum FirmwareProfile {
     PublishedRoots,
     /// An M5 board without bare-metal GPU tables yet: probe refuses it.
     M5NoBareMetalTables,
+    /// The M5 firmware on bare metal: both roles publish their kernel roots
+    /// ([`mmu::UatFirmware::PublishedRoots`]) and the driver owns the page tables.
+    M5PublishedRoots,
 }
 
 impl Config {
@@ -191,7 +194,7 @@ impl Config {
 impl FirmwareProfile {
     /// The M5 firmware's protocol (26A428 InitData graph, queues and submission).
     pub(crate) const fn is_m5(self) -> bool {
-        matches!(self, Self::M5NoBareMetalTables)
+        matches!(self, Self::M5NoBareMetalTables | Self::M5PublishedRoots)
     }
 }
 
@@ -743,10 +746,16 @@ impl Firmware {
 
     /// Holds idle descent while a fresh physical render pair is registered.
     fn acquire_registration_power(&mut self) -> Result {
+        if !self.variant.registration_power_hold {
+            return Ok(());
+        }
         power::acquire(self)
     }
 
     fn release_registration_power(&mut self) -> Result {
+        if !self.variant.registration_power_hold {
+            return Ok(());
+        }
         // An idle hold keeps the cores powered past registration; it releases them itself.
         if self.hold.active() {
             self.registration_power_release_pending = false;
@@ -1392,9 +1401,18 @@ impl Gpu {
         let m5 = cfg.profile.is_m5();
         if m5 {
             let board = cfg.m5.ok_or(EINVAL)?;
-            if id.num_clusters != board.clusters || id.num_clusters * id.num_cores != board.gpu_cores {
-                dev_err!(dev.as_ref(), "M5 board expects {} clusters and {} cores, the GPU reports {} x {}\n",
-                    board.clusters, board.gpu_cores, id.num_clusters, id.num_cores);
+            // The M5 layouts are sized for every core slot of the board, fused-off cores
+            // included, so the GPU is matched on clusters and slots, not on enabled cores.
+            if id.num_clusters != board.clusters || id.num_clusters * id.num_cores != board.gpu_cores
+            {
+                dev_err!(
+                    dev.as_ref(),
+                    "M5 board expects {} clusters of {} core slots, the GPU reports {} x {}\n",
+                    board.clusters,
+                    board.gpu_cores / board.clusters,
+                    id.num_clusters,
+                    id.num_cores
+                );
                 return Err(ENODEV);
             }
             fw::m5::pool::select_render_pool(board);
@@ -1535,7 +1553,7 @@ impl Gpu {
             },
             GFP_KERNEL,
         )?;
-        let firmware = Self::boot(pdev, dev, cfg, regs, geometry, &gpu.shared)?;
+        let firmware = Self::boot(pdev, dev, cfg, regs, geometry, &gpu.id, &gpu.shared)?;
         gpu.shared
             .port
             .store(Arc::as_ptr(&firmware.port).cast_mut(), Ordering::Release);
@@ -1616,17 +1634,169 @@ impl Gpu {
         Ok((freq_hz.ok_or(EINVAL)? / 1000).try_into()?)
     }
 
-    /// Starts the M5 firmware. It runs only on page tables the driver owns, which no M5 board
-    /// has yet.
+    /// Starts the M5 firmware on bare metal: both roles boot and publish their kernel roots,
+    /// the M5 graph is built in the kernel window they share, then the M5 preparation,
+    /// InitData to the primary and then the secondary, POWER_ON_DONE to both, and both opening
+    /// records retired.
     fn boot_m5(
-        _pdev: &platform::Device<Core<'_>>,
-        _dev: &AsahiDrmDevice,
-        _cfg: &'static Config,
-        _regs: regs::G17Resources,
-        _geometry: mmu::UatGeometry,
-        _shared: &Arc<Shared>,
+        pdev: &platform::Device<Core<'_>>,
+        dev: &AsahiDrmDevice,
+        cfg: &'static Config,
+        regs: regs::G17Resources,
+        geometry: mmu::UatGeometry,
+        id: &regs::G17Id,
+        shared: &Arc<Shared>,
     ) -> Result<KBox<Firmware>> {
-        Err(ENODEV)
+        if cfg.profile != FirmwareProfile::M5PublishedRoots {
+            return Err(ENODEV);
+        }
+        let board = cfg.m5.ok_or(EINVAL)?;
+        // Names the step a failed bootstrap stopped at.
+        let at = |step: &'static str| {
+            move |e: &Error| {
+                dev_err!(dev.as_ref(), "M5 bare-metal bootstrap failed at {}: {:?}\n", step, e)
+            }
+        };
+        let uat = Arc::new(
+            mmu::Uat::new(
+                dev.into(),
+                geometry,
+                true,
+                mmu::UatFirmware::PublishedRoots {
+                    secondary_root_offset: cfg.secondary_root_offset,
+                },
+                cfg.uat_quirks,
+            )
+            .inspect_err(at("UAT"))?
+            .with_m5(),
+            GFP_KERNEL,
+        )?;
+        // The firmware samples the kernel lower root's top-level entries only when it starts:
+        // link the tables of every lower range the M5 graph and its queues use first.
+        uat.prepare_lower_tables(&initdata::InitData::m5_lower_links(
+            uat.kernel_lower_dynamic_range(),
+        ))
+        .inspect_err(at("lower links"))?;
+        let primary = Coprocessor::new(pdev, dev, cfg, &uat, shared, Role::Primary)
+            .inspect_err(|e| dev_err!(dev.as_ref(), "Primary coprocessor setup failed: {:?}\n", e))?;
+        let secondary = Coprocessor::new(pdev, dev, cfg, &uat, shared, Role::Secondary)
+            .inspect_err(|e| {
+                dev_err!(dev.as_ref(), "Secondary coprocessor setup failed: {:?}\n", e)
+            })?;
+        let render_global = uat.new_vm(0, geometry.user_range()).inspect_err(at("render VM"))?;
+        let metrics_ids = Arc::new(
+            buffer::MetricsIds::with_stride(64).inspect_err(at("metrics IDs"))?,
+            GFP_KERNEL,
+        )?;
+        let metrics = Arc::new(
+            KernelObject::new(
+                dev,
+                &render_global,
+                Placement::In(buffer::BlockGeometry::M5_COMPACT, mmu::UAT_PGSZ as u64),
+                metrics_ids.storage_bytes()?,
+                mmu::PROT_GPU_FW_SHARED_RW,
+                CpuMap::WriteCombined,
+            )
+            .inspect_err(at("metrics"))?,
+            GFP_KERNEL,
+        )?;
+        let session_metrics = metrics.clone();
+        let firmware = KBox::try_init(
+            kernel::try_init!(Firmware {
+                secondary: Some(secondary),
+                primary,
+                bridge: Bridge::unused(regs),
+                port: port::Port::new(
+                    power::Demand::new(pdev.as_ref().as_raw())?,
+                    shared.feed.clone(),
+                )?,
+                seen_submissions: 0,
+                rings: channel::Rings::new(shared.variant.graph)?,
+                recovery: recovery::State::new(),
+                effort: power::Effort::new(),
+                hold: power::Hold::new(),
+                governor: thermal::Governor::new(),
+                registration_power_release_pending: false,
+                variant: shared.variant,
+                queues <- runtime::Registry::with_waiters(
+                    shared.clusters,
+                    shared.deflake,
+                    shared.descriptor_flags,
+                    shared.variant,
+                    Some(shared.queues.clone()),
+                    Some(shared.renders.clone()),
+                ),
+                pool: object::Pool::new()?,
+                render_rings: kick::RenderRings::new()?,
+                render_ids: freelist::RenderIds::new()?,
+                init: initdata::InitData::new(),
+                _render_global: render_global,
+                _pm_metrics: session_metrics,
+                uat,
+            }),
+            GFP_KERNEL,
+        )
+        .inspect_err(at("session"))?;
+        // Once a role runs, a stopped CPU is not proof that no engine still reads what it was
+        // given: a failed bootstrap keeps the session, nothing is freed or unmapped.
+        let mut retained = core::mem::ManuallyDrop::new(firmware);
+        let session = &mut **retained;
+        // M5 renders take 64-byte metrics records.
+        session.queues.metrics = metrics_ids;
+        session.primary.boot().inspect_err(at("primary boot"))?;
+        let secondary = session.secondary.as_mut().ok_or(EINVAL)?;
+        secondary.boot().inspect_err(at("secondary boot"))?;
+        // The firmware built its root and kernel-window tables while booting.
+        session.uat.invalidate_reserved_tables();
+        let root_entries = session
+            .uat
+            .adopt_firmware_root_entries()
+            .inspect_err(at("root adoption"))?;
+        session
+            .init
+            .build_m5(dev, &session.uat, id, board)
+            .inspect_err(at("M5 graph"))?;
+        session
+            .init
+            .bind_m5_metrics(&session.uat, &metrics)
+            .inspect_err(at("metrics binding"))?;
+        // Publishers reach the mailbox, QoS table and recovery word through the port, as on
+        // G17P; M5's rings are the shared ones its InitData views name.
+        let mailbox: *const Mailbox = &*session.primary.rtkit;
+        session
+            .port
+            .attach(
+                session.init.port_views(mailbox)?,
+                session.bridge.regs.clone(),
+                shared.variant.registration,
+            )
+            .inspect_err(at("port"))?;
+        session
+            .uat
+            .confirm_firmware_root_entries(root_entries)
+            .inspect_err(at("root confirmation"))?;
+        session.uat.mirror_secondary_root().inspect_err(at("secondary root"))?;
+        session
+            .bridge
+            .regs
+            .prepare_m5_firmware()
+            .inspect_err(at("M5 preparation"))?;
+        let ack = shared.variant.init_ack;
+        session
+            .primary
+            .init(session.init.root_va(Role::Primary)?, ack)
+            .inspect_err(at("primary InitData"))?;
+        dev_info!(dev.as_ref(), "M5 primary initdata acknowledged\n");
+        let root_va = session.init.root_va(Role::Secondary)?;
+        let secondary = session.secondary.as_mut().ok_or(EINVAL)?;
+        secondary.init(root_va, ack).inspect_err(at("secondary InitData"))?;
+        dev_info!(dev.as_ref(), "M5 secondary initdata acknowledged\n");
+        session.primary.notify(MSG_POWER_ON_DONE)?;
+        secondary.notify(MSG_POWER_ON_DONE)?;
+        Self::wait_for_opening(dev, &session.init, &session.primary, session.secondary.as_ref())
+            .inspect_err(at("opening records"))?;
+        dev_info!(dev.as_ref(), "M5 firmware opening records retired\n");
+        Ok(core::mem::ManuallyDrop::into_inner(retained))
     }
 
     /// Starts both coprocessors and initializes their firmware.
@@ -1636,10 +1806,11 @@ impl Gpu {
         cfg: &'static Config,
         regs: regs::G17Resources,
         geometry: mmu::UatGeometry,
+        id: &regs::G17Id,
         shared: &Arc<Shared>,
     ) -> Result<KBox<Firmware>> {
         if cfg.profile.is_m5() {
-            return Self::boot_m5(pdev, dev, cfg, regs, geometry, shared);
+            return Self::boot_m5(pdev, dev, cfg, regs, geometry, id, shared);
         }
         let uat = Arc::new(
             mmu::Uat::new(

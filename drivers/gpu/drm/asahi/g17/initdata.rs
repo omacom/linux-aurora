@@ -17,8 +17,6 @@ use kernel::{c_str, prelude::*, sync::Arc};
 use t8140::{kernel_window as high, low};
 
 mod v25g83;
-// The M5 graph is built only once an M5 board has a page-table boot path.
-#[allow(dead_code)]
 mod m5;
 mod work_pair;
 pub(crate) mod outer_credit;

@@ -1493,6 +1493,17 @@ const J716C_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
 /// lanes. A one-lane board leaves the second lane 0.
 pub(crate) type M5AuxPerfState = (u32, [u32; 2], [u32; 2]);
 
+// J775D ADT afr-perf-states / cs-perf-states: one lane per die, mV; SRAM floor 775 mV.
+const J775D_AUX_PERF_STATES: [M5AuxPerfState; 14] = [
+    (24, [125, 125], [775, 775]), (338, [600, 600], [775, 775]),
+    (486, [660, 655], [775, 775]), (636, [670, 665], [775, 775]),
+    (796, [710, 705], [775, 775]), (888, [720, 720], [775, 775]),
+    (988, [755, 765], [775, 775]), (1084, [800, 795], [800, 795]),
+    (1182, [810, 820], [810, 820]), (1278, [850, 860], [850, 860]),
+    (1374, [905, 915], [905, 915]), (1470, [945, 955], [945, 955]),
+    (1578, [1030, 1040], [1030, 1040]), (1620, [1075, 1085], [1075, 1085]),
+];
+
 /// One-lane auxiliary tables.
 const fn one_lane(states: [(u32, u32, u32); 14]) -> [M5AuxPerfState; 14] {
     let mut out = [(0, [0; 2], [0; 2]); 14];
@@ -1604,6 +1615,16 @@ const J716C_AON_RECORDS: [[u32; 3]; 3] = [
     [0x6730_5452, 0x0058_0001, 0x0000_1401],
     [0x6731_5452, 0x00a3_0001, 0x0000_1401],
     [0x7230_5452, 0x00b8_0001, 0x0000_1401],
+];
+
+// J775D: both dies' records, g0TR-g3TR and r0TR-r1TR.
+const J775D_AON_RECORDS: [[u32; 3]; 6] = [
+    [0x6730_5452, 0x019f_0001, 0x0000_1401],
+    [0x6731_5452, 0x01bb_0001, 0x0000_1401],
+    [0x6732_5452, 0x00a7_0001, 0x0000_1401],
+    [0x6733_5452, 0x00c3_0001, 0x0000_1401],
+    [0x7230_5452, 0x0113_0001, 0x0000_1401],
+    [0x7231_5452, 0x001b_0001, 0x0000_1401],
 ];
 
 pub(crate) fn encode_common26_aon_ptd(board: &Board, out: &mut [u8]) -> Result<(), InitdataError> {
@@ -1756,8 +1777,8 @@ pub(crate) struct Board {
     /// The leakage calibration words [`Board::controller_defaults`] are valid for, or `None`
     /// where they hold for every part of the board.
     pub(crate) calibration: Option<[u32; 3]>,
-    /// The policy controllers' configuration.
-    pub(crate) controller_defaults: fn(&mut [u8]) -> Result<(), InitdataError>,
+    /// The policy controllers' configuration, where the board has one.
+    pub(crate) controller_defaults: Option<fn(&mut [u8]) -> Result<(), InitdataError>>,
 }
 
 /// M5 Pro: two clusters of ten cores.
@@ -1774,7 +1795,7 @@ pub(crate) const J714: Board = Board {
     min_parameter_buffer: 0x0020_0000,
     render_pool: (0x40_0000, 1 << 32),
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
-    controller_defaults: encode_m5_policy_controller_defaults,
+    controller_defaults: Some(encode_m5_policy_controller_defaults),
 };
 
 /// M5 Max: four clusters of ten cores.
@@ -1792,7 +1813,28 @@ pub(crate) const J716C: Board = Board {
     render_pool: (0x80_0000, 1 << 33),
     // J714's controller configuration, for a part with J714's calibration only.
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
-    controller_defaults: encode_m5_policy_controller_defaults,
+    controller_defaults: Some(encode_m5_policy_controller_defaults),
+};
+
+/// M5 Ultra: two dies of four clusters of ten cores (G17D). Values from the J775D ADT.
+pub(crate) const J775D: Board = Board {
+    clusters: 8,
+    gpu_cores: 80,
+    // Firmware revision 2 for raw revision 0x11.
+    core_revision: (0x1a, 2),
+    perf_states: &J775D_GPU_PERF_STATES,
+    // One voltage table per cluster.
+    perf_tables: 8,
+    aux_perf_states: &J775D_AUX_PERF_STATES,
+    relative_frequency: relative_frequency(&J775D_GPU_PERF_STATES),
+    aon_records: &J775D_AON_RECORDS,
+    register_windows: &J775D_REGISTER_WINDOWS,
+    // The minimum parameter buffer for eight clusters.
+    min_parameter_buffer: 0x0050_0000,
+    render_pool: (0x40_0000, 1 << 32),
+    calibration: None,
+    // No controller configuration.
+    controller_defaults: None,
 };
 
 const _: () = {
@@ -1899,6 +1941,26 @@ pub(crate) const J716C_GPU_PERF_STATES: [M5PerfState; 14] = four_tables([
     (1620, [1015, 1015, 1015, 1015], [1015, 1015, 1015, 1015]),
 ]);
 
+// J775D ADT sgx perf-states (one table per cluster) and perf-states-sram, mV.
+pub(crate) const J775D_GPU_PERF_STATES: [M5PerfState; 14] = [
+    (0, [125, 125, 125, 125, 125, 125, 125, 125], [775, 775, 775, 775, 775, 775, 775, 775]),
+    (338, [615, 615, 615, 615, 615, 610, 610, 615], [775, 775, 775, 775, 775, 775, 775, 775]),
+    (486, [670, 655, 655, 670, 650, 665, 665, 650], [775, 775, 775, 775, 775, 775, 775, 775]),
+    (636, [695, 690, 690, 695, 690, 690, 690, 690], [775, 775, 775, 775, 775, 775, 775, 775]),
+    (796, [760, 745, 745, 760, 745, 740, 740, 745], [775, 775, 775, 775, 775, 775, 775, 775]),
+    (888, [770, 755, 755, 770, 750, 750, 750, 750], [775, 775, 775, 775, 775, 775, 775, 775]),
+    (988, [795, 780, 780, 795, 775, 775, 775, 775], [795, 780, 780, 795, 775, 775, 775, 775]),
+    (1084, [805, 805, 805, 805, 815, 800, 800, 815], [805, 805, 805, 805, 815, 800, 800, 815]),
+    (1182, [815, 810, 810, 815, 825, 820, 820, 825], [815, 810, 810, 815, 825, 820, 820, 825]),
+    (1278, [860, 845, 845, 860, 870, 855, 855, 870], [860, 845, 845, 860, 870, 855, 855, 870]),
+    (1374, [885, 885, 885, 885, 895, 895, 895, 895], [885, 885, 885, 885, 895, 895, 895, 895]),
+    (1470, [930, 930, 930, 930, 940, 935, 935, 940], [930, 930, 930, 930, 940, 935, 935, 940]),
+    (1578, [1020, 1005, 1005, 1020, 1030, 1015, 1015, 1030],
+        [1020, 1005, 1005, 1020, 1030, 1015, 1015, 1030]),
+    (1620, [1045, 1040, 1040, 1045, 1065, 1050, 1050, 1065],
+        [1045, 1040, 1040, 1045, 1065, 1050, 1050, 1065]),
+];
+
 pub(crate) const J714_GPU_BASE: u64 = 0x23_0000_0000;
 
 #[derive(Copy, Clone)]
@@ -1993,6 +2055,51 @@ const J716C_REGISTER_WINDOWS: [M5RegisterWindowSpec; 30] = {
     windows
 };
 
+/// Second die of J775D.
+const D: u64 = 0x40_0000_0000;
+
+/// J775D: the explicit instances of both dies (ADT), in device-VA order.
+const J775D_REGISTER_WINDOWS: [M5RegisterWindowSpec; 32] = [
+    jw(0, &[0x2_8041_4000], 0x4000, 0, 2),
+    // One per active memory cache controller.
+    jw(3, &[0x22_2010_4000, 0x22_2210_4000, 0x22_2410_4000, 0x22_2610_4000,
+            0x22_2810_4000, 0x22_2a10_4000, 0x22_2c10_4000, 0x22_2e10_4000], 0x18000, 0, 2),
+    jw(4, &[0x2_8046_8000], 0x4000, 0, 0),
+    jw(9, &[0x2_8425_0000], 0x4000, 0, 2),
+    jw(10, &[0x2_8424_0000], 0x4000, 0, 0),
+    jw(11, &[0x2_8425_8000], 0x4000, 0, 2),
+    jw(12, &[0x5_0965_c000], 0x4000, 0, 2),
+    jw(13, &[0x45_0965_c000], 0x4000, 0, 2),
+    jw(14, &[0x23_8030_0000], 0x8000, 0, 0),
+    jw(15, &[0x2_8cdc_0000], 0x24000, 0, 2),
+    jw(17, &[G], 0x21500, 0, 2),
+    jw(18, &[G + 0xeb_4000, G + 0xeb_4000 + D], 0x4000, 0, 2),
+    jw(20, &[G + 0x300_0000, G + 0x320_0000, G + 0x340_0000, G + 0x360_0000,
+             G + 0x380_0000, G + 0x3a0_0000, G + 0x3c0_0000, G + 0x3e0_0000,
+             0x23_035a_8000, 0x23_037a_8000, 0x23_03da_8000, 0x23_03fa_8000], 0x40000, 0, 2),
+    jw(22, &[G + 0x100_0000], 0x8000, 0, 2),
+    jw(23, &[G + 0xf0_0000, G + 0xf0_0000 + D], 0x10000, 0, 2),
+    jw(24, &[G + 0xec_0000, G + 0xed_0000, G + 0xee_0000, G + 0xef_0000,
+             G + 0xec_0000 + D, G + 0xed_0000 + D, G + 0xee_0000 + D, G + 0xef_0000 + D],
+       0x10000, 0, 2),
+    jw(31, &[G + 0xd0_4000], 0x8000, 0xd0_4000, 2),
+    jw(33, &[G + 0xd5_0000], 0x10000, 0xd5_0000, 2),
+    jw(34, &[G + 0xd1_0000], 0x4000, 0xd1_0000, 2),
+    jw(36, &[G + 0xd4_0000], 0x4000, 0xd4_0000, 2),
+    jw(37, &[G + 0xd6_0000], 0x20000, 0xd6_0000, 2),
+    jw(38, &[G + 0xd4_4000], 0x4000, 0xd4_4000, 2),
+    jw(39, &[G + 0xd4_c000], 0x200, 0xd4_c000, 2),
+    jw(40, &[G + 0xe0_0000], 0x4000, 0xe0_0000, 2),
+    jw(42, &[G + 0xe4_0000], 0x4000, 0xe4_0000, 2),
+    jw(44, &[G + 0xe0_8000, G + 0xe1_0000], 0x8000, 0, 2),
+    jw(46, &[G + 0xe3_3800], 0x4000, 0, 2),
+    jw(48, &[G + 0xe6_0000], 0x58, 0xe6_0000, 2),
+    jw(52, &[G + 0xe4_8000], 0x8000, 0, 2),
+    jw(53, &[G + 0x2_3d00], 0x200, 0x2_3d00, 2),
+    jw(58, &[G + 0xe7_3800], 0x4000, 0, 2),
+    jw(59, &[0x23_0358_0000, 0x23_0378_0000, 0x23_03d8_0000, 0x23_03f8_0000], 0x60000, 0, 2),
+];
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct M5RegisterWindow {
     pub(crate) slot: usize,
@@ -2004,7 +2111,7 @@ pub(crate) struct M5RegisterWindow {
 }
 
 /// The most register windows of any board.
-pub(crate) const M5_MAX_REGISTER_WINDOWS: usize = J714_REGISTER_WINDOWS.len();
+pub(crate) const M5_MAX_REGISTER_WINDOWS: usize = J775D_REGISTER_WINDOWS.len();
 
 impl Board {
     /// The board's `index`th register window.

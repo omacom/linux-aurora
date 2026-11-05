@@ -194,6 +194,9 @@ pub(crate) struct UatQuirks {
     pub(crate) handoff_lock: bool,
     /// Handoff "current slot" written at initialization.
     pub(crate) handoff_slot: u32,
+    /// Handoff byte after the flush records written at initialization. It is 1 on T6050, where
+    /// it also turns the legacy flush protocol off.
+    pub(crate) handoff_unk2: u8,
     /// Store GPU-only mappings of client and kernel-lower tables as AP 0 with the access in
     /// PXN (read) and UXN (write), the form the firmware itself uses, instead of AP 2.
     pub(crate) native_gpu_permissions: bool,
@@ -207,6 +210,7 @@ impl UatQuirks {
         page_tlbi: false,
         handoff_lock: true,
         handoff_slot: 0,
+        handoff_unk2: 0,
         native_gpu_permissions: false,
     };
 }
@@ -2041,9 +2045,10 @@ impl Handoff {
     }
 
     /// Initialize the handoff region
-    fn init(&self, firmware: UatFirmware, slot: u32) -> Result {
+    fn init(&self, firmware: UatFirmware, slot: u32, unk2: u8) -> Result {
         self.magic_ap.store(PPL_MAGIC, Ordering::Relaxed);
         self.cur_slot.store(slot, Ordering::Relaxed);
+        self.unk2.store(unk2, Ordering::Relaxed);
         self.unk3.store(0, Ordering::Relaxed);
         fence(Ordering::SeqCst);
 
@@ -3348,6 +3353,16 @@ impl Uat {
         &self.kernel_lower_vm
     }
 
+    /// Links the kernel lower root's tables for each range, with no mappings. A published-roots
+    /// firmware samples that root's top-level entries only when it starts.
+    pub(crate) fn prepare_lower_tables(&self, ranges: &[Range<u64>]) -> Result {
+        let mut inner = lock_vm(&self.kernel_lower_vm.gpuvm, None, false)?;
+        for range in ranges {
+            inner.page_table.alloc_pages(range.clone())?;
+        }
+        Ok(())
+    }
+
     /// Installed descriptor and bind contexts rooted in this user VM. A graph
     /// constructor checks this before changing a retained pool's mappings.
     pub(crate) fn vm_context_mask(&self, vm: &Vm) -> Result<u64> {
@@ -3585,6 +3600,12 @@ impl Uat {
     /// The GPU behind this UAT runs the M5 firmware's protocol.
     pub(crate) fn is_m5(&self) -> bool {
         self.m5
+    }
+
+    /// Marks a published-roots UAT as an M5 GPU's ([`Uat::is_m5`]).
+    pub(crate) fn with_m5(mut self) -> Self {
+        self.m5 = true;
+        self
     }
 
     /// Keep dynamic objects outside the M5 boot graph, its unmapped sentinel,
@@ -3877,7 +3898,7 @@ impl Uat {
         inner.kernel_ttb1 = ttb1;
         inner.secondary_ttb1 = secondary_ttb1;
 
-        inner.handoff().init(firmware, quirks.handoff_slot)?;
+        inner.handoff().init(firmware, quirks.handoff_slot, quirks.handoff_unk2)?;
         if quirks.clean_tables {
             pgtable::clean_poc(
                 core::ptr::from_ref(inner.handoff()).cast::<u8>(),

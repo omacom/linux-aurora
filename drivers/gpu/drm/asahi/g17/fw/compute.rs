@@ -209,6 +209,17 @@ impl OperandState {
         r0a5c9: 0x3c000,
         size: 0x80000,
     };
+    /// Eight clusters of ten cores (M5 Ultra): bank stride 0x78400, tails 0x4000. The size is
+    /// the M5 compute queues' operand buffer, the tails' end rounded up to 16 KiB.
+    pub(crate) const EIGHT_BY_TEN: OperandState = OperandState {
+        r10229: 0xf0800,
+        r140a8: 0xf4800,
+        r10099: 0x78405,
+        r10091: 0xf0400,
+        r0a5c1: 0x0005,
+        r0a5c9: 0x78000,
+        size: 0xf8000,
+    };
 }
 
 /// Checkpoints into the main register array, as entry counts: after the

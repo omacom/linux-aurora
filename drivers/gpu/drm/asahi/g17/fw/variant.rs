@@ -80,6 +80,10 @@ pub(crate) struct Variant {
     /// Command validation applies the M5 command set: resource commands, the M5 render and
     /// compute flags, 8x MSAA and the M5 tile-buffer limit.
     pub(crate) m5_commands: bool,
+    /// The host holds the cores powered around a render pair's registration and its first
+    /// work. The bare-metal M5 firmware powers the cores for work by its own policy: under a
+    /// hold, the M5 Ultra's core-power witness reads unpowered until the hold is released.
+    pub(crate) registration_power_hold: bool,
 }
 
 /// A firmware build a SoC supports, identified by its loaded TEXT.
@@ -125,6 +129,7 @@ pub(crate) const V26A428: Variant = Variant {
     opening_record: true,
     split_firmware_area: false,
     m5_commands: false,
+    registration_power_hold: true,
 };
 
 /// The M4 Pro firmware (25G83, `mBoot-18000.161.10`).
@@ -157,6 +162,15 @@ pub(crate) const V25G83: Variant = Variant {
     opening_record: true,
     split_firmware_area: false,
     m5_commands: false,
+    registration_power_hold: true,
+};
+
+/// The 26A428 firmware of the M5 GPUs, which runs the M5 protocol (the M5 graph, queues and
+/// command set).
+pub(crate) const V26A428_M5: Variant = Variant {
+    m5_commands: true,
+    registration_power_hold: false,
+    ..V26A428
 };
 
 pub(crate) const V25F84: Variant = Variant {

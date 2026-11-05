@@ -439,11 +439,12 @@ impl AsahiPlatformDriver {
     fn probe_m5<'bound>(
         pdev: &'bound platform::Device<Core<'_>>,
     ) -> Result<AsahiPlatformDriverData<'bound>> {
-        // Both boards bind gpu,t6050. Let the ID registers choose the configuration.
+        // Every T6050 board binds gpu,t6050. Let the ID registers choose the configuration.
         let res = regs::G17Resources::new(pdev)?;
         let id = res.get_g17_id()?;
         let cfg = hw::t6050::config(&id).ok_or_else(|| {
-            dev_err!(pdev.as_ref(), "No M5 configuration for GPU variant {:#x}\n", id.variant);
+            dev_err!(pdev.as_ref(), "No M5 configuration for GPU variant {:#x} with {} dies\n",
+                id.variant, id.num_dies);
             ENODEV
         })?;
         if let g17::FirmwareProfile::M5NoBareMetalTables = cfg.profile {
