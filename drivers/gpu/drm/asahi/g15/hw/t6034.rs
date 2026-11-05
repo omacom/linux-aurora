@@ -3,7 +3,7 @@
 //! J514M/T6034 (M3 Max, G15C) measurement profile.
 //!
 //! The powered identity read on this J514M found four ten-slot clusters with
-//! enabled masks [0x1fd, 0x1fd, 0x1ed, 0x1ed], or 30 enabled cores. Its ADT has
+//! enabled masks [0x1fd, 0x1fd, 0x1fc, 0x1ed], or 30 enabled cores. Its ADT has
 //! four voltage tables and six memory channels. The four-cluster G15C object
 //! and command layouts below are inherited from T6031; they are not a native
 //! macOS capture of this machine. The J516C power/reference words remain
