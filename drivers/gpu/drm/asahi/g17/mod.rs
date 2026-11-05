@@ -1423,6 +1423,7 @@ impl Gpu {
                 return Err(ENODEV);
             }
             fw::m5::pool::select_render_pool(board);
+            fw::m5::topology::select_topology(board);
             thermal::select_board(board);
         }
 

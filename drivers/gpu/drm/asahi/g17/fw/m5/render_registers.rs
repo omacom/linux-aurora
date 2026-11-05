@@ -4,8 +4,40 @@
 use kernel::prelude::*;
 use super::super::{kick::RegisterWrite, render::{RenderArgs, RenderPass, M5RegisterPrograms as RegisterPrograms}};
 use super::render::M5RenderCommandInputs;
-const DEFLAKE_STATE_OFFSET: u64 = 0x980;
-const DEFLAKE_AUX_OFFSET: u64 = 0xc0;
+
+/// A pass's tiler context store for N clusters: 0x20 + 0x40 x N bytes of per-cluster control
+/// words, the auxiliary sub-buffer at the next 64-byte boundary, the state stream
+/// align64((N + 1) x 0x2e0) after it, and N x 0x680 + 0x800 bytes of the stream's storage
+/// beyond it. Offsets from the store's base.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ContextStore {
+    pub(crate) auxiliary: usize,
+    pub(crate) stream: usize,
+    pub(crate) extent: usize,
+}
+const fn align64(bytes: usize) -> usize {
+    (bytes + 63) & !63
+}
+impl ContextStore {
+    pub(crate) const fn of(clusters: usize) -> Self {
+        let auxiliary = align64(0x20 + 0x40 * clusters);
+        let stream = auxiliary + align64(0x2e0 * (clusters + 1));
+        Self { auxiliary, stream, extent: stream + 0x680 * clusters + 0x800 }
+    }
+
+    /// The selected board's store: laid out for the G17D's own cluster count with its forms;
+    /// other boards keep the two-cluster store.
+    pub(crate) fn selected() -> Self {
+        // STUB(G): super::compute::{g17d_forms, clusters}.
+        Self::of(if super::topology::g17d_forms() { super::topology::clusters() as usize } else { 2 })
+    }
+}
+const _: () = {
+    let two = ContextStore::of(2);
+    assert!(two.auxiliary == 0xc0 && two.stream == 0x980 && two.extent == 0x1e80);
+    let eight = ContextStore::of(8);
+    assert!(eight.auxiliary == 0x240 && eight.stream == 0x1c40 && eight.extent == 0x5840);
+};
 
 fn utile_config(p: &RenderPass) -> u64 {
     (u64::from(p.utile_width / 16) << 12) | (u64::from(p.utile_height / 16) << 14)
@@ -436,16 +468,17 @@ impl Workspace {
         self.common.write_m5(args)?;
         let r = args.resources;
         let p = args.pass;
-        // The TA's two deflake sub-buffers sit at fixed offsets from the
-        // deflake base (DEFLAKE_STATE_OFFSET, DEFLAKE_AUX_OFFSET).
+        // The two sub-buffers sit at the context store's offsets from its base.
         let base = r.deflake_va.checked_sub(0x10_0000_0000).ok_or(EINVAL)?;
+        let store = ContextStore::selected();
+        let (state_offset, aux_offset) = (store.stream as u64, store.auxiliary as u64);
         let mut vdm_seen = false;
         for reg in &mut self.common.ta {
             let register = reg.reg;
             reg.value = match register {
-                0x1c880 if vdm_seen => base.checked_add(DEFLAKE_STATE_OFFSET).ok_or(EINVAL)?,
-                0x10111 | 0x1c9b0 => base.checked_add(DEFLAKE_STATE_OFFSET).ok_or(EINVAL)?,
-                0x10119 | 0x1c9b8 => base.checked_add(DEFLAKE_AUX_OFFSET).ok_or(EINVAL)?,
+                0x1c880 if vdm_seen => base.checked_add(state_offset).ok_or(EINVAL)?,
+                0x10111 | 0x1c9b0 => base.checked_add(state_offset).ok_or(EINVAL)?,
+                0x10119 | 0x1c9b8 => base.checked_add(aux_offset).ok_or(EINVAL)?,
                 0x1c079 | 0x1c9d8 if p.layers == 1 => r.heapmeta_va.checked_sub(0x10_0000_0000).ok_or(EINVAL)?,
                 _ => reg.value,
             };
@@ -540,7 +573,7 @@ pub(crate) fn apply_pass(args: &RenderArgs<'_>, c: &M5RenderControls,
     let bg=usc(p.bg.offset)?;let pbg=usc(p.partial_bg.offset)?;
     let eot=usc(p.eot_offset)?;let peot=usc(p.partial_eot_offset)?;
     let deflake=r.deflake_va.checked_sub(0x10_0000_0000)
-        .and_then(|offset|offset.checked_add(DEFLAKE_STATE_OFFSET)).ok_or(EINVAL)?;
+        .and_then(|offset|offset.checked_add(ContextStore::selected().stream as u64)).ok_or(EINVAL)?;
     i.context_id=u32::from(r.context_id);
     i.ta.tpc_va=r.tpc_va;i.ta.tpc_size=r.tpc_size;i.ta.deflake_state_va=deflake;
     let f=&mut i.fragment;
