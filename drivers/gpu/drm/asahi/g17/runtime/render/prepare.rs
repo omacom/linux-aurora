@@ -537,6 +537,7 @@ impl super::super::Backend {
             first,
         } = *ctx;
         let built = (|| -> Result<_> {
+            parked.clear_for_vm(self.context.vm().id())?;
             let free_list = self.context.render_pool(
                 alloc,
                 &resources.ids,

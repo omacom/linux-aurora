@@ -508,6 +508,9 @@ struct Previous<B = Binding, C = Arc<Context>> {
     binding: Option<B>,
     context: C,
     publication: Option<(u64, u64)>,
+    /// The queue moved to another VM. The previous owner's views were unmapped at the move,
+    /// so a rollback leaves the queue detached instead of restoring them.
+    moved: bool,
 }
 impl<B, C> Previous<B, C> {
     /// The exact drain witness covers the replacement publication even when
@@ -1698,21 +1701,49 @@ impl Queue {
                 binding: None,
                 context: old.ok_or(EIO)?,
                 publication: None,
+                moved: false,
             });
         } else {
-            // Another VM: the pool must be fresh backing (EPERM otherwise).
-            let kick_alias = self.kick.map_client(context.vm())?;
-            let pool_alias = self.pool.map_client(context.vm())?;
-            self.graph.clear_client_state();
-            let binding = self.graph.bind(context.clone(), kick_alias, pool_alias)?;
+            // Another VM: the pool must be fresh backing (EPERM otherwise). The queue's state
+            // pages belong to one VM at a time. The previous owner's views (kick ring,
+            // preemption, usage and operand state, descriptors, queue context) are unmapped
+            // first, so its GPU work can no longer read or write what the new owner's work
+            // leaves there; then the pages are cleared and mapped into the new VM. The queue
+            // is idle (`reusable`) and the previous owner's pool release was consumed (fresh
+            // backing), so the firmware no longer uses those views. The previous context,
+            // whose scheduler state the queue may still run until the new owner's first
+            // command, stays in `Previous`.
+            if !self.pool.serves(context.vm()) {
+                return Err(EPERM);
+            }
+            drop(self.binding.take());
+            let moved = (|| -> Result<Binding> {
+                self.graph.clear_client_state();
+                self.kick.clear_ring()?;
+                let kick_alias = self.kick.map_client(context.vm())?;
+                let pool_alias = self.pool.map_client(context.vm())?;
+                self.graph.bind(context.clone(), kick_alias, pool_alias)
+            })();
+            let binding = match moved {
+                Ok(binding) => binding,
+                Err(error) => {
+                    // Left detached: the record still names the previous owner's pages.
+                    if let Some(old) = old.as_ref() {
+                        self.retained_owner = Some(old.retain_firmware_pages());
+                    }
+                    self.needs_fresh_backing = true;
+                    return Err(error);
+                }
+            };
             self.graph.set_owner(&context)?;
-            let old_binding = self.binding.replace(binding);
+            self.binding = Some(binding);
             // A detached queue (exited owner already dropped) has nothing to supersede;
             // the new owner's record fields replace the retained pages' references.
             self.previous = old.map(|old| Previous {
-                binding: old_binding,
+                binding: None,
                 context: old,
                 publication: None,
+                moved: true,
             });
             self.retained_owner = None;
         }
@@ -1750,7 +1781,13 @@ impl Queue {
                     return Err(error);
                 }
                 let mut previous = self.previous.take().ok_or(EIO)?;
-                if let Some(binding) = previous.binding.take() {
+                if previous.moved {
+                    // The record names the previous owner again, whose views went at the
+                    // move: the queue is left detached, as for an exited owner.
+                    self.binding = None;
+                    self.retained_owner = Some(previous.context.retain_firmware_pages());
+                    self.needs_fresh_backing = true;
+                } else if let Some(binding) = previous.binding.take() {
                     self.binding = Some(binding);
                 } else {
                     self.binding.as_mut().ok_or(EIO)?.context = previous.context;
@@ -3042,6 +3079,7 @@ mod fault_ownership_tests {
                 binding: Some(Lease::new(&used)),
                 context: Lease::new(&used),
                 publication,
+                moved: false,
             });
             assert_eq!(used.load(Ordering::Relaxed), 2);
             Previous::retire_witnessed(&mut previous);
@@ -3188,7 +3226,12 @@ impl Queue {
             self.graph.set_owner(&previous.context)?;
         }
         if let Some(mut previous) = self.previous.take() {
-            if let Some(binding) = previous.binding.take() {
+            if previous.moved {
+                // As in `release_owner`: left detached, the new owner's views returned.
+                retired = self.binding.take();
+                self.retained_owner = Some(previous.context.retain_firmware_pages());
+                self.needs_fresh_backing = true;
+            } else if let Some(binding) = previous.binding.take() {
                 retired = self.binding.replace(binding);
             } else {
                 self.binding.as_mut().ok_or(EIO)?.context = previous.context;

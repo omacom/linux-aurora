@@ -403,6 +403,8 @@ struct RenderStorage {
     // The lower alias drops before its backing.
     low: mmu::KernelMapping,
     high: KernelObject,
+    /// The client VM the storage was created for, whose alias of it lasts as long as that VM.
+    vm: u64,
 }
 
 /// Render ring storage outlives its rings for the life of the device.
@@ -442,9 +444,14 @@ impl RenderRings {
         )
     }
 
-    fn take(&self) -> Option<RenderStorage> {
+    /// Reusable storage created for `vm`. Storage of another VM is never handed out: that VM
+    /// keeps its read-write alias of the pages, so it could read and write the new ring.
+    fn take(&self, vm: u64) -> Option<RenderStorage> {
         let mut stock = self.stock.lock();
-        let index = stock.retired.iter().rposition(|(reusable, _)| *reusable)?;
+        let index = stock
+            .retired
+            .iter()
+            .rposition(|(reusable, storage)| *reusable && storage.vm == vm)?;
         let last = stock.retired.len() - 1;
         stock.retired.swap(index, last);
         stock.retired.pop().map(|(_, storage)| storage)
@@ -567,7 +574,8 @@ impl Queue {
         if id.engine == DataMaster::Compute {
             return Err(EINVAL);
         }
-        if let Some(storage) = rings.take() {
+        let vm = client.id();
+        if let Some(storage) = rings.take(vm) {
             let mut ring = RenderRing {
                 storage: ManuallyDrop::new(storage),
                 rings: rings.clone(),
@@ -621,7 +629,7 @@ impl Queue {
                 Err(error) => return Err(error),
             }
         };
-        let storage = RenderStorage { low, high };
+        let storage = RenderStorage { low, high, vm };
         // Count the storage only once it exists. Without room to return it,
         // nothing has aliased it but `client`, which drops first.
         if let Err(error) = rings.admit() {
@@ -669,6 +677,30 @@ impl Queue {
         let address = self.low_va();
         self.object()
             .map_alias(vm, address, mmu::PROT_GPU_SHARED_RW)
+    }
+
+    /// Clears an idle compute ring before another VM is given a view of it, so the new owner
+    /// cannot read the entries the previous owner's commands left. The firmware has consumed
+    /// every entry; the host's position in the ring is kept.
+    pub(crate) fn clear_ring(&mut self) -> Result {
+        let Backing::Compute { low, .. } = &mut self.backing else {
+            return Err(EINVAL);
+        };
+        low.bytes_mut().fill(0);
+        fence(Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Clears an idle render ring before a context of another VM is given a view of it, so the
+    /// new owner cannot read the entries earlier owners' commands left. The firmware has
+    /// consumed every entry; the host's position in the ring is kept.
+    pub(crate) fn clear_render_ring(&mut self) -> Result {
+        let Backing::Render(ring) = &mut self.backing else {
+            return Err(EINVAL);
+        };
+        ring.storage.high.bytes_mut().fill(0);
+        fence(Ordering::SeqCst);
+        Ok(())
     }
 
     /// Reuse a permanent client view only when every page names this ring.

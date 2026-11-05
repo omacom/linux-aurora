@@ -38,6 +38,8 @@ pub(crate) struct ParkedPair {
     /// owner) keeps it, so its next owner change still waits while that
     /// scheduler is released.
     executed: u64,
+    /// The VM of the context that last ran on these rings.
+    vm: u64,
 }
 
 /// All new graph ownership stays separate from the installed kick storage until commit.
@@ -84,6 +86,7 @@ impl Pair {
     /// under the same device mutex. Moving these owners performs no firmware operation.
     pub(crate) fn park(self) -> (ParkedPair, RetiredBinding) {
         let context = self.memory.context.clone();
+        let vm = context.vm().id();
         let scheduler = context.scheduler_owner();
         let buffer_id = self.buffer_id();
         let parked = ParkedPair {
@@ -103,6 +106,7 @@ impl Pair {
             outer_started: self.outer_started,
             previous: self.previous,
             executed: self.executed,
+            vm,
         };
         let retired = RetiredBinding {
             memory: Some(self.memory),
@@ -118,6 +122,20 @@ impl Pair {
 }
 
 impl ParkedPair {
+    /// Clears both kick rings when the pair goes to a context of another VM than the one
+    /// that last ran on it, so the new owner cannot read the entries the previous owner's
+    /// commands left. The pair is parked, so the firmware consumed every entry.
+    pub(crate) fn clear_for_vm(&mut self, vm: u64) -> Result {
+        if self.vm == vm {
+            return Ok(());
+        }
+        for queue in self.kicks.as_mut().ok_or(EBUSY)?.iter_mut() {
+            queue.clear_render_ring()?;
+        }
+        self.vm = vm;
+        Ok(())
+    }
+
     /// The release of `scheduler` has been consumed: a later owner change no
     /// longer has to wait for it.
     pub(crate) fn release_consumed(&mut self, scheduler: u64) {
