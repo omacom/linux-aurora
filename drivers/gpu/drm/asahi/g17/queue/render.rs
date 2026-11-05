@@ -1453,14 +1453,16 @@ impl Pair {
     /// Latches when the front group executed and the firmware consumed its ring entries while
     /// `stamps` still lag it, and reports whether that has held for
     /// [`retirement::STAMP_FALLBACK_NS`] (`now`, host ns). The observation scan then retires it
-    /// on its pass record instead of waiting for stamps no later event will move.
+    /// on its pass record instead of waiting for stamps no later event will move. Not on M5,
+    /// whose pass record can precede the group's writes: as for M5 compute, only the stamps
+    /// return the group's buffers.
     pub(crate) fn note_stamp_wait(
         &mut self,
         stamps: [u32; 2],
         state: u32,
         now: u64,
     ) -> Result<bool> {
-        if self.quarantined || self.prepared.is_some() || state != 0 {
+        if self.quarantined || self.prepared.is_some() || state != 0 || self.memory.graph.is_m5() {
             return Ok(false);
         }
         let Some(front) = self.active.front_mut() else {
