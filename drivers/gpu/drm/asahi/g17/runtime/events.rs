@@ -30,6 +30,9 @@ impl event::Transport for Service<'_> {
     fn roles(&self) -> &'static [Role] {
         self.firmware.roles()
     }
+    fn reports_after_signal(&self) -> bool {
+        self.firmware.init.is_m5()
+    }
     fn trace(&mut self, role: Role) {
         let firmware = &mut *self.firmware;
         firmware
@@ -302,6 +305,21 @@ impl Firmware {
         Ok(())
     }
 
+    /// Drains every role's trace ring, then their statistics rings. On M5 the event worker calls
+    /// this after it has signalled the completions of its pass: the reports are not scheduling
+    /// inputs.
+    fn drain_reports(&mut self) {
+        let dev = &self.primary.state.shared.dev;
+        for &role in self.roles() {
+            self.rings.drain_trace(dev, &self.init, role);
+        }
+        for &role in self.roles() {
+            self.observe_statistics_power();
+            self.rings.drain_statistics(&self.primary.state.shared.dev, &self.init, role);
+            self.observe_statistics_power();
+        }
+    }
+
     pub(super) fn service_runtime_events(
         &mut self,
         deferred: &mut DeferredBatch,
@@ -440,6 +458,10 @@ impl crate::g17::Shared {
         };
         if self.crashed.load(core::sync::atomic::Ordering::Acquire) {
             return Err(EIO);
+        }
+        if firmware.init.is_m5() {
+            // The completions above are signalled; the reports that arrived with them come after.
+            firmware.drain_reports();
         }
         if recover {
             firmware.service_runtime_recovery(deferred)?;
