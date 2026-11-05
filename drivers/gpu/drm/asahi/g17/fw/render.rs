@@ -1633,7 +1633,8 @@ mod ta_mode_tests {
     fn policy_is_local_to_the_admitted_t6041_build() {
         let max = selected(&crate::hw::t6041::CONFIG.firmware);
         let pro = selected(&crate::hw::t6040::CONFIG.firmware);
-        assert!(max.is_25f84());
+        assert_eq!(max.compute, crate::g17::fw::compute::ComputeProgram::V25F84);
+        assert!(max.split_firmware_area);
         assert_eq!(max.programs, RegisterPrograms::V25G83);
         assert!(max.ta_mode_1);
         assert!(!pro.ta_mode_1);

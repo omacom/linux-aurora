@@ -43,13 +43,6 @@ pub(crate) enum QueueRegistration {
     Mailbox,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub(crate) enum FirmwareVersion {
-    V26A428,
-    V25G83,
-    V25F84,
-}
-
 /// The layouts and rules of one G17 firmware build.
 #[derive(Copy, Clone)]
 pub(crate) struct Variant {
@@ -84,7 +77,6 @@ pub(crate) struct Variant {
     pub(crate) compute: super::compute::ComputeProgram,
     pub(crate) opening_record: bool,
     pub(crate) split_firmware_area: bool,
-    pub(crate) version: FirmwareVersion,
 }
 
 /// A firmware build a SoC supports, identified by its loaded TEXT.
@@ -129,7 +121,6 @@ pub(crate) const V26A428: Variant = Variant {
     compute: super::compute::ComputeProgram::G17P,
     opening_record: true,
     split_firmware_area: false,
-    version: FirmwareVersion::V26A428,
 };
 
 /// The M4 Pro firmware (25G83, `mBoot-18000.161.10`).
@@ -161,11 +152,9 @@ pub(crate) const V25G83: Variant = Variant {
     compute: super::compute::ComputeProgram::G17P,
     opening_record: true,
     split_firmware_area: false,
-    version: FirmwareVersion::V25G83,
 };
 
 pub(crate) const V25F84: Variant = Variant {
-    version: FirmwareVersion::V25F84,
     qid_floor: 0,
     registration: QueueRegistration::Mailbox,
     compute: super::compute::ComputeProgram::V25F84,
@@ -173,12 +162,6 @@ pub(crate) const V25F84: Variant = Variant {
     split_firmware_area: true,
     ..V25G83
 };
-
-impl Variant {
-    pub(crate) const fn is_25f84(&self) -> bool {
-        matches!(self.version, FirmwareVersion::V25F84)
-    }
-}
 
 const _: () = {
     assert!(super::queue::PointerBlock::valid_layout(&V26A428.pointers));
