@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J514M/T6034 internal display. Fresh ADT metadata identifies the same
+ * DCP/DART/PMP register layout and 14.7 firmware images as T6031, with a
+ * 400 MHz disp0 clock. Keep a separate handoff and component compatible;
+ * every consumer remains disabled until the T6034 gate validates it.
+ */
+#include "t6031-dcp.dtsi"
+
+&clk_disp0 {
+	clock-frequency = <400000000>;
+};
+
+&display {
+	compatible = "apple,t6034-display-subsystem";
+};
+
+&dcp {
+	compatible = "apple,t6034-dcp";
+};
+
+&pmp {
+	compatible = "apple,t6034-pmp-v2", "apple,t6000-pmp-v2";
+};
+
+&pmp_report {
+	compatible = "apple,t6034-pmp-v2-report", "apple,t6020-pmp-v2-report";
+};
