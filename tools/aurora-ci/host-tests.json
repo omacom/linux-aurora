@@ -2226,7 +2226,7 @@
     "tools/asahi/g15-t6034-profile-tests.py"
    ],
    "rust": "1.93.1",
-   "note": "Production G15C profiles, exact fused T6034 topology, six memory channels and empty-firmware refusal without the prefix escape hatch; public synthetic identity inputs only."
+   "note": "Production G15C profiles, exact T6034 topology/six memory channels, full J514M firmware tuple and wrong-board/field refusal; strict nonempty and empty profiles never consult prefix overrides, while older policy remains unchanged. Public identity inputs only."
   },
   {
    "name": "tools/asahi/t6034-display-tests.py",

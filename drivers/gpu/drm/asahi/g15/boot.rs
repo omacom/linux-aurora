@@ -526,7 +526,9 @@ pub(crate) fn admit(
     }
     let adt = adt::read(dev, cfg)
         .inspect_err(|e| dev_err!(dev, "GPU regions not admitted: {:?}\n", e))?;
-    identity::firmware(dev, &adt, cfg.firmware)
+    // T6034 requires complete identities; the older profiles keep their
+    // existing explicitly requested bring-up prefix policy.
+    identity::firmware(dev, &adt, cfg.firmware, cfg.chip_id != 0x6034)
         .inspect_err(|e| dev_err!(dev, "loaded GFX TEXT identity mismatch: {:?}\n", e))?;
     dev_info!(dev, "M3: firmware identity accepted\n");
     if cfg.board == hw::Board::None {

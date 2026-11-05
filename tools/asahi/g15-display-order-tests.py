@@ -306,7 +306,10 @@ mod adt {
     pub fn read(_: &super::device::Device, _: &super::Config) -> super::Result<GpuAdt> { super::call("adt"); Ok(GpuAdt) }
 }
 mod identity {
-    pub fn firmware(_: &super::device::Device, _: &super::adt::GpuAdt, _: ()) -> super::Result { super::call("identity"); Ok(()) }
+    pub fn firmware(_: &super::device::Device, _: &super::adt::GpuAdt, _: (), allow_prefix: bool) -> super::Result {
+        super::STATE.with(|s| assert_eq!(allow_prefix, !s.borrow().t6034));
+        super::call("identity"); Ok(())
+    }
 }
 mod initdata {
     pub fn prepare_board(_: &super::device::Device, _: &super::Config, _: &super::adt::GpuAdt) -> super::Result<u32> {
@@ -457,6 +460,8 @@ SLEEP_HOLD_MUTANTS = {
 }
 
 RS_MUTANTS = {
+    "t6034-prefix-enabled": ('cfg.chip_id != 0x6034', 'true'),
+    "other-prefix-policy-lost": ('cfg.chip_id != 0x6034', 'false'),
     "t6034-ignores-soc": ('&& glue::machine(kernel::c_str!("apple,t6034"))', "&& true"),
     "candidate-ignores-config-chip": ("cfg.chip_id == 0x6031", "true"),
     "candidate-ignores-board": ('&& glue::machine(kernel::c_str!("apple,j514c"))', "&& true"),
