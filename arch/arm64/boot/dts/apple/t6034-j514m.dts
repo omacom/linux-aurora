@@ -10,7 +10,7 @@
 /dts-v1/;
 
 #include "t6034.dtsi"
-#include "t6031-dcp.dtsi"
+#include "t6034-dcp.dtsi"
 #include "t603x-j514-j516.dtsi"
 
 / {
