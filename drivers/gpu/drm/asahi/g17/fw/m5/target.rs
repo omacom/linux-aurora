@@ -40,7 +40,14 @@ impl TargetSlices {
             if segments == 0 || pb_bytes == 0 { return None; }
             let segments = segments as usize;
             sizes[1] = tilemap_bytes.checked_mul(segments)?;
-            sizes[2] = if layers > 1 { 0x100usize.checked_mul(segments)? } else { 0 };
+            // Each segment's layer metadata, single-layer passes included. When the parameter
+            // buffer runs out and the firmware renders partially, the tiler continues each later
+            // segment k at this slice's base (named in the TA command) plus 0x100 k, and the
+            // firmware names that root in the next partial program. A single-layer pass's first segment
+            // takes its metadata from the target records instead, so the slice is used only once
+            // a pass splits: left unsized, its base was the compact window's first byte, and the
+            // segments' metadata landed in whatever lived there.
+            sizes[2] = 0x100usize.checked_mul(segments)?;
             sizes[4] = (kind as usize).checked_mul(0x300)?.checked_add(0x680)?;
             sizes[5] = (kind as usize).checked_mul(0x5c0)?;
 
