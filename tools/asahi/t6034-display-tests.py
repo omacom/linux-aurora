@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-only OR MIT
 """Run production J514M display selection and opt-out policy on the host."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 ROOT = Path(__file__).resolve().parents[2]
@@ -125,3 +126,91 @@ with tempfile.TemporaryDirectory(prefix='t6034-pmp-report-') as directory:
   assert (result.returncode==0)==(name=='control'),(name,result.stderr)
   print('PMP '+name+': '+('pass' if name=='control' else 'caught'))
 print('T6034 exact PMP report binding, halted owner, offsets and explicit fallback: PASS')
+
+# The platform drivers can both match while the master sees no component.
+# Exercise its production enumeration and platform probe, plus both OF tables.
+master = (ROOT / 'drivers/gpu/drm/apple/apple_drv.c').read_text()
+dcp_driver = (ROOT / 'drivers/gpu/drm/apple/dcp.c').read_text()
+component_table = item(master, 'static const struct of_device_id apple_dcp_id_tbl[] = {') + ';'
+master_table = (item(master, 'static const struct of_device_id of_match[] = {') + ';').replace('of_match[]', 'master_of_match[]')
+dcp_table = (item(dcp_driver, 'static const struct of_device_id of_match[] = {') + ';').replace('of_match[]', 'dcp_of_match[]')
+data_names = sorted(set(re.findall(r'\.data = &(\w+)', dcp_table)))
+component_prefix = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+#define IS_ENABLED(x) 0
+#define ENODEV 19
+struct device_node { const char *compatible; bool available; };
+struct device { struct device_node *of_node; };
+struct platform_device { struct device dev; };
+struct component_match { struct device_node *nodes[4]; int count; };
+struct of_device_id { const char *compatible; const void *data; };
+static struct device_node *nodes[4];
+static struct component_match matches;
+static int masters;
+static bool of_device_is_available(const struct device_node *n) {return n && n->available;}
+static bool of_device_is_compatible(const struct device_node *n,const char *s) {return n && !strcmp(n->compatible,s);}
+static bool dcp_t6030_ext_native(struct device_node *n) {(void)n;return false;}
+static bool dcp_h17p_external_supported(struct device_node *n) {(void)n;return false;}
+static bool table_has(const struct of_device_id *table,const char *compatible)
+{for(;table->compatible;table++)if(!strcmp(table->compatible,compatible))return true;return false;}
+static struct device_node *next_node(struct device_node *previous,const struct of_device_id *table)
+{
+ unsigned i=0;if(previous){while(nodes[i] && nodes[i]!=previous)i++;if(nodes[i])i++;}
+ for(;nodes[i];i++)if(table_has(table,nodes[i]->compatible))return nodes[i];
+ return NULL;
+}
+#define for_each_matching_node(np,table) for(np=next_node(NULL,table);np;np=next_node(np,table))
+#define for_each_endpoint_of_node(np,ep) for(ep=NULL;ep;ep=NULL)
+static struct device_node *of_graph_get_remote_port_parent(struct device_node *n) {(void)n;return NULL;}
+static void of_node_put(struct device_node *n) {(void)n;}
+static int component_compare_of(struct device *d,void *p) {(void)d;(void)p;return 1;}
+static void drm_of_component_match_add(struct device *d,struct component_match **m,int (*compare)(struct device *,void *),struct device_node *n)
+{(void)d;(void)compare;*m=&matches;assert(matches.count<4);matches.nodes[matches.count++]=n;}
+static int apple_drm_ops;
+static int component_master_add_with_match(struct device *d,int *ops,struct component_match *m)
+{(void)d;assert(ops==&apple_drm_ops && m && m->count>0);masters++;return 0;}
+'''
+component_functions='\n'.join(item(master, marker) for marker in [
+ 'static bool apple_dcp_usable(struct device_node *np)',
+ 'static int add_dcp_components(struct device *dev,',
+ 'static int apple_platform_probe(struct platform_device *pdev)'])
+component_main=r'''
+int main(void)
+{
+ struct device_node dcp={"apple,t6034-dcp",true};
+ struct device_node ext={"apple,t6034-dcpext",true};
+ struct device_node display={"apple,t6034-display-subsystem",true};
+ struct platform_device platform={{&display}};
+ assert(table_has(master_of_match,display.compatible));
+ assert(table_has(dcp_of_match,dcp.compatible));
+ nodes[0]=&dcp;nodes[1]=&ext;
+ assert(apple_platform_probe(&platform)==0 && masters==1);
+ assert(matches.count==1 && matches.nodes[0]==&dcp);
+ matches.count=0;masters=0;dcp.available=false;
+ assert(apple_platform_probe(&platform)==-ENODEV && !masters && !matches.count);
+ dcp.available=true;dcp.compatible="apple,t6031-dcp";
+ assert(apple_platform_probe(&platform)==0 && matches.count==1);
+ matches.count=0;masters=0;dcp.compatible="apple,t6034-dcpext";nodes[1]=NULL;
+ assert(apple_platform_probe(&platform)==-ENODEV && !masters && !matches.count);
+ return 0;
+}
+'''
+component_source='\n'.join([component_prefix,'\n'.join('static const char '+n+';' for n in data_names),component_table,master_table,dcp_table,component_functions,component_main])
+component_mutants={
+ 'control':component_source,
+ 'missing-master-dcp':component_source.replace(component_table,component_table.replace('"apple,t6034-dcp"','"apple,missing-t6034-dcp"')),
+ 'missing-master-binding':component_source.replace(master_table,master_table.replace('"apple,t6034-display-subsystem"','"apple,missing-t6034-display-subsystem"')),
+ 'missing-dcp-binding':component_source.replace(dcp_table,dcp_table.replace('"apple,t6034-dcp"','"apple,missing-t6034-dcp"')),
+ 'lost-disabled-filter':component_source.replace('return of_device_is_available(np) &&','return true &&'),
+}
+with tempfile.TemporaryDirectory(prefix='t6034-components-') as directory:
+ for name,c in component_mutants.items():
+  exe=Path(directory)/name
+  subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-x','c','-','-o',str(exe)],input=c,text=True,check=True)
+  result=subprocess.run([str(exe)],capture_output=True)
+  assert (result.returncode==0)==(name=='control'),(name,result.stderr)
+  print('components '+name+': '+('pass' if name=='control' else 'caught'))
+print('T6034 DCP/platform matches, production component enumeration and disabled filtering: PASS')
