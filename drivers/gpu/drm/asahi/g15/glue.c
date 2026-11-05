@@ -163,7 +163,7 @@ int asahi_g15_display_prepare(struct device *dev)
 		return ret;
 	np = of_find_compatible_node(NULL, NULL, "apple,t6031-display-subsystem");
 	if (!np || !of_device_is_available(np))
-		dev_info_once(dev, "G15: waiting for the T6031 native display, which this boot did not enable (it needs the boot loader's display handoff, and apple_t6031_display.enable=1 except on the J516C)\n");
+		dev_info_once(dev, "G15: waiting for the T6031 native display, which this boot did not enable (it needs the boot loader's display handoff, and an admitted native-display board)\n");
 	else
 		dev_info_once(dev, "G15: waiting for the T6031 native display to come up: the GPU firmware starts only after the display is published\n");
 	of_node_put(np);
