@@ -932,6 +932,12 @@ impl Firmware {
     /// refused control (recovery in progress) is retried on a later check.
     fn idle_hold(&mut self, now_ns: u64, in_flight: bool) -> Option<u64> {
         const RETRY_NS: u64 = 1_000_000;
+        // The M5 firmware powers the cores for work by its own policy, and under a host
+        // hold J775D's core-power witness reads unpowered until the hold is released. M5
+        // takes no host hold, whatever delay the tree or sysfs asks for.
+        if self.init.is_m5() {
+            return None;
+        }
         let hold_ms = power::IDLE_HOLD_MS.load(Ordering::Relaxed);
         for _ in 0..2 {
             match self
