@@ -1517,13 +1517,15 @@ const fn one_lane(states: [(u32, u32, u32); 14]) -> [M5AuxPerfState; 14] {
 }
 
 // Evaluate the frequency-only curve at compile time; no kernel FPU use.
-// Conversion uses Hz before the single-precision multiply and divide.
-const fn relative_frequency(states: &[M5PerfState; 14]) -> [u32; 16] {
+// Conversion uses Hz before the single-precision multiply and divide. The curve is based at
+// `floor`, the lowest state the performance controllers run the GPU at: states at and below it
+// read 0.
+const fn relative_frequency(states: &[M5PerfState; 14], floor: usize) -> [u32; 16] {
     let mut values = [0; 16];
-    let base = states[1].0 as u64 * 1_000_000;
+    let base = states[floor].0 as u64 * 1_000_000;
     let maximum = states[13].0 as u64 * 1_000_000;
     let denominator = (maximum - base) as f32;
-    let mut state = 2;
+    let mut state = floor + 1;
     while state < 14 {
         let frequency = states[state].0 as u64 * 1_000_000;
         values[state] = (((frequency - base) as f32 * 100.0) / denominator).to_bits();
@@ -1789,7 +1791,7 @@ pub(crate) const J714: Board = Board {
     perf_states: &J714_GPU_PERF_STATES,
     perf_tables: 2,
     aux_perf_states: &J714_AUX_PERF_STATES,
-    relative_frequency: relative_frequency(&J714_GPU_PERF_STATES),
+    relative_frequency: relative_frequency(&J714_GPU_PERF_STATES, 1),
     aon_records: &J714_AON_RECORDS,
     register_windows: &J714_REGISTER_WINDOWS,
     min_parameter_buffer: 0x0020_0000,
@@ -1806,7 +1808,7 @@ pub(crate) const J716C: Board = Board {
     perf_states: &J716C_GPU_PERF_STATES,
     perf_tables: 4,
     aux_perf_states: &J716C_AUX_PERF_STATES,
-    relative_frequency: relative_frequency(&J716C_GPU_PERF_STATES),
+    relative_frequency: relative_frequency(&J716C_GPU_PERF_STATES, 1),
     aon_records: &J716C_AON_RECORDS,
     register_windows: &J716C_REGISTER_WINDOWS,
     min_parameter_buffer: 0x0030_0000,
@@ -1815,6 +1817,9 @@ pub(crate) const J716C: Board = Board {
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
     controller_defaults: Some(encode_m5_policy_controller_defaults),
 };
+
+/// J775D's performance controllers run from P3.
+const J775D_PERF_FLOOR: usize = 3;
 
 /// M5 Ultra: two dies of four clusters of ten cores (G17D). Values from the J775D ADT.
 pub(crate) const J775D: Board = Board {
@@ -1826,7 +1831,7 @@ pub(crate) const J775D: Board = Board {
     // One voltage table per cluster.
     perf_tables: 8,
     aux_perf_states: &J775D_AUX_PERF_STATES,
-    relative_frequency: relative_frequency(&J775D_GPU_PERF_STATES),
+    relative_frequency: relative_frequency(&J775D_GPU_PERF_STATES, J775D_PERF_FLOOR),
     aon_records: &J775D_AON_RECORDS,
     register_windows: &J775D_REGISTER_WINDOWS,
     // The minimum parameter buffer for eight clusters.
@@ -2727,6 +2732,11 @@ pub(crate) fn encode_m5_policy_controller_defaults_j775d(out: &mut [u8]) -> Resu
     for (offset, value) in [(0xaa0, 0x3da3_d70b), (0xab0, 0x3ba3_d70a), (0x45b4, 0x3c23_d70b),
         (0x45c4, 0x3e8f_5c29), (0xb44, 75), (0xb48, 95)] {
         put_u32(policy, offset, value);
+    }
+    // The performance controllers' floor, P3, as state x 100 in the three floor words (the last
+    // byte-packed in the boost block); HwData's relative-frequency tables are based at it too.
+    for offset in [0xb94, 0xbd4, 0xbf9] {
+        put_u32(policy, offset, J775D_PERF_FLOOR as u32 * 100);
     }
     const DIE_CHANNELS: u64 = 0x6fcc_3fcc_6fcc_3fcc;
     for (offset, words) in [
