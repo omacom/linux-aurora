@@ -144,9 +144,9 @@ static const struct dcp_v14_board dcp_v14_board_j615 = {
  * J504 (MacBook Pro 14", M3): the J613 DCP image on the same T8122 DCP (the
  * J504 ADT names it), driving the 14" mini-LED panel of the J514S: 3024x1964
  * with 74 notch rows above the 3024x1890 boot framebuffer, at 60 or 120 Hz.
- * The colour matrix methods are this image's. The panel level block is not
- * qualified on this board, so brightness stays closed (no panel_nits), and
- * its swaps keep zero timestamps as on the Airs. Every panel timing and the
+ * The colour matrix methods are this image's, and so is the panel level
+ * block the J613 qualified (brightness in nits, 500 at most here). Its swaps
+ * keep zero timestamps as on the Airs. Every panel timing and the
  * display clock are logged for the first boots.
  */
 static const struct dcp_v14_board dcp_v14_board_j504 = {
@@ -160,6 +160,7 @@ static const struct dcp_v14_board dcp_v14_board_j504 = {
 	.panel_height = 1964,
 	.promotion = true,
 	.log_bringup = true,
+	.panel_nits = true,
 	.ctm_set = A(421),
 	.ctm_get = A(420),
 };
@@ -1723,7 +1724,8 @@ static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
 {
 	return board && board->panel_nits &&
 		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s") ||
-		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613"));
+		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613") ||
+		 machine_is(ctx, "apple,j504"));
 }
 
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)

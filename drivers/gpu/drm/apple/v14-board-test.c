@@ -256,7 +256,7 @@ static void v14_swap_timestamps_encoding(struct kunit *test)
 
 /*
  * J504 (14" M3 MacBook Pro): the J613 image on the T8122 DCP, its own 3024x1964
- * ProMotion panel, brightness closed and unstamped swaps. The other T8122
+ * ProMotion panel, the qualified level block (brightness) and unstamped swaps. The other T8122
  * Macs (J433, J434) have no record.
  */
 static void v14_board_j504(struct kunit *test)
@@ -277,7 +277,7 @@ static void v14_board_j504(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, b->panel_height, 1964);
 	KUNIT_EXPECT_TRUE(test, b->promotion);
 	KUNIT_EXPECT_TRUE(test, b->log_bringup);
-	KUNIT_EXPECT_FALSE(test, b->panel_nits);
+	KUNIT_EXPECT_TRUE(test, b->panel_nits);
 	KUNIT_EXPECT_FALSE(test, b->base_edid);
 	KUNIT_EXPECT_EQ(test, b->ctm_set, air->ctm_set);
 	KUNIT_EXPECT_EQ(test, b->ctm_get, air->ctm_get);

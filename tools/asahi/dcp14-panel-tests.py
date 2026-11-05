@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
      assert(!IS_ERR(p14)&&p14&&!strcmp(p14->name,"J504")&&!strcmp(p14->debugfs,"dcp-j504"));
      assert(p14->panel_width==3024&&p14->panel_height==1964&&p14->promotion&&p14->log_bringup);
      assert(!strcmp(p14->firmware_uuid,"90F849E1-B422-367E-B389-50246F8DEC47"));
-     assert(!strcmp(p14->handoff,"apple,t8122-handoff")&&!p14->panel_nits&&!p14->swap_timestamps);
+     assert(!strcmp(p14->handoff,"apple,t8122-handoff")&&p14->panel_nits&&!p14->swap_timestamps);
      assert(p14->ctm_set==A(421)&&p14->ctm_get==A(420));
      image_uuid=p14->firmware_uuid;assert(probe_gate(&dev,p14)==0);
      image_uuid="C042E95C-B9D8-3F0E-94B3-582A08AA6FDD";assert(probe_gate(&dev,p14)==-ENODEV);
