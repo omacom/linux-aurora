@@ -14,6 +14,7 @@ use crate::g17::{
     fw::{
         channels::ControlRecord,
         compute::{ComputeProgram, OperandState, COMPUTE_DESCRIPTOR_SIZE},
+        m5::initdata::Board,
         queue::*,
         variant::PointerLayout,
     },
@@ -149,6 +150,8 @@ struct Graph {
     pointers: PointerLayout,
     /// Layout of the operand-state buffer for the GPU's cores.
     operand_state: &'static OperandState,
+    /// The M5 board, whose part selects the M5 descriptor words.
+    board: Option<&'static Board>,
     program: ComputeProgram,
 }
 
@@ -159,6 +162,7 @@ impl Graph {
         context: &Context,
         pointers: PointerLayout,
         operand_state: &'static OperandState,
+        board: Option<&'static Board>,
         program: ComputeProgram,
         m5: bool,
     ) -> Result<Self> {
@@ -243,6 +247,7 @@ impl Graph {
             reclaimed: 0,
             pointers,
             operand_state,
+            board,
             program,
         })
     }
@@ -652,11 +657,12 @@ impl Queue {
         context: Arc<Context>,
         pointers: PointerLayout,
         operand_state: &'static OperandState,
+        board: Option<&'static Board>,
         program: ComputeProgram,
         m5: bool,
     ) -> Result<Self> {
         let Backing { mut pool, mut kick } = backing;
-        let mut graph = Graph::new(alloc, objects, &context, pointers, operand_state, program, m5)?;
+        let mut graph = Graph::new(alloc, objects, &context, pointers, operand_state, board, program, m5)?;
         let kick_alias = kick.map_client(context.vm())?;
         let pool_alias = pool.map_client(context.vm())?;
         let binding = graph.bind(context.clone(), kick_alias, pool_alias)?;
@@ -2425,7 +2431,8 @@ impl Queue {
             KickAnnounce::new(qid, DataMaster::Compute, kick_timestamp, policy.priority())?;
         let predecessor = KickPredecessor::new(qid, kick_parent)?;
         let matrix_ops = self.graph.m5 && *requested_matrix_ops;
-        let m5_args = crate::g17::fw::m5::compute::DescriptorArgs {
+        let m5_board = if self.graph.m5 { Some(self.graph.board.ok_or(EINVAL)?) } else { None };
+        let m5_args = m5_board.map(|board| crate::g17::fw::m5::compute::DescriptorArgs {
             registers: crate::g17::fw::m5::compute::RegisterArgs {
                 matrix_ops,
                 scratch: m5_scratch,
@@ -2441,7 +2448,8 @@ impl Queue {
                 operand_region_bytes: self.graph.operand_state.bank_bytes(),
                 operand_aux_offset: self.graph.operand_state.tail_offset(),
                 operand_bytes: self.graph.operand_state.size, resource_control: plan.map_or(0x54b, |p| p.resource_flags),
-                dispatch_control: 0x14c08a60, auxiliary_control: 1,
+                dispatch_control: crate::g17::fw::m5::compute::dispatch_control(board, 0x14c08a60),
+                auxiliary_control: 1,
             },
             descriptor_va: descriptor_low, submit_sequence: 0, work_state_va: work_node,
             cdm_end_va: *cdm_end_va, stamp_va: [args.stamp_va, args.aux_stamp_va],
@@ -2450,7 +2458,7 @@ impl Queue {
             status_va: args.status_va, timestamp_va: [timestamp_va, timestamp_va + 8],
             shared_control_va: self.pool.control_va(), event_metadata: [0;16],
             usage_fw_va: self.graph.usage.gpu_va(), completion_identity: 1,
-        };
+        });
         let m5_dependency_types = [2u8; crate::g17::fw::kick::QID_MAX as usize + 1];
         let kick_args = KickArgs {
             qid,
@@ -2497,9 +2505,9 @@ impl Queue {
             accounted = true;
             let object = &mut self.graph.ring.as_mut().ok_or(EAGAIN)?.object;
             let offset = kick_timestamp.slot() % DESCRIPTORS * COMPUTE_DESCRIPTOR_SIZE;
-            if self.graph.m5 {
+            if let Some(m5_args) = &m5_args {
                 object.initialize::<crate::g17::fw::m5::compute::Descriptor>(offset,
-                    |descriptor| descriptor.write_zeroed(&m5_args))?;
+                    |descriptor| descriptor.write_zeroed(m5_args))?;
             } else {
                 object.initialize::<ComputeDescriptor>(offset, |descriptor| descriptor.write_zeroed(&args))?;
             }

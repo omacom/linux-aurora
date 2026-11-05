@@ -1170,6 +1170,7 @@ impl Backend {
                     self.context.clone(),
                     self.shared.variant.pointers,
                     self.shared.operand_state,
+                    self.shared.m5_board,
                     self.shared.variant.compute,
                     alloc.uat.is_m5(),
                 )?;

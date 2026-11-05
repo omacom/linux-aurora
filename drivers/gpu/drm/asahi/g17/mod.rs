@@ -1018,6 +1018,8 @@ struct Shared {
     variant: &'static fw::Variant,
     /// Layout of compute queues' operand-state buffers for this GPU's cores.
     operand_state: &'static fw::compute::OperandState,
+    /// The M5 board ([`Config::m5`]) of an M5 profile.
+    m5_board: Option<&'static fw::m5::initdata::Board>,
     /// Layout of renders' deflake buffers for this GPU's cores.
     deflake: fw::render::Deflake,
     compute_blocks: usize,
@@ -1490,6 +1492,7 @@ impl Gpu {
                 active_cores,
                 variant,
                 operand_state: &cfg.core_layout.operand_state,
+                m5_board: cfg.m5.filter(|_| m5),
                 deflake: cfg.core_layout.deflake,
                 compute_blocks: cfg.core_layout.compute_blocks,
                 descriptor_flags: [id.perf_control, id.perf_map[0]],

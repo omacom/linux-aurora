@@ -6,11 +6,30 @@
 
 use kernel::prelude::*;
 use super::super::{kick::RegisterWrite, offset_va, work_key};
+use super::initdata::Board;
 
 pub(crate) const MAIN_COUNT: usize = 40;
 pub(crate) const ALTERNATE_COUNT: usize = 4;
 pub(crate) const PREEMPT_BYTES: usize = 0x4000;
 pub(crate) const CHECKPOINTS: [u16; 4] = [37, 39, 39, 40];
+
+/// A dispatch control word for `board`: above four clusters it carries the cluster-topology term,
+/// `0x9c` in the form for the firmware feature the 27.0 profile leaves clear (`0x1c` is the
+/// feature-set form). The term is an OR. Compute and render dispatch words both take it.
+pub(crate) fn dispatch_control(board: &Board, base: u64) -> u64 {
+    topology_dispatch_control(base, board.clusters)
+}
+
+/// [`dispatch_control`] for `clusters`.
+pub(crate) const fn topology_dispatch_control(base: u64, clusters: u32) -> u64 {
+    if clusters > 4 { base | 0x9c } else { base }
+}
+
+const _: () = {
+    assert!(topology_dispatch_control(0x14c0_8a60, 8) == 0x14c0_8afc);
+    assert!(topology_dispatch_control(0x10c0_8860, 8) == 0x10c0_88fc);
+    assert!(topology_dispatch_control(0x14c0_8a60, 4) == 0x14c0_8a60);
+};
 
 /// The SCS scratch allocation. Pages are 4 KiB USC pool pages, independent
 /// of the host's CPU page size. Layout sections and control registers are
