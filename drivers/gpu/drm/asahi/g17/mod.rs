@@ -764,11 +764,14 @@ impl Firmware {
         port: &port::Port,
         effort: u32,
     ) -> Result {
-        if state.applied() == effort && init.effort()? == effort {
+        // The state machine and the performance-controller demand follow the requested effort;
+        // the firmware is given the M5 value (InitData::submission_effort).
+        let published = init.submission_effort(effort);
+        if state.applied() == effort && init.effort()? == published {
             return Ok(());
         }
-        init.publish_effort(effort)?;
-        trace::message(trace::EFFORT, u64::from(effort));
+        init.publish_effort(published)?;
+        trace::message(trace::EFFORT, u64::from(published));
         state.did_apply(effort);
         port.set_effort_full(effort == power::FULL_EFFORT);
         Ok(())
@@ -909,6 +912,8 @@ struct Shared {
     deflake: fw::render::Deflake,
     compute_blocks: usize,
     descriptor_flags: [u32; 2],
+    /// Firmware events and work run: off for an M5 GPU until the M5 queues take submission.
+    submission_enabled: bool,
     crashed: AtomicBool,
     feed: Arc<feed::Feed>,
     #[pin]
@@ -1078,6 +1083,9 @@ impl Shared {
     /// during a pass. The pass skips the housekeeping that nothing needs (see
     /// `runtime_event_turn`). Callable from any context.
     fn queue_event_records(self: &Arc<Self>) {
+        if !self.submission_enabled {
+            return;
+        }
         // Already queued if this fails, which is just as good.
         let _ = workqueue::system_highpri().enqueue::<Arc<Shared>, EVENT_WORK>(self.clone());
     }
@@ -1233,7 +1241,12 @@ impl Gpu {
             ias: cfg.uat_ias,
             oas: cfg.uat_oas,
         };
-        let max_frequency_khz = Self::max_frequency_khz(dev)?;
+        let m5 = cfg.profile.is_m5();
+        let max_frequency_khz = if m5 {
+            fw::m5::initdata::J714_GPU_PERF_STATES[13].0 * 1000
+        } else {
+            Self::max_frequency_khz(dev)?
+        };
         let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
         let idle_delay =
             power::idle_delay(node.get_opt_property(c_str!("apple,idle-off-delay-ms"))?)?;
@@ -1291,6 +1304,7 @@ impl Gpu {
                 deflake: cfg.core_layout.deflake,
                 compute_blocks: cfg.core_layout.compute_blocks,
                 descriptor_flags: [id.perf_control, id.perf_map[0]],
+                submission_enabled: !m5,
                 crashed: AtomicBool::new(false),
                 feed,
                 feed_work <- new_work!("g17::Shared::feed_work"),
