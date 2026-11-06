@@ -970,10 +970,34 @@ static int macsmc_power_event(struct notifier_block *nb, unsigned long event, vo
 	return NOTIFY_DONE;
 }
 
+static int macsmc_read_identity(struct apple_smc *smc, smc_key key,
+			       char *out, size_t capacity)
+{
+	struct apple_smc_key_info info;
+	int ret;
+
+	if (!capacity)
+		return -EINVAL;
+	out[0] = '\0';
+	ret = apple_smc_get_key_info(smc, key, &info);
+	if (ret < 0)
+		return ret;
+	if (!info.size || info.size >= capacity || !(info.flags & APPLE_SMC_READABLE))
+		return -EINVAL;
+	/* SMC read requests must describe this key, not the destination buffer. */
+	ret = apple_smc_read(smc, key, out, info.size);
+	if (ret != info.size) {
+		out[0] = '\0';
+		return ret < 0 ? ret : -EIO;
+	}
+	out[info.size] = '\0';
+	return 0;
+}
+
 static int macsmc_power_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct apple_smc *smc = dev_get_drvdata(pdev->dev.parent);
+	struct apple_smc *smc;
 	struct power_supply_config psy_cfg = {};
 	struct apple_smc_key_info info;
 	struct macsmc_power *power;
@@ -986,6 +1010,9 @@ static int macsmc_power_probe(struct platform_device *pdev)
 	enum power_supply_property *props;
 	size_t nprops;
 
+	if (!dev->parent)
+		return dev_err_probe(dev, -ENODEV, "Missing SMC parent\n");
+	smc = dev_get_drvdata(dev->parent);
 	if (!smc)
 		return -ENODEV;
 
@@ -1148,12 +1175,12 @@ static int macsmc_power_probe(struct platform_device *pdev)
 		power->batt_desc.num_properties = nprops;
 
 		/* Fetch identity strings */
-		apple_smc_read(smc, SMC_KEY(BMDN), power->model_name,
-			       sizeof(power->model_name) - 1);
-		apple_smc_read(smc, SMC_KEY(BMSN), power->serial_number,
-			       sizeof(power->serial_number) - 1);
-		apple_smc_read(smc, SMC_KEY(BMDT), power->mfg_date,
-			       sizeof(power->mfg_date) - 1);
+		macsmc_read_identity(smc, SMC_KEY(BMDN), power->model_name,
+				     sizeof(power->model_name));
+		macsmc_read_identity(smc, SMC_KEY(BMSN), power->serial_number,
+				     sizeof(power->serial_number));
+		macsmc_read_identity(smc, SMC_KEY(BMDT), power->mfg_date,
+				     sizeof(power->mfg_date));
 
 		apple_smc_read_u8(power->smc, SMC_KEY(BNCB), &power->num_cells);
 		power->nominal_voltage_mv = MACSMC_NOMINAL_CELL_VOLTAGE_MV * power->num_cells;
