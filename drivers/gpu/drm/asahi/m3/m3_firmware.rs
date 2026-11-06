@@ -62,6 +62,19 @@ pub(crate) static KNOWN_IMAGES_T8122: [KnownImage; 1] = [KnownImage {
     initdata_magic: Some(G15_V14_8_3_INITDATA),
 }];
 
+/// Image record for the extended format. The SoC's runtime selection does not use it yet.
+pub(crate) static T8122_IMAGES_26: [KnownImage; 1] = [KnownImage {
+    name: "T8122 C0 firmware-compat 26.6.2",
+    uuid: None,
+    stkg_sha256: Some([
+        0x3a, 0x6b, 0x8b, 0x5e, 0x83, 0x38, 0x4d, 0x5c,
+        0xc1, 0x92, 0x9d, 0x91, 0xb6, 0x36, 0x40, 0xfe,
+        0xe8, 0xf5, 0x52, 0xb5, 0x10, 0x8c, 0x4e, 0xa6,
+        0x20, 0xbe, 0xdb, 0x7b, 0xbc, 0xa0, 0x31, 0x64,
+    ]),
+    initdata_magic: Some(0x0c89_c357_8392_04b8),
+}];
+
 /// The same T8122 image for the start experiment (`t8122_start`, only with
 /// `asahi.t8122_start=1`), where `asahi.t8122_initdata_version` may replace the version.
 pub(crate) static KNOWN_IMAGES_T8122_EXPERIMENT: [KnownImage; 1] = [KnownImage {
@@ -117,6 +130,10 @@ pub(crate) struct Layout {
     /// Offset of the 8-byte tag that precedes the 8 per-boot bytes zeroed before hashing.
     pub(crate) entropy_tag_offset: usize,
     pub(crate) entropy_tag: [u8; 8],
+    /// An additional independent boot value, when required by this image.
+    extra_boot_value: Option<(usize, [u8; 8])>,
+    /// Expected boot-table location and byte count in the image header.
+    boot_table: Option<(u32, u32)>,
     /// The firmware version, for logs.
     pub(crate) version: &'static str,
 }
@@ -127,6 +144,8 @@ pub(crate) static T6030_LAYOUT: Layout = Layout {
     vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0005_c000],
     entropy_tag_offset: 0x58e88,
     entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    extra_boot_value: None,
+    boot_table: None,
     version: "RTKit-2419.140.12.release",
 };
 
@@ -137,23 +156,73 @@ pub(crate) static T8122_LAYOUT: Layout = Layout {
     vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0006_4000],
     entropy_tag_offset: 0x5d54a,
     entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    extra_boot_value: None,
+    boot_table: None,
     version: "RTKit-2419.140.12.release",
 };
 
 pub(crate) const TEXT_SHA256: [u8; 32] = [
     0x11, 0xe4, 0x9f, 0x75, 0xb, 0x67, 0x1a, 0x2b, 0x13, 0xd0, 0x92, 0xdb, 0x1c, 0xbc, 0xa3, 0xa8, 0x77, 0x55, 0x86, 0xd6, 0xb1, 0xe3, 0xaa, 0xe8, 0xa6, 0xa4, 0x64, 0xa7, 0x80, 0x2, 0x93, 0xd5];
 
+/// T8122 C0, firmware-compat 26.6.2. Selection remains separate from runtime admission.
+pub(crate) static T8122_LAYOUT_26: Layout = Layout {
+    text_size: 393216,
+    data_size: 1228800,
+    vas: [0xffff_fc00_0000_0000, 0xffff_fc00_0006_0000],
+    entropy_tag_offset: 380492,
+    entropy_tag: *b"GKTS\x08\x00\x00\x00",
+    extra_boot_value: Some((380719, *b"ECAP\x08\x00\x00\x00")),
+    boot_table: Some((380492, 561)),
+    version: "RTKit-3255.160.4.release",
+};
+
 fn normalize_boot_entropy(layout: &Layout, text: &mut [u8]) -> bool {
-    let tag = layout.entropy_tag_offset;
     if text.len() != layout.text_size as usize {
         return false;
     }
-    let Some(end) = tag.checked_add(16) else { return false; };
-    let Some(entropy) = text.get_mut(tag..end) else { return false; };
-    if entropy[..8] != layout.entropy_tag {
-        return false;
+    if let Some((offset, count)) = layout.boot_table {
+        let Some(header) = text.get(0x22c..0x234) else {
+            return false;
+        };
+        if header[..4] != offset.to_le_bytes() || header[4..] != count.to_le_bytes() {
+            return false;
+        }
+        let Some(end) = (offset as usize).checked_add(count as usize) else {
+            return false;
+        };
+        if text.get(offset as usize..end).is_none() {
+            return false;
+        }
     }
-    entropy[8..].fill(0);
+    let fields = [
+        Some((layout.entropy_tag_offset, layout.entropy_tag)),
+        layout.extra_boot_value,
+    ];
+    // Validate every field before touching even the first boot value.
+    for (offset, tag) in fields.into_iter().flatten() {
+        let Some(end) = offset.checked_add(16) else {
+            return false;
+        };
+        let Some(field) = text.get(offset..end) else {
+            return false;
+        };
+        if field[..8] != tag {
+            return false;
+        }
+        if let Some((base, count)) = layout.boot_table {
+            if offset < base as usize || end > base as usize + count as usize {
+                return false;
+            }
+        }
+    }
+    if let Some((other, _)) = layout.extra_boot_value {
+        if other < layout.entropy_tag_offset + 16 && layout.entropy_tag_offset < other + 16 {
+            return false;
+        }
+    }
+    for (offset, _) in fields.into_iter().flatten() {
+        text[offset + 8..offset + 16].fill(0);
+    }
     true
 }
 
@@ -167,6 +236,14 @@ pub(crate) struct Firmware {
 }
 
 impl Firmware {
+    pub(crate) fn profile(&self) -> super::m3_profile::Profile {
+        if core::ptr::eq(self.layout, &T8122_LAYOUT_26) {
+            super::m3_profile::Profile::Extended
+        } else {
+            super::m3_profile::Profile::Legacy
+        }
+    }
+
     pub(crate) const fn version(&self) -> &'static str {
         self.layout.version
     }
@@ -393,4 +470,61 @@ mod tests {
         assert!(!normalize_boot_entropy(&layout, &mut text));
         assert_eq!(text, vec![0xa5; 15]);
     }
+
+    fn image_26() -> Vec<u8> {
+        let mut image = vec![0x5a; 393216];
+        image[0x22c..0x230].copy_from_slice(&380492u32.to_le_bytes());
+        image[0x230..0x234].copy_from_slice(&561u32.to_le_bytes());
+        image[380492..380500].copy_from_slice(b"GKTS\x08\x00\x00\x00");
+        image[380719..380727].copy_from_slice(b"ECAP\x08\x00\x00\x00");
+        image
+    }
+
+    #[test]
+    fn newer_image_masks_only_both_boot_values() {
+        let mut image = image_26();
+        let before = image.clone();
+        assert!(normalize_boot_entropy(&T8122_LAYOUT_26, &mut image));
+        for index in 0..image.len() {
+            let expected = if (380500..380508).contains(&index) || (380727..380735).contains(&index)
+            {
+                0
+            } else {
+                before[index]
+            };
+            assert_eq!(image[index], expected, "byte {index}");
+        }
+    }
+
+    #[test]
+    fn invalid_second_field_or_table_does_not_mask_first_value() {
+        for index in [0x22c, 0x230, 380492, 380496, 380719, 380723] {
+            let mut image = image_26();
+            image[index] ^= 1;
+            let before = image.clone();
+            assert!(!normalize_boot_entropy(&T8122_LAYOUT_26, &mut image));
+            assert_eq!(image, before);
+        }
+        let mut image = image_26();
+        image.pop();
+        let before = image.clone();
+        assert!(!normalize_boot_entropy(&T8122_LAYOUT_26, &mut image));
+        assert_eq!(image, before);
+    }
+
+    #[test]
+    fn extended_record_cannot_replace_legacy_identity() {
+        let newer = &T8122_IMAGES_26[0];
+        let digest = newer.stkg_sha256.unwrap();
+        assert!(newer.accepts_runtime(None, &digest));
+        assert_eq!(newer.initdata_magic, Some(0x0c89_c357_8392_04b8));
+        for index in 0..digest.len() {
+            let mut wrong = digest;
+            wrong[index] ^= 1;
+            assert!(!newer.accepts_runtime(None, &wrong));
+        }
+        assert!(!KNOWN_IMAGES_T8122[0].accepts_runtime(None, &digest));
+        assert!(!newer.accepts_runtime(KNOWN_IMAGES_T8122[0].uuid, &[0; 32]));
+    }
+
 }

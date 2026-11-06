@@ -1,2319 +1,2364 @@
 {
- "comment": [
-  "Hermetic host test suites, run by host-tests.py from the top of the tree.",
-  "{output} is a fresh path that does not exist yet; its parent does.",
-  "expect: pass (exit 0, the default) or fail (non-zero; mutation checks that report a caught mutant that way).",
-  "known_failure: runs, is reported, and does not fail the job; remove it once the suite passes.",
-  "commits: history the suite reads; host-tests.py --fetch-commits fetches it into a shallow checkout.",
-  "Every test-like file under the discovery roots is listed in suites or excluded (tests/test_host_tests.py checks).",
-  "helpers: files that look like suites but are run by a listed suite.",
-  "serial: the suite measures time; it runs alone, after the parallel batch.",
-  "group: the CI job that runs the suite; aurora-sep-slow holds the longest aurora-sep suites so they run beside the rest."
- ],
- "apt": [
-  "bison",
-  "bubblewrap",
-  "clang",
-  "dbus",
-  "device-tree-compiler",
-  "flex",
-  "libarchive-tools",
-  "libegl-dev",
-  "libgles-dev",
-  "libnotify-bin",
-  "lld",
-  "llvm",
-  "make",
-  "makepkg",
-  "python3-gi",
-  "zstd"
- ],
- "discovery": [
-  "tools/asahi",
-  "tools/asahi-m3",
-  "tools/aurora-*",
-  "tools/testing/apple",
-  "tools/testing/selftests/drivers/apple",
-  "tools/testing/selftests/drivers/gpu/apple-*",
-  "tools/testing/selftests/drivers/gpu/asahi-g15"
- ],
- "suites": [
-  {
-   "name": "tools/asahi/apple-dart-fw-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/apple-dart-fw-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/apple-dart-range-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/apple-dart-range-tests.py"
-   ],
-   "known_failure": "its mocks predate the current apple-dart.c (no u32, fw_mirror/fw_handoff, apple_dart_fw_invalidate; apple_dart_hw_sync_locked takes three arguments now)"
-  },
-  {
-   "name": "tools/asahi/avd-codec-tail-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/avd-codec-tail-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/avd-av1-tail-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/avd-av1-tail-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/avd-av1-tail-tests.py --mutation round-up",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/avd-av1-tail-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "round-up"
-   ],
-   "expect": "fail",
-   "note": "inverted: exit status is the controls program status, non-zero when the mutant is caught"
-  },
-  {
-   "name": "tools/asahi/avd-av1-tail-tests.py --mutation cpu-unaligned",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/avd-av1-tail-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "cpu-unaligned"
-   ],
-   "expect": "fail",
-   "note": "inverted: exit status is the controls program status, non-zero when the mutant is caught"
-  },
-  {
-   "name": "tools/asahi/bcm4377-id-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-id-tests.py",
-    "--out",
-    "{output}",
-    "--old-ref",
-    "87ddae1397f6f70817cb57df76477a86bdf96424"
-   ],
-   "commits": [
-    "87ddae1397f6f70817cb57df76477a86bdf96424"
-   ]
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py --mutation epoch",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "epoch"
-   ],
-   "expect": "pass",
-   "note": "self-checking: exits 0 when the mutant aborts"
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py --mutation close",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "close"
-   ],
-   "expect": "pass",
-   "note": "self-checking: exits 0 when the mutant aborts"
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py --mutation producer-fence",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "producer-fence"
-   ],
-   "expect": "pass",
-   "note": "self-checking: exits 0 when the mutant aborts"
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py --mutation active-fence",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "active-fence"
-   ],
-   "expect": "pass",
-   "note": "self-checking: exits 0 when the mutant aborts"
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py --mutation board",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}",
-    "--mutation",
-    "board"
-   ],
-   "expect": "pass",
-   "note": "self-checking: exits 0 when the mutant aborts"
-  },
-  {
-   "name": "tools/asahi/bcm4377-resume-tests.py --old-ref 36fab84538bed0f2f823c0e6745e4b0f5e6c2a1e",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/bcm4377-resume-tests.py",
-    "--out",
-    "{output}",
-    "--old-ref",
-    "36fab84538bed0f2f823c0e6745e4b0f5e6c2a1e"
-   ],
-   "expect": "pass",
-   "note": "self-checking: original driver (87ddae1397f6^) must abort cases 0,1,2,28",
-   "commits": [
-    "36fab84538bed0f2f823c0e6745e4b0f5e6c2a1e"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-assoc-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-assoc-tests.py",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-assoc-tests.py --mutation short-ie",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-assoc-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "short-ie"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-assoc-tests.py --mutation header-length",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-assoc-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "header-length"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-assoc-tests.py --mutation skb-capacity",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-assoc-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "skb-capacity"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-assoc-tests.py --mutation cmplt-header",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-assoc-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "cmplt-header"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-assoc-tests.py --old-association f58ae50192550e6fc67c956f361f525881a1f969",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-assoc-tests.py",
-    "--output",
-    "{output}",
-    "--old-association",
-    "f58ae50192550e6fc67c956f361f525881a1f969"
-   ],
-   "expect": "fail",
-   "note": "inverted; old getter from ecd1ea4d0f06^",
-   "commits": [
-    "f58ae50192550e6fc67c956f361f525881a1f969"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-bss-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-bss-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmfmac-scan-timeout-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmfmac-scan-timeout-tests.py",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmfmac-scan-timeout-tests.py --old-source {output}/old.c",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmfmac-scan-timeout-tests.py",
-    "--output",
-    "{output}",
-    "--old-source",
-    "{output}/old.c"
-   ],
-   "expect": "pass",
-   "note": "self-checking; cfg80211.c from f58ae5019255^",
-   "setup": [
-    [
-     "sh",
-     "-c",
-     "mkdir -p \"$1\" && git show 661c0a5740e8f36816f7e79a784c36c026097368:drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c > \"$1/old.c\"",
-     "sh",
-     "{output}"
-    ]
-   ],
-   "commits": [
-    "661c0a5740e8f36816f7e79a784c36c026097368"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-pcie-dma-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-pcie-dma-tests.py",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-pcie-dma-tests.py --mutation narrow-stream",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-pcie-dma-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "narrow-stream"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-pcie-dma-tests.py --mutation ignore-aperture",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-pcie-dma-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "ignore-aperture"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-pcie-dma-tests.py --mutation revision-wide",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-pcie-dma-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "revision-wide"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/brcmf-pcie-dma-tests.py --old-dma 654386a164a1e93063f879491f10bebfc1439291",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-pcie-dma-tests.py",
-    "--output",
-    "{output}",
-    "--old-dma",
-    "654386a164a1e93063f879491f10bebfc1439291"
-   ],
-   "expect": "fail",
-   "note": "inverted; probe from dbdeefb63947^",
-   "commits": [
-    "654386a164a1e93063f879491f10bebfc1439291"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-pcie-dma-tests.py --firmware-revision b0de24a8c59735f21023c93592dd9a2eb9e155a4",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-pcie-dma-tests.py",
-    "--output",
-    "{output}",
-    "--firmware-revision",
-    "b0de24a8c59735f21023c93592dd9a2eb9e155a4"
-   ],
-   "expect": "fail",
-   "note": "inverted; firmware table from 2d17f269503c^",
-   "commits": [
-    "b0de24a8c59735f21023c93592dd9a2eb9e155a4"
-   ]
-  },
-  {
-   "name": "tools/asahi/brcmf-roam-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/brcmf-roam-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/compute-preempt-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/compute-preempt-tests.py",
-    "--out",
-    "{output}"
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/asahi/compute-preempt-tests.py --old-ref f885ea0de2cd638bda1e0d3d38a901d927a503f5",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/compute-preempt-tests.py",
-    "--out",
-    "{output}",
-    "--old-ref",
-    "f885ea0de2cd638bda1e0d3d38a901d927a503f5"
-   ],
-   "rust": "1.85.0",
-   "expect": "pass",
-   "note": "self-checking; policy from c6f4ea502bdd^",
-   "commits": [
-    "f885ea0de2cd638bda1e0d3d38a901d927a503f5"
-   ]
-  },
-  {
-   "name": "tools/asahi/dcp14-backlight-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/dcp14-backlight-tests.py"
-   ]
-  },
-  {
-   "name": "tools/asahi/dcp14-backlight-tests.py --old-source {output}/old.c",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/dcp14-backlight-tests.py",
-    "--old-source",
-    "{output}/old.c"
-   ],
-   "expect": "pass",
-   "note": "self-checking (-DOLD); iomfb_v14_7.c from 2e5a8e777ada^",
-   "setup": [
-    [
-     "sh",
-     "-c",
-     "mkdir -p \"$1\" && git show e19eb212f57ec32db9026666c89dd610062e9f24:drivers/gpu/drm/apple/iomfb_v14_7.c > \"$1/old.c\"",
-     "sh",
-     "{output}"
-    ]
-   ],
-   "commits": [
-    "e19eb212f57ec32db9026666c89dd610062e9f24"
-   ]
-  },
-  {
-   "name": "tools/asahi/dcp14-panel-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/dcp14-panel-tests.py"
-   ]
-  },
-  {
-   "name": "tools/asahi/dcp14-panel-tests.py --old-source {output}/old.c",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/dcp14-panel-tests.py",
-    "--old-source",
-    "{output}/old.c"
-   ],
-   "expect": "pass",
-   "note": "self-checking; iomfb_v14_7.c from 7d5a612eceaa^",
-   "setup": [
-    [
-     "sh",
-     "-c",
-     "mkdir -p \"$1\" && git show a5713d126ea098fd3b6b833fc4022762540aac6c:drivers/gpu/drm/apple/iomfb_v14_7.c > \"$1/old.c\"",
-     "sh",
-     "{output}"
-    ]
-   ],
-   "commits": [
-    "a5713d126ea098fd3b6b833fc4022762540aac6c"
-   ]
-  },
-  {
-   "name": "tools/asahi/devcoredump-init-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/devcoredump-init-tests.py"
-   ]
-  },
-  {
-   "name": "tools/asahi/devcoredump-init-tests.py --old-source {output}/old.c",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/devcoredump-init-tests.py",
-    "--old-source",
-    "{output}/old.c"
-   ],
-   "expect": "pass",
-   "note": "self-checking (-DOLD); devcoredump.c from ebd3dc459ac1^",
-   "setup": [
-    [
-     "sh",
-     "-c",
-     "mkdir -p \"$1\" && git show fb7cca304cb381dc589fadbed479c6f3b36e5e23:drivers/base/devcoredump.c > \"$1/old.c\"",
-     "sh",
-     "{output}"
-    ]
-   ],
-   "commits": [
-    "fb7cca304cb381dc589fadbed479c6f3b36e5e23"
-   ]
-  },
-  {
-   "name": "tools/asahi/display26-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/display26-tests.py"
-   ]
-  },
-  {
-   "name": "tools/asahi/dma-heap-fd-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/dma-heap-fd-tests.py",
-    "--out",
-    "{output}",
-    "--old-ref",
-    "94380ecd5ff9b2a2b9f6e8a0b5c465159ccfaf71"
-   ],
-   "commits": [
-    "94380ecd5ff9b2a2b9f6e8a0b5c465159ccfaf71"
-   ]
-  },
-  {
-   "name": "tools/asahi/mt7932-association-events-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/mt7932-association-events-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/mt7932-association-events-tests.py --old-source {output}/old.c",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/mt7932-association-events-tests.py",
-    "--out",
-    "{output}",
-    "--old-source",
-    "{output}/old.c"
-   ],
-   "expect": "pass",
-   "note": "self-checking; link.c from c980f7435d50^ (the fix). The test commit itself (f885ea0de2cd) is test-only, so its parent is NOT a valid old source.",
-   "setup": [
-    [
-     "sh",
-     "-c",
-     "mkdir -p \"$1\" && git show 818bde483e1618783005ac76e1c58057a4bb4cfa:drivers/net/wireless/mediatek/mt7932/link.c > \"$1/old.c\"",
-     "sh",
-     "{output}"
-    ]
-   ],
-   "commits": [
-    "818bde483e1618783005ac76e1c58057a4bb4cfa"
-   ]
-  },
-  {
-   "name": "tools/asahi/mt7932-connect-result-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/mt7932-connect-result-tests.py",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/mt7932-connect-result-tests.py --old-source {output}/old.c",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/mt7932-connect-result-tests.py",
-    "--output",
-    "{output}",
-    "--old-source",
-    "{output}/old.c"
-   ],
-   "expect": "pass",
-   "note": "self-checking; link.c from 6c3ee18a0725^",
-   "setup": [
-    [
-     "sh",
-     "-c",
-     "mkdir -p \"$1\" && git show 7db4eadeeba6512726fc527cb624ae99742de607:drivers/net/wireless/mediatek/mt7932/link.c > \"$1/old.c\"",
-     "sh",
-     "{output}"
-    ]
-   ],
-   "commits": [
-    "7db4eadeeba6512726fc527cb624ae99742de607"
-   ]
-  },
-  {
-   "name": "tools/asahi/mt7932-owe-retry-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/mt7932-owe-retry-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/neo-auxiliary-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-auxiliary-tests.py",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/asahi/neo-auxiliary-tests.py --mutation",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-auxiliary-tests.py",
-    "--output",
-    "{output}",
-    "--mutation"
-   ],
-   "rust": "1.85.0",
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/neo-auxiliary-tests.py --old",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-auxiliary-tests.py",
-    "--output",
-    "{output}",
-    "--old"
-   ],
-   "rust": "1.85.0",
-   "expect": "fail",
-   "note": "inverted; reads 990a45b609dd",
-   "commits": [
-    "990a45b609ddcaa49f5386e1c11530599226c0e1"
-   ]
-  },
-  {
-   "name": "tools/asahi/neo-stability-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-stability-tests.py",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/neo-stability-tests.py --mutation sep-syscore",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-stability-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "sep-syscore"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/neo-stability-tests.py --mutation wake-irq",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-stability-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "wake-irq"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/neo-stability-tests.py --mutation stale-policy",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-stability-tests.py",
-    "--output",
-    "{output}",
-    "--mutation",
-    "stale-policy"
-   ],
-   "expect": "fail",
-   "note": "inverted"
-  },
-  {
-   "name": "tools/asahi/neo-stability-tests.py --old-usb",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-stability-tests.py",
-    "--output",
-    "{output}",
-    "--old-usb"
-   ],
-   "expect": "fail",
-   "note": "inverted; reads 990a45b609dd",
-   "commits": [
-    "990a45b609ddcaa49f5386e1c11530599226c0e1"
-   ]
-  },
-  {
-   "name": "tools/asahi/neo-stability-tests.py --old-regulatory",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/neo-stability-tests.py",
-    "--output",
-    "{output}",
-    "--old-regulatory"
-   ],
-   "expect": "fail",
-   "note": "inverted; reads 990a45b609dd",
-   "commits": [
-    "990a45b609ddcaa49f5386e1c11530599226c0e1"
-   ]
-  },
-  {
-   "name": "tools/asahi/pmp-j613-hwmon-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/pmp-j613-hwmon-tests.py"
-   ]
-  },
-  {
-   "name": "tools/asahi/qspi-nvram-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/qspi-nvram-tests.py",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/rtkit-oslog-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/rtkit-oslog-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/rtkit-oslog-tests.py --mutate admission",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/rtkit-oslog-tests.py",
-    "--out",
-    "{output}",
-    "--mutate",
-    "admission"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutate)"
-  },
-  {
-   "name": "tools/asahi/rtkit-oslog-tests.py --mutate channel",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/rtkit-oslog-tests.py",
-    "--out",
-    "{output}",
-    "--mutate",
-    "channel"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutate)"
-  },
-  {
-   "name": "tools/asahi/rtkit-oslog-tests.py --mutate counter",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/rtkit-oslog-tests.py",
-    "--out",
-    "{output}",
-    "--mutate",
-    "counter"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutate)"
-  },
-  {
-   "name": "tools/asahi/rtkit-oslog-tests.py --mutate reset",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/rtkit-oslog-tests.py",
-    "--out",
-    "{output}",
-    "--mutate",
-    "reset"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutate)"
-  },
-  {
-   "name": "tools/asahi/rtkit-oslog-tests.py --ref 0cee491386e3dff5a09b60d5703f6a7be71b0883",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/rtkit-oslog-tests.py",
-    "--out",
-    "{output}",
-    "--ref",
-    "0cee491386e3dff5a09b60d5703f6a7be71b0883"
-   ],
-   "expect": "fail",
-   "note": "inverted; rtkit.c from 1369d18b4ec7^",
-   "commits": [
-    "0cee491386e3dff5a09b60d5703f6a7be71b0883"
-   ]
-  },
-  {
-   "name": "tools/asahi/tbnet-refill-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tbnet-refill-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/tbnet-refill-tests.py --mutant refill-count",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tbnet-refill-tests.py",
-    "--out",
-    "{output}",
-    "--mutant",
-    "refill-count"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutant)"
-  },
-  {
-   "name": "tools/asahi/tbnet-refill-tests.py --mutant no-retry",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tbnet-refill-tests.py",
-    "--out",
-    "{output}",
-    "--mutant",
-    "no-retry"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutant)"
-  },
-  {
-   "name": "tools/asahi/tbnet-refill-tests.py --mutant no-cancel",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tbnet-refill-tests.py",
-    "--out",
-    "{output}",
-    "--mutant",
-    "no-cancel"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutant)"
-  },
-  {
-   "name": "tools/asahi/tbnet-refill-tests.py --mutant worker-allocation",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tbnet-refill-tests.py",
-    "--out",
-    "{output}",
-    "--mutant",
-    "worker-allocation"
-   ],
-   "expect": "fail",
-   "note": "inverted (note: flag is --mutant)"
-  },
-  {
-   "name": "tools/asahi/tbnet-refill-tests.py --ref f7f5fc8e97cf5238c8669d9fca0d024b40174209",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tbnet-refill-tests.py",
-    "--out",
-    "{output}",
-    "--ref",
-    "f7f5fc8e97cf5238c8669d9fca0d024b40174209"
-   ],
-   "expect": "fail",
-   "note": "inverted; main.c from 71700a159448^",
-   "commits": [
-    "f7f5fc8e97cf5238c8669d9fca0d024b40174209"
-   ]
-  },
-  {
-   "name": "tools/asahi/tunnel-route-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tunnel-route-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/m3-batching-tests.rs",
-   "group": "tools",
-   "argv": [
-    "{output}",
-    "--test-threads=1"
-   ],
-   "setup": [
-    [
-     "rustc",
-     "--edition=2021",
-     "--test",
-     "tools/asahi/m3-batching-tests.rs",
-     "-o",
-     "{output}"
-    ]
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/asahi/m3-runtime-tests.rs",
-   "group": "tools",
-   "argv": [
-    "{output}",
-    "--test-threads=1"
-   ],
-   "setup": [
-    [
-     "rustc",
-     "--edition=2021",
-     "--test",
-     "tools/asahi/m3-runtime-tests.rs",
-     "-o",
-     "{output}"
-    ]
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/asahi/pmp-bootargs-tests.rs",
-   "group": "tools",
-   "argv": [
-    "{output}",
-    "--test-threads=1"
-   ],
-   "setup": [
-    [
-     "rustc",
-     "--edition=2021",
-     "--test",
-     "tools/asahi/pmp-bootargs-tests.rs",
-     "-o",
-     "{output}"
-    ]
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/asahi/pmp-power-tests.rs",
-   "group": "tools",
-   "argv": [
-    "{output}",
-    "--test-threads=1"
-   ],
-   "setup": [
-    [
-     "rustc",
-     "--edition=2021",
-     "--test",
-     "tools/asahi/pmp-power-tests.rs",
-     "-o",
-     "{output}"
-    ]
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/asahi-m3/test_completion_progress.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi-m3/test_completion_progress.py"
-   ]
-  },
-  {
-   "name": "tools/asahi-m3/test_fault_snapshot.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi-m3/test_fault_snapshot.py"
-   ]
-  },
-  {
-   "name": "tools/asahi-m3/test-retirement-progress.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi-m3/test-retirement-progress.py"
-   ]
-  },
-  {
-   "name": "tools/asahi-m3/test-gem-object-size.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi-m3/test-gem-object-size.py"
-   ],
-   "rust": "1.85.0"
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_adt_extract.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_adt_extract.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_air_gpu.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_air_gpu.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_desktop_fixes.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_desktop_fixes.py",
-    "-v"
-   ],
-   "commits": [
-    "05d6db3921dec6a6667a7ec8b1b0c75f0f66bafe"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_diag_sensor.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_diag_sensor.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_download_resume.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_download_resume.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_esp_history.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_esp_history.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_extract_mesa_calibration.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_extract_mesa_calibration.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_frozen_dependencies.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_frozen_dependencies.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_host_entropy.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_host_entropy.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_host_state_check.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_host_state_check.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m1n1_rollback.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m1n1_rollback.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_air.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_air.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_air_default.py",
-   "group": "aurora-sep-slow",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_air_default.py",
-    "-v"
-   ],
-   "commits": [
-    "4f2a68f8b88a6b407f072356c248d22f076b401a"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_air_mesa.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_air_mesa.py",
-    "-v"
-   ],
-   "commits": [
-    "4f2a68f8b88a6b407f072356c248d22f076b401a"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_boot_profile.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_boot_profile.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_cmdline.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_cmdline.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_flow.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_flow.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_gpu_check.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_gpu_check.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_handoff.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_handoff.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_kernel_only.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_kernel_only.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_max.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_max.py",
-    "-v"
-   ],
-   "commits": [
-    "2ca6ff6e3480e11dfd51b720763c0fbd99fa015e",
-    "26cdc069a3dfa86b901ac3c407bad14cc2fb7efc"
-   ],
-   "serial": true
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_persistent.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_persistent.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_pro_mesa.py",
-   "group": "aurora-sep-slow",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_pro_mesa.py",
-    "-v"
-   ],
-   "commits": [
-    "26cdc069a3dfa86b901ac3c407bad14cc2fb7efc",
-    "df0c433027e9eb283b14a56894efcc817c8a3cfb",
-    "1d41e1b7ff5db2b31de8fcee56959d70ce152c0a"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_pro_perf.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_pro_perf.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_report.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_report.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3_stack_assembly.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3_stack_assembly.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_m3max_kit.py",
-   "group": "aurora-sep-slow",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_m3max_kit.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_neo_gpu.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_neo_gpu.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_packaging.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_packaging.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_pm_domains.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_pm_domains.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_ready_pam_hint.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_ready_pam_hint.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_refkey_seal_admission.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_refkey_seal_admission.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_release.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_release.py",
-    "-v"
-   ],
-   "commits": [
-    "d14f756c9a65752ca532b93391f775387ba4f191",
-    "df0c433027e9eb283b14a56894efcc817c8a3cfb",
-    "1d41e1b7ff5db2b31de8fcee56959d70ce152c0a"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_sbio_exchange.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_sbio_exchange.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_sensor_recheck.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_sensor_recheck.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_sensor_wake.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_sensor_wake.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_sep_ready.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_sep_ready.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_store_shipped.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_store_shipped.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_t8112_sep_dma.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_t8112_sep_dma.py",
-    "-v"
-   ],
-   "setup": [
-    [
-     "make",
-     "-s",
-     "O={output}/kbuild",
-     "ARCH=arm64",
-     "allnoconfig"
-    ],
-    [
-     "make",
-     "-s",
-     "O={output}/kbuild",
-     "ARCH=arm64",
-     "scripts_dtc"
-    ]
-   ],
-   "env": {
-    "DTC": "{output}/kbuild/scripts/dtc/dtc"
-   }
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_t8122_sep.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_t8122_sep.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_unsupported_soc.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_unsupported_soc.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_verify_bringup.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_verify_bringup.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/tests/test_xart_locator.py",
-   "group": "aurora-sep",
-   "argv": [
-    "python3",
-    "-m",
-    "unittest",
-    "discover",
-    "-s",
-    "tools/aurora-sep/tests",
-    "-p",
-    "test_xart_locator.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-udev-rule.sh",
-   "group": "tools",
-   "argv": [
-    "sh",
-    "tools/aurora-sep/recipes/mesa-m3/tests/test-udev-rule.sh"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh (sh)",
-   "group": "tools",
-   "argv": [
-    "sh",
-    "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh (bash)",
-   "group": "tools",
-   "argv": [
-    "bash",
-    "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-user-setup.sh",
-   "group": "tools",
-   "argv": [
-    "sh",
-    "tools/aurora-sep/recipes/mesa-m3/tests/test-user-setup.sh"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-system-provider.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/aurora-sep/recipes/mesa-m3/tests/test-system-provider.py"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-system-board.c",
-   "group": "tools",
-   "setup": [
-    [
-     "cc",
-     "-std=c11",
-     "-Wall",
-     "-Wextra",
-     "-Werror",
-     "-pedantic",
-     "-O2",
-     "tools/aurora-sep/recipes/mesa-m3/tests/test-system-board.c",
-     "-ldl",
-     "-o",
-     "{output}"
-    ]
-   ],
-   "argv": [
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-uwsm.sh",
-   "group": "tools",
-   "argv": [
-    "sh",
-    "tools/aurora-sep/recipes/mesa-m3/tests/test-uwsm.sh"
-   ]
-  },
-  {
-   "name": "tools/aurora-display-notifier/tests/test_notifier.py",
-   "group": "tools",
-   "argv": [
+  "comment": [
+    "Hermetic host test suites, run by host-tests.py from the top of the tree.",
+    "{output} is a fresh path that does not exist yet; its parent does.",
+    "expect: pass (exit 0, the default) or fail (non-zero; mutation checks that report a caught mutant that way).",
+    "known_failure: runs, is reported, and does not fail the job; remove it once the suite passes.",
+    "commits: history the suite reads; host-tests.py --fetch-commits fetches it into a shallow checkout.",
+    "Every test-like file under the discovery roots is listed in suites or excluded (tests/test_host_tests.py checks).",
+    "helpers: files that look like suites but are run by a listed suite.",
+    "serial: the suite measures time; it runs alone, after the parallel batch.",
+    "group: the CI job that runs the suite; aurora-sep-slow holds the longest aurora-sep suites so they run beside the rest."
+  ],
+  "apt": [
+    "bison",
+    "bubblewrap",
+    "clang",
+    "dbus",
+    "device-tree-compiler",
+    "flex",
+    "libarchive-tools",
+    "libegl-dev",
+    "libgles-dev",
+    "libnotify-bin",
+    "lld",
+    "llvm",
     "make",
-    "-C",
-    "tools/aurora-display-notifier/",
-    "test"
-   ]
+    "makepkg",
+    "python3-gi",
+    "zstd"
+  ],
+  "discovery": [
+    "tools/asahi",
+    "tools/asahi-m3",
+    "tools/aurora-*",
+    "tools/testing/apple",
+    "tools/testing/selftests/drivers/apple",
+    "tools/testing/selftests/drivers/gpu/apple-*",
+    "tools/testing/selftests/drivers/gpu/asahi-g15"
+  ],
+  "suites": [
+    {
+      "name": "tools/asahi/apple-dart-fw-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/apple-dart-fw-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/apple-dart-range-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/apple-dart-range-tests.py"
+      ],
+      "known_failure": "its mocks predate the current apple-dart.c (no u32, fw_mirror/fw_handoff, apple_dart_fw_invalidate; apple_dart_hw_sync_locked takes three arguments now)"
+    },
+    {
+      "name": "tools/asahi/avd-codec-tail-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/avd-codec-tail-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/avd-av1-tail-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/avd-av1-tail-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/avd-av1-tail-tests.py --mutation round-up",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/avd-av1-tail-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "round-up"
+      ],
+      "expect": "fail",
+      "note": "inverted: exit status is the controls program status, non-zero when the mutant is caught"
+    },
+    {
+      "name": "tools/asahi/avd-av1-tail-tests.py --mutation cpu-unaligned",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/avd-av1-tail-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "cpu-unaligned"
+      ],
+      "expect": "fail",
+      "note": "inverted: exit status is the controls program status, non-zero when the mutant is caught"
+    },
+    {
+      "name": "tools/asahi/bcm4377-id-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-id-tests.py",
+        "--out",
+        "{output}",
+        "--old-ref",
+        "87ddae1397f6f70817cb57df76477a86bdf96424"
+      ],
+      "commits": [
+        "87ddae1397f6f70817cb57df76477a86bdf96424"
+      ]
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py --mutation epoch",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "epoch"
+      ],
+      "expect": "pass",
+      "note": "self-checking: exits 0 when the mutant aborts"
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py --mutation close",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "close"
+      ],
+      "expect": "pass",
+      "note": "self-checking: exits 0 when the mutant aborts"
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py --mutation producer-fence",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "producer-fence"
+      ],
+      "expect": "pass",
+      "note": "self-checking: exits 0 when the mutant aborts"
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py --mutation active-fence",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "active-fence"
+      ],
+      "expect": "pass",
+      "note": "self-checking: exits 0 when the mutant aborts"
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py --mutation board",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}",
+        "--mutation",
+        "board"
+      ],
+      "expect": "pass",
+      "note": "self-checking: exits 0 when the mutant aborts"
+    },
+    {
+      "name": "tools/asahi/bcm4377-resume-tests.py --old-ref 36fab84538bed0f2f823c0e6745e4b0f5e6c2a1e",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/bcm4377-resume-tests.py",
+        "--out",
+        "{output}",
+        "--old-ref",
+        "36fab84538bed0f2f823c0e6745e4b0f5e6c2a1e"
+      ],
+      "expect": "pass",
+      "note": "self-checking: original driver (87ddae1397f6^) must abort cases 0,1,2,28",
+      "commits": [
+        "36fab84538bed0f2f823c0e6745e4b0f5e6c2a1e"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-assoc-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-assoc-tests.py",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-assoc-tests.py --mutation short-ie",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-assoc-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "short-ie"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-assoc-tests.py --mutation header-length",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-assoc-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "header-length"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-assoc-tests.py --mutation skb-capacity",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-assoc-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "skb-capacity"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-assoc-tests.py --mutation cmplt-header",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-assoc-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "cmplt-header"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-assoc-tests.py --old-association f58ae50192550e6fc67c956f361f525881a1f969",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-assoc-tests.py",
+        "--output",
+        "{output}",
+        "--old-association",
+        "f58ae50192550e6fc67c956f361f525881a1f969"
+      ],
+      "expect": "fail",
+      "note": "inverted; old getter from ecd1ea4d0f06^",
+      "commits": [
+        "f58ae50192550e6fc67c956f361f525881a1f969"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-bss-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-bss-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmfmac-scan-timeout-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmfmac-scan-timeout-tests.py",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmfmac-scan-timeout-tests.py --old-source {output}/old.c",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmfmac-scan-timeout-tests.py",
+        "--output",
+        "{output}",
+        "--old-source",
+        "{output}/old.c"
+      ],
+      "expect": "pass",
+      "note": "self-checking; cfg80211.c from f58ae5019255^",
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "mkdir -p \"$1\" && git show 661c0a5740e8f36816f7e79a784c36c026097368:drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c > \"$1/old.c\"",
+          "sh",
+          "{output}"
+        ]
+      ],
+      "commits": [
+        "661c0a5740e8f36816f7e79a784c36c026097368"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-pcie-dma-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-pcie-dma-tests.py",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-pcie-dma-tests.py --mutation narrow-stream",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-pcie-dma-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "narrow-stream"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-pcie-dma-tests.py --mutation ignore-aperture",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-pcie-dma-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "ignore-aperture"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-pcie-dma-tests.py --mutation revision-wide",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-pcie-dma-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "revision-wide"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/brcmf-pcie-dma-tests.py --old-dma 654386a164a1e93063f879491f10bebfc1439291",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-pcie-dma-tests.py",
+        "--output",
+        "{output}",
+        "--old-dma",
+        "654386a164a1e93063f879491f10bebfc1439291"
+      ],
+      "expect": "fail",
+      "note": "inverted; probe from dbdeefb63947^",
+      "commits": [
+        "654386a164a1e93063f879491f10bebfc1439291"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-pcie-dma-tests.py --firmware-revision b0de24a8c59735f21023c93592dd9a2eb9e155a4",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-pcie-dma-tests.py",
+        "--output",
+        "{output}",
+        "--firmware-revision",
+        "b0de24a8c59735f21023c93592dd9a2eb9e155a4"
+      ],
+      "expect": "fail",
+      "note": "inverted; firmware table from 2d17f269503c^",
+      "commits": [
+        "b0de24a8c59735f21023c93592dd9a2eb9e155a4"
+      ]
+    },
+    {
+      "name": "tools/asahi/brcmf-roam-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/brcmf-roam-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/compute-preempt-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/compute-preempt-tests.py",
+        "--out",
+        "{output}"
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/compute-preempt-tests.py --old-ref f885ea0de2cd638bda1e0d3d38a901d927a503f5",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/compute-preempt-tests.py",
+        "--out",
+        "{output}",
+        "--old-ref",
+        "f885ea0de2cd638bda1e0d3d38a901d927a503f5"
+      ],
+      "rust": "1.85.0",
+      "expect": "pass",
+      "note": "self-checking; policy from c6f4ea502bdd^",
+      "commits": [
+        "f885ea0de2cd638bda1e0d3d38a901d927a503f5"
+      ]
+    },
+    {
+      "name": "tools/asahi/dcp14-backlight-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcp14-backlight-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/dcp14-backlight-tests.py --old-source {output}/old.c",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcp14-backlight-tests.py",
+        "--old-source",
+        "{output}/old.c"
+      ],
+      "expect": "pass",
+      "note": "self-checking (-DOLD); iomfb_v14_7.c from 2e5a8e777ada^",
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "mkdir -p \"$1\" && git show e19eb212f57ec32db9026666c89dd610062e9f24:drivers/gpu/drm/apple/iomfb_v14_7.c > \"$1/old.c\"",
+          "sh",
+          "{output}"
+        ]
+      ],
+      "commits": [
+        "e19eb212f57ec32db9026666c89dd610062e9f24"
+      ]
+    },
+    {
+      "name": "tools/asahi/dcp14-panel-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcp14-panel-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/dcp14-panel-tests.py --old-source {output}/old.c",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dcp14-panel-tests.py",
+        "--old-source",
+        "{output}/old.c"
+      ],
+      "expect": "pass",
+      "note": "self-checking; iomfb_v14_7.c from 7d5a612eceaa^",
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "mkdir -p \"$1\" && git show a5713d126ea098fd3b6b833fc4022762540aac6c:drivers/gpu/drm/apple/iomfb_v14_7.c > \"$1/old.c\"",
+          "sh",
+          "{output}"
+        ]
+      ],
+      "commits": [
+        "a5713d126ea098fd3b6b833fc4022762540aac6c"
+      ]
+    },
+    {
+      "name": "tools/asahi/devcoredump-init-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/devcoredump-init-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/devcoredump-init-tests.py --old-source {output}/old.c",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/devcoredump-init-tests.py",
+        "--old-source",
+        "{output}/old.c"
+      ],
+      "expect": "pass",
+      "note": "self-checking (-DOLD); devcoredump.c from ebd3dc459ac1^",
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "mkdir -p \"$1\" && git show fb7cca304cb381dc589fadbed479c6f3b36e5e23:drivers/base/devcoredump.c > \"$1/old.c\"",
+          "sh",
+          "{output}"
+        ]
+      ],
+      "commits": [
+        "fb7cca304cb381dc589fadbed479c6f3b36e5e23"
+      ]
+    },
+    {
+      "name": "tools/asahi/display26-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/display26-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/dma-heap-fd-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/dma-heap-fd-tests.py",
+        "--out",
+        "{output}",
+        "--old-ref",
+        "94380ecd5ff9b2a2b9f6e8a0b5c465159ccfaf71"
+      ],
+      "commits": [
+        "94380ecd5ff9b2a2b9f6e8a0b5c465159ccfaf71"
+      ]
+    },
+    {
+      "name": "tools/asahi/mt7932-association-events-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/mt7932-association-events-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/mt7932-association-events-tests.py --old-source {output}/old.c",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/mt7932-association-events-tests.py",
+        "--out",
+        "{output}",
+        "--old-source",
+        "{output}/old.c"
+      ],
+      "expect": "pass",
+      "note": "self-checking; link.c from c980f7435d50^ (the fix). The test commit itself (f885ea0de2cd) is test-only, so its parent is NOT a valid old source.",
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "mkdir -p \"$1\" && git show 818bde483e1618783005ac76e1c58057a4bb4cfa:drivers/net/wireless/mediatek/mt7932/link.c > \"$1/old.c\"",
+          "sh",
+          "{output}"
+        ]
+      ],
+      "commits": [
+        "818bde483e1618783005ac76e1c58057a4bb4cfa"
+      ]
+    },
+    {
+      "name": "tools/asahi/mt7932-connect-result-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/mt7932-connect-result-tests.py",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/mt7932-connect-result-tests.py --old-source {output}/old.c",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/mt7932-connect-result-tests.py",
+        "--output",
+        "{output}",
+        "--old-source",
+        "{output}/old.c"
+      ],
+      "expect": "pass",
+      "note": "self-checking; link.c from 6c3ee18a0725^",
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "mkdir -p \"$1\" && git show 7db4eadeeba6512726fc527cb624ae99742de607:drivers/net/wireless/mediatek/mt7932/link.c > \"$1/old.c\"",
+          "sh",
+          "{output}"
+        ]
+      ],
+      "commits": [
+        "7db4eadeeba6512726fc527cb624ae99742de607"
+      ]
+    },
+    {
+      "name": "tools/asahi/mt7932-owe-retry-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/mt7932-owe-retry-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/neo-auxiliary-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-auxiliary-tests.py",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/neo-auxiliary-tests.py --mutation",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-auxiliary-tests.py",
+        "--output",
+        "{output}",
+        "--mutation"
+      ],
+      "rust": "1.85.0",
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/neo-auxiliary-tests.py --old",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-auxiliary-tests.py",
+        "--output",
+        "{output}",
+        "--old"
+      ],
+      "rust": "1.85.0",
+      "expect": "fail",
+      "note": "inverted; reads 990a45b609dd",
+      "commits": [
+        "990a45b609ddcaa49f5386e1c11530599226c0e1"
+      ]
+    },
+    {
+      "name": "tools/asahi/neo-stability-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-stability-tests.py",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/neo-stability-tests.py --mutation sep-syscore",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-stability-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "sep-syscore"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/neo-stability-tests.py --mutation wake-irq",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-stability-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "wake-irq"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/neo-stability-tests.py --mutation stale-policy",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-stability-tests.py",
+        "--output",
+        "{output}",
+        "--mutation",
+        "stale-policy"
+      ],
+      "expect": "fail",
+      "note": "inverted"
+    },
+    {
+      "name": "tools/asahi/neo-stability-tests.py --old-usb",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-stability-tests.py",
+        "--output",
+        "{output}",
+        "--old-usb"
+      ],
+      "expect": "fail",
+      "note": "inverted; reads 990a45b609dd",
+      "commits": [
+        "990a45b609ddcaa49f5386e1c11530599226c0e1"
+      ]
+    },
+    {
+      "name": "tools/asahi/neo-stability-tests.py --old-regulatory",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/neo-stability-tests.py",
+        "--output",
+        "{output}",
+        "--old-regulatory"
+      ],
+      "expect": "fail",
+      "note": "inverted; reads 990a45b609dd",
+      "commits": [
+        "990a45b609ddcaa49f5386e1c11530599226c0e1"
+      ]
+    },
+    {
+      "name": "tools/asahi/pmp-j613-hwmon-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/pmp-j613-hwmon-tests.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/qspi-nvram-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/qspi-nvram-tests.py",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/rtkit-oslog-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/rtkit-oslog-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/rtkit-oslog-tests.py --mutate admission",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/rtkit-oslog-tests.py",
+        "--out",
+        "{output}",
+        "--mutate",
+        "admission"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutate)"
+    },
+    {
+      "name": "tools/asahi/rtkit-oslog-tests.py --mutate channel",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/rtkit-oslog-tests.py",
+        "--out",
+        "{output}",
+        "--mutate",
+        "channel"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutate)"
+    },
+    {
+      "name": "tools/asahi/rtkit-oslog-tests.py --mutate counter",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/rtkit-oslog-tests.py",
+        "--out",
+        "{output}",
+        "--mutate",
+        "counter"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutate)"
+    },
+    {
+      "name": "tools/asahi/rtkit-oslog-tests.py --mutate reset",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/rtkit-oslog-tests.py",
+        "--out",
+        "{output}",
+        "--mutate",
+        "reset"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutate)"
+    },
+    {
+      "name": "tools/asahi/rtkit-oslog-tests.py --ref 0cee491386e3dff5a09b60d5703f6a7be71b0883",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/rtkit-oslog-tests.py",
+        "--out",
+        "{output}",
+        "--ref",
+        "0cee491386e3dff5a09b60d5703f6a7be71b0883"
+      ],
+      "expect": "fail",
+      "note": "inverted; rtkit.c from 1369d18b4ec7^",
+      "commits": [
+        "0cee491386e3dff5a09b60d5703f6a7be71b0883"
+      ]
+    },
+    {
+      "name": "tools/asahi/tbnet-refill-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tbnet-refill-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/tbnet-refill-tests.py --mutant refill-count",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tbnet-refill-tests.py",
+        "--out",
+        "{output}",
+        "--mutant",
+        "refill-count"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutant)"
+    },
+    {
+      "name": "tools/asahi/tbnet-refill-tests.py --mutant no-retry",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tbnet-refill-tests.py",
+        "--out",
+        "{output}",
+        "--mutant",
+        "no-retry"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutant)"
+    },
+    {
+      "name": "tools/asahi/tbnet-refill-tests.py --mutant no-cancel",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tbnet-refill-tests.py",
+        "--out",
+        "{output}",
+        "--mutant",
+        "no-cancel"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutant)"
+    },
+    {
+      "name": "tools/asahi/tbnet-refill-tests.py --mutant worker-allocation",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tbnet-refill-tests.py",
+        "--out",
+        "{output}",
+        "--mutant",
+        "worker-allocation"
+      ],
+      "expect": "fail",
+      "note": "inverted (note: flag is --mutant)"
+    },
+    {
+      "name": "tools/asahi/tbnet-refill-tests.py --ref f7f5fc8e97cf5238c8669d9fca0d024b40174209",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tbnet-refill-tests.py",
+        "--out",
+        "{output}",
+        "--ref",
+        "f7f5fc8e97cf5238c8669d9fca0d024b40174209"
+      ],
+      "expect": "fail",
+      "note": "inverted; main.c from 71700a159448^",
+      "commits": [
+        "f7f5fc8e97cf5238c8669d9fca0d024b40174209"
+      ]
+    },
+    {
+      "name": "tools/asahi/tunnel-route-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tunnel-route-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/m3-batching-tests.rs",
+      "group": "tools",
+      "argv": [
+        "{output}",
+        "--test-threads=1"
+      ],
+      "setup": [
+        [
+          "rustc",
+          "--edition=2021",
+          "--test",
+          "tools/asahi/m3-batching-tests.rs",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/m3-runtime-tests.rs",
+      "group": "tools",
+      "argv": [
+        "{output}",
+        "--test-threads=1"
+      ],
+      "setup": [
+        [
+          "rustc",
+          "--edition=2021",
+          "--test",
+          "tools/asahi/m3-runtime-tests.rs",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/pmp-bootargs-tests.rs",
+      "group": "tools",
+      "argv": [
+        "{output}",
+        "--test-threads=1"
+      ],
+      "setup": [
+        [
+          "rustc",
+          "--edition=2021",
+          "--test",
+          "tools/asahi/pmp-bootargs-tests.rs",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/pmp-power-tests.rs",
+      "group": "tools",
+      "argv": [
+        "{output}",
+        "--test-threads=1"
+      ],
+      "setup": [
+        [
+          "rustc",
+          "--edition=2021",
+          "--test",
+          "tools/asahi/pmp-power-tests.rs",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi-m3/test_completion_progress.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi-m3/test_completion_progress.py"
+      ]
+    },
+    {
+      "name": "tools/asahi-m3/test_fault_snapshot.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi-m3/test_fault_snapshot.py"
+      ]
+    },
+    {
+      "name": "tools/asahi-m3/test-retirement-progress.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi-m3/test-retirement-progress.py"
+      ]
+    },
+    {
+      "name": "tools/asahi-m3/test-gem-object-size.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi-m3/test-gem-object-size.py"
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_adt_extract.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_adt_extract.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_air_gpu.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_air_gpu.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_desktop_fixes.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_desktop_fixes.py",
+        "-v"
+      ],
+      "commits": [
+        "05d6db3921dec6a6667a7ec8b1b0c75f0f66bafe"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_diag_sensor.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_diag_sensor.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_download_resume.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_download_resume.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_esp_history.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_esp_history.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_extract_mesa_calibration.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_extract_mesa_calibration.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_frozen_dependencies.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_frozen_dependencies.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_host_entropy.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_host_entropy.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_host_state_check.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_host_state_check.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m1n1_rollback.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m1n1_rollback.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_air.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_air.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_air_default.py",
+      "group": "aurora-sep-slow",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_air_default.py",
+        "-v"
+      ],
+      "commits": [
+        "4f2a68f8b88a6b407f072356c248d22f076b401a"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_air_mesa.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_air_mesa.py",
+        "-v"
+      ],
+      "commits": [
+        "4f2a68f8b88a6b407f072356c248d22f076b401a"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_boot_profile.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_boot_profile.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_cmdline.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_cmdline.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_flow.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_flow.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_gpu_check.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_gpu_check.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_handoff.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_handoff.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_kernel_only.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_kernel_only.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_max.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_max.py",
+        "-v"
+      ],
+      "commits": [
+        "2ca6ff6e3480e11dfd51b720763c0fbd99fa015e",
+        "26cdc069a3dfa86b901ac3c407bad14cc2fb7efc"
+      ],
+      "serial": true
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_persistent.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_persistent.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_pro_mesa.py",
+      "group": "aurora-sep-slow",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_pro_mesa.py",
+        "-v"
+      ],
+      "commits": [
+        "26cdc069a3dfa86b901ac3c407bad14cc2fb7efc",
+        "df0c433027e9eb283b14a56894efcc817c8a3cfb",
+        "1d41e1b7ff5db2b31de8fcee56959d70ce152c0a"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_pro_perf.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_pro_perf.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_report.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_report.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3_stack_assembly.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3_stack_assembly.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_m3max_kit.py",
+      "group": "aurora-sep-slow",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_m3max_kit.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_neo_gpu.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_neo_gpu.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_packaging.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_packaging.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_pm_domains.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_pm_domains.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_ready_pam_hint.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_ready_pam_hint.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_refkey_seal_admission.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_refkey_seal_admission.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_release.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_release.py",
+        "-v"
+      ],
+      "commits": [
+        "d14f756c9a65752ca532b93391f775387ba4f191",
+        "df0c433027e9eb283b14a56894efcc817c8a3cfb",
+        "1d41e1b7ff5db2b31de8fcee56959d70ce152c0a"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_sbio_exchange.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_sbio_exchange.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_sensor_recheck.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_sensor_recheck.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_sensor_wake.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_sensor_wake.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_sep_ready.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_sep_ready.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_store_shipped.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_store_shipped.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_t8112_sep_dma.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_t8112_sep_dma.py",
+        "-v"
+      ],
+      "setup": [
+        [
+          "make",
+          "-s",
+          "O={output}/kbuild",
+          "ARCH=arm64",
+          "allnoconfig"
+        ],
+        [
+          "make",
+          "-s",
+          "O={output}/kbuild",
+          "ARCH=arm64",
+          "scripts_dtc"
+        ]
+      ],
+      "env": {
+        "DTC": "{output}/kbuild/scripts/dtc/dtc"
+      }
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_t8122_sep.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_t8122_sep.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_unsupported_soc.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_unsupported_soc.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_verify_bringup.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_verify_bringup.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/tests/test_xart_locator.py",
+      "group": "aurora-sep",
+      "argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tools/aurora-sep/tests",
+        "-p",
+        "test_xart_locator.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-udev-rule.sh",
+      "group": "tools",
+      "argv": [
+        "sh",
+        "tools/aurora-sep/recipes/mesa-m3/tests/test-udev-rule.sh"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh (sh)",
+      "group": "tools",
+      "argv": [
+        "sh",
+        "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh (bash)",
+      "group": "tools",
+      "argv": [
+        "bash",
+        "tools/aurora-sep/recipes/mesa-m3/tests/test-session-env.sh"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-user-setup.sh",
+      "group": "tools",
+      "argv": [
+        "sh",
+        "tools/aurora-sep/recipes/mesa-m3/tests/test-user-setup.sh"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-system-provider.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/aurora-sep/recipes/mesa-m3/tests/test-system-provider.py"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-system-board.c",
+      "group": "tools",
+      "setup": [
+        [
+          "cc",
+          "-std=c11",
+          "-Wall",
+          "-Wextra",
+          "-Werror",
+          "-pedantic",
+          "-O2",
+          "tools/aurora-sep/recipes/mesa-m3/tests/test-system-board.c",
+          "-ldl",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "argv": [
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/aurora-sep/recipes/mesa-m3/tests/test-uwsm.sh",
+      "group": "tools",
+      "argv": [
+        "sh",
+        "tools/aurora-sep/recipes/mesa-m3/tests/test-uwsm.sh"
+      ]
+    },
+    {
+      "name": "tools/aurora-display-notifier/tests/test_notifier.py",
+      "group": "tools",
+      "argv": [
+        "make",
+        "-C",
+        "tools/aurora-display-notifier/",
+        "test"
+      ]
+    },
+    {
+      "name": "tools/aurora-display-notifier/tests/integration_dbus.py",
+      "group": "tools",
+      "argv": [
+        "dbus-run-session",
+        "--",
+        "env",
+        "AURORA_TEST_PRIVATE_BUS=1",
+        "python3",
+        "tools/aurora-display-notifier/tests/integration_dbus.py"
+      ]
+    },
+    {
+      "name": "tools/aurora-tb/pr14-regression.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/aurora-tb/pr14-regression.py",
+        "--negative-controls"
+      ]
+    },
+    {
+      "name": "tools/aurora-tb/tbnet-lifecycle-test.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/aurora-tb/tbnet-lifecycle-test.py",
+        "--source",
+        ".",
+        "--output",
+        "{output}",
+        "--negative-controls"
+      ],
+      "known_failure": "its fixture predates the receive refill retry (1d25feb6bb33): no rx_refill_work member or cancel_delayed_work_sync mock"
+    },
+    {
+      "name": "tools/aurora-wake/test-s2idle-rtc-regression.sh",
+      "group": "tools",
+      "argv": [
+        "bash",
+        "tools/aurora-wake/test-s2idle-rtc-regression.sh"
+      ]
+    },
+    {
+      "name": "tools/aurora-userpages/userpages.c",
+      "group": "tools",
+      "argv": [
+        "cc",
+        "-O2",
+        "-g",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wl,-z,max-page-size=65536",
+        "tools/aurora-userpages/userpages.c",
+        "-o",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/testing/apple/check-backlight.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/apple/check-backlight.py",
+        "--output",
+        "{output}"
+      ],
+      "known_failure": "its include path lacks linux/math64.h, which dcp_backlight.h now includes"
+    },
+    {
+      "name": "tools/testing/apple/check-backlight-retry.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/apple/check-backlight-retry.py",
+        "--output",
+        "{output}"
+      ],
+      "known_failure": "the extracted code now calls min(), div_u64() and mul_u32_u32(), which the fixture does not mock"
+    },
+    {
+      "name": "tools/testing/apple/check-lifetime.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/apple/check-lifetime.py",
+        "--output",
+        "{output}"
+      ],
+      "known_failure": "the apple_dcp_afkep mock lacks lock and stopping, and spin_lock_irqsave is not mocked"
+    },
+    {
+      "name": "tools/testing/selftests/drivers/gpu/apple-afkv2/run-afkv2-tests.sh",
+      "group": "tools",
+      "argv": [
+        "sh",
+        "tools/testing/selftests/drivers/gpu/apple-afkv2/run-afkv2-tests.sh"
+      ],
+      "known_failure": "the send and edid stages predate afk.c changes (afk_send_command_common, reply_len)"
+    },
+    {
+      "name": "tools/testing/selftests/drivers/gpu/apple-afkv2/test-admission.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/selftests/drivers/gpu/apple-afkv2/test-admission.py"
+      ]
+    },
+    {
+      "name": "tools/testing/selftests/drivers/gpu/apple-dcp/plane-layout.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/selftests/drivers/gpu/apple-dcp/plane-layout.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/testing/selftests/drivers/gpu/apple-dcp/run.sh",
+      "group": "tools",
+      "argv": [
+        "sh",
+        "tools/testing/selftests/drivers/gpu/apple-dcp/run.sh",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/testing/selftests/drivers/gpu/test_t8140_external_bw.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/selftests/drivers/gpu/test_t8140_external_bw.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/testing/selftests/drivers/net/mt7932_e2e_test.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/selftests/drivers/net/mt7932_e2e_test.py",
+        "-v"
+      ]
+    },
+    {
+      "name": "tools/asahi/tb-dp-repair-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tb-dp-repair-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/t6030-clock-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-clock-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/t6030-wiring-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-wiring-tests.py",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/tiled-split-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/tiled-split-tests.py",
+        "--mutations",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/t6030-pmp-supplier-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-pmp-supplier-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/atc-usb3-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/atc-usb3-tests.py",
+        "--mutations",
+        "--out",
+        "{output}"
+      ]
+    },
+    {
+      "name": "tools/asahi/g15-input-error-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-input-error-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-queue-credit-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-queue-credit-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-probe-init-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-probe-init-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-retention-tests.py",
+      "group": "tools",
+      "commits": [
+        "31da169251bd34d5810a0874563d9a019b85bf56"
+      ],
+      "argv": [
+        "python3",
+        "tools/asahi/g15-retention-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual G15 and KBox ownership bodies with drop-count allocation failures; old-source P1 controls must fail at runtime. Public synthetic inputs only."
+    },
+    {
+      "name": "tools/asahi/g15-maintained-handoff-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-maintained-handoff-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-zero-words-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-zero-words-tests.py",
+        "--mutations",
+        "--evidence",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-pb-growth-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-pb-growth-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-stats-drain-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-stats-drain-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+    },
+    {
+      "name": "tools/asahi/g15-display-order-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/g15-display-order-tests.py"
+      ],
+      "rust": "1.93.1",
+      "note": "Actual display publication, T6030/T6031 link and admit() bodies on OF/device-link and admission-order models; C and admit() mutants must build and fail. No hardware or private fixtures."
+    },
+    {
+      "name": "tools/testing/selftests/drivers/gpu/asahi-g15/run.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/testing/selftests/drivers/gpu/asahi-g15/run.py"
+      ],
+      "rust": "1.93.1",
+      "note": "Public synthetic Rust/C host cases; two unavailable private-hardware fixture cases remain explicitly ignored."
+    },
+    {
+      "name": "tools/asahi/t6030-pmp-dt-tests.py",
+      "group": "tools",
+      "setup": [
+        [
+          "make",
+          "-s",
+          "O={output}/kbuild",
+          "ARCH=arm64",
+          "allnoconfig"
+        ],
+        [
+          "make",
+          "-s",
+          "O={output}/kbuild",
+          "ARCH=arm64",
+          "scripts_dtc"
+        ]
+      ],
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-pmp-dt-tests.py",
+        "--dtc",
+        "{output}/kbuild/scripts/dtc/dtc",
+        "--output",
+        "{output}/dtbs"
+      ],
+      "note": "Compile J514S/J516S default and static PMP profiles; check supplier nodes and alias in the resulting DTBs."
+    },
+    {
+      "name": "tools/asahi/t6030-pmp-graph-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-pmp-graph-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "note": "Actual production-body host boundaries and runtime mutants; no firmware or hardware qualification."
+    },
+    {
+      "name": "tools/asahi/t6030-display-admission-tests.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-display-admission-tests.py",
+        "--mutations",
+        "--output",
+        "{output}"
+      ],
+      "note": "Actual production-body host boundaries and runtime mutants; no firmware or hardware qualification."
+    },
+    {
+      "name": "tools/asahi/t6030-display-linkage-tests.py",
+      "group": "tools",
+      "setup": [
+        [
+          "make",
+          "-s",
+          "O={output}-conf",
+          "allnoconfig"
+        ]
+      ],
+      "argv": [
+        "python3",
+        "tools/asahi/t6030-display-linkage-tests.py",
+        "--conf",
+        "{output}-conf/scripts/kconfig/conf",
+        "--output",
+        "{output}"
+      ],
+      "note": "Build only the host Kconfig tool in an isolated output directory; check all built-in/module dependency combinations."
+    },
+    {
+      "name": "tools/asahi/test-j613-dcp-power.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/test-j613-dcp-power.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/test-m3-mailbox.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/test-m3-mailbox.py"
+      ]
+    },
+    {
+      "name": "tools/asahi/m3-firmware-tests.rs",
+      "group": "tools",
+      "argv": [
+        "{output}",
+        "--test-threads=1"
+      ],
+      "setup": [
+        [
+          "rustc",
+          "--edition=2021",
+          "--test",
+          "tools/asahi/m3-firmware-tests.rs",
+          "-o",
+          "{output}"
+        ]
+      ],
+      "rust": "1.85.0"
+    },
+    {
+      "name": "tools/asahi/test-m3-uapi.py",
+      "group": "tools",
+      "argv": [
+        "python3",
+        "tools/asahi/test-m3-uapi.py"
+      ],
+      "rust": "1.85.0"
+    }
+  ],
+  "helpers": {
+    "tools/testing/selftests/drivers/gpu/apple-dcp/run.py": "the implementation behind tools/testing/selftests/drivers/gpu/apple-dcp/run.sh, which is listed",
+    "tools/testing/selftests/drivers/gpu/asahi-g15/uat-owner.c": "compiled and executed by the registered asahi-g15/run.py actual reservation-owner fixture",
+    "tools/testing/selftests/drivers/gpu/asahi-g15/pmp-bridge.c": "compiled and executed by the registered asahi-g15/run.py maintained PMP fixture",
+    "tools/asahi/t6030-pmp-graph-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
+    "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
+    "tools/asahi/m3-uapi-tests.rs": "compiled and executed by the registered tools/asahi/test-m3-uapi.py paired-header suite"
   },
-  {
-   "name": "tools/aurora-display-notifier/tests/integration_dbus.py",
-   "group": "tools",
-   "argv": [
-    "dbus-run-session",
-    "--",
-    "env",
-    "AURORA_TEST_PRIVATE_BUS=1",
-    "python3",
-    "tools/aurora-display-notifier/tests/integration_dbus.py"
-   ]
-  },
-  {
-   "name": "tools/aurora-tb/pr14-regression.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/aurora-tb/pr14-regression.py",
-    "--negative-controls"
-   ]
-  },
-  {
-   "name": "tools/aurora-tb/tbnet-lifecycle-test.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/aurora-tb/tbnet-lifecycle-test.py",
-    "--source",
-    ".",
-    "--output",
-    "{output}",
-    "--negative-controls"
-   ],
-   "known_failure": "its fixture predates the receive refill retry (1d25feb6bb33): no rx_refill_work member or cancel_delayed_work_sync mock"
-  },
-  {
-   "name": "tools/aurora-wake/test-s2idle-rtc-regression.sh",
-   "group": "tools",
-   "argv": [
-    "bash",
-    "tools/aurora-wake/test-s2idle-rtc-regression.sh"
-   ]
-  },
-  {
-   "name": "tools/aurora-userpages/userpages.c",
-   "group": "tools",
-   "argv": [
-    "cc",
-    "-O2",
-    "-g",
-    "-Wall",
-    "-Wextra",
-    "-Werror",
-    "-Wl,-z,max-page-size=65536",
-    "tools/aurora-userpages/userpages.c",
-    "-o",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/testing/apple/check-backlight.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/apple/check-backlight.py",
-    "--output",
-    "{output}"
-   ],
-   "known_failure": "its include path lacks linux/math64.h, which dcp_backlight.h now includes"
-  },
-  {
-   "name": "tools/testing/apple/check-backlight-retry.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/apple/check-backlight-retry.py",
-    "--output",
-    "{output}"
-   ],
-   "known_failure": "the extracted code now calls min(), div_u64() and mul_u32_u32(), which the fixture does not mock"
-  },
-  {
-   "name": "tools/testing/apple/check-lifetime.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/apple/check-lifetime.py",
-    "--output",
-    "{output}"
-   ],
-   "known_failure": "the apple_dcp_afkep mock lacks lock and stopping, and spin_lock_irqsave is not mocked"
-  },
-  {
-   "name": "tools/testing/selftests/drivers/gpu/apple-afkv2/run-afkv2-tests.sh",
-   "group": "tools",
-   "argv": [
-    "sh",
-    "tools/testing/selftests/drivers/gpu/apple-afkv2/run-afkv2-tests.sh"
-   ],
-   "known_failure": "the send and edid stages predate afk.c changes (afk_send_command_common, reply_len)"
-  },
-  {
-   "name": "tools/testing/selftests/drivers/gpu/apple-afkv2/test-admission.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/selftests/drivers/gpu/apple-afkv2/test-admission.py"
-   ]
-  },
-  {
-   "name": "tools/testing/selftests/drivers/gpu/apple-dcp/plane-layout.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/selftests/drivers/gpu/apple-dcp/plane-layout.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/testing/selftests/drivers/gpu/apple-dcp/run.sh",
-   "group": "tools",
-   "argv": [
-    "sh",
-    "tools/testing/selftests/drivers/gpu/apple-dcp/run.sh",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/testing/selftests/drivers/gpu/test_t8140_external_bw.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/selftests/drivers/gpu/test_t8140_external_bw.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/testing/selftests/drivers/net/mt7932_e2e_test.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/selftests/drivers/net/mt7932_e2e_test.py",
-    "-v"
-   ]
-  },
-  {
-   "name": "tools/asahi/tb-dp-repair-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tb-dp-repair-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/t6030-clock-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-clock-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/t6030-wiring-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-wiring-tests.py",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/tiled-split-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/tiled-split-tests.py",
-    "--mutations",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/t6030-pmp-supplier-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-pmp-supplier-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/atc-usb3-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/atc-usb3-tests.py",
-    "--mutations",
-    "--out",
-    "{output}"
-   ]
-  },
-  {
-   "name": "tools/asahi/g15-input-error-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-input-error-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-queue-credit-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-queue-credit-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-probe-init-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-probe-init-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-retention-tests.py",
-   "group": "tools",
-   "commits": [
-    "31da169251bd34d5810a0874563d9a019b85bf56"
-   ],
-   "argv": [
-    "python3",
-    "tools/asahi/g15-retention-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual G15 and KBox ownership bodies with drop-count allocation failures; old-source P1 controls must fail at runtime. Public synthetic inputs only."
-  },
-  {
-   "name": "tools/asahi/g15-maintained-handoff-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-maintained-handoff-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-zero-words-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-zero-words-tests.py",
-    "--mutations",
-    "--evidence",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-pb-growth-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-pb-growth-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-stats-drain-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-stats-drain-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
-  },
-  {
-   "name": "tools/asahi/g15-display-order-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/g15-display-order-tests.py"
-   ],
-   "rust": "1.93.1",
-   "note": "Actual display publication, T6030/T6031 link and admit() bodies on OF/device-link and admission-order models; C and admit() mutants must build and fail. No hardware or private fixtures."
-  },
-  {
-   "name": "tools/testing/selftests/drivers/gpu/asahi-g15/run.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/testing/selftests/drivers/gpu/asahi-g15/run.py"
-   ],
-   "rust": "1.93.1",
-   "note": "Public synthetic Rust/C host cases; two unavailable private-hardware fixture cases remain explicitly ignored."
-  },
-  {
-   "name": "tools/asahi/t6030-pmp-dt-tests.py",
-   "group": "tools",
-   "setup": [
-    [
-     "make",
-     "-s",
-     "O={output}/kbuild",
-     "ARCH=arm64",
-     "allnoconfig"
-    ],
-    [
-     "make",
-     "-s",
-     "O={output}/kbuild",
-     "ARCH=arm64",
-     "scripts_dtc"
-    ]
-   ],
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-pmp-dt-tests.py",
-    "--dtc",
-    "{output}/kbuild/scripts/dtc/dtc",
-    "--output",
-    "{output}/dtbs"
-   ],
-   "note": "Compile J514S/J516S default and static PMP profiles; check supplier nodes and alias in the resulting DTBs."
-  },
-  {
-   "name": "tools/asahi/t6030-pmp-graph-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-pmp-graph-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "note": "Actual production-body host boundaries and runtime mutants; no firmware or hardware qualification."
-  },
-  {
-   "name": "tools/asahi/t6030-display-admission-tests.py",
-   "group": "tools",
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-display-admission-tests.py",
-    "--mutations",
-    "--output",
-    "{output}"
-   ],
-   "note": "Actual production-body host boundaries and runtime mutants; no firmware or hardware qualification."
-  },
-  {
-   "name": "tools/asahi/t6030-display-linkage-tests.py",
-   "group": "tools",
-   "setup": [
-    [
-     "make",
-     "-s",
-     "O={output}-conf",
-     "allnoconfig"
-    ]
-   ],
-   "argv": [
-    "python3",
-    "tools/asahi/t6030-display-linkage-tests.py",
-    "--conf",
-    "{output}-conf/scripts/kconfig/conf",
-    "--output",
-    "{output}"
-   ],
-   "note": "Build only the host Kconfig tool in an isolated output directory; check all built-in/module dependency combinations."
+  "excluded": {
+    "tools/aurora-sep/tests/coordinator/runtime-check.sh": "Needs /dev/sep-bio, a running kernel booted with trusted.source=applesep, the hw_random sysfs interface and fprintd. Coordinator payload for an approved device.",
+    "tools/aurora-sep/tests/coordinator/deletion-check.sh": "Needs /dev/sep-bio, fprintd over the system bus and a previously enrolled expendable test account; spans a reboot.",
+    "tools/aurora-sep/tests/coordinator/sep-live-count.py": "Opens /dev/sep-bio on a running kernel. Not picked up by `unittest discover` (no test_ prefix) - keep it that way.",
+    "tools/aurora-wake/s2idle-rtc-regression.sh": "Real suspend-to-idle cycles with rtcwake on an Apple machine, as root. Its argument checks run hermetically via test-s2idle-rtc-regression.sh (in suites.json).",
+    "tools/aurora-wake/attended-bt-wake.sh": "J700 with a paired Bluetooth keyboard, a person pressing keys, root.",
+    "tools/aurora-wake/bt-wake-cycle.sh": "One s2idle cycle on a J700 with Bluetooth wake, root.",
+    "tools/aurora-wake/bt-wake-power.sh": "Alternating RTC-timed sleeps on a J700, root.",
+    "tools/aurora-wake/bt-wake-emulated.sh": "Drives two other machines over SSH (target and a BlueZ host).",
+    "tools/aurora-wake/hog-keyboard.py": "BLE HID keyboard emulator for a second BlueZ host (system bus + Bluetooth adapter).",
+    "tools/aurora-tb/tb-pcie-report": "Reads live Thunderbolt/PCIe state and the kernel log with a dock attached (may need sudo).",
+    "tools/aurora-m3/m3-serial.py": "macOS helper (sudo, macvdmtool) recording a second Mac's serial console over a USB-C cable.",
+    "tools/testing/selftests/drivers/apple/j813-peripherals.sh": "Physical J813 check (exits 4 unless /proc/device-tree/compatible has apple,j813 and euid 0).",
+    "tools/testing/selftests/drivers/net/mt7932_e2e.py": "End-to-end Wi-Fi on a J700 via nmcli and the real network. Its helper unit tests (mt7932_e2e_test.py) are in suites.json.",
+    "tools/testing/selftests/arm64/user4k/": "kselftest programs for the user4k granule API: need an arm64 Aurora kernel booted with user4k=on (and an aarch64 toolchain to build). check-any-quarter.py / runtime-app.py consume output of those programs.",
+    "tools/aurora-sep/recipes/mesa-m3/tests/test-probe.sh": "Needs a built mesa-m3-probe (C, links Mesa/EGL/Wayland) and a headless weston for the wayland case.",
+    "tools/aurora-sep/recipes/mesa-m3/tests/test-confirm.sh": "Needs a built mesa-m3-wlcheck (Wayland client) passed as its argument.",
+    "tools/aurora-sep/recipes/mesa-m3/tests/build-checks.sh": "Runs inside the PKGBUILD package() step against a freshly built Mesa tree (makepkg, aarch64).",
+    "tools/aurora-bindgen/build.py": "Downloads the pinned bindgen 0.73.2 source archive (codeload.github.com) and crates.io dependencies, then cargo build --locked -j2 (89 s here incl. its own test.py run; passed). Viable as an optional cached job; GitHub runners have network.",
+    "tools/aurora-bindgen/test.py": "Hermetic once a patched bindgen exists (--bindgen PATH, 2 s, passed). --baseline-bindgen must be an unpatched 0.73.2; the system 0.73.1 fails the tag-only equality check by design.",
+    "tools/asahi-m3/completion_progress.py, fault_snapshot.py, retirement_progress.py": "Libraries that read /sys/kernel/debug/asahi-m3/* or /dev/kmsg on an M3 machine. Their offline tests are in suites.json.",
+    "tools/aurora-sep/air-gpu/*.sh, tools/aurora-sep/pro/*, tools/aurora-sep/neo/*": "On-device helpers; exercised through fixtures by tools/aurora-sep/tests (test_air_gpu, test_m3_pro_perf, test_neo_gpu).",
+    "drivers/**/*-test.c, *_test.c, tools/testing/kunit/configs/{apple_firmware,arm64_user4k*}.config": "KUnit suites: need a kernel build and tools/testing/kunit/kunit.py (arm64 under QEMU). Not host scripts.",
+    "tools/aurora-sep/tests: env-gated cases": "Skipped unless set: AURORA_ADT_FIXTURE (real ADT dump), AIR_GPU_TEST_VULKAN=1 (real Vulkan job on a render node), AURORA_PRO_MESA_PKG / AURORA_M1N1_PKG (release packages); test_m3max_kit real-package cases need /nonexistent/... packages. The rest of each module runs."
   }
- ],
- "helpers": {
-  "tools/testing/selftests/drivers/gpu/apple-dcp/run.py": "the implementation behind tools/testing/selftests/drivers/gpu/apple-dcp/run.sh, which is listed",
-  "tools/testing/selftests/drivers/gpu/asahi-g15/uat-owner.c": "compiled and executed by the registered asahi-g15/run.py actual reservation-owner fixture",
-  "tools/testing/selftests/drivers/gpu/asahi-g15/pmp-bridge.c": "compiled and executed by the registered asahi-g15/run.py maintained PMP fixture",
-  "tools/asahi/t6030-pmp-graph-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
-  "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite"
- },
- "excluded": {
-  "tools/aurora-sep/tests/coordinator/runtime-check.sh": "Needs /dev/sep-bio, a running kernel booted with trusted.source=applesep, the hw_random sysfs interface and fprintd. Coordinator payload for an approved device.",
-  "tools/aurora-sep/tests/coordinator/deletion-check.sh": "Needs /dev/sep-bio, fprintd over the system bus and a previously enrolled expendable test account; spans a reboot.",
-  "tools/aurora-sep/tests/coordinator/sep-live-count.py": "Opens /dev/sep-bio on a running kernel. Not picked up by `unittest discover` (no test_ prefix) - keep it that way.",
-  "tools/aurora-wake/s2idle-rtc-regression.sh": "Real suspend-to-idle cycles with rtcwake on an Apple machine, as root. Its argument checks run hermetically via test-s2idle-rtc-regression.sh (in suites.json).",
-  "tools/aurora-wake/attended-bt-wake.sh": "J700 with a paired Bluetooth keyboard, a person pressing keys, root.",
-  "tools/aurora-wake/bt-wake-cycle.sh": "One s2idle cycle on a J700 with Bluetooth wake, root.",
-  "tools/aurora-wake/bt-wake-power.sh": "Alternating RTC-timed sleeps on a J700, root.",
-  "tools/aurora-wake/bt-wake-emulated.sh": "Drives two other machines over SSH (target and a BlueZ host).",
-  "tools/aurora-wake/hog-keyboard.py": "BLE HID keyboard emulator for a second BlueZ host (system bus + Bluetooth adapter).",
-  "tools/aurora-tb/tb-pcie-report": "Reads live Thunderbolt/PCIe state and the kernel log with a dock attached (may need sudo).",
-  "tools/aurora-m3/m3-serial.py": "macOS helper (sudo, macvdmtool) recording a second Mac's serial console over a USB-C cable.",
-  "tools/testing/selftests/drivers/apple/j813-peripherals.sh": "Physical J813 check (exits 4 unless /proc/device-tree/compatible has apple,j813 and euid 0).",
-  "tools/testing/selftests/drivers/net/mt7932_e2e.py": "End-to-end Wi-Fi on a J700 via nmcli and the real network. Its helper unit tests (mt7932_e2e_test.py) are in suites.json.",
-  "tools/testing/selftests/arm64/user4k/": "kselftest programs for the user4k granule API: need an arm64 Aurora kernel booted with user4k=on (and an aarch64 toolchain to build). check-any-quarter.py / runtime-app.py consume output of those programs.",
-  "tools/aurora-sep/recipes/mesa-m3/tests/test-probe.sh": "Needs a built mesa-m3-probe (C, links Mesa/EGL/Wayland) and a headless weston for the wayland case.",
-  "tools/aurora-sep/recipes/mesa-m3/tests/test-confirm.sh": "Needs a built mesa-m3-wlcheck (Wayland client) passed as its argument.",
-  "tools/aurora-sep/recipes/mesa-m3/tests/build-checks.sh": "Runs inside the PKGBUILD package() step against a freshly built Mesa tree (makepkg, aarch64).",
-  "tools/aurora-bindgen/build.py": "Downloads the pinned bindgen 0.73.2 source archive (codeload.github.com) and crates.io dependencies, then cargo build --locked -j2 (89 s here incl. its own test.py run; passed). Viable as an optional cached job; GitHub runners have network.",
-  "tools/aurora-bindgen/test.py": "Hermetic once a patched bindgen exists (--bindgen PATH, 2 s, passed). --baseline-bindgen must be an unpatched 0.73.2; the system 0.73.1 fails the tag-only equality check by design.",
-  "tools/asahi-m3/completion_progress.py, fault_snapshot.py, retirement_progress.py": "Libraries that read /sys/kernel/debug/asahi-m3/* or /dev/kmsg on an M3 machine. Their offline tests are in suites.json.",
-  "tools/aurora-sep/air-gpu/*.sh, tools/aurora-sep/pro/*, tools/aurora-sep/neo/*": "On-device helpers; exercised through fixtures by tools/aurora-sep/tests (test_air_gpu, test_m3_pro_perf, test_neo_gpu).",
-  "drivers/**/*-test.c, *_test.c, tools/testing/kunit/configs/{apple_firmware,arm64_user4k*}.config": "KUnit suites: need a kernel build and tools/testing/kunit/kunit.py (arm64 under QEMU). Not host scripts.",
-  "tools/aurora-sep/tests: env-gated cases": "Skipped unless set: AURORA_ADT_FIXTURE (real ADT dump), AIR_GPU_TEST_VULKAN=1 (real Vulkan job on a render node), AURORA_PRO_MESA_PKG / AURORA_M1N1_PKG (release packages); test_m3max_kit real-package cases need /nonexistent/... packages. The rest of each module runs."
- }
 }
