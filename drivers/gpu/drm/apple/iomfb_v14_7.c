@@ -136,6 +136,7 @@ static const struct dcp_v14_board dcp_v14_board_j615 = {
 	.panel_width = 2880,
 	.panel_height = 1864,
 	.promotion = false,
+	.panel_nits = true,
 	.ctm_set = A(421),
 	.ctm_get = A(420),
 };
@@ -1698,7 +1699,8 @@ static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
 {
 	return board && board->panel_nits &&
 		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s") ||
-		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613"));
+		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613") ||
+		 machine_is(ctx, "apple,j615"));
 }
 
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
