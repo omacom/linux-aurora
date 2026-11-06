@@ -40,6 +40,13 @@ bool apple_t8122_25g83_board(void)
 	return ok;
 }
 
+/* Match the PMGR provider: automatic domains can be clock-gated while active. */
+static bool j613_power_state_active(u32 state)
+{
+	return FIELD_GET(GENMASK(7, 4), state) == 15 ||
+	       ((state & BIT(28)) && FIELD_GET(GENMASK(3, 0), state) == 15);
+}
+
 /* These are DT domain nodes, carrying the PMGR offsets, not copied registers. */
 static int j613_power_ready(void)
 {
@@ -82,7 +89,7 @@ static int j613_power_ready(void)
 			return -ENOMEM;
 		state = readl(pmgr + offset);
 		iounmap(pmgr);
-		if (FIELD_GET(GENMASK(7, 4), state) != 15)
+		if (!j613_power_state_active(state))
 			return -EBUSY;
 	}
 	return 0;
