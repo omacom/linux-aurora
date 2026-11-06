@@ -8,10 +8,10 @@ use layout::{Field,Space};
 pub(crate) struct Pass {buffers:KVec<Buffer>}
 impl Pass {
     pub(crate) fn new(dev:&driver::AsahiDrmDevice,uat:&mmu::Uat,vm:&mmu::Vm,
-        slot:usize,clusters:u32,aliases:&mut KVec<mmu::KernelMapping>)->Result<Self> {
+        slot:usize,clusters:u32,profile:super::m3_profile::Profile,aliases:&mut KVec<mmu::KernelMapping>)->Result<Self> {
         let mut buffers=KVec::with_capacity(layout::COUNT,GFP_KERNEL)?;
         for field in layout::FIELDS {
-            let a=layout::board_allocation(slot,field,clusters).map_err(|_|EINVAL)?;
+            let a=layout::allocation_for(profile,slot,field,clusters).map_err(|_|EINVAL)?;
             let mut b=match a.space {
                 Space::ClientGpu=>Buffer::at_prot(dev,uat.kernel_vm(),Some((vm,a.address)),None,
                     a.size,prot::PROT_GPU_FW_SHARED_RW,prot::Prot::from_pte(a.access.pte()))?,

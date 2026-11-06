@@ -15,3 +15,97 @@ mod m3_init_storage;
 mod m3_thermal_policy;
 #[path = "../../drivers/gpu/drm/asahi/m3/t8122_hwdata.rs"]
 mod t8122_hwdata;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_init_26.rs"]
+mod m3_init_26;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_profile.rs"]
+mod m3_profile;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_mmio_26.rs"]
+mod m3_mmio_26;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_queue_layout.rs"]
+mod m3_queue_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_pool_layout.rs"]
+mod m3_pool_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_layout.rs"]
+mod m3_compute_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_channel_format.rs"]
+mod m3_channel_format;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_sequence.rs"]
+mod m3_compute_sequence;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_state_layout.rs"]
+mod m3_state_layout;
+
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_compute_storage.rs"]
+mod m3_compute_storage;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_parameter_layout.rs"]
+mod m3_parameter_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_sync_layout.rs"]
+mod m3_sync_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/agx_render.rs"]
+mod agx_render;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/agx_render_state.rs"]
+mod agx_render_state;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_scene_layout.rs"]
+mod m3_scene_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_command_layout.rs"]
+mod m3_command_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_render_sequence.rs"]
+mod m3_render_sequence;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_tiler_command.rs"]
+mod m3_tiler_command;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_pass_layout.rs"]
+mod m3_pass_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_shared_layout.rs"]
+mod m3_shared_layout;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_fragment_command.rs"]
+mod m3_fragment_command;
+
+#[path = "../../drivers/gpu/drm/asahi/m3/agx_attachments.rs"]
+mod agx_attachments;
+
+#[test]
+fn extended_parameter_aliases_are_gpu_only_and_legacy_is_unchanged() {
+    use m3_pass_layout::{Access, Space};
+    use m3_profile::Profile;
+    use m3_shared_layout as shared;
+    for index in 0..shared::COUNT {
+        let original = shared::allocation(index).unwrap();
+        let legacy = shared::allocation_for(Profile::Legacy, index).unwrap();
+        assert_eq!(legacy, original);
+        let extended = shared::allocation_for(Profile::Extended, index).unwrap();
+        if [shared::PARAMETER_PAGE_LIST, shared::PARAMETER_BLOCK_LIST].contains(&index) {
+            assert_eq!(extended.space, Space::ClientGpu);
+            assert_eq!(extended.address, original.address);
+            assert_eq!(extended.size, original.size);
+            assert_eq!(extended.access, Access::GpuCachedRw);
+            assert_eq!(extended.access.pte(), 0xc0000000000080);
+            assert_eq!(original.access, Access::GpuFirmwareCachedRw);
+        }
+        if extended.space == Space::ClientGpu {
+            assert_ne!(extended.access, Access::GpuFirmwareCachedRw);
+        }
+    }
+}
+
+#[path = "../../drivers/gpu/drm/asahi/m3/m3_completion_policy.rs"]
+mod m3_completion_policy;
