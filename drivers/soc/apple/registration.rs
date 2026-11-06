@@ -60,6 +60,37 @@ pub(crate) fn patch_loaded(nonce_session: bool, accepted: bool, needs_patch: boo
     accepted && !(nonce_session && needs_patch)
 }
 
+/// Whether a completed registration can be left in place.
+///
+/// Stricter than [`patch_loaded`] on a 13.5 profile: state 9 forces a reload
+/// even when the acknowledgement still reads accepted, because a power cycle
+/// is what clears a stuck NEEDS_PATCH. `left_powered` is this driver's record
+/// that it has not switched the sensor off since that registration.
+pub(crate) fn registration_still_held(
+    established: bool,
+    left_powered: bool,
+    silent: bool,
+    accepted: bool,
+    needs_patch: bool,
+) -> bool {
+    established && left_powered && !silent && accepted && !needs_patch
+}
+
+/// Whether calibration dropped the patch, so a profile without a nonce
+/// session has to power-cycle and register again. A nonce-session profile
+/// never takes that second wake: its parameter path does not.
+pub(crate) fn needs_reload_after_calibration(
+    nonce_session: bool,
+    silent: bool,
+    accepted: bool,
+    needs_patch: bool,
+) -> bool {
+    if nonce_session {
+        return false;
+    }
+    !registration_still_held(true, true, silent, accepted, needs_patch)
+}
+
 /// The bring-up stage retry `retry` (counted from 1) starts from.
 ///
 /// The stage an attempt left stands: once the serial is registered, [`plan`]
@@ -363,6 +394,34 @@ mod tests {
                 register_sensor: false
             }
         );
+    }
+
+    #[test]
+    fn a_held_registration_needs_every_condition() {
+        assert!(registration_still_held(true, true, false, true, false));
+        assert!(!registration_still_held(false, true, false, true, false));
+        assert!(!registration_still_held(true, false, false, true, false));
+        assert!(!registration_still_held(true, true, true, true, false));
+        assert!(!registration_still_held(true, true, false, false, false));
+        assert!(!registration_still_held(true, true, false, true, true));
+    }
+
+    #[test]
+    fn calibration_skips_the_second_wake_while_the_patch_remains() {
+        assert!(!needs_reload_after_calibration(false, false, true, false));
+    }
+
+    #[test]
+    fn calibration_reloads_when_the_patch_is_gone() {
+        assert!(needs_reload_after_calibration(false, false, true, true));
+        assert!(needs_reload_after_calibration(false, true, true, false));
+        assert!(needs_reload_after_calibration(false, false, false, false));
+    }
+
+    #[test]
+    fn a_nonce_session_never_takes_the_post_calibration_wake() {
+        assert!(!needs_reload_after_calibration(true, true, false, true));
+        assert!(!needs_reload_after_calibration(true, false, true, false));
     }
 
     /// The enclave's sensor registration, as the boots on record show it.
