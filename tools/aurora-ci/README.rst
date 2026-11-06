@@ -221,6 +221,14 @@ repository. ``package`` and ``KUnit`` use the repository variable
 builds kernels on. Without it they use ``ubuntu-24.04-arm``, where the
 package build takes about 45 minutes.
 
+Repository variables do not reach a fork's pull request run, so a fork would
+always get that 45 minute build. When both the author and whoever triggered
+the run are vouched for, ``plan.py`` names the Namespace runner for the fork
+instead. Any other fork stays on GitHub's runner, a maintainer's ``ci:build``
+label included. This only routes honest pull requests: a pull request's own
+copy of the workflow can ask for any runner, so what keeps untrusted code off
+Namespace is still the approval and runner group described above.
+
 Repository setup
 ================
 

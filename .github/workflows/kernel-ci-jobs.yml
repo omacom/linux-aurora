@@ -5,7 +5,8 @@
 # public repository. The two CPU-heavy jobs (package, kunit) run on the
 # repository variable KERNEL_CI_RUNNER when it is set, as a JSON runs-on value
 # such as ["namespace-profile-arm64-linux-apple-12x32"]; it defaults to
-# GitHub's arm64 runner.
+# GitHub's arm64 runner. Variables do not reach a fork's pull request run, so
+# for a trusted author's fork plan.py names the runner instead.
 
 name: Kernel CI jobs
 
@@ -47,6 +48,7 @@ jobs:
       reason: ${{ steps.plan.outputs.reason }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
       head_sha: ${{ steps.plan.outputs.head_sha }}
+      runner: ${{ steps.plan.outputs.runner }}
       key: ${{ steps.lookup.outputs.key }}
       kernel_tree: ${{ steps.lookup.outputs.kernel_tree }}
       recipe_commit: ${{ steps.lookup.outputs.recipe_commit }}
@@ -296,7 +298,7 @@ jobs:
     if: needs.plan.outputs.tier == 'full'
     # A reused build only downloads and checks the packages; that needs no
     # build machine.
-    runs-on: ${{ needs.plan.outputs.package_run != '' && 'ubuntu-24.04' || fromJSON(vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
+    runs-on: ${{ needs.plan.outputs.package_run != '' && 'ubuntu-24.04' || fromJSON(needs.plan.outputs.runner || vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
     timeout-minutes: 180
     permissions:
       actions: read # look up and download earlier runs' artifacts
@@ -406,7 +408,7 @@ jobs:
     name: KUnit
     needs: plan
     if: needs.plan.outputs.tier == 'full' && needs.plan.outputs.verified_run == ''
-    runs-on: ${{ fromJSON(vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
+    runs-on: ${{ fromJSON(needs.plan.outputs.runner || vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
     timeout-minutes: 90
     permissions:
       contents: read # check out the repository
