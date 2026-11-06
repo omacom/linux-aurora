@@ -87,3 +87,69 @@ pub(crate) fn allocation(index:usize)->Result<Allocation,InvalidOwner> {
 pub(crate) fn coalesce_stamp_flush(wide:bool,timestamps:[u64;2],last:bool)->bool {
     wide && timestamps==[0,0] && !last
 }
+
+pub(crate) fn allocation_for(profile: super::m3_profile::Profile, index: usize)
+    -> Result<Allocation, InvalidOwner> {
+    let mut owner = allocation(index)?;
+    if profile == super::m3_profile::Profile::Legacy { return Ok(owner); }
+    match index {
+        // The initial allocator has eight 4-MiB payload owners. Retain the
+        // historical indices without allocating unused 4-MiB payloads.
+        9..=22 => { owner.size = 0x4000; owner.mapping = Mapping::FirmwareOnly; }
+        POOL_PAGES => owner.size = 0x20000,
+        POOL_TABLE => { owner.size = 0x4000; owner.mapping = Mapping::Client(POOL_TABLE_VA & !0x3fff); }
+        POOL => owner.size = 0xa0,
+        GPU_CONTEXT => owner.size = 0x38,
+        NOTIFIER => owner.size = 0x200,
+        EVENT => owner.size = 8,
+        QUEUE => owner.size = 0x24c0,
+        PREEMPTION => owner.size = 0x4000,
+        COMMAND => { owner.size = 0x8b0; owner.mapping = Mapping::CommandAlias(0x73_0000_0000); }
+        TAIL_SCRATCH => { owner.size = 0x4000; owner.mapping = Mapping::Client(0x72_0100_0000); }
+        46 => { owner.size = 0x40000; owner.mapping = Mapping::Client(0x72_0000_0000); }
+        45 | 47..=49 => { owner.size = 0x4000; owner.mapping = Mapping::FirmwareOnly; }
+        _ => {}
+    }
+    Ok(owner)
+}
+
+pub(crate) fn slot_offset_for(profile: super::m3_profile::Profile, index: usize, slot: usize)
+    -> Result<usize, InvalidOwner> {
+    if slot >= SLOTS { return Err(InvalidOwner); }
+    let size = allocation_for(profile, index)?.size;
+    Ok(if RESET.contains(&index) { ((size + 0x3fff) & !0x3fff) * slot } else { 0 })
+}
+
+pub(crate) fn batch_allocation_for(profile: super::m3_profile::Profile, index: usize)
+    -> Result<Allocation, InvalidOwner> {
+    let mut owner = allocation_for(profile, index)?;
+    owner.size += slot_offset_for(profile, index, SLOTS - 1)?;
+    Ok(owner)
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    use super::super::m3_profile::Profile;
+    #[test] fn extended_commands_do_not_straddle_another_slots_page() {
+        let command = allocation_for(Profile::Extended, COMMAND).unwrap();
+        let Mapping::CommandAlias(base) = command.mapping else { panic!("missing command alias") };
+        assert_eq!(base & 0x3fff, 0);
+        for slot in 0..SLOTS - 1 {
+            let start = slot_offset_for(Profile::Extended, COMMAND, slot).unwrap();
+            let next = slot_offset_for(Profile::Extended, COMMAND, slot + 1).unwrap();
+            assert!(start + command.size <= next);
+        }
+        assert_eq!(batch_allocation_for(Profile::Extended, QUEUE).unwrap().size, 0x24c0);
+        assert!(slot_offset_for(Profile::Extended, COMMAND, SLOTS).is_err());
+    }
+    #[test] fn legacy_plan_is_byte_for_byte_the_same_for_every_owner_and_slot() {
+        for index in 0..COUNT {
+            assert_eq!(allocation_for(Profile::Legacy, index), allocation(index));
+            for slot in 0..SLOTS {
+                assert_eq!(slot_offset_for(Profile::Legacy, index, slot), slot_offset(index, slot));
+            }
+            assert_eq!(batch_allocation_for(Profile::Legacy, index), batch_allocation(index));
+        }
+    }
+}
