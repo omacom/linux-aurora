@@ -78,6 +78,10 @@
 			label = "pmp-dispext0";
 			#power-domain-cells = <0>;
 			power-domains = <&ps_dispext0_fe>;
+			/* As T6030's: enabled only by the dcpext gate, before the PMP starts. */
+			apple,always-on;
+			/* A missing external acknowledgement must not block the internal panel. */
+			apple,defer-startup-ack;
 			status = "disabled";
 		};
 
@@ -88,6 +92,10 @@
 			label = "pmp-dispext1";
 			#power-domain-cells = <0>;
 			power-domains = <&ps_dispext1_fe>;
+			/* As T6030's: enabled only by the dcpext gate, before the PMP starts. */
+			apple,always-on;
+			/* A missing external acknowledgement must not block the internal panel. */
+			apple,defer-startup-ack;
 			status = "disabled";
 		};
 
@@ -98,6 +106,10 @@
 			label = "pmp-dispext2";
 			#power-domain-cells = <0>;
 			power-domains = <&ps_dispext2_fe>;
+			/* As T6030's: enabled only by the dcpext gate, before the PMP starts. */
+			apple,always-on;
+			/* A missing external acknowledgement must not block the internal panel. */
+			apple,defer-startup-ack;
 			status = "disabled";
 		};
 
@@ -108,6 +120,10 @@
 			label = "pmp-dispext3";
 			#power-domain-cells = <0>;
 			power-domains = <&ps_dispext3_fe>;
+			/* As T6030's: enabled only by the dcpext gate, before the PMP starts. */
+			apple,always-on;
+			/* A missing external acknowledgement must not block the internal panel. */
+			apple,defer-startup-ack;
 			status = "disabled";
 		};
 

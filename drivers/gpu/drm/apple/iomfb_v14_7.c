@@ -937,6 +937,14 @@ static void dcp_v14_external_published(struct apple_dcp_v14 *v14, const char *ke
 		ret = parse(raw->data, raw->size, &ctx);
 		if (!ret) {
 			ctx.dcp = dcp;
+			/* Timings that list no ColorModes use these; see parse_mode(). */
+			for (i = 0; i < v14->raw_count; i++)
+				if (!v14->raw[i].service &&
+				    !strcmp(v14->raw[i].key, "ColorElements") &&
+				    v14->raw[i].size) {
+					ctx.shared_colors = v14->raw[i].data;
+					ctx.shared_colors_len = v14->raw[i].size;
+				}
 			ret = dcp_modes_replace(dcp, &ctx, generation);
 		}
 		if (ret) {
@@ -2029,9 +2037,14 @@ int iomfb_v14_7_external_prepare(struct apple_dcp *dcp)
 		dcp->coproc_reg = NULL;
 		goto refuse;
 	}
-	/* The callbacks here are those of one firmware image. */
+	/*
+	 * The callbacks here are those of one firmware image: T6030's, or on a
+	 * T6031 external processor the J516C image its internal DCP runs.
+	 */
 	if (of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid) ||
-	    strcmp(uuid, DCP_V14_FIRMWARE_UUID)) {
+	    (strcmp(uuid, DCP_V14_FIRMWARE_UUID) &&
+	     (!of_device_is_compatible(dev->of_node, "apple,t6031-dcpext") ||
+	      strcmp(uuid, DCP_V14_J516C_FIRMWARE_UUID)))) {
 		dev_err(dev, "external display processor firmware %s is not supported\n",
 			uuid ?: "(unknown)");
 		ret = -ENODEV;
@@ -2118,23 +2131,38 @@ bool iomfb_v14_7_external_failed(struct apple_dcp *dcp)
 	       (dcp->v14 && READ_ONCE(dcp->v14->failed));
 }
 
+/* True if @ps is a power state labelled dispext<N><suffix>. */
+static bool dcpext_ps_is(struct device_node *ps, const char *suffix)
+{
+	const char *label;
+
+	return ps && !of_property_read_string(ps, "label", &label) &&
+	       strstarts(label, "dispext") && strlen(label) >= strlen(suffix) &&
+	       !strcmp(label + strlen(label) - strlen(suffix), suffix);
+}
+
 /* Refuse startup unless both the hardware floor and PMP vote are in place. */
 static int dcpext_check_power(struct apple_dcp *dcp)
 {
 	struct device *dev = dcp->dev;
-	struct device_node *ps, *entry;
+	struct device_node *ps, *fe, *entry;
 	struct regmap *map;
-	const char *label;
 	u32 offset, value;
 	int ret;
 
 	ps = of_parse_phandle(dev->of_node, "power-domains", 0);
 	if (!ps)
 		return -ENODEV;
-	/* The CPU domain of this pipe: dispext<N>_cpu. */
-	ret = of_property_read_string(ps, "label", &label);
-	if (ret || !strstarts(label, "dispext") || strlen(label) < 4 ||
-	    strcmp(label + strlen(label) - 4, "_cpu")) {
+	/*
+	 * The floor is on the pipe's CPU domain, dispext<N>_cpu. On T6031 the
+	 * pipe sits on dispext<N>_fe, whose parent is the CPU domain.
+	 */
+	if (of_device_is_compatible(dev->of_node, "apple,t6031-dcpext")) {
+		fe = ps;
+		ps = dcpext_ps_is(fe, "_fe") ? of_parse_phandle(fe, "power-domains", 0) : NULL;
+		of_node_put(fe);
+	}
+	if (!dcpext_ps_is(ps, "_cpu")) {
 		of_node_put(ps);
 		return -EINVAL;
 	}

@@ -29,6 +29,7 @@ extern const struct apple_dpin_policy apple_dpin_disabled;
 extern const struct apple_dpin_policy apple_dpin_m1;
 extern const struct apple_dpin_policy apple_dpin_m2;
 extern const struct apple_dpin_policy apple_dpin_m3;
+extern const struct apple_dpin_policy apple_dpin_m3_max;
 
 enum apple_dpin_phase {
 	APPLE_DPIN_IDLE,
