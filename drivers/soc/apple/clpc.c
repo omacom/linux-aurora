@@ -24,13 +24,20 @@
 #include <linux/debugfs.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/kref.h>
+#include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/seq_file.h>
+#include <linux/slab.h>
+#include <linux/soc/apple/clpc.h>
 #include <linux/soc/apple/pmc.h>
+#include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
 #define APPLE_CLPC_MAX_CLUSTERS	8
@@ -86,6 +93,20 @@ struct apple_clpc_vote {
 	unsigned long last_demand;
 };
 
+/*
+ * The GPU driver's activity input, see apple_clpc_gpu_get(). It has a
+ * lifetime of its own, so that a late put by the GPU driver never touches a
+ * removed CLPC.
+ */
+struct apple_clpc_gpu {
+	struct kref ref;
+	spinlock_t lock;
+	bool active;
+	u64 updated_ns;
+	/* Counts every report, active or not */
+	u64 sequence;
+};
+
 struct apple_clpc {
 	struct device *dev;
 	struct device *pmc;
@@ -109,6 +130,7 @@ struct apple_clpc {
 	unsigned long gpu_read_errors;
 	struct dentry *debugfs;
 	struct regmap *gpu_pmgr;
+	struct apple_clpc_gpu *gpu;
 	u32 gpu_offset;
 	/* Graphics powered at the last sample, since when, and that sample's time */
 	bool gpu_on;
@@ -125,6 +147,117 @@ struct apple_clpc {
 	unsigned long gpu_floor_releases;
 	unsigned long gpu_floor_returns;
 };
+
+/* Protects publication and removal of the drvdata, never a GPU report. */
+static DEFINE_MUTEX(apple_clpc_clients_lock);
+
+static void apple_clpc_gpu_free(struct kref *ref)
+{
+	kfree(container_of(ref, struct apple_clpc_gpu, ref));
+}
+
+/**
+ * apple_clpc_gpu_set_active() - report GPU activity to the CLPC
+ * @gpu: request from apple_clpc_gpu_get(), or NULL
+ * @active: whether the GPU has work
+ *
+ * Safe in atomic context: it only takes the request's own spinlock.
+ */
+void apple_clpc_gpu_set_active(struct apple_clpc_gpu *gpu, bool active)
+{
+	unsigned long flags;
+
+	if (!gpu)
+		return;
+	spin_lock_irqsave(&gpu->lock, flags);
+	gpu->active = active;
+	gpu->updated_ns = ktime_get_mono_fast_ns();
+	gpu->sequence++;
+	spin_unlock_irqrestore(&gpu->lock, flags);
+}
+EXPORT_SYMBOL_GPL(apple_clpc_gpu_set_active);
+
+/**
+ * apple_clpc_gpu_put() - clear and release a request from apple_clpc_gpu_get()
+ * @gpu: the request, or NULL
+ */
+void apple_clpc_gpu_put(struct apple_clpc_gpu *gpu)
+{
+	if (gpu) {
+		apple_clpc_gpu_set_active(gpu, false);
+		kref_put(&gpu->ref, apple_clpc_gpu_free);
+	}
+}
+EXPORT_SYMBOL_GPL(apple_clpc_gpu_put);
+
+/**
+ * apple_clpc_gpu_get() - get the activity input of the CLPC a GPU links to
+ * @dev: the GPU device
+ * @out: the request, or NULL when @dev names no CLPC
+ *
+ * The CLPC is named by the "apple,clpc" phandle of @dev. A device link orders
+ * it before the GPU. It has one such input, for one GPU.
+ *
+ * Return: 0, -EPROBE_DEFER while the CLPC has not probed, or another error.
+ */
+int apple_clpc_gpu_get(struct device *dev, struct apple_clpc_gpu **out)
+{
+	struct device_node *np;
+	struct platform_device *provider;
+	struct apple_clpc *clpc;
+	struct device_link *link;
+	int ret = -EPROBE_DEFER;
+
+	*out = NULL;
+	np = of_parse_phandle(dev->of_node, "apple,clpc", 0);
+	if (!np)
+		return of_find_property(dev->of_node, "apple,clpc", NULL) ? -EINVAL : 0;
+	if (!of_device_is_compatible(np, "apple,t8140-clpc")) {
+		of_node_put(np);
+		return -EINVAL;
+	}
+	provider = of_find_device_by_node(np);
+	of_node_put(np);
+	if (!provider)
+		return ret;
+	link = device_link_add(dev, &provider->dev, DL_FLAG_AUTOREMOVE_CONSUMER);
+	if (!link) {
+		put_device(&provider->dev);
+		return -ENOMEM;
+	}
+	mutex_lock(&apple_clpc_clients_lock);
+	clpc = dev_get_drvdata(&provider->dev);
+	if (clpc && clpc->gpu && refcount_read(&clpc->gpu->ref.refcount) == 1) {
+		kref_get(&clpc->gpu->ref);
+		*out = clpc->gpu;
+		ret = 0;
+	}
+	mutex_unlock(&apple_clpc_clients_lock);
+	put_device(&provider->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_clpc_gpu_get);
+
+static bool apple_clpc_gpu_active(struct apple_clpc_gpu *gpu, u64 *updated,
+				  u64 *sequence)
+{
+	unsigned long flags;
+	bool active;
+
+	spin_lock_irqsave(&gpu->lock, flags);
+	active = gpu->active;
+	*updated = gpu->updated_ns;
+	*sequence = gpu->sequence;
+	spin_unlock_irqrestore(&gpu->lock, flags);
+	return active;
+}
+
+static void apple_clpc_gpu_owner_put(void *data)
+{
+	struct apple_clpc_gpu *gpu = data;
+
+	kref_put(&gpu->ref, apple_clpc_gpu_free);
+}
 
 /* cpufreq policies can appear after probe; pick up new ones as they do. */
 static void apple_clpc_find_clusters(struct apple_clpc *clpc)
@@ -402,6 +535,13 @@ static int apple_clpc_status_show(struct seq_file *s, void *unused)
 		seq_printf(s, "gpu floor releases: %lu returns: %lu\n",
 			   clpc->gpu_floor_releases, clpc->gpu_floor_returns);
 	}
+	if (clpc->gpu) {
+		u64 updated, sequence;
+		bool active = apple_clpc_gpu_active(clpc->gpu, &updated, &sequence);
+
+		seq_printf(s, "host_gpu: active %u request_ns %llu sequence %llu\n",
+			   active, updated, sequence);
+	}
 	for (i = 0; i < clpc->nr_clusters; i++)
 		seq_printf(s, "cluster cpu%u: busy %u%% level %u%% -> dcs %u soc %u\n",
 			   clpc->clusters[i].policy_cpu, clpc->clusters[i].busy,
@@ -447,6 +587,9 @@ static void apple_clpc_stop(void *data)
 {
 	struct apple_clpc *clpc = data;
 
+	mutex_lock(&apple_clpc_clients_lock);
+	dev_set_drvdata(clpc->dev, NULL);
+	mutex_unlock(&apple_clpc_clients_lock);
 	apple_clpc_halt(clpc);
 	debugfs_remove_recursive(clpc->debugfs);
 	apple_clpc_free_clusters(clpc);
@@ -467,6 +610,18 @@ static int apple_clpc_probe(struct platform_device *pdev)
 	clpc->dev = dev;
 	clpc->pmc = dev->parent;
 	clpc->hw = of_device_get_match_data(dev);
+	/* The GPU driver reports its submissions here, see apple_clpc_gpu_get(). */
+	if (of_device_is_compatible(dev->of_node, "apple,t8140-clpc")) {
+		clpc->gpu = kzalloc_obj(*clpc->gpu);
+		if (!clpc->gpu)
+			return -ENOMEM;
+		kref_init(&clpc->gpu->ref);
+		spin_lock_init(&clpc->gpu->lock);
+		ret = devm_add_action_or_reset(dev, apple_clpc_gpu_owner_put,
+					       clpc->gpu);
+		if (ret)
+			return ret;
+	}
 	/* The property is optional: without it, CPU demand alone sets the floors. */
 	if (clpc->hw->gpu_demand)
 		gpu = of_parse_phandle(dev->of_node, "apple,gpu-power-state", 0);
@@ -532,7 +687,9 @@ static int apple_clpc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	mutex_lock(&apple_clpc_clients_lock);
 	platform_set_drvdata(pdev, clpc);
+	mutex_unlock(&apple_clpc_clients_lock);
 	apple_clpc_queue(clpc, true);
 	return 0;
 }
@@ -608,6 +765,63 @@ static const struct apple_clpc_hw apple_clpc_hw_t8140 = {
 	.pmp_backoff = true,
 	.pmp_agent = 0,
 };
+
+#if IS_BUILTIN(CONFIG_KUNIT) && !defined(MODULE)
+#include <kunit/test.h>
+
+static void apple_clpc_gpu_request_lifetime_test(struct kunit *test)
+{
+	struct apple_clpc_gpu *gpu = kzalloc_obj(*gpu);
+	u64 updated, sequence;
+
+	KUNIT_ASSERT_NOT_NULL(test, gpu);
+	kref_init(&gpu->ref);
+	spin_lock_init(&gpu->lock);
+	KUNIT_EXPECT_FALSE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	KUNIT_EXPECT_EQ(test, sequence, 0ull);
+	/* The CLPC and one GPU own references of their own. */
+	kref_get(&gpu->ref);
+	apple_clpc_gpu_set_active(gpu, true);
+	KUNIT_EXPECT_TRUE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	KUNIT_EXPECT_GT(test, updated, 0ull);
+	KUNIT_EXPECT_EQ(test, sequence, 1ull);
+	/* The GPU's put clears the input. */
+	apple_clpc_gpu_put(gpu);
+	KUNIT_EXPECT_FALSE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	KUNIT_EXPECT_EQ(test, sequence, 2ull);
+	kref_put(&gpu->ref, apple_clpc_gpu_free);
+}
+
+static void apple_clpc_gpu_provider_removal_test(struct kunit *test)
+{
+	struct apple_clpc_gpu *gpu = kzalloc_obj(*gpu);
+	u64 updated, sequence;
+
+	KUNIT_ASSERT_NOT_NULL(test, gpu);
+	kref_init(&gpu->ref);
+	spin_lock_init(&gpu->lock);
+	kref_get(&gpu->ref);
+	/* A removed CLPC drops its reference; the GPU's stays usable. */
+	kref_put(&gpu->ref, apple_clpc_gpu_free);
+	apple_clpc_gpu_set_active(gpu, true);
+	KUNIT_EXPECT_TRUE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	apple_clpc_gpu_set_active(gpu, false);
+	KUNIT_EXPECT_FALSE(test, apple_clpc_gpu_active(gpu, &updated, &sequence));
+	apple_clpc_gpu_put(gpu);
+}
+
+static struct kunit_case apple_clpc_cases[] = {
+	KUNIT_CASE(apple_clpc_gpu_request_lifetime_test),
+	KUNIT_CASE(apple_clpc_gpu_provider_removal_test),
+	{}
+};
+
+static struct kunit_suite apple_clpc_suite = {
+	.name = "apple-clpc-gpu",
+	.test_cases = apple_clpc_cases,
+};
+kunit_test_suite(apple_clpc_suite);
+#endif
 
 static const struct of_device_id apple_clpc_of_match[] = {
 	{ .compatible = "apple,t8132-clpc", .data = &apple_clpc_hw_t8132 },

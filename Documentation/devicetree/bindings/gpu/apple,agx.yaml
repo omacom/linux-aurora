@@ -66,6 +66,13 @@ properties:
 
   operating-points-v2: true
 
+  apple,clpc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Host performance controller (CLPC) that the GPU reports its
+      submissions to, for the memory controller and fabric floors it
+      raises for GPU work.
+
   apple,firmware-abi:
     $ref: /schemas/types.yaml#/definitions/uint32-array
     minItems: 3
