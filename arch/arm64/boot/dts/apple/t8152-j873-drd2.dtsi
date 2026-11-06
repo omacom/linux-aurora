@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/ {
+	aliases {
+		usb2phy2 = &usb2phy2;
+		usbdrd2 = &usbdrd2;
+	};
+
+	soc {
+		usb2_dart0: iommu@383020000 {
+			compatible = "apple,t8152-dart";
+			reg = <3 0x83020000 0 0xc000>, <2 0x200 0 0x10>;
+			interrupts = <AIC_IRQ 1750 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			power-domains = <&psd_atc2_usb>;
+			apple,static-topology;
+			apple,num-streams = <16>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+
+		usb2_dart1: iommu@383040000 {
+			compatible = "apple,t8152-dart";
+			reg = <3 0x83040000 0 0xc000>, <2 0x200 0 0x10>;
+			interrupts = <AIC_IRQ 1750 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			power-domains = <&psd_atc2_usb>;
+			apple,static-topology;
+			apple,num-streams = <16>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+
+		usb2phy2: phy@382418000 {
+			compatible = "apple,t8152-usb2-phy";
+			reg = <3 0x82418000 0 0x4000>, <3 0x82448000 0 0x4000>;
+			reg-names = "usb2", "eusb2";
+			#phy-cells = <0>;
+			power-domains = <&ps_atc2_usb_aon>, <&psd_atc2_usb>;
+			power-domain-names = "usb-aon", "usb";
+		};
+
+		usbdrd2: usb@382430000 {
+			compatible = "apple,t8152-dwc3";
+			reg = <3 0x82430000 0 0xcd00>,
+			      <3 0x8243cd00 0 0x4b00>,
+			      <3 0x82414000 0 0x4000>,
+			      <3 0x82410000 0 0x4000>,
+			      <3 0x82444000 0 0x4000>,
+			      <3 0x82450000 0 0x4000>;
+			reg-names = "dwc3-core", "dwc3-apple", "pipe-handler",
+				    "pwr-ctrl", "bulk-fabric", "ausbc-debug";
+			interrupts = <AIC_IRQ 1763 IRQ_TYPE_LEVEL_HIGH>;
+			iommus = <&usb2_dart0 0>, <&usb2_dart0 1>, <&usb2_dart1 0>, <&usb2_dart1 1>;
+			power-domains = <&psd_atc2_usb>;
+			phys = <&usb2phy2>;
+			phy-names = "usb2-phy";
+			dr_mode = "host";
+			maximum-speed = "high-speed";
+		};
+	};
+};
