@@ -260,7 +260,10 @@ impl<F: StoreIo> Store<F> {
         let size = store.file.size()?;
         if created && size == 0 {
             store.create()?;
-            pr_info!("created a new host-state store\n");
+            pr_info!(
+                "created a new host-state store at /var/lib/aurora-sep-host-state.bin ({} bytes)\n",
+                STORE_SIZE
+            );
             return Ok(store);
         }
 

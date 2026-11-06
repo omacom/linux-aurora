@@ -116,6 +116,8 @@ def package_check_log(tc, text):
     for line in lines:
         if line in ('pacman -Qu --color never', 'pacman -Sy --noconfirm', 'sudo pacman -Sy --noconfirm'): continue
         line = line.replace('pacman -Sy --noconfirm --ask 4 ', 'pacman -S --noconfirm --ask 4 ')
+        # Releases before the apple-sep.conf rename had no old name to remove on uninstall.
+        line = re.sub(r' \S*/etc/aurora-sep-old\.conf(?=\s|$)', '', line)
         out.append(line)
     return out
 
