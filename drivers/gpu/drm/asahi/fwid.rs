@@ -495,11 +495,15 @@ mod tests {
 
     #[test]
     fn t6050_admits_only_its_pinned_image() {
-        let crate::g17::fw::variant::Firmware::Identified(builds) =
-            crate::hw::t6050::CONFIG_ULTRA.firmware
-        else {
-            panic!("J775D on bare metal must identify its loaded firmware");
-        };
+        for cfg in [&crate::hw::t6050::CONFIG_ULTRA, &crate::hw::t6050::CONFIG_MAX] {
+            let crate::g17::fw::variant::Firmware::Identified(builds) = cfg.firmware else {
+                panic!("an M5 board on bare metal must identify its loaded firmware");
+            };
+            t6050_admits_only(builds);
+        }
+    }
+
+    fn t6050_admits_only(builds: &[crate::g17::fw::variant::Build]) {
         for image in builds.iter().flat_map(|build| build.images) {
             // Both roles' records, inside TEXT.
             assert_eq!(image.entropy.len(), 2);

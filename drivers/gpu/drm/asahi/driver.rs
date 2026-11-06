@@ -448,7 +448,7 @@ impl AsahiPlatformDriver {
             ENODEV
         })?;
         if let g17::FirmwareProfile::M5NoBareMetalTables = cfg.profile {
-            dev_err!(pdev.as_ref(), "M5 Pro/Max bare-metal GPU tables not yet available\n");
+            dev_err!(pdev.as_ref(), "M5 Pro bare-metal GPU tables not yet available\n");
             return Err(ENODEV);
         }
         Self::probe_g17(pdev, res, cfg)
