@@ -186,6 +186,14 @@ module! {
             default: 0,
             description: "G15: admit an unpinned GPU firmware build whose TEXT SHA-256 starts with these 8 bytes (bring-up only)",
         },
+        g15_share_budget_us: u32 {
+            default: 4000,
+            description: "G15: compute GPU time of one VM's flight while another VM waits, us (100..1000000; 0: off)",
+        },
+        g15_share_window_ms: u32 {
+            default: 500,
+            description: "G15: how long after a job of another VM was held the share budget applies, ms (1..10000)",
+        },
         stats_export: u8 {
             default: 1,
             // permissions: 0,
