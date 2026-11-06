@@ -35,7 +35,7 @@ use crate::{
 const AGX3_PARAMS_SIZE: u64 =
     (core::mem::offset_of!(uapi::drm_asahi_params_global, gpu_hal_generation)
         + core::mem::size_of::<u32>()) as u64;
-const _: () = assert!(AGX3_PARAMS_SIZE == 600);
+const _: () = assert!(AGX3_PARAMS_SIZE == super::m3_profile::PARAMS_REQUIRED);
 
 /// Refused clients that are logged per boot; later refusals only count.
 const REFUSALS_LOGGED: u32 = 16;
@@ -45,10 +45,19 @@ static REFUSALS: AtomicU32 = AtomicU32::new(0);
 /// [`AGX3_PARAMS_SIZE`] bytes (so it knows this GPU runs AGX3 command streams), and pass
 /// VM_CREATE flags 0 (legacy HAL). `size` is the largest GET_PARAMS size the file asked for.
 pub(crate) fn admit_vm(device: &kernel::device::Device, size: u64, flags: u32) -> Result {
+    admit_vm_for(device, super::m3_profile::Profile::Legacy, size, flags)
+}
+
+pub(crate) fn admit_vm_for(
+    device: &kernel::device::Device,
+    profile: super::m3_profile::Profile,
+    size: u64,
+    flags: u32,
+) -> Result {
     {
         // The positive acknowledgement of the command ABI (7.1.12 `g16_profile::client_admitted`):
         // GET_PARAMS coverage, and VM_CREATE flags 0 on the legacy-HAL M3 runtime.
-        if size >= AGX3_PARAMS_SIZE && flags == 0 {
+        if profile.vm_acknowledged(size, flags) {
             return Ok(());
         }
         let refusals = REFUSALS.fetch_add(1, Ordering::Relaxed).saturating_add(1);
@@ -64,11 +73,13 @@ pub(crate) fn admit_vm(device: &kernel::device::Device, size: u64, flags: u32) -
             };
             dev_info!(
                 device,
-                "M3: refusing a VM for {}[{}]: it asked GET_PARAMS for {} of the {} parameter bytes, so it cannot know this GPU runs AGX3 command streams; M3-aware userspace is needed{}\n",
+                "M3: refusing a VM for {}[{}]: GET_PARAMS bytes={}/{} HAL={} flags={:#x}{}\n",
                 name,
                 task.group_leader().pid(),
                 size,
                 AGX3_PARAMS_SIZE,
+                profile.hal(),
+                flags,
                 last
             );
         }
