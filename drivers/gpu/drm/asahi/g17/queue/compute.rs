@@ -3115,6 +3115,7 @@ mod fault_ownership_tests {
             binding: None,
             context: Lease::new(&used),
             publication: Some((9, 3)),
+            moved: false,
         });
         Previous::retire_witnessed(&mut previous);
         assert_eq!(used.load(Ordering::Relaxed), 0);
