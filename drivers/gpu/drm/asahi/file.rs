@@ -1302,9 +1302,15 @@ impl File {
             cls_pr_debug!(Errors, "queue_create: Invalid priority\n");
             return Err(EINVAL);
         }
-        // HIGH has only been run on G17; G13 and G14 keep refusing it.
+        // Keep support tied to a backend and admitted profile. G13/G14 and
+        // unqualified M3 profiles retain their previous rejection.
+        let high_supported = reg_data.gpu.as_any().is::<crate::g17::Gpu>();
+        #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+        let high_supported = high_supported || reg_data.gpu.as_any()
+            .downcast_ref::<crate::m3::m3_drm::Backend>()
+            .is_some_and(|gpu| gpu.supports_high_priority());
         if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
-            && !reg_data.gpu.as_any().is::<crate::g17::Gpu>()
+            && !high_supported
         {
             cls_pr_debug!(Errors, "queue_create: HIGH priority is not supported on this GPU\n");
             return Err(EINVAL);
