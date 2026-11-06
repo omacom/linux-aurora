@@ -19,7 +19,11 @@ allOf:
 
 properties:
   compatible:
-    const: apple,t8140-qspi
+    oneOf:
+      - const: apple,t8140-qspi
+      - items:
+          - const: apple,t8152-qspi
+          - const: apple,t8140-qspi
 
   reg:
     maxItems: 1
