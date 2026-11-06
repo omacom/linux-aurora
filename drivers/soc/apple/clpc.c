@@ -48,8 +48,13 @@ enum apple_clpc_rail {
 #define APPLE_CLPC_BUSY_PCT	50
 /* Time a rail keeps its last request after demand stops */
 #define APPLE_CLPC_HOLD_MS	32
-/* Time the GPU floor stays released after the PMP last limited the DCS */
-#define APPLE_CLPC_GPU_BACKOFF_MS	1000
+/*
+ * Time the GPU floor stays released after the PMP last limited the DCS. Under
+ * sustained heavy rendering the PMP limits the DCS again well within this, so
+ * the floor stays released; light submissions that follow get the floor back
+ * this long after the PMP stops limiting.
+ */
+#define APPLE_CLPC_GPU_BACKOFF_MS	100
 
 /**
  * struct apple_clpc_hw - per-SoC CLPC parameters
