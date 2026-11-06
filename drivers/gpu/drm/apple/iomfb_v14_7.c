@@ -141,6 +141,31 @@ static const struct dcp_v14_board dcp_v14_board_j615 = {
 };
 
 /*
+ * J504 (MacBook Pro 14", M3): the J613 DCP image on the same T8122 DCP (the
+ * J504 ADT names it), driving the 14" mini-LED panel of the J514S: 3024x1964
+ * with 74 notch rows above the 3024x1890 boot framebuffer, at 60 or 120 Hz.
+ * The colour matrix methods are this image's, and so is the panel level
+ * block the J613 qualified (brightness in nits, 500 at most here). Its swaps
+ * keep zero timestamps as on the Airs. Every panel timing and the
+ * display clock are logged for the first boots.
+ */
+static const struct dcp_v14_board dcp_v14_board_j504 = {
+	.name = "J504",
+	.debugfs = "dcp-j504",
+	.dcp_compatible = "apple,t8122-dcp",
+	.machine = "apple,j504",
+	.firmware_uuid = DCP_V14_J613_FIRMWARE_UUID,
+	.handoff = "apple,t8122-handoff",
+	.panel_width = 3024,
+	.panel_height = 1964,
+	.promotion = true,
+	.log_bringup = true,
+	.panel_nits = true,
+	.ctm_set = A(421),
+	.ctm_get = A(420),
+};
+
+/*
  * J516C (MacBook Pro 16", M3 Max): the J516S panel, 3456x2234 with 74 notch
  * rows above the 3456x2160 boot framebuffer, at 60 or 120 Hz, on the T6031
  * DCP, running this Mac's own 14.7 DCP image (the J516C ADT names it). The
@@ -194,6 +219,7 @@ static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_t6030,
 	&dcp_v14_board_j613,
 	&dcp_v14_board_j615,
+	&dcp_v14_board_j504,
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
 };
@@ -1698,7 +1724,8 @@ static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
 {
 	return board && board->panel_nits &&
 		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s") ||
-		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613"));
+		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613") ||
+		 machine_is(ctx, "apple,j504"));
 }
 
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)

@@ -54,6 +54,8 @@ static const char *const j514c[] = { "apple,j514c", "apple,t6031", "apple,arm-pl
 static const char *const j516m[] = { "apple,j516m", "apple,t6034", "apple,arm-platform", NULL };
 static const char *const j516s[] = { "apple,j516s", "apple,t6030", "apple,arm-platform", NULL };
 static const char *const j613[] = { "apple,j613", "apple,t8122", "apple,arm-platform", NULL };
+static const char *const j504[] = { "apple,j504", "apple,t8122", "apple,arm-platform", NULL };
+static const char *const j433[] = { "apple,j433", "apple,t8122", "apple,arm-platform", NULL };
 
 static void v14_board_j516c(struct kunit *test)
 {
@@ -252,7 +254,46 @@ static void v14_swap_timestamps_encoding(struct kunit *test)
 	}
 }
 
+/*
+ * J504 (14" M3 MacBook Pro): the J613 image on the T8122 DCP, its own 3024x1964
+ * ProMotion panel, the qualified level block (brightness) and unstamped swaps. The other T8122
+ * Macs (J433, J434) have no record.
+ */
+static void v14_board_j504(struct kunit *test)
+{
+	const struct dcp_v14_board *b, *air;
+	bool known;
+
+	b = board_for("apple,t8122-dcp", j504, &known);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	air = board_for("apple,t8122-dcp", j613, &known);
+	KUNIT_ASSERT_NOT_NULL(test, air);
+	KUNIT_EXPECT_PTR_NE(test, b, air);
+	KUNIT_EXPECT_STREQ(test, b->name, "J504");
+	KUNIT_EXPECT_STREQ(test, b->machine, "apple,j504");
+	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t8122-handoff");
+	KUNIT_EXPECT_STREQ(test, b->firmware_uuid, J613_DCP_IMAGE);
+	KUNIT_EXPECT_EQ(test, b->panel_width, 3024);
+	KUNIT_EXPECT_EQ(test, b->panel_height, 1964);
+	KUNIT_EXPECT_TRUE(test, b->promotion);
+	KUNIT_EXPECT_TRUE(test, b->log_bringup);
+	KUNIT_EXPECT_TRUE(test, b->panel_nits);
+	KUNIT_EXPECT_FALSE(test, b->base_edid);
+	KUNIT_EXPECT_EQ(test, b->ctm_set, air->ctm_set);
+	KUNIT_EXPECT_EQ(test, b->ctm_get, air->ctm_get);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J613_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(b, false));
+
+	KUNIT_EXPECT_NULL(test, board_for("apple,t8122-dcp", j433, &known));
+	KUNIT_EXPECT_TRUE(test, known);
+	/* A J504 root with another SoC's DCP gets no J504 record. */
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j504, &known));
+}
+
 static struct kunit_case v14_board_cases[] = {
+	KUNIT_CASE(v14_board_j504),
 	KUNIT_CASE(v14_board_j516c),
 	KUNIT_CASE(v14_board_j514c),
 	KUNIT_CASE(v14_board_t6031_other_boards),

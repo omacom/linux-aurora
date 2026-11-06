@@ -589,9 +589,9 @@ pub(crate) fn thermal_hot_param() -> (u64, bool) {
 
 /// Whether to start the runtime backend on a T8122 (`asahi.m3_backend`), and say why not.
 ///
-/// The runtime starts only on the boards the T8122 table allows (the M3 MacBook Airs), with
-/// `auto` and `runtime` alike: it has not run on any T8122, so nothing forces it onto another
-/// board. The G15 manager backend is T6030-only.
+/// The runtime starts only on the boards the T8122 table allows (the M3 MacBook Airs and the
+/// 14" M3 MacBook Pro, `t8122_admission::T8122_BOARDS`), with `auto` and `runtime` alike:
+/// nothing forces it onto another board. The G15 manager backend is T6030-only.
 pub(crate) fn t8122_backend(pdev: &platform::Device<Core<'_>>) -> bool {
     let dev = pdev.as_ref();
     match M3_BACKEND.load(Ordering::Relaxed) {
@@ -610,7 +610,7 @@ pub(crate) fn t8122_backend(pdev: &platform::Device<Core<'_>>) -> bool {
         _ => {
             dev_info!(
                 dev,
-                "M3: no GPU backend on this T8122 board: the runtime backend may start only on the M3 MacBook Airs (J613, J615)\n"
+                "M3: no GPU backend on this T8122 board: the runtime backend may start only on the M3 MacBook Airs (J613, J615) and the 14\" M3 MacBook Pro (J504)\n"
             );
             false
         }
