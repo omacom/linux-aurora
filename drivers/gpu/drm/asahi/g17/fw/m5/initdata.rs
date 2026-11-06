@@ -1789,6 +1789,8 @@ pub(crate) struct Board {
     pub(crate) idle_standby_us: Option<u32>,
     /// The active memory cache controller mask, where it differs from the inherited 0xf.
     mcc_mask: Option<u64>,
+    /// HwData +0x100c and +0x1048 (all cores), where the board sets them.
+    topology_words: Option<(u32, u32)>,
     /// The hotspot at which the thermal governor's fan curve starts, millidegrees C.
     pub(crate) fan_curve_start_mc: i32,
     /// Whether the host encodings are the G17D ones measured on the M5 Ultra
@@ -1813,6 +1815,7 @@ pub(crate) const J714: Board = Board {
     controller_defaults: Some(encode_m5_policy_controller_defaults),
     idle_standby_us: None,
     mcc_mask: None,
+    topology_words: None,
     fan_curve_start_mc: 84_000,
     g17d_forms: false,
 };
@@ -1834,7 +1837,9 @@ pub(crate) const J716C: Board = Board {
     calibration: Some([0xd2035701, 0xac3a1280, 0x0a281d81]),
     controller_defaults: Some(encode_m5_policy_controller_defaults),
     idle_standby_us: None,
-    mcc_mask: None,
+    // The ADT GPU node's active-mcc-bit-vector: eight memory cache controllers.
+    mcc_mask: Some(0xff),
+    topology_words: Some((16, 40)),
     fan_curve_start_mc: 84_000,
     g17d_forms: false,
 };
@@ -1865,6 +1870,7 @@ pub(crate) const J775D: Board = Board {
     idle_standby_us: Some(3500),
     // The ADT GPU node's active-mcc-bit-vector: eight memory cache controllers.
     mcc_mask: Some(0xff),
+    topology_words: None,
     // The SMC raises the fans in its automatic mode from a 97 C hotspot under a sustained
     // full-chip load, with the CPU and GPU still at their top states: the curve starts there,
     // above the SMC's own start rather than below it.
@@ -2298,6 +2304,10 @@ pub(crate) fn encode_m5_hw_data(
     put_u32(out, 0x272c, 1);
     if let Some(mask) = board.mcc_mask {
         put_u64(out, 0x10a8, mask);
+    }
+    if let Some((word, cores)) = board.topology_words {
+        put_u32(out, 0x100c, word);
+        put_u32(out, 0x1048, cores);
     }
     // The inherited J813 minimum parameter-buffer size is replaced per board.
     put_u32(out, 0x26b0, board.min_parameter_buffer);
