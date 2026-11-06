@@ -47,6 +47,7 @@ typedef uint64_t dma_addr_t;
 #define VISIBLE_IF_KUNIT
 #define AVD_QUIRK_LSR 1
 #define AVD_QUIRK_NO_PIPE_STATE 2
+#define AVD_QUIRK_H264_MV_128 (1U << 4)
 #define AVD_CODEC_HEVC 0
 #define AVD_CODEC_H264 1
 #define AVD_CODEC_VP9 2
