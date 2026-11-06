@@ -246,6 +246,18 @@ struct apple_dcp_v14 {
 	 * and the kernel sets the mode (A411) and the power state (A472).
 	 */
 	bool external;
+	/*
+	 * External, T6031 (J516C 14.7 image): timings list no ColorModes, and
+	 * take theirs from the published ColorElements. The mode catalog so
+	 * depends on both, and is rebuilt when either changes.
+	 */
+	bool shared_colors;
+	/*
+	 * A ColorElements change left the timings without a mode, and the
+	 * display was reported withdrawn then: the TimingElements removal
+	 * that follows on an unplug does not report it again.
+	 */
+	bool colors_withdrew;
 	/* External: start signal and first client open done. */
 	bool opened;
 	/* External: the display is powered (A472) in the mode last set. */
@@ -834,7 +846,10 @@ static bool dcp_v14_external_hold(struct apple_dcp *dcp, bool hdmi_hpd)
  */
 void iomfb_v14_7_external_withdrawn(struct apple_dcp *dcp)
 {
-	bool hdmi_hpd = dcp_hdmi_port_attached(dcp);
+	bool hdmi_hpd;
+
+	KUNIT_STATIC_STUB_REDIRECT(iomfb_v14_7_external_withdrawn, dcp);
+	hdmi_hpd = dcp_hdmi_port_attached(dcp);
 
 	if ((READ_ONCE(dcp->typec_cable_connected) && !READ_ONCE(dcp->typec_crtc_off)) ||
 	    hdmi_hpd)
@@ -859,6 +874,44 @@ bool iomfb_v14_7_external_release(struct apple_dcp *dcp)
 	dev_info(dcp->dev, "display not described again: reporting it disconnected\n");
 	dcp_v14_external_hotplug(dcp, false);
 	return true;
+}
+
+/* The published raw property @key of service 0, or NULL. */
+static struct dcp_v14_raw *dcp_v14_raw_find(struct apple_dcp_v14 *v14, const char *key)
+{
+	u32 i;
+
+	for (i = 0; i < v14->raw_count; i++)
+		if (!v14->raw[i].service && !strcmp(v14->raw[i].key, key))
+			return &v14->raw[i];
+	return NULL;
+}
+
+/*
+ * Builds the mode catalog from the published TimingElements and, where the
+ * timings take their colors from there (shared_colors), the ColorElements
+ * published now. -ENODATA without timings.
+ */
+static int dcp_v14_external_catalog(struct apple_dcp_v14 *v14, struct apple_dcp *dcp,
+				    u64 generation)
+{
+	struct dcp_v14_raw *timings = dcp_v14_raw_find(v14, "TimingElements");
+	struct dcp_v14_raw *colors;
+	struct dcp_parse_ctx ctx;
+	int ret;
+
+	if (!timings)
+		return -ENODATA;
+	ret = parse(timings->data, timings->size, &ctx);
+	if (ret)
+		return ret;
+	ctx.dcp = dcp;
+	colors = v14->shared_colors ? dcp_v14_raw_find(v14, "ColorElements") : NULL;
+	if (colors && colors->size) {
+		ctx.shared_colors = colors->data;
+		ctx.shared_colors_len = colors->size;
+	}
+	return dcp_modes_replace(dcp, &ctx, generation);
 }
 
 /*
@@ -922,30 +975,47 @@ static void dcp_v14_external_published(struct apple_dcp_v14 *v14, const char *ke
 			dcp_connector_update_dict(connector, key, &chunks);
 	}
 
-	if (!strcmp(key, "TimingElements")) {
-		if (removed) {
+	if (!strcmp(key, "TimingElements") && removed) {
+		if (!v14->colors_withdrew)
 			iomfb_v14_7_external_withdrawn(dcp);
+		v14->colors_withdrew = false;
+	} else if (!strcmp(key, "TimingElements") ||
+		   (part == DCP_V14_DESC_COLOR && v14->shared_colors &&
+		    dcp_v14_raw_find(v14, "TimingElements"))) {
+		/*
+		 * With shared colors the catalog depends on the timings and the
+		 * colors both, published in either order: rebuild it on either.
+		 * A removal has no transfer; it applies to the current attachment.
+		 */
+		if (removed)
+			generation = dcp_modes_transfer_begin(dcp);
+		ret = dcp_v14_external_catalog(v14, dcp, generation);
+		if (ret == -ESTALE)
 			return;
-		}
-		ret = parse(raw->data, raw->size, &ctx);
-		if (!ret) {
-			ctx.dcp = dcp;
-			/* Timings that list no ColorModes use these; see parse_mode(). */
-			for (i = 0; i < v14->raw_count; i++)
-				if (!v14->raw[i].service &&
-				    !strcmp(v14->raw[i].key, "ColorElements") &&
-				    v14->raw[i].size) {
-					ctx.shared_colors = v14->raw[i].data;
-					ctx.shared_colors_len = v14->raw[i].size;
-				}
-			ret = dcp_modes_replace(dcp, &ctx, generation);
+		if (ret && part == DCP_V14_DESC_COLOR) {
+			/*
+			 * The colors the catalog's modes were chosen from changed,
+			 * and the timings no longer give a mode: no mode is left.
+			 */
+			dev_warn(dcp->dev, "display colors leave no usable timing: %d\n", ret);
+			if (dcp_modes_withdraw(dcp, generation))
+				return;
+			v14->described &= ~DCP_V14_DESC_TIMING;
+			wake_up_all(&v14->described_wait);
+			if (!v14->colors_withdrew)
+				iomfb_v14_7_external_withdrawn(dcp);
+			v14->colors_withdrew = true;
+			return;
 		}
 		if (ret) {
 			dev_warn(dcp->dev, "display timings not used: %d\n", ret);
 			return;
 		}
+		v14->colors_withdrew = false;
 		if (READ_ONCE(dcp->nr_modes))
 			v14->described |= DCP_V14_DESC_TIMING;
+		else if (v14->shared_colors)
+			v14->described &= ~DCP_V14_DESC_TIMING;
 		wake_up_all(&v14->described_wait);
 		dev_info(dcp->dev, "display has %u usable modes\n", READ_ONCE(dcp->nr_modes));
 		dcp_v14_external_hotplug(dcp, READ_ONCE(dcp->nr_modes) > 0);
@@ -2229,6 +2299,8 @@ static int dcpext_boot(struct apple_dcp *dcp)
 	v14->dev = dev;
 	v14->dcp = dcp;
 	v14->external = dcp->external_native;
+	v14->shared_colors = v14->external &&
+		of_device_is_compatible(dev->of_node, "apple,t6031-dcpext");
 	if (v14->external) {
 		struct clk *clk = clk_get_optional(dev, NULL);
 
@@ -3404,6 +3476,7 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
 #include "iomfb_v14_7_external_audio_test.c"
+#include "iomfb_v14_7_shared_colors_test.c"
 #include "iomfb_v14_7_backlight_test.c"
 #include "iomfb_v14_7_backlight_lifetime_test.c"
 #endif
