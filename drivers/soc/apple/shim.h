@@ -44,6 +44,8 @@ void sep_hwrng_unregister(void *mem);
 void *sep_store_open(const char *path);
 void *sep_store_open_host(const char *path, bool *created);
 void *sep_store_open_trunc(const char *path);
+int sep_store_replace(const char *path, const void *head, size_t head_len,
+		      const void *body, size_t body_len);
 void *sep_store_open_ro(const char *path);
 void *sep_store_open_block(const char *path, int writable);
 void sep_store_close(void *handle);
