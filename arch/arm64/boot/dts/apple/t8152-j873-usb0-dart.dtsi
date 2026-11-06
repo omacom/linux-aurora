@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* usb-drd0: two DARTBLK instances, SID 1, shared TLBI aperture offset 0x100.
+ * Windows, IRQ, tunables and dma-range are from the M6 ADT;
+ * port 3 is the fixed-host reference. */
+
+/ {
+	soc {
+		usb0_dart0: iommu@403020000 {
+			compatible = "apple,t8152-dart";
+			reg = <0x4 0x03020000 0x0 0xc000>,
+			      <0x2 0x00000100 0x0 0x10>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1608 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			/* no DART MMIO at probe: ADT dart,gen3 manual-availability, see apple-dart.c */
+			apple,static-topology;
+			apple,num-streams = <16>;
+			power-domains = <&psd_atc0_usb>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			/* ADT dart-tunables-instance-0 as (offset, mask, value) */
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+
+		usb0_dart1: iommu@403040000 {
+			compatible = "apple,t8152-dart";
+			reg = <0x4 0x03040000 0x0 0xc000>,
+			      <0x2 0x00000100 0x0 0x10>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1608 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			/* no DART MMIO at probe: ADT dart,gen3 manual-availability, see apple-dart.c */
+			apple,static-topology;
+			apple,num-streams = <16>;
+			power-domains = <&psd_atc0_usb>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			/* ADT dart-tunables-instance-1: byte-identical to instance 0 */
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+	};
+};

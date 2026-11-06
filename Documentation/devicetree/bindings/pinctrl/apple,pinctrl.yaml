@@ -25,6 +25,7 @@ properties:
               - apple,t8122-pinctrl
               - apple,t8132-pinctrl
               - apple,t8140-pinctrl
+              - apple,t8152-pinctrl
           - const: apple,t8103-pinctrl
       - items:
           # Do not add additional SoC to this list.
@@ -90,6 +91,11 @@ patternProperties:
       - pinmux
 
     additionalProperties: false
+
+  '^.+-hog(-[0-9]+)?$':
+    type: object
+    required:
+      - gpio-hog
 
 allOf:
   - $ref: pinctrl.yaml#
