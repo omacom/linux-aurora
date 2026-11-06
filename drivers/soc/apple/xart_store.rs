@@ -353,6 +353,9 @@ impl Store {
 
         if let Some(guard) = self.guard.as_mut() {
             guard.check(key, true)?;
+            if guard.take_save_previous() {
+                self.save_previous(key)?;
+            }
         }
 
         let old = self.find(key);
@@ -390,6 +393,33 @@ impl Store {
         }
         self.valid_records = self.slots.iter().filter(|slot| slot.used).count();
         Ok(())
+    }
+
+    /// Saves the current value of `key` before the guard's boot policy
+    /// rewrite of it, and logs the rewrite. Refuses it when that fails.
+    fn save_previous(&mut self, key: &Key) -> Result<()> {
+        let saved = match self.read(key) {
+            Ok(Some(value)) => crate::xart_guard::save_previous(key, &value),
+            Ok(None) => Err(ENOENT),
+            Err(e) => Err(e),
+        };
+        match saved {
+            Ok(()) => {
+                pr_notice!(
+                    "xART guard: allowed one rewrite of kind-{} record {} for a boot policy change; its previous value is in {}\n",
+                    key.kind,
+                    crate::xart_guard::Id(&key.uuid),
+                    crate::xart_guard::PREVIOUS_PATH
+                );
+                Ok(())
+            }
+            Err(e) => {
+                if let Some(guard) = self.guard.as_mut() {
+                    guard.refuse_unsaved(key, e);
+                }
+                Err(EPERM)
+            }
+        }
     }
 
     pub(crate) fn delete(&mut self, key: &Key) -> Result<bool> {

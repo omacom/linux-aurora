@@ -25,6 +25,19 @@ log() {
     echo "aurora-sep-greeter-fingerprint: $*" >&2
 }
 
+if [ "${1:-}" = refresh ]; then
+    # Touch ID came up after the login screen asked fprintd for the reader,
+    # so the login screen has no fingerprint option. Show it again, but only
+    # while nobody is logged in: restarting gdm ends graphical sessions.
+    systemctl -q is-active gdm.service || exit 0
+    for s in $(loginctl list-sessions --no-legend | awk '{print $1}'); do
+        [ "$(loginctl show-session "$s" -p Class --value)" != user ] || exit 0
+    done
+    [ -f "$out/authServicesLegacy.js" ] || exit 0
+    log "Touch ID is ready; showing the login screen again so it offers fingerprint"
+    exec systemctl restart gdm.service
+fi
+
 rm -rf "$out" "$dropin"
 [ "${1:-}" != stop ] || exit 0
 
