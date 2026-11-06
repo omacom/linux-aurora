@@ -2403,6 +2403,20 @@
    "note": "self-checking: exits 0 when the mutant aborts"
   },
   {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation begin-drops-users",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "begin-drops-users",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
    "name": "tools/asahi/t6030-pmp-graph-tests.py",
    "group": "tools",
    "argv": [

@@ -61,9 +61,9 @@ static inline bool agx_vote_retry_reached(const struct agx_vote *v, agx_ms_t now
 
 /* An operation starts. now is the operation's start time in ms (any wrapping clock; the caller reads it
  * under its lock). Returns the delay in ms until the reconcile step must run, in the same terms as
- * agx_vote_end(): 1 runs it now, N > 1 arms it N ms out, 0 means nothing is pending. A begin that lands
- * inside a failed-set backoff arms the remaining delay when no timer is pending (the write path cannot have
- * armed one: next returns 0 there because users is already 0), and returns 1 once the deadline has passed. */
+ * agx_vote_end(): 1 runs it now, 0 means nothing is pending. A begin during a failed-set backoff returns 0
+ * because next() already arms the retry from the failure state, and the caller's queueing can only pull a
+ * deadline earlier, never push it out; it returns 1 once the deadline has passed. */
 static inline agx_ms_t agx_vote_begin(struct agx_vote *v, agx_ms_t now)
 {
 	v->users++;

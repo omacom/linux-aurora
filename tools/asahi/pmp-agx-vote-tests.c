@@ -365,9 +365,11 @@ int main(void)
 		begin(&s); advance_to(&s, 0);
 		CHECK(s.v.failures == 1 && s.armed);
 		int kicks = s.kicks;
+		uint32_t armed_at = s.timer_at;
 		for (int i = 0; i < 5; i++)
 			begin(&s);
 		CHECK(s.kicks == kicks + 5 && s.sets == 1);           // each begin arms the same deadline, none reconciles early
+		CHECK(s.armed && s.timer_at == armed_at);             // mod_delayed_work can only pull the deadline earlier
 		advance_to(&s, AGX_VOTE_RETRY_MS);
 		CHECK(s.sets == 2 && s.bit && s.v.failures == 0);
 		// the header alone
@@ -439,6 +441,33 @@ int main(void)
 		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 6000};
 		CHECK(agx_vote_next(&v, 5500) == 500);
 		CHECK(agx_vote_next(&v, 6000) == 1);
+	}
+	// 26. chriskearney's missing-retry-timer repro at c3487a52: the end lands inside a failed SET ack
+	// (no timer exists: applied ran with users 0) and the next operation begins before the retry
+	// deadline. The begin arms the remaining delay, the deadline is never pulled later, and the
+	// vote lands inside the new operation. A begin during the window cannot strand the retry even
+	// when the glue timer is already armed.
+	{
+		struct sim s = fresh(true, 250, 0);
+		s.fail_sets = 1;
+		s.end_in_write = 1;                                    // the last end lands inside the ack poll
+		begin(&s); advance_to(&s, 0);
+		CHECK(s.v.failures == 1 && s.v.users == 0 && !s.bit);  // the reviewer's steps 1 to 3
+		advance_to(&s, AGX_VOTE_RETRY_MS);                     // the retry fires idle: spent backoff clears
+		CHECK(s.v.failures == 0 && !s.armed && !s.bit);
+		begin(&s);                                             // step 4: the new sole operation, before any deadline
+		advance_to(&s, s.now + AGX_VOTE_RETRY_MS + 5000);      // far past where the vote must have landed
+		CHECK(s.bit && s.v.voted && s.v.users == 1 && s.v.failures == 0);
+		// the header alone: begin inside the window arms the remaining delay (never 0), and a second
+		// begin cannot push the deadline later (mod_delayed_work only pulls it earlier)
+		struct agx_vote v = {.enabled = true, .failures = 1, .retry_at = 6000};
+		CHECK(agx_vote_begin(&v, 5500) == 500);
+		CHECK(v.users == 1);
+		CHECK(agx_vote_begin(&v, 5500) == 500);                // same begin time: the deadline is unchanged
+		CHECK(agx_vote_begin(&v, 6000) == 1);                  // at the deadline: reconcile now
+		// 1 ms before the deadline
+		struct agx_vote w = {.enabled = true, .failures = 1, .retry_at = 6000};
+		CHECK(agx_vote_begin(&w, 5999) == 1);
 	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;

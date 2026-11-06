@@ -43,6 +43,7 @@ CONTROLS = [
      '\t\tat = agx_vote_retry_reached(v, now) ? now : v->retry_at;\n', ''),
     ('begin-backoff-kick', 'return (!v->failures || agx_vote_retry_reached(v, now)) ? 1 : v->retry_at - now;', 'return (void)now, 1;'),
     ('begin-no-retry-arm', 'return (!v->failures || agx_vote_retry_reached(v, now)) ? 1 : v->retry_at - now;', 'return (void)now, 0;'),
+    ('begin-drops-users', '	v->users++;\n	if (!v->enabled || v->stopped)', '	if (!v->enabled || v->stopped)'),
     ('retry-revival', '|| (agx_ms_t)(v->retry_at - now) > AGX_VOTE_RETRY_MS', ''),
 ]
 
