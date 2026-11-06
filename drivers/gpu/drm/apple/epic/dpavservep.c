@@ -39,6 +39,9 @@ static bool dcpavserv_identity(struct apple_epic_service *service, const char *n
 {
 	if (!name || strcmp(name, "dcpav-service-epic"))
 		return false;
+	if (dcp_is_ext26(service->ep->dcp))
+		return service->ep->endpoint == DPAVSERV_ENDPOINT && unit == 0 &&
+			class && !strcmp(class, "DCPDPService") && service->channel;
 	if (!service->ep->wire_v2)
 		return unit == 0;
 	/* H17P's lower-case interface-id is dynamic, not a physical-port unit. */
@@ -134,6 +137,8 @@ static void dcpavserv_init(struct apple_epic_service *service, const char *name,
 	mutex_unlock(&dcp->dcpavserv.lock);
 	if (v2)
 		mutex_unlock(&dcp->hpd_mutex);
+	if (published && dcp_is_ext26(dcp) && !dcp->ext26_client_open)
+		WRITE_ONCE(dcp->ext26_edid_tried, false);
 	if (!published) {
 		/* A generation/registry change during OPEN cannot enable stale work. */
 		afk_service_retire(service);
@@ -567,8 +572,8 @@ static const struct drm_edid *dcpavserv_read_edid_inline(struct apple_epic_servi
 bool dcpavserv_edid_current(struct apple_dcp *dcp, u64 generation)
 {
 	lockdep_assert_held(&dcp->hpd_mutex);
-	return dcp->hw.iomfb_method_profile !=
-		DCP_IOMFB_METHODS_H17P_EXTERNAL ||
+	return (!dcp_is_ext26(dcp) && dcp->hw.iomfb_method_profile !=
+		DCP_IOMFB_METHODS_H17P_EXTERNAL) ||
 		(dcp->typec_cable_connected && generation == dcp->typec_generation &&
 		 !READ_ONCE(dcp->quiescing) && !READ_ONCE(dcp->external_physically_absent));
 }
@@ -578,7 +583,7 @@ bool dcpavserv_edid_service_current(struct apple_dcp *dcp, u64 epoch)
 	lockdep_assert_held(&dcp->dcpavserv.lock);
 	return dcp->dcpavserv.enabled && dcp->dcpavserv.service &&
 		epoch == dcp->dcpavserv.epoch &&
-		(dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17P_EXTERNAL ||
+		((!dcp_is_ext26(dcp) && dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17P_EXTERNAL) ||
 		 !READ_ONCE(dcp->external_physically_absent));
 }
 
@@ -641,7 +646,7 @@ const struct drm_edid *dcpavserv_copy_edid(struct apple_dcp *dcp, u64 generation
 	edid = service->ep->wire_v2 ? dcpavserv_read_edid_inline(service) :
 		dcpavserv_read_edid_legacy(service);
 	/* The 14.7 external role: every block's header and checksum. */
-	if (v14_7_ext && !IS_ERR(edid) && !drm_edid_valid(edid)) {
+	if ((v14_7_ext || dcp_is_ext26(dcp)) && !IS_ERR(edid) && !drm_edid_valid(edid)) {
 		dev_warn(dcp->dev, "DCPAVSERV: the sink's EDID is not valid\n");
 		drm_edid_free(edid);
 		edid = ERR_PTR(-EPROTO);
@@ -700,7 +705,7 @@ int dpavservep_init(struct apple_dcp *dcp)
 	if (IS_ERR(ep))
 		return PTR_ERR(ep);
 	/* External H17P uses AFKV2 service calls with host-owned OOB buffers. */
-	ep->wire_v2 = dcp->hw.iomfb_method_profile ==
+	ep->wire_v2 = dcp_is_ext26(dcp) || dcp->hw.iomfb_method_profile ==
 		DCP_IOMFB_METHODS_H17P_EXTERNAL;
 	ep->inline_v2 = false;
 	dcp->dcpavservep = ep;

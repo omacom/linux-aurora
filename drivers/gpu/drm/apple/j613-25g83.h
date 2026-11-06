@@ -43,6 +43,13 @@ static inline bool j613_25g83_mappings(const u32 *markers, size_t cells)
 	       markers[2] == 1;
 }
 
+/* This profile adopts a powered RUN session through a locked firmware DART. */
+static inline bool j613_25g83_external_state(const u32 *state, size_t cells)
+{
+	return state && cells == 4 && state[0] == 1 &&
+	       (state[1] & BIT(4)) && (state[3] & BIT(0));
+}
+
 /*
  * Local copies of the PMP table checks of
  * drivers/pmdomain/apple/pmp-report-validation.h, which is not in this tree

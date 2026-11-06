@@ -33,7 +33,7 @@ def main():
         entries.append((reg, 'apple,always-on;' in node, 'apple,no-ack;' in node, 'apple,defer-startup-ack;' in node))
     assert len(entries) == 4
     entry_data = ',\n'.join('{%d, %d, %d, %d}' % e for e in entries)
-    names = ['static int apple_pmp_report_bit(', 'static int apple_pmp_start_check_layout(',
+    names = ['static int apple_pmp_report_record(', 'static int apple_pmp_report_bit(', 'static int apple_pmp_start_check_layout(',
              'static int apple_pmp_start_describe(', 'static void apple_pmp_start_finish(',
              'static bool apple_pmp_start_stopping(', 'static void apple_pmp_start_work(',
              'static void apple_pmp_start_drain(', 'static int apple_pmp_start_init(',
@@ -83,8 +83,8 @@ def main():
         controls = [
             ('no-managed-owner', '.starts_pmp = IS_ENABLED(CONFIG_APPLE_T6030_GPU_PMP_LINK)', '.starts_pmp = false'),
             ('no-managed-probe', 'ret = apple_pmp_start_init(rep);', 'ret = 0; (void)apple_pmp_start_init;'),
-            ('no-child-seeding', 'apple_pmp_report_entry_set_state(&ent->genpd, true);', '(void)0;'),
-            ('no-storage-policy', 'ent->no_ack = of_property_read_bool(node, "apple,no-ack");', 'ent->no_ack = false;'),
+            ('no-child-seeding', 'apple_pmp_report_entry_set_state(&ent->genpd, true);', '0;'),
+            ('no-storage-policy', 'ent->no_ack = of_property_read_bool(node, "apple,no-ack");\n\t}', 'ent->no_ack = false;\n\t}'),
             ('external-startup-ack', '!of_property_read_bool(child, "apple,defer-startup-ack")', 'true'),
             ('ignore-seeded-state', 'status || request != st->seed', 'status'),
             ('ignore-halted-state', 'status || request != st->seed', 'request != st->seed'),

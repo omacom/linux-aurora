@@ -57,6 +57,9 @@ struct apple_rtkit_shmem {
  *                 context.
  * @recv_message:  Function called when a message from RTKit is received
  *                 on a non-system endpoint. Called from a worker thread.
+ * @recv_message_timed: Like recv_message, carrying the monotonic nanosecond
+ *                 timestamp captured before deferring mailbox RX. If set,
+ *                 this callback is used instead of recv_message.
  * @recv_message_early:
  *                 Like recv_message, but called from atomic context. It
  *                 should return true if it handled the message. If it
@@ -77,6 +80,7 @@ struct apple_rtkit_ops {
 	unsigned int flags;
 	void (*crashed)(void *cookie, const void *crashlog, size_t crashlog_size);
 	void (*recv_message)(void *cookie, u8 endpoint, u64 message);
+	void (*recv_message_timed)(void *cookie, u8 endpoint, u64 message, u64 received_ns);
 	bool (*recv_message_early)(void *cookie, u8 endpoint, u64 message);
 	int (*shmem_setup)(void *cookie, struct apple_rtkit_shmem *bfr);
 	void (*shmem_destroy)(void *cookie, struct apple_rtkit_shmem *bfr);

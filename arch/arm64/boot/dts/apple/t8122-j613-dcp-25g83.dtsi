@@ -20,7 +20,8 @@
 };
 
 &dcpext {
-	/delete-property/ apple,pmp-report;
+	apple,pmp-report = <&pmp_report_dispext>;
+	apple,pmp = <&pmp>;
 };
 
 &disp0_piodma {
@@ -37,10 +38,17 @@
 
 /* This profile requests only DISP and ANS until external admission succeeds. */
 &pmp_report_dispext {
+	apple,soc-device-record;
 	status = "disabled";
 };
 
+&pmp_report_disp {
+	apple,soc-device-record;
+};
+
 &pmp_report_ans {
+	apple,soc-device-record;
+	apple,no-ack;
 	apple,always-on;
 };
 
@@ -88,4 +96,13 @@
 	memory-region-names = "ttbs", "pagetables", "handoff";
 	apple,pmp = <&pmp>;
 	status = "disabled";
+};
+
+/* Native26 firmware and PIODMA use the same 1-TiB alias as the panel. */
+&dcpext_dart {
+	apple,dma-range = /bits/ 64 <0x10000000000 0x1000000000>;
+};
+
+&dispext0_dart {
+	apple,dma-range = /bits/ 64 <0x10000000000 0x1000000000>;
 };

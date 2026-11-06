@@ -60,6 +60,7 @@ struct dptx_port {
 	struct phy *atcphy;
 	struct mux_control *mux;
 	u32 lane_count;
+	u32 native26_max_lanes;
 	u32 link_rate, pending_link_rate;
 	u32 drive_settings[2];
 	u32 trained_voltage[4], trained_pre[4];
@@ -84,5 +85,6 @@ int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
 int dptxport_sink_irq(struct apple_epic_service *service);
 
 struct apple_dcp;
+bool dptx_native_controllers_ready(struct apple_dcp *dcp);
 int dpav_ctrl_init(struct apple_dcp *dcp);
 #endif

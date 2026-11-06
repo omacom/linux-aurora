@@ -112,3 +112,8 @@ void dcp_ack(struct apple_dcp *dcp, enum dcp_context_id context);
 /* The user may own drm_display_mode, so we need to search for our copy */
 bool lookup_mode(struct apple_dcp *dcp, const struct drm_display_mode *mode,
 		 struct dcp_display_mode *out);
+
+int iomfb_ext26_blank(struct apple_dcp *dcp);
+bool iomfb_ext26_backing_fresh(struct apple_dcp *dcp, struct drm_framebuffer *fb);
+int iomfb_ext26_retain_epoch(struct apple_dcp *dcp);
+bool iomfb_ext26_control_complete(struct apple_dcp *dcp, u32 id, bool aborted);

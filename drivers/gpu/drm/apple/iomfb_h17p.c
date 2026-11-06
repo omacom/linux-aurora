@@ -2,9 +2,13 @@
 /* Copyright The Asahi Linux Contributors */
 
 #include <linux/bitops.h>
+#include <linux/soc/apple/rtkit.h>
+#include <drm/drm_gem.h>
 #include <linux/unaligned.h>
 
 #include "dcp-link.h"
+#include "dcpext26-wire.h"
+#include "dcpext26-lifecycle.h"
 #include "iomfb_h17p.h"
 #include "iomfb_v12_3.h"
 #include "iomfb_v13_3.h"
@@ -196,11 +200,12 @@ void iomfb_encode_backlight_h17p(struct dcp_present_h17p *wire, u32 nits,
 
 static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
 	IOMFB_METHOD("A000", dcpep_late_init_signal),
-	IOMFB_METHOD_H17("A025", "A029", dcpep_setup_video_limits), /* (0,0) */
+	[dcpep_setup_video_limits] = { "dcpep_setup_video_limits",
+		{'A', '0', '2', '5'}, {'A', '0', '2', '9'}, {'A', '0', '2', '9'} }, /* (0,0) */
 	IOMFB_METHOD("A131", iomfbep_a131_pmu_service_matched), /* nested in D206 */
 	IOMFB_METHOD("A132", iomfbep_a132_backlight_service_matched), /* nested in D207 */
-	IOMFB_METHOD("A385", dcpep_set_create_dfb), /* first call inside D121; (0,0) */
-	IOMFB_METHOD("A386", iomfbep_a358_vi_set_temperature_hint), /* nested in D100 */
+	IOMFB_METHOD_EXT26("A385", "A389", dcpep_set_create_dfb), /* first call inside D121; (0,0) */
+	IOMFB_METHOD_EXT26("A386", "A390", iomfbep_a358_vi_set_temperature_hint), /* nested in D100 */
 	IOMFB_METHOD("A401", dcpep_start_signal),
 	IOMFB_METHOD("A406", dcpep_swap_start),
 	/*
@@ -208,7 +213,7 @@ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
 	 * with it: every swap is A406 followed by A408, A407 is unused, and the
 	 * A408 response is 0x0c bytes (dcp_swap_submit_resp_h17p).
 	 */
-	IOMFB_METHOD("A408", dcpep_swap_submit),
+	IOMFB_METHOD_EXT26("A408", "A407", dcpep_swap_submit),
 	IOMFB_METHOD("A411", dcpep_set_display_device),
 	IOMFB_METHOD("A412", dcpep_is_main_display),
 	IOMFB_METHOD("A413", dcpep_set_digital_out_mode),
@@ -252,6 +257,13 @@ static const struct dcp_method_entry dcp_methods[dcpep_num_methods] = {
 
 #define DCP_FW h17p
 #define DCP_FW_VER DCP_FW_VERSION(26, 6, 0)
+
+static int ext26_encode(struct apple_dcp *dcp, struct dcp_swap_submit_req_h17p *request);
+static int ext26_activate(struct apple_dcp *dcp);
+static int ext26_open_client(struct apple_dcp *dcp);
+static u8 ext26_prop_start(struct apple_dcp *dcp, u32 advertised);
+static void ext26_start(struct apple_dcp *dcp);
+static bool ext26_abort(struct apple_dcp *dcp, int tag, void *out, void *input);
 
 #include "iomfb_template.c"
 
@@ -699,10 +711,465 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[599] = trampoline_nop, /* find_swap_function_gated */
 };
 
+/* Included with the public H17P template helpers in scope. */
+
+static bool ext26_callback_size(int tag, u32 input, u32 output)
+{
+	switch (tag) {
+	case 3: return input == 4 && output == 60;
+	case 6: return input == 84 && output == 80;
+	case 107: return input == 64 && !output;
+	case 115: return input == 16 && output == 8;
+	case 116: return input == 16 && output == 4;
+	case 134: return !input && output == 4;
+	case 408: return input == 8 && output == 8;
+	case 454: return input == 4 && output == 4;
+	case 567: return input == 128 && output == 4;
+	case 572: return input == 4 && output == 4;
+	case 576: return input == 4 && !output;
+	case 588: return !input && !output;
+	default: return iomfb_validate_callback_h17p(tag, input, output);
+	}
+}
+
+static u8 ext26_prop_start(struct apple_dcp *dcp, u32 advertised)
+{
+	struct dcp_chunks *chunks = &dcp->chunks;
+
+	if (!advertised || advertised > SZ_1M + 1)
+		return false;
+	kfree(chunks->data);
+	memset(chunks, 0, sizeof(*chunks));
+	chunks->length = advertised - 1;
+	chunks->contiguous = true;
+	chunks->modes_generation = dcp_modes_transfer_begin(dcp);
+	dcp_firmware_metadata_begin(dcp);
+	chunks->data = kzalloc(max_t(size_t, 1, chunks->length), GFP_KERNEL);
+	return !!chunks->data;
+}
+
+struct ext26_boot {
+	unsigned int completed;
+	u32 one;
+};
+
+static void ext26_boot_next(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	struct ext26_boot *boot = cookie;
+	const struct dcp_method_entry *method;
+	u32 in = 0, reply = 0;
+
+	if (READ_ONCE(dcp->crashed) || (boot->completed && !out) ||
+	    ((boot->completed == 5 || boot->completed == 6) &&
+	     get_unaligned_le32(out) != 1)) {
+		WRITE_ONCE(dcp->crashed, true);
+		dev_err(dcp->dev,
+			"native26 D121 startup refused: completed=%u last=%s reply=%#x present=%u; session retained\n",
+			boot->completed, boot->completed == 5 ? "A000" :
+			boot->completed == 6 ? "A465" : "earlier call",
+			out && (boot->completed == 2 || boot->completed == 5 ||
+				boot->completed == 6) ? get_unaligned_le32(out) : 0, !!out);
+		kfree(boot);
+		return;
+	}
+	if (boot->completed == 5 || boot->completed == 6)
+		dev_dbg(dcp->dev, "native26 D121 %s reply=%#x accepted\n",
+			 boot->completed == 5 ? "A000" : "A465", get_unaligned_le32(out));
+	switch (boot->completed++) {
+	case 0:
+		method = &dcp_methods[dcpep_set_create_dfb];
+		break;
+	case 1:
+		method = &dcp_methods[dcpep_create_default_fb];
+		reply = 4;
+		break;
+	case 2:
+		method = &dcp_methods[dcpep_setup_video_limits];
+		break;
+	case 3:
+		method = &dcp_methods[dcpep_flush_supports_power];
+		in = 4;
+		break;
+	case 4:
+		method = &dcp_methods[dcpep_late_init_signal];
+		in = reply = 4;
+		break;
+	case 5:
+		method = &dcp_methods[dcpep_set_display_refresh_properties];
+		reply = 4;
+		break;
+	default:
+		kfree(boot);
+		boot_done(dcp, NULL, NULL);
+		dev_dbg(dcp->dev, "native26 D121 startup complete\n");
+		return;
+	}
+	dcp_push(dcp, false, method, in, reply, &boot->one, ext26_boot_next, boot);
+}
+
+static bool ext26_boot_callback(struct apple_dcp *dcp, int tag, void *out, void *in)
+{
+	struct ext26_boot *boot = kzalloc_obj(*boot);
+
+	if (!boot) {
+		WRITE_ONCE(dcp->crashed, true);
+		return false;
+	}
+	boot->one = 1;
+	ext26_boot_next(dcp, NULL, boot);
+	return false;
+}
+
+static bool ext26_property(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+
+	if (tag == 107 && (!strncmp((const char *)in, "TimingElements", 64) ||
+			   !strncmp((const char *)in, "DisplayAttributes", 64))) {
+		dcp_modes_begin_attachment(dcp);
+		if (dcp->connector) {
+			dcp->connector->connected = false;
+			apple_connector_invalidate_edid(dcp->connector);
+			dcp_queue_hotplug(dcp->connector);
+		}
+	}
+	if (memcmp(in, "NormalModeActive", sizeof("NormalModeActive")))
+		return true;
+	if (tag == 107) {
+		WRITE_ONCE(dcp->ext26_normal, false);
+		return true;
+	}
+	bool on = tag == 104 ? !!in[64] : !!get_unaligned_le32(in + 64);
+
+	if (!on) {
+		WRITE_ONCE(dcp->ext26_normal, false);
+		return true;
+	}
+	if (READ_ONCE(dcp->ext26_power_sent) &&
+	    dcp->ext26_rx_ns > READ_ONCE(dcp->ext26_power_ns) &&
+	    dcp->ext26_generation == READ_ONCE(dcp->typec_generation)) {
+		WRITE_ONCE(dcp->ext26_normal, true);
+		complete_all(&dcp->ext26_ready);
+		dev_dbg(dcp->dev, "native26 NormalModeActive after power publication\n");
+	}
+	return true;
+}
+
+static bool ext26_bandwidth(struct apple_dcp *dcp, int tag, void *out, void *in)
+{
+	memset(out, 0, 60);
+	put_unaligned_le32(1, (u8 *)out + 56);
+	return true;
+}
+
+static bool ext26_frame_sync(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+
+	memset(out, 0, 80);
+	if (!(in[80] & 1))
+		memcpy(out, in, 80);
+	return true;
+}
+
+static bool ext26_defaults(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+	u32 count = get_unaligned_le32(in + 64);
+
+	memset(out, 0, 36);
+	if (count <= 8)
+		memcpy(out, in + 68, count * 4);
+	return true;
+}
+
+static bool ext26_clock(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+	u32 index = get_unaligned_le32(in + 4);
+	u64 rate = 0;
+
+	if (!memcmp(in, "VORP", 4) && index < 2)
+		rate = index ? 24000000 : 48000000;
+	put_unaligned_le64(rate, out);
+	return true;
+}
+
+static bool ext26_analytics(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+
+	memset(out, 0, 4100);
+	if (memchr(in, 0, 64) && !in[4160])
+		memcpy(out, in + 64, 4096);
+	return true;
+}
+
+static bool ext26_tiling(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	memset(out, 0, 8);
+	if (((u8 *)input)[12] <= 1)
+		((u8 *)out)[4] = 1;
+	return true;
+}
+
+static bool ext26_release(struct apple_dcp *dcp, int tag, void *out, void *in)
+{
+	u32 id = get_unaligned_le32(in);
+
+	memset(out, 0, 4);
+	/* Logical descriptor release never proves DMA retirement. */
+	if (id && id < DCP_MAX_MAPPINGS && test_bit(id, dcp->memdesc_map) &&
+	    !test_and_set_bit(id, dcp->ext26_released))
+		*(u8 *)out = 1;
+	return true;
+}
+
+static bool ext26_allocate(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+	u64 bytes = get_unaligned_le64(in + 4);
+	u32 alignment = get_unaligned_le32(in + 12);
+
+	memset(out, 0, 28);
+	if (get_unaligned_le32(in) != 0x703 || !is_power_of_2(alignment) ||
+	    alignment > SZ_16K || in[16] || in[17] || in[18] || !bytes ||
+	    bytes > SZ_64M || ALIGN(bytes, SZ_16K) > SZ_256M - dcp->ext26_buffer_bytes)
+		return true;
+	trampoline_allocate_buffer_h17p(dcp, tag, out, input);
+	if (get_unaligned_le32((u8 *)out + 24))
+		dcp->ext26_buffer_bytes += ALIGN(bytes, SZ_16K);
+	return true;
+}
+
+static bool ext26_hotplug(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+	u64 connected = get_unaligned_le64(in);
+
+	memset(out, 0, 76);
+	if (!(in[84] & 1))
+		memcpy(out, in + 8, 76);
+
+	dcpep_cb_hotplug(dcp, &connected);
+	return true;
+}
+
+static void ext26_started(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	if (!out || READ_ONCE(dcp->crashed) || get_unaligned_le32(out) != 1) {
+		WRITE_ONCE(dcp->crashed, true);
+		complete_all(&dcp->start_done);
+		return;
+	}
+	dcp_ext26_open_services(dcp);
+	dcp->main_display = false;
+	dcp->active = true;
+	dev_dbg(dcp->dev, "native26 A401 complete; service OPEN and route admission enabled\n");
+	complete_all(&dcp->start_done);
+}
+
+static void ext26_client_reply(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	struct dcp_wait_cookie *wait = cookie;
+
+	WRITE_ONCE(wait->replied, !!out);
+	complete(&wait->done);
+	kref_put(&wait->refcount, release_wait_cookie);
+}
+
+static int ext26_open_client(struct apple_dcp *dcp)
+{
+	struct dcp_wait_cookie *wait;
+	int ret;
+
+	if (dcp->ext26_client_open)
+		return 0;
+	wait = kzalloc_obj(*wait);
+	if (!wait)
+		return -ENOMEM;
+	init_completion(&wait->done);
+	kref_init(&wait->refcount);
+	kref_get(&wait->refcount);
+	dcp_first_client_open(dcp, false, ext26_client_reply, wait);
+	ret = wait_for_completion_timeout(&wait->done, msecs_to_jiffies(5000)) &&
+	      READ_ONCE(wait->replied) && !READ_ONCE(dcp->crashed) ? 0 : -ETIMEDOUT;
+	kref_put(&wait->refcount, release_wait_cookie);
+	if (!ret) {
+		dcp->ext26_client_open = true;
+		dev_dbg(dcp->dev, "native26 A457 complete before first mode\n");
+	} else {
+		WRITE_ONCE(dcp->ext26_blocked, true);
+		WRITE_ONCE(dcp->crashed, true);
+	}
+	return ret;
+}
+
+static void ext26_main_done(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	if (!out) {
+		WRITE_ONCE(dcp->crashed, true);
+		return;
+	}
+	dcp_ack(dcp, DCP_CONTEXT_CB);
+}
+
+static bool ext26_main_query(struct apple_dcp *dcp, int tag, void *out, void *in)
+{
+	dcp_is_main_display(dcp, false, ext26_main_done, NULL);
+	return false;
+}
+
+static bool ext26_stride(struct apple_dcp *dcp, int tag, void *out, void *in)
+{
+	put_unaligned_le32(dcp->ext26_stride, out);
+	return true;
+}
+
+static bool ext26_match_backlight(struct apple_dcp *dcp, int tag, void *out, void *in)
+{
+	iomfb_a132_backlight_service_matched(dcp, false, complete_backlight_service_matched, out);
+	return false;
+}
+
+static bool ext26_map_piodma(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	const u8 *in = input;
+	u64 id = get_unaligned_le64(in);
+
+	memset(out, 0, 16);
+	if (!id || id >= DCP_MAX_MAPPINGS || get_unaligned_le32(in + 8) != 1 ||
+	    !test_bit(id, dcp->memdesc_map) || test_bit(id, dcp->ext26_released))
+		return true;
+	if (dcp->memdesc[id].piodma_mapped) {
+		put_unaligned_le32(id, out);
+		put_unaligned_le64(dcp->memdesc[id].dva, (u8 *)out + 4);
+		return true;
+	}
+	return trampoline_map_piodma_h17p(dcp, tag, out, input);
+}
+
+static void ext26_start(struct apple_dcp *dcp)
+{
+	iomfb_cb_handler *handlers = kcalloc(IOMFB_MAX_CB, sizeof(*handlers), GFP_KERNEL);
+
+	if (!handlers) {
+		WRITE_ONCE(dcp->crashed, true);
+		complete(&dcp->start_done);
+		return;
+	}
+	memcpy(handlers, cb_handlers, sizeof(cb_handlers));
+	handlers[0] = handlers[112] = trampoline_true;
+	handlers[3] = ext26_bandwidth;
+	handlers[6] = ext26_frame_sync;
+	handlers[102] = handlers[104] = handlers[107] = ext26_property;
+	handlers[114] = ext26_analytics;
+	handlers[115] = ext26_tiling;
+	handlers[116] = handlers[134] = trampoline_zero;
+	handlers[588] = trampoline_nop;
+	handlers[121] = ext26_boot_callback;
+	handlers[101] = ext26_stride;
+	handlers[125] = ext26_defaults;
+	handlers[201] = ext26_map_piodma;
+	handlers[207] = ext26_match_backlight;
+	handlers[130] = handlers[411] = handlers[452] = trampoline_zero;
+	handlers[202] = handlers[592] = handlers[594] = trampoline_nop;
+	handlers[400] = handlers[401] = handlers[574] = trampoline_zero;
+	handlers[408] = ext26_clock;
+	handlers[451] = ext26_allocate;
+	handlers[454] = ext26_release;
+	handlers[575] = ext26_hotplug;
+	handlers[582] = trampoline_zero;
+	handlers[593] = ext26_abort;
+	handlers[599] = ext26_main_query;
+	dcp->ext26_handlers = handlers;
+	dcp->cb_handlers = handlers;
+	dcp_start_signal(dcp, false, ext26_started, NULL);
+}
+
+static int ext26_encode(struct apple_dcp *dcp, struct dcp_swap_submit_req_h17p *request)
+{
+	struct dcpext26_primary primary, *selected = NULL;
+	const struct dcp_swap_submit_req_h17p *effective = request;
+	const struct dcp_surface *surface;
+	struct iomfb_scanout_h17p *scanout = dcp->iomfb.next_scanout;
+	struct drm_framebuffer *fb = scanout ? scanout->fb[0] : NULL;
+
+	if (READ_ONCE(dcp->ext26_blocked) || !READ_ONCE(dcp->ext26_normal))
+		return -EPIPE;
+	if (!(request->swap.swap_enabled & BIT(0)) && dcp->iomfb.scanout)
+		effective = &dcp->iomfb.scanout->request;
+	surface = &effective->surf[0].base;
+	if (!effective->surf_null[0]) {
+		if (!fb || !fb->obj[0])
+			return -EINVAL;
+		primary = (struct dcpext26_primary) {
+			.address = effective->surf_iova[0], .backing_bytes = fb->obj[0]->size,
+			.width = surface->width, .height = surface->height, .pitch = surface->stride,
+		};
+		selected = &primary;
+	}
+	return dcpext26_primary_encode(dcp->ext26_present, sizeof(dcp->ext26_present),
+				       request->swap.swap_id, 0, selected);
+}
+
+static void ext26_power_reply(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	struct dcp_wait_cookie *wait = cookie;
+
+	wait->status = out && get_unaligned_le64(out) == 1 ? 0 : ~0U;
+	complete(&wait->done);
+	kref_put(&wait->refcount, release_wait_cookie);
+}
+
+static bool ext26_abort(struct apple_dcp *dcp, int tag, void *out, void *input)
+{
+	u32 id = get_unaligned_le32(input);
+
+	if (iomfb_ext26_control_complete(dcp, id, true))
+		return true;
+	bool ack = trampoline_abort_swap_ap_gated(dcp, tag, out, input);
+
+	WRITE_ONCE(dcp->ext26_blocked, true);
+	WRITE_ONCE(dcp->crashed, true);
+	return ack;
+}
+
+static int ext26_activate(struct apple_dcp *dcp)
+{
+	struct dcp_set_power_state_req_h17p request = { .unklong = 1 };
+	struct dcp_wait_cookie *wait;
+	int ret;
+
+	wait = kzalloc_obj(*wait);
+	if (!wait)
+		return -ENOMEM;
+	wait->status = ~0U;
+	init_completion(&wait->done);
+	kref_init(&wait->refcount);
+	kref_get(&wait->refcount);
+	WRITE_ONCE(dcp->external_power_attempted, true);
+	dcp_set_power_state(dcp, false, &request, ext26_power_reply, wait);
+	ret = wait_for_completion_timeout(&wait->done, msecs_to_jiffies(5000));
+	ret = ret && !READ_ONCE(wait->status) ? 0 : -EIO;
+	kref_put(&wait->refcount, release_wait_cookie);
+	if (!ret && !wait_for_completion_timeout(&dcp->ext26_ready, msecs_to_jiffies(5000)))
+		ret = -ETIMEDOUT;
+	if (!ret && (!READ_ONCE(dcp->ext26_normal) || READ_ONCE(dcp->crashed) ||
+		     READ_ONCE(dcp->ext26_blocked)))
+		ret = -EIO;
+	if (!ret) {
+		WRITE_ONCE(dcp->pipe_enabled_h17p, true);
+		dev_dbg(dcp->dev, "native26 mode and power ready; primary scanout admitted\n");
+	}
+	return ret;
+}
+
 bool iomfb_check_callback_h17p(struct apple_dcp *dcp, int tag, u32 in_len,
 			       u32 out_len)
 {
-	return iomfb_validate_callback_h17p(tag, in_len, out_len);
+	return dcp_is_ext26(dcp) ? ext26_callback_size(tag, in_len, out_len) :
+		iomfb_validate_callback_h17p(tag, in_len, out_len);
 }
 
 static_assert(sizeof(struct dcp_set_power_state_resp) == 8);
@@ -785,7 +1252,9 @@ int iomfb_external_power_h17p(struct apple_dcp *dcp, bool on)
 	init_completion(&cookie->wait.done);
 	kref_init(&cookie->wait.refcount);
 	kref_get(&cookie->wait.refcount);
-	if (on) {
+	if (dcp_is_ext26(dcp)) {
+		dcp_set_power_state(dcp, false, &request, iomfb_external_power_complete, cookie);
+	} else if (on) {
 		u32 handle = 2;
 
 		iomfb_opaque_x_reset_h17p(dcp);
@@ -793,7 +1262,7 @@ int iomfb_external_power_h17p(struct apple_dcp *dcp, bool on)
 	} else {
 		dcp_set_power_state(dcp, true, &request, iomfb_external_power_complete, cookie);
 	}
-	ret = wait_for_completion_timeout(&cookie->wait.done, msecs_to_jiffies(500));
+	ret = wait_for_completion_timeout(&cookie->wait.done, msecs_to_jiffies(dcp_is_ext26(dcp) ? 5000 : 500));
 	ret = ret ? (int)READ_ONCE(cookie->wait.status) : -ETIMEDOUT;
 	kref_put(&cookie->wait.refcount, release_wait_cookie);
 	return ret;
@@ -801,6 +1270,10 @@ int iomfb_external_power_h17p(struct apple_dcp *dcp, bool on)
 
 void iomfb_start_h17p(struct apple_dcp *dcp)
 {
+	if (dcp_is_ext26(dcp)) {
+		ext26_start(dcp);
+		return;
+	}
 	WRITE_ONCE(dcp->pipe_enabled_h17p, false);
 	dcp->cb_handlers = cb_handlers;
 	dcp_start_signal(dcp, false, dcp_started, NULL);
@@ -839,3 +1312,107 @@ int iomfb_h17p_deliver_swap_complete(struct apple_dcp *dcp, u32 swap_id)
 
 #undef DCP_FW_VER
 #undef DCP_FW
+
+struct ext26_control {
+	struct dcpext26_exchange exchange;
+	struct completion done;
+	u8 wire[DCPEXT26_SUBMIT_BYTES];
+};
+
+static void ext26_control_signal(struct apple_dcp *dcp, struct ext26_control *control)
+{
+	if (dcpext26_exchange_finished(&control->exchange)) {
+		if (control->exchange.failed) {
+			WRITE_ONCE(dcp->crashed, true);
+			WRITE_ONCE(dcp->ext26_blocked, true);
+		}
+		dcp->ext26_control_pending = false;
+		complete_all(&control->done);
+	}
+}
+
+bool iomfb_ext26_control_complete(struct apple_dcp *dcp, u32 id, bool aborted)
+{
+	struct ext26_control *control = dcp->ext26_control;
+
+	if (!dcp_is_ext26(dcp))
+		return false;
+	if (id && id == dcp->ext26_control_id)
+		return true;
+	if (!control || !dcpext26_exchange_complete(&control->exchange, id))
+		return false;
+	if (aborted)
+		control->exchange.failed = true;
+	ext26_control_signal(dcp, control);
+	return true;
+}
+
+static void ext26_null_submitted(struct apple_dcp *dcp, void *reply, void *cookie)
+{
+	struct ext26_control *control = cookie;
+
+	control->exchange.replied = true;
+	if (dcpext26_submit_reply(reply, 12))
+		control->exchange.failed = true;
+	ext26_control_signal(dcp, control);
+}
+
+static void ext26_null_started(struct apple_dcp *dcp, void *reply, void *cookie)
+{
+	struct ext26_control *control = cookie;
+	u32 id;
+
+	if (dcpext26_start_reply(reply, 8, &id) ||
+	    !dcpext26_exchange_begin(&control->exchange, id) ||
+	    dcpext26_primary_encode(control->wire, sizeof(control->wire), id, 0, NULL)) {
+		control->exchange.failed = true;
+		ext26_control_signal(dcp, control);
+		return;
+	}
+	dcp_push(dcp, false, &dcp_methods[dcpep_swap_submit], sizeof(control->wire), 12,
+		 control->wire, ext26_null_submitted, control);
+}
+
+/* Called by the lifecycle worker, never from RX or the shared DRM tail. */
+int iomfb_ext26_blank(struct apple_dcp *dcp)
+{
+	struct ext26_control *control;
+	u8 start[16] = {};
+	int ret;
+
+	ret = iomfb_queue_settle(dcp, msecs_to_jiffies(5000));
+	if (ret)
+		return ret;
+	control = kzalloc_obj(*control);
+	if (!control)
+		return -ENOMEM;
+	init_completion(&control->done);
+	mutex_lock(&dcp->iomfb.lock);
+	if (dcp->ext26_control || dcp->present_state_h17p.pending || dcp->crashed) {
+		mutex_unlock(&dcp->iomfb.lock);
+		kfree(control);
+		return -EBUSY;
+	}
+	dcp->ext26_control = control;
+	dcp->ext26_control_pending = true;
+	mutex_unlock(&dcp->iomfb.lock);
+	dcp_push(dcp, false, &dcp_methods[dcpep_swap_start], sizeof(start), 8,
+		 start, ext26_null_started, control);
+	ret = wait_for_completion_timeout(&control->done, msecs_to_jiffies(5000));
+	/* RX no longer owns a successful control before its storage is reclaimed. */
+	if (ret)
+		apple_rtkit_flush_rx(dcp->rtk);
+	mutex_lock(&dcp->iomfb.lock);
+	if (!ret || control->exchange.failed || dcp->crashed) {
+		WRITE_ONCE(dcp->crashed, true);
+		ret = -EIO;
+		/* Possibly published control storage remains owned until reset. */
+	} else {
+		dcp->ext26_control_id = control->exchange.id;
+		dcp->ext26_control = NULL;
+		kfree(control);
+		ret = 0;
+	}
+	mutex_unlock(&dcp->iomfb.lock);
+	return ret;
+}

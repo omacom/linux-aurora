@@ -569,7 +569,8 @@ static int dptxport_call_set_link_rate(struct apple_epic_service *service,
 			}
 		} else if (dptx->atcphy) {
 			/* No clocked crossbar output across a PHY rate change. */
-			dcp_direct_crossbar_link(service->ep->dcp, false);
+			if (!dcp_is_ext26(service->ep->dcp))
+				dcp_direct_crossbar_link(service->ep->dcp, false);
 			dptx->phy_ops.dp.link_rate = phy_link_rate;
 			dptx->phy_ops.dp.set_rate = 1;
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
@@ -916,7 +917,7 @@ static int dptxport_prepare(struct apple_epic_service *service, const char *name
 	 * T6030 14.7 also announces the low-power port service, and may leave
 	 * its class empty.
 	 */
-	if (dcp_fw_is_14_7(dcp) && name &&
+	if ((dcp_fw_is_14_7(dcp) || dcp_is_ext26(dcp)) && name &&
 	    (!strcmp(name, "dcpdptx-port-epic") ||
 	     !strcmp(name, "dcp-lpdptx-port-epic")) &&
 	    (!class || !class[0] || !strcmp(class, "AppleDCPDPTXRemotePort")))
@@ -942,8 +943,8 @@ static void dptxport_init(struct apple_epic_service *service, const char *name,
 	if (service->ep->dcp->external_native)
 		schedule_work(&service->ep->dcp->external_ready_work);
 	/* Publication may follow the startup wait or the bounded retry window. */
-	if (service->ep->dcp->hw.iomfb_method_profile ==
-	    DCP_IOMFB_METHODS_H17P_EXTERNAL &&
+	if ((service->ep->dcp->hw.iomfb_method_profile ==
+	     DCP_IOMFB_METHODS_H17P_EXTERNAL || dcp_is_ext26(service->ep->dcp)) &&
 	    READ_ONCE(service->ep->dcp->typec_cable_connected) &&
 	    !READ_ONCE(service->ep->dcp->quiescing) &&
 	    !READ_ONCE(service->ep->dcp->external_error))
@@ -951,9 +952,140 @@ static void dptxport_init(struct apple_epic_service *service, const char *name,
 				 &service->ep->dcp->typec_reconnect_wq, 0);
 }
 
+/* Native26 USB-C callbacks use the current Type-C PHY without changing its mode. */
+static int dptxport_native26_call(struct apple_epic_service *service, u16 group, u32 command,
+				const void *data, size_t size, void *reply, size_t room)
+{
+	struct dptx_port *port = service->cookie;
+	struct apple_dcp *dcp = service->ep->dcp;
+	union phy_configure_opts capacity = {};
+	int ret;
+
+	if (group == 1 && (command == 3 || command == 4))
+		return dptx_j700_training(service, command == 3, data, size, reply, room);
+	if (group || (size && !data))
+		return -EOPNOTSUPP;
+	memset(reply, 0, room);
+	memcpy(reply, data, min(size, room));
+	if (room >= 4)
+		put_unaligned_le32(0, reply);
+	switch (command) {
+	case DPTX_APCALL_ACTIVATE:
+		if (!port->atcphy)
+			return -ENODEV;
+		ret = phy_validate(port->atcphy, PHY_MODE_DP, 0, &capacity);
+		if (ret || capacity.dp.lanes < 2)
+			return ret ?: -EINVAL;
+		return dcp_direct_crossbar_link(dcp, true);
+	case DPTX_APCALL_DEACTIVATE:
+		return dcp_direct_crossbar_link(dcp, false);
+	case DPTX_APCALL_WILL_CHANGE_LINKG_CONFIG:
+		memset(reply, 0, room);
+		return dcp_direct_crossbar_link(dcp, false);
+	case DPTX_APCALL_DID_CHANGE_LINK_CONFIG:
+		memset(reply, 0, room);
+		mdelay(10);
+		return port->link_rate ? dcp_direct_crossbar_link(dcp, true) : 0;
+	case DPTX_APCALL_GET_MAX_DRIVE_SETTINGS:
+		if (room < 28)
+			return -EINVAL;
+		memset(reply, 0, room);
+		put_unaligned_le32(3, reply + 20);
+		put_unaligned_le32(3, reply + 24);
+		return 0;
+	case DPTX_APCALL_SET_DRIVE_SETTINGS:
+		return -EOPNOTSUPP;
+	case DPTX_APCALL_GET_DRIVE_SETTINGS:
+		return dptx_j700_training(service, false, data, size, reply, room);
+	case DPTX_APCALL_GET_MAX_LINK_RATE:
+		if (room < 32)
+			return -EINVAL;
+		memset(reply, 0, room);
+		put_unaligned_le32(LINK_RATE_HBR2, reply + 16);
+		return 0;
+	case DPTX_APCALL_GET_LINK_RATE:
+		if (room < 32)
+			return -EINVAL;
+		memset(reply, 0, room);
+		put_unaligned_le32(port->link_rate, reply + 16);
+		return 0;
+	case DPTX_APCALL_SET_LINK_RATE:
+		if (size < 32 || room < 32)
+			return -EINVAL;
+		switch (get_unaligned_le32(data + 16)) {
+		case 0:
+		case LINK_RATE_RBR:
+		case LINK_RATE_HBR:
+		case LINK_RATE_HBR2:
+		case LINK_RATE_HBR3:
+			break;
+		default:
+			return -EINVAL;
+		}
+		ret = dcp_direct_crossbar_link(dcp, false);
+		if (ret)
+			return ret;
+		return dptxport_call_set_link_rate(service, data, size, reply, room);
+	case DPTX_APCALL_GET_MAX_LANE_COUNT:
+		if (room < 32 || !port->atcphy)
+			return -EINVAL;
+		ret = phy_validate(port->atcphy, PHY_MODE_DP, 0, &capacity);
+		if (ret || capacity.dp.lanes < 2 || capacity.dp.lanes > 4)
+			return ret ?: -EINVAL;
+		port->native26_max_lanes = capacity.dp.lanes;
+		memset(reply, 0, room);
+		put_unaligned_le64(capacity.dp.lanes, reply + 16);
+		return 0;
+	case DPTX_APCALL_SET_ACTIVE_LANE_COUNT: {
+		u64 lanes;
+
+		if (size < 32 || room < 32)
+			return -EINVAL;
+		lanes = get_unaligned_le64(data + 16);
+		ret = dptx_j700_validate_lanes(port, lanes);
+		if (ret)
+			return ret;
+		port->lane_count = lanes;
+		put_unaligned_le64(lanes, reply + 16);
+		if (lanes)
+			complete(&port->linkcfg_completion);
+		return 0;
+	}
+	case DPTX_APCALL_GET_ACTIVE_LANE_COUNT:
+		if (room < 32)
+			return -EINVAL;
+		memset(reply, 0, room);
+		put_unaligned_le64(port->lane_count, reply + 16);
+		return 0;
+	case DPTX_APCALL_GET_SUPPORTS_HPD:
+		if (room < 32)
+			return -EINVAL;
+		memset(reply, 0, room);
+		put_unaligned_le32(1, reply + 16);
+		return 0;
+	case DPTX_APCALL_GET_SUPPORTS_DOWN_SPREAD:
+		if (room < 32)
+			return -EINVAL;
+		memset(reply, 0, room);
+		return 0;
+	case DPTX_APCALL_SET_TILED_DISPLAY_HINTS:
+		if (room < 4)
+			return -EINVAL;
+		put_unaligned_le32(1, reply);
+		return 0;
+	case DPTX_APCALL_GET_VIRTUAL_DEVICE_MODE:
+		memset(reply, 0, room);
+		return 0;
+	default:
+		return dptxport_call(service, command, data, size, reply, room);
+	}
+}
+
 static int dptxport_v2_group_call(struct apple_epic_service *service, u16 group, u32 command,
 			       const void *data, size_t size, void *reply, size_t room)
 {
+	if (dcp_is_ext26(service->ep->dcp))
+		return dptxport_native26_call(service, group, command, data, size, reply, room);
 	if (group == 1 && command == DPTX_APCALL_SET_DRIVE_SETTINGS)
 		return dptx_j700_training(service, true, data, size, reply, room);
 	if (group == 1 && command == DPTX_APCALL_GET_DRIVE_SETTINGS)
@@ -1079,7 +1211,60 @@ static void dptx_controller_service_init(struct apple_epic_service *service,
 					 const char *name, const char *class, s64 unit)
 {
 	complete(&service->ep->dcp->dptx_controller_ready);
+	if (dcp_is_ext26(service->ep->dcp) &&
+	    dptx_native_controllers_ready(service->ep->dcp)) {
+		dev_dbg(service->ep->dcp->dev,
+			 "native26 all four controller interfaces OPEN; port OPEN enabled\n");
+		afk_service_retry(service->ep->dcp->dptxep);
+	}
 }
+
+bool dptx_native_controllers_ready(struct apple_dcp *dcp)
+{
+	struct apple_dcp_afkep *ep = READ_ONCE(dcp->dptx_controller_ep);
+	unsigned long flags, mask = 0;
+	u32 i;
+
+	if (IS_ERR_OR_NULL(ep))
+		return false;
+	for (i = 0; i < min_t(u32, READ_ONCE(ep->num_channels), AFK_MAX_CHANNEL); i++) {
+		struct apple_epic_service *service = &ep->services[i];
+
+		spin_lock_irqsave(&service->lock, flags);
+		if (service->enabled && !service->torndown)
+			mask |= (unsigned long)service->cookie;
+		spin_unlock_irqrestore(&service->lock, flags);
+	}
+	return mask == 0xf;
+}
+
+static int dptx_native_controller_prepare(struct apple_epic_service *service,
+					 const char *name, const char *class, s64 unit)
+{
+	unsigned int kind;
+
+	if (!name || !class || strcmp(class, "AppleDCPDPTXController") ||
+	    unit < 0 || unit > 1)
+		return -EINVAL;
+	if (!strcmp(name, "dcpav-controller-epic"))
+		kind = 0;
+	else if (!strcmp(name, "dcpdp-controller-epic"))
+		kind = 1;
+	else
+		return -EINVAL;
+	/* A bit identifies each unit's AV and DP interface, independently of channel. */
+	service->cookie = (void *)(unsigned long)BIT(unit * 2 + kind);
+	return 0;
+}
+
+static const struct apple_epic_service_ops dptx_native_controller_ops[] = {
+	{
+		.name = "AppleDCPDPTXController",
+		.prepare = dptx_native_controller_prepare,
+		.init = dptx_controller_service_init,
+	},
+	{}
+};
 
 static const struct apple_epic_service_ops dptx_controller_ops[] = {
 	{
@@ -1095,17 +1280,20 @@ int dptx_controller_init(struct apple_dcp *dcp)
 	int ret;
 
 	init_completion(&dcp->dptx_controller_ready);
-	ep = afk_init(dcp, DPTX_CONTROLLER_ENDPOINT, dptx_controller_ops);
+	ep = afk_init(dcp, DPTX_CONTROLLER_ENDPOINT,
+		      dcp_is_ext26(dcp) ? dptx_native_controller_ops : dptx_controller_ops);
 	if (IS_ERR(ep))
 		return PTR_ERR(ep);
 	/* Controller interfaces require the same OPEN handshake as the port. */
-	ep->wire_v2 = dcp->hw.iomfb_method_profile ==
+	ep->wire_v2 = dcp_is_ext26(dcp) || dcp->hw.iomfb_method_profile ==
 		DCP_IOMFB_METHODS_H17P_EXTERNAL;
 	dcp->dptx_controller_ep = ep;
 
 	ret = afk_start(ep);
 	if (ret)
 		return ret;
+	if (dcp_is_ext26(dcp))
+		return 0; /* Native OPEN follows A401. */
 	if (!wait_for_completion_timeout(&dcp->dptx_controller_ready,
 					 msecs_to_jiffies(1000)))
 		return -ETIMEDOUT;
@@ -1116,7 +1304,7 @@ int dptx_controller_init(struct apple_dcp *dcp)
 int dptxep_init(struct apple_dcp *dcp)
 {
 	struct apple_dcp_afkep *ep;
-	bool wire_v2 = dcp->hw.iomfb_method_profile ==
+	bool wire_v2 = dcp_is_ext26(dcp) || dcp->hw.iomfb_method_profile ==
 		DCP_IOMFB_METHODS_H17P_EXTERNAL;
 	int ret;
 	u32 port;
@@ -1127,7 +1315,7 @@ int dptxep_init(struct apple_dcp *dcp)
 	init_completion(&dcp->dptxport[0].linkcfg_completion);
 	init_completion(&dcp->dptxport[1].linkcfg_completion);
 
-	ep = afk_init(dcp, wire_v2 ? DPTX_ENDPOINT_V2 : DPTX_ENDPOINT, dptxep_ops);
+	ep = afk_init(dcp, wire_v2 && !dcp_is_ext26(dcp) ? DPTX_ENDPOINT_V2 : DPTX_ENDPOINT, dptxep_ops);
 	if (IS_ERR(ep))
 		return PTR_ERR(ep);
 	ep->wire_v2 = wire_v2;
@@ -1137,6 +1325,8 @@ int dptxep_init(struct apple_dcp *dcp)
 	if (ret)
 		return ret;
 
+	if (dcp_is_ext26(dcp))
+		return 0; /* Native OPEN follows A401; publication retries discovery. */
 	for (port = 0; port < dcp->hw.num_dptx_ports; port++) {
 		ret = wait_for_completion_timeout(&dcp->dptxport[port].enable_completion,
 						timeout);
@@ -1147,7 +1337,7 @@ int dptxep_init(struct apple_dcp *dcp)
 			 * kIOReturnNoDevice (0xe00002c0). Leave the endpoint
 			 * up so a later announce can still bind.
 			 */
-			if (dcp_fw_is_14_7(dcp)) {
+			if (dcp_fw_is_14_7(dcp) || dcp_is_ext26(dcp)) {
 				dev_info(dcp->dev,
 					 "DPTX port %u not announced yet\n", port);
 				return 0;

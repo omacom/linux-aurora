@@ -78,13 +78,38 @@ impl Root {
             (root::CONTROL, self.control.at(0, CONTROL_SIZE)?),
             (root::POWER, self.power.at(0, 2292)?),
         ];
-        let bytes = out.get_mut(..ROOT_SIZE).ok_or(Error::Size)?;
-        bytes.fill(0);
-        // Opaque qualified G15/V14_8_3 version tuple, not a semantic version.
-        for (i, value) in [0x490u16, 0x8380, 0xe21e, 0xc08].iter().enumerate() {
-            bytes[root::VERSION + i * 2..root::VERSION + i * 2 + 2].copy_from_slice(&value.to_le_bytes());
+        Self::write_root(out, ROOT_SIZE, 0x0c08_e21e_8380_0490, &references)
+    }
+
+    /// Encode the extended root without admitting a firmware image or publishing it.
+    pub(crate) fn encode_26(&self, out: &mut [u8], extra: Region) -> Result<(), Error> {
+        let references = [
+            (root::REGION_A, self.region_a.at(0, 0x4000)?),
+            (root::RUNTIME, self.runtime.at(0, 0x4b8)?),
+            (root::GLOBALS, self.globals.at(0, 0xe48)?),
+            (root::NEW_A, self.new_a.at(0, 0x20)?),
+            (root::CONTROL, self.control.at(0, 0xeaf0)?),
+            (root::POWER, self.power.at(0, 0x670)?),
+            (0xc0, extra.at(0, 0x4000)?),
+        ];
+        if references.iter().any(|(_, address)| address & 7 != 0) {
+            return Err(Error::Address);
         }
-        for (offset, value) in references { pointer(bytes, offset, value); }
+        Self::write_root(out, 0xc8, 0x0c89_c357_8392_04b8, &references)
+    }
+
+    fn write_root(
+        out: &mut [u8],
+        size: usize,
+        version: u64,
+        references: &[(usize, u64)],
+    ) -> Result<(), Error> {
+        let bytes = out.get_mut(..size).ok_or(Error::Size)?;
+        bytes.fill(0);
+        pointer(bytes, root::VERSION, version);
+        for &(offset, value) in references {
+            pointer(bytes, offset, value);
+        }
         word(bytes, root::HOST_ALLOCATIONS, 1);
         bytes[root::PAGE_SIZE..root::PAGE_SIZE + 2].copy_from_slice(&0x4000u16.to_le_bytes());
         bytes[root::PAGE_BITS] = 14;
@@ -191,5 +216,109 @@ impl ControlRegion {
         pointer(bytes, control::CHANNEL_RING, ring);
         word(bytes, control::UNKNOWN_45C4, 1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod root_format_tests {
+    use super::*;
+
+    fn allocations() -> (Root, Region) {
+        let region =
+            |index: u64| Region::new(0xffff_fc01_0000_0000 + index * 0x10000, 0x10000).unwrap();
+        (
+            Root {
+                region_a: region(1),
+                runtime: region(2),
+                globals: region(3),
+                new_a: region(4),
+                control: region(5),
+                power: region(6),
+            },
+            region(7),
+        )
+    }
+
+    #[test]
+    fn root_revision_changes_only_the_version_and_extension() {
+        let (root, extra) = allocations();
+        let mut older = [0x55; 0xd0];
+        let mut newer = older;
+        root.encode(&mut older).unwrap();
+        root.encode_26(&mut newer, extra).unwrap();
+        assert_eq!(&older[8..0xc0], &newer[8..0xc0]);
+        assert_eq!(
+            u64::from_le_bytes(newer[..8].try_into().unwrap()),
+            0x0c89_c357_8392_04b8
+        );
+        assert_eq!(
+            u64::from_le_bytes(newer[0xc0..0xc8].try_into().unwrap()),
+            0xffff_fc01_0007_0000
+        );
+        assert_eq!(&older[0xc0..], &[0x55; 16]);
+        assert_eq!(&newer[0xc8..], &[0x55; 8]);
+        for (offset, index) in [
+            (8, 1),
+            (0x18, 2),
+            (0x20, 3),
+            (0xa8, 4),
+            (0xb0, 5),
+            (0xb8, 6),
+        ] {
+            assert_eq!(
+                u64::from_le_bytes(newer[offset..offset + 8].try_into().unwrap()),
+                0xffff_fc01_0000_0000 + index * 0x10000
+            );
+        }
+    }
+
+    #[test]
+    fn every_short_destination_is_unchanged() {
+        let (root, extra) = allocations();
+        for length in 0..0xc8 {
+            let mut output = [0xa5; 0xc8];
+            assert_eq!(
+                root.encode_26(&mut output[..length], extra),
+                Err(Error::Size)
+            );
+            assert_eq!(output, [0xa5; 0xc8]);
+        }
+    }
+
+    #[test]
+    fn every_reference_requires_its_own_complete_allocation() {
+        for (index, required) in [0x4000, 0x4b8, 0xe48, 0x20, 0xeaf0, 0x670, 0x4000]
+            .into_iter()
+            .enumerate()
+        {
+            for (size, aligned, valid) in [
+                (required - 1, true, false),
+                (required, false, false),
+                (required, true, true),
+            ] {
+                let (mut root, mut extra) = allocations();
+                let reference = match index {
+                    0 => &mut root.region_a,
+                    1 => &mut root.runtime,
+                    2 => &mut root.globals,
+                    3 => &mut root.new_a,
+                    4 => &mut root.control,
+                    5 => &mut root.power,
+                    _ => &mut extra,
+                };
+                *reference =
+                    Region::new(0xffff_fc02_0000_0000 + u64::from(!aligned), size).unwrap();
+                let mut output = [0xa5; 0xc8];
+                let result = root.encode_26(&mut output, extra);
+                assert_eq!(
+                    result.is_ok(),
+                    valid,
+                    "reference {index}, size {size}, aligned {aligned}"
+                );
+                if !valid {
+                    assert_eq!(output, [0xa5; 0xc8]);
+                }
+            }
+        }
     }
 }

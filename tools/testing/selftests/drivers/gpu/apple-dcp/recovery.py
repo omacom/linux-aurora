@@ -7,6 +7,7 @@ They document an unresolved peer contract, not successful replay protection.
 """
 from pathlib import Path
 import json, hashlib, subprocess
+from common import classic_unit
 
 def check(root, output):
     import edid
@@ -264,6 +265,7 @@ def check(root, output):
     includes=[root/'drivers/gpu/drm/apple',root/'tools/testing/selftests/drivers/gpu/apple-afkv2/host-include']
     results=[]
     def run(name,text,cases):
+        text=classic_unit(text)
         area=out/name;area.mkdir(exist_ok=True);(area/'host.c').write_text(text)
         cmd=['clang','-std=gnu11','-Wall','-Werror','-Wno-unused-function','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer']+['-I'+str(p) for p in includes]+[str(area/'host.c'),'-o',str(area/'host')]
         (area/'command.json').write_text(json.dumps(cmd,indent=2)+'\n')

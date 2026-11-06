@@ -61,10 +61,68 @@ def tipd_pm_header(root):
         '#define clamp(val, lo, hi) ({ __auto_type _v = (val); '
         '__typeof__(_v) _lo = (lo), _hi = (hi); _v < _lo ? _lo : _v > _hi ? _hi : _v; })')
 
+def classic_unit(unit):
+    # This suite exercises established profiles. Native26 has separate actual-body
+    # fixtures; model its optional branch and storage without changing assertions.
+    if 'dcp_is_ext26(' in unit and not re.search(r'^static [^\n]+ dcp_is_ext26\(', unit, re.M):
+        unit = '#define dcp_is_ext26(d) 0\n' + unit
+    # Native-only diagnostic/OPEN branches still need declarations when parsed.
+    for token, value in (('SYSTEM_ENDPOINT', '0x20'), ('DISP0_ENDPOINT', '0x23')):
+        if token in unit and not re.search(r'#define ' + token + r'\s', unit):
+            unit = '#define ' + token + ' ' + value + '\n' + unit
+    if 'dptx_native_controllers_ready(' in unit:
+        unit = '#define dptx_native_controllers_ready(d) 0\n' + unit
+    if 'dcp_is_retained_external(' in unit and not re.search(r'^(?:static )?bool dcp_is_retained_external\(', unit, re.M):
+        predicate = 'dcp_is_external_h17p(d)' if 'dcp_is_external_h17p(' in unit else '((d)->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL)'
+        unit = '#define dcp_is_retained_external(d) ' + predicate + '\n' + unit
+    if 'ext26_' in unit and 'struct apple_dcp {' in unit:
+        mock = block(unit, 'struct apple_dcp {')
+        fields = []
+        for name in ('ext26_pm_preparing', 'ext26_stopping', 'ext26_normal', 'ext26_blocked', 'external_stopped', 'crashed', 'ext26_services_open', 'ext26_client_open', 'ext26_edid_tried'):
+            if name not in mock:
+                fields.append('bool ' + name + ';')
+        if 'ext26_edid_generation' not in mock:
+            fields.append('u64 ext26_edid_generation;')
+        if 'ext26_aux' not in mock:
+            fields.append('struct apple_dcp_afkep *ext26_aux[3];')
+        if 'ext26_blank_work' not in mock:
+            fields.append('int ext26_blank_work;')
+        for name in ('systemep', 'ibootep', 'dptx_controller_ep', 'dptxep', 'dcpavservep'):
+            if 'dcp->' + name in unit and not re.search(r'\b' + name + r'\b', mock):
+                fields.append('struct apple_dcp_afkep *' + name + ';')
+        if 'dcp->rtk' in unit and not re.search(r'\brtk\b', mock):
+            fields.append('void *rtk;')
+        unit = unit.replace('struct apple_dcp {', 'struct apple_dcp {\n' + '\n'.join(fields), 1)
+        if 'struct apple_dcp_afkep *endpoints' in unit and 'struct apple_dcp_afkep {' not in unit:
+            unit = 'struct apple_dcp_afkep { void *wq; };\n' + unit
+        for name, expression in (('afk_host_idle', '1'), ('iomfb_ext26_retain_epoch', '0'),
+                ('apple_rtkit_flush_rx', '((void)0)'), ('flush_workqueue', '((void)0)'),
+                ('flush_work', '((void)0)'), ('queue_work', '0'),
+                ('dcp_modes_begin_attachment', '((void)0)')):
+            if name + '(' in unit and not re.search(r'^(?:static )?[^\n;]+\b' + name + r'\([^;]*\)\s*\{', unit, re.M):
+                unit = '#define ' + name + '(...) ' + expression + '\n' + unit
+    if 'struct apple_dcp_afkep *endpoints' in unit:
+        unit = '#ifndef ARRAY_SIZE\n#define ARRAY_SIZE(a) (sizeof(a)/sizeof(*(a)))\n#endif\n#ifndef IS_ERR_OR_NULL\n#define IS_ERR_OR_NULL(p) (!(p))\n#endif\n' + unit
+    if 'WRITE_ONCE(' in unit and '#define WRITE_ONCE' not in unit:
+        unit = '#define WRITE_ONCE(x,v) ((x)=(v))\n' + unit
+    if 'DPAVSERV_ENDPOINT' in unit and not re.search(r'#define DPAVSERV_ENDPOINT\s', unit):
+        unit = '#define DPAVSERV_ENDPOINT 0x28\n' + unit
+    if 'dcp_direct_crossbar_link(' in unit and not re.search(r'^(?:static )?[^\n;]+\bdcp_direct_crossbar_link\([^;]*\)\s*\{', unit, re.M):
+        unit = '#define dcp_direct_crossbar_link(d,on) 0\n' + unit
+    if 'ext26_prop_start(' in unit:
+        unit = '#define ext26_prop_start(d,n) 0\n' + unit
+    if 'dcp->chunks.received' in unit:
+        unit = unit.replace('void *data;\n        size_t length;', 'void *data;\n        size_t received; bool contiguous; size_t length;')
+    if 'ext26_command_bytes' in unit:
+        unit = unit.replace('struct apple_dcp_afkep {', 'struct apple_dcp_afkep { size_t ext26_command_bytes; unsigned ext26_command_count;', 1)
+        unit = '#ifndef ALIGN\n#define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))\n#endif\n#ifndef SZ_16K\n#define SZ_16K 16384UL\n#endif\n#ifndef SZ_16M\n#define SZ_16M (16UL<<20)\n#endif\n' + unit
+    return unit
+
 def run_unit(name, unit, output, cases=((),), includes=(), extra=()):
     work = output / name
     work.mkdir(parents=True, exist_ok=True)
     source = work / 'host.c'
+    unit = classic_unit(unit)
     source.write_text(unit)
     command = shlex.split(os.environ.get('HOSTCC', 'clang')) + [
         '-std=gnu11', '-Wall', '-Werror', '-O1', '-g',

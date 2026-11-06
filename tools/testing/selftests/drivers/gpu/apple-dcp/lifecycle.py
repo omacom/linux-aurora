@@ -1340,7 +1340,8 @@ def readiness(root):
     # The T8122 dcpext wrapper moved the pipe's probe into dcp_platform_probe_pipe().
     probe = function(dcp, 'static int dcp_platform_probe_pipe(' if 'static int dcp_platform_probe_pipe(' in dcp
                      else 'static int dcp_platform_probe(')
-    publish = probe[probe.rindex('\tif (dcp->hw.iomfb_method_profile ==\n\t    DCP_IOMFB_METHODS_H17P_EXTERNAL) {'):]
+    publish_marker = '\tif (dcp_is_retained_external(dcp)) {' if 'dcp_is_retained_external(dcp)' in probe else '\tif (dcp->hw.iomfb_method_profile ==\n\t    DCP_IOMFB_METHODS_H17P_EXTERNAL) {'
+    publish = probe[probe.rindex(publish_marker):]
     # Which processor must come up before the boot framebuffer is taken over.
     header = root / 'drivers/gpu/drm/apple/apple_boot_display.h'
     boot_display = ''

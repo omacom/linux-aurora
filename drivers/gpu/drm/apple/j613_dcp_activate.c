@@ -40,6 +40,13 @@ bool apple_t8122_25g83_board(void)
 	return ok;
 }
 
+/* Match the PMGR provider: automatic domains can be clock-gated while active. */
+static bool j613_power_state_active(u32 state)
+{
+	return FIELD_GET(GENMASK(7, 4), state) == 15 ||
+	       ((state & BIT(28)) && FIELD_GET(GENMASK(3, 0), state) == 15);
+}
+
 /* These are DT domain nodes, carrying the PMGR offsets, not copied registers. */
 static int j613_power_ready(void)
 {
@@ -82,7 +89,7 @@ static int j613_power_ready(void)
 			return -ENOMEM;
 		state = readl(pmgr + offset);
 		iounmap(pmgr);
-		if (FIELD_GET(GENMASK(7, 4), state) != 15)
+		if (!j613_power_state_active(state))
 			return -EBUSY;
 	}
 	return 0;
@@ -287,6 +294,196 @@ static void j613_resolve(struct device_node **nodes)
 					   "apple,t8122-asc-mailbox");
 }
 
+static struct of_changeset external_gate;
+static bool external_gate_applied;
+
+/*
+ * UPDATE_PROPERTY also inserts an absent property and records its old value
+ * for changeset rollback. Firmware DTs may already constrain these suppliers.
+ */
+static int __init j613_external_update(struct device_node *np, const char *name,
+				     const void *value, unsigned int length)
+{
+	struct property *prop = kzalloc_obj(*prop);
+	int ret;
+
+	if (!prop)
+		return -ENOMEM;
+	prop->name = kstrdup(name, GFP_KERNEL);
+	prop->length = length;
+	if (length)
+		prop->value = kmemdup(value, length, GFP_KERNEL);
+	if (!prop->name || (length && !prop->value)) {
+		ret = -ENOMEM;
+		goto free;
+	}
+	ret = of_changeset_update_property(&external_gate, np, prop);
+	if (!ret)
+		return 0;
+free:
+	kfree(prop->value);
+	kfree(prop->name);
+	kfree(prop);
+	return ret;
+}
+
+
+/* Optional external transaction; its failure must not unwind the panel. */
+static int __init j613_external_gate(struct device_node *display)
+{
+	struct device_node *chosen, *ext = NULL, *pio = NULL, *report = NULL;
+	struct device_node *nodes[9] = {}, *cpu = NULL, *routes = NULL, *route;
+	struct of_phandle_args args;
+	const char *opt, *uuid, *status, *loader_result;
+	const char *reason = "external node or compatible";
+	struct property *prop = NULL;
+	const void *old;
+	__be32 *cells;
+	u32 state[4], version[3], ready;
+	int len, ret = -EINVAL, i, count = 0;
+
+	chosen = of_find_node_by_path("/chosen");
+	opt = chosen ? of_get_property(chosen, "asahi,j613-25g83-dcpext", &len) : NULL;
+	if (!opt || len != 2 || opt[0] != '1' || opt[1]) {
+		of_node_put(chosen);
+		return 0;
+	}
+	loader_result = of_get_property(chosen, "asahi,j613-25g83-dcpext-result", &len);
+	if (loader_result && len > 0 && loader_result[len - 1] == 0)
+		pr_info("J613 native26 external loader result: %s\n", loader_result);
+	else
+		pr_info("J613 native26 external loader result: absent or malformed\n");
+	of_node_put(chosen);
+	if (!of_machine_is_compatible("apple,j613"))
+		return -ENODEV;
+	ext = of_find_node_by_path("dcpext");
+	if (!ext)
+		ext = of_find_node_by_path("dcpext0");
+#define J613_EXT_REQUIRE(test, why) do { \
+	if (!(test)) { \
+		reason = why; \
+		goto out; \
+	} \
+} while (0)
+	J613_EXT_REQUIRE(ext && of_device_is_compatible(ext, "apple,t8122-dcpext"),
+			"external node or compatible");
+	J613_EXT_REQUIRE(of_property_count_u32_elems(ext, "apple,firmware-compat") == 3 &&
+			!of_property_read_u32_array(ext, "apple,firmware-compat", version, 3),
+			"missing or malformed apple,firmware-compat");
+	J613_EXT_REQUIRE(!of_property_read_string(ext, "apple,firmware-uuid", &uuid),
+			"missing apple,firmware-uuid");
+	J613_EXT_REQUIRE(j613_25g83_identity(true, 1, version, 3, uuid), "firmware identity");
+	J613_EXT_REQUIRE(!of_property_read_u32(ext, "apple,j613-25g83-dcpext-handoff", &ready) && ready == 1,
+			"missing native handoff marker");
+	J613_EXT_REQUIRE(!of_property_read_u32(ext, "apple,t8122-dcpext-firmware-ready", &ready) && ready == 1,
+			"missing firmware-ready marker");
+	J613_EXT_REQUIRE(of_property_count_u32_elems(ext, "apple,j613-25g83-dcpext-boot-state") == 4 &&
+			!of_property_read_u32_array(ext, "apple,j613-25g83-dcpext-boot-state", state, 4),
+			"missing or malformed boot-state");
+	J613_EXT_REQUIRE(j613_25g83_external_state(state, 4), "boot-state not powered RUN and locked");
+	J613_EXT_REQUIRE(of_property_present(ext, "memory-region"), "missing memory-region");
+#undef J613_EXT_REQUIRE
+	pr_info("J613 native26 external handoff: identity, markers, boot-state and memory-region accepted\n");
+	reason = "PMP/DART/mailbox suppliers";
+	nodes[count++] = of_node_get(ext);
+	nodes[count++] = j613_target(ext, "iommus", "#iommu-cells", 5, "apple,t8122-dart");
+	nodes[count++] = j613_target(ext, "mboxes", "#mbox-cells", -1, "apple,t8122-asc-mailbox");
+	pio = of_get_child_by_name(ext, "piodma");
+	nodes[count++] = pio ? j613_target(pio, "iommus", "#iommu-cells", 4, "apple,t8122-dart") : NULL;
+	nodes[count++] = j613_target(ext, "apple,pmp-report", NULL, -1,
+					"apple,t6000-pmp-v2-report-entry");
+	if (!nodes[4] || of_property_read_u32(nodes[4], "reg", &ready) || ready != 8 ||
+	    of_property_read_bool(nodes[4], "apple,no-ack") || !nodes[1] ||
+	    !nodes[3] || nodes[1] == nodes[3])
+		goto out;
+	reason = "PMP report compatible";
+	report = of_get_parent(nodes[4]);
+	if (!report || !of_device_is_compatible(report, "apple,j613-25g83-pmp-report"))
+		goto out;
+	reason = "DISPEXT CPU power domain";
+	cpu = of_parse_phandle(ext, "power-domains", 0);
+	if (!cpu || of_property_read_string(cpu, "label", &status) || strcmp(status, "dispext_cpu") ||
+	    !of_property_read_bool(cpu, "apple,firmware-owned"))
+		goto out;
+	reason = "two crossbar routes";
+	if (of_count_phandle_with_args(ext, "mux-controls", "#mux-control-cells") != 2)
+		goto out;
+	for (i = 0; i < 2; i++) {
+		if (of_parse_phandle_with_args(ext, "mux-controls", "#mux-control-cells", i, &args))
+			goto out;
+		nodes[count++] = args.np;
+		if (args.args_count != 1 || args.args[0] ||
+		    !of_device_is_compatible(args.np, "apple,t6020-display-crossbar"))
+			goto out;
+	}
+	reason = "supplier must be disabled";
+	for (i = 0; i < count; i++) {
+		if (!nodes[i] || of_property_read_string(nodes[i], "status", &status) ||
+		    strcmp(status, "disabled"))
+			goto out;
+	}
+	reason = "two Type-C route children";
+	routes = of_get_child_by_name(ext, "typec-routes");
+	if (of_get_child_count(routes) != 2)
+		goto out;
+	reason = "internal display IOMMU shape";
+	old = of_get_property(display, "iommus", &len);
+	if (!old || len != 8 || !nodes[3]->phandle)
+		goto out;
+	reason = "changeset allocation";
+	prop = kzalloc_obj(*prop);
+	cells = kmalloc(16, GFP_KERNEL);
+	if (!prop || !cells) {
+		kfree(prop);
+		kfree(cells);
+		prop = NULL;
+		ret = -ENOMEM;
+		goto out;
+	}
+	memcpy(cells, old, 8);
+	cells[2] = cpu_to_be32(nodes[3]->phandle);
+	cells[3] = 0;
+	prop->name = kstrdup("iommus", GFP_KERNEL);
+	prop->length = 16;
+	prop->value = cells;
+	if (!prop->name) {
+		kfree(cells);
+		kfree(prop);
+		ret = -ENOMEM;
+		goto out;
+	}
+	reason = "resource changeset";
+	of_changeset_init(&external_gate);
+	ret = of_changeset_update_property(&external_gate, display, prop);
+	if (!ret)
+		ret = j613_external_update(nodes[4], "apple,always-on", NULL, 0);
+	for (i = 0; i < count && !ret; i++)
+		ret = of_changeset_update_prop_string(&external_gate, nodes[i], "status", "okay");
+	for_each_child_of_node(routes, route) {
+		if (!ret)
+			ret = of_changeset_update_prop_string(&external_gate, route, "status", "okay");
+	}
+	if (!ret)
+		ret = of_changeset_apply(&external_gate);
+	if (ret)
+		of_changeset_destroy(&external_gate);
+	else {
+		external_gate_applied = true;
+		pr_info("J613 native26 external gate accepted: reserved firmware, DISPEXT12 and both Type-C routes\n");
+	}
+out:
+	if (ret)
+		pr_info("J613 native26 external gate refused: %d (%s); internal display retained\n", ret, reason);
+	for (i = 0; i < count; i++)
+		of_node_put(nodes[i]);
+	of_node_put(cpu);
+	of_node_put(routes);
+	of_node_put(report);
+	of_node_put(pio);
+	of_node_put(ext);
+	return ret;
+}
+
 int __init apple_j613_25g83_coldplug(void)
 {
 	struct device_node *nodes[J613_NR_NODES] = {}, *chosen;
@@ -382,11 +579,17 @@ int __init apple_j613_25g83_coldplug(void)
 	for (i = 0; i < ARRAY_SIZE(nodes) && !ret; i++)
 		ret = of_changeset_update_prop_string(&gate, nodes[i], "status", "okay");
 	if (!ret) {
+		j613_external_gate(nodes[J613_DISPLAY]);
 		display_clock_hz = witness[3];
 		ret = of_changeset_apply(&gate);
 	}
 	if (ret) {
 		display_clock_hz = 0;
+		if (external_gate_applied) {
+			of_changeset_revert(&external_gate);
+			of_changeset_destroy(&external_gate);
+			external_gate_applied = false;
+		}
 		of_changeset_destroy(&gate);
 	} else {
 		display_clock_hz = witness[3];
