@@ -8,6 +8,7 @@
 #include <linux/bitops.h>
 #include <linux/bitfield.h>
 #include <linux/cpufreq.h>
+#include <linux/debugfs.h>
 #include <linux/err.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -17,6 +18,7 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/seq_file.h>
 #include <linux/module.h>
 #include <linux/soc/apple/pmgr-misc.h>
 #include <linux/workqueue.h>
@@ -465,6 +467,37 @@ static bool apple_pmgr_init_device(struct apple_pmgr_misc *misc,
 	return true;
 }
 
+/* Read only: the whole clock-generator word of one system device (the desired state is bits 3:0, the actual state bits 7:4), no side effect. */
+static int apple_pmgr_misc_ps_show(struct seq_file *s, void *unused)
+{
+	const struct apple_pmgr_sys_device *d = s->private;
+
+	seq_printf(s, "%#010x\n", readl_relaxed(d->base + APPLE_CLKGEN_PSTATE));
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(apple_pmgr_misc_ps);
+
+static void apple_pmgr_misc_debugfs_remove(void *dir)
+{
+	debugfs_remove(dir);
+}
+
+static void apple_pmgr_misc_debugfs_init(struct apple_pmgr_misc *misc)
+{
+	static const char * const names[DEV_MAX] = { "fabric_ps", "dcs_ps" };
+	char *dirname = devm_kasprintf(misc->dev, GFP_KERNEL, "apple-pmgr-misc-%s", dev_name(misc->dev));
+	struct dentry *dir;
+	int i;
+
+	if (!dirname)
+		return;
+	dir = debugfs_create_dir(dirname, NULL);
+	for (i = 0; i < DEV_MAX; i++)
+		if (misc->devices[i].base)
+			debugfs_create_file(names[i], 0400, dir, &misc->devices[i], &apple_pmgr_misc_ps_fops);
+	devm_add_action_or_reset(misc->dev, apple_pmgr_misc_debugfs_remove, dir);
+}
+
 static int apple_pmgr_misc_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -485,6 +518,9 @@ static int apple_pmgr_misc_probe(struct platform_device *pdev)
 		ret = 0;
 
 	platform_set_drvdata(pdev, misc);
+
+	if (!ret)
+		apple_pmgr_misc_debugfs_init(misc);
 
 	/*
 	 * With PMP enabled its firmware owns the fabric and DCS p-states.
