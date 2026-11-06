@@ -76,6 +76,7 @@ enum isp_firmware_version {
 	ISP_FIRMWARE_V_12_4,
 	ISP_FIRMWARE_V_13_5,
 	ISP_FIRMWARE_V_14_7,
+	ISP_FIRMWARE_V_26_6_2,
 };
 
 struct isp_surf {
@@ -262,6 +263,7 @@ struct apple_isp {
 	struct device *dev;
 	const struct apple_isp_hw *hw;
 	enum isp_firmware_version fw_compat;
+	bool preview_26;
 	u32 platform_id;
 	u32 temporal_filter;
 	struct isp_preset *presets;
@@ -310,6 +312,10 @@ struct apple_isp {
 	} fw;
 	/* changes under video_lock once the video device is registered */
 	enum isp_fw_state fw_state;
+	/* First IPC failure; cleared only after fresh channel initialization. */
+	int ipc_error;
+	/* End the current receive invocation before resident reclamation. */
+	bool ipc_quiescing;
 
 	struct isp_surf *ipc_surf;
 	struct isp_surf *extra_surf;

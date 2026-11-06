@@ -139,10 +139,15 @@ static inline bool chan_rx_done(struct apple_isp *isp, struct isp_channel *chan)
 
 int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan)
 {
-	int err = 0;
+	int err = -EAGAIN;
 
 	mutex_lock(&chan->lock);
-	while (1) {
+	/* One ring per turn, even if the producer refills acknowledged slots. */
+	for (u32 i = 0; i < chan->num; i++) {
+		if (READ_ONCE(isp->ipc_error)) {
+			err = READ_ONCE(isp->ipc_error);
+			break;
+		}
 		chan_read_msg(isp, chan, &chan->req);
 		if (chan_rx_done(isp, chan)) {
 			err = 0;
@@ -150,8 +155,11 @@ int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan)
 		}
 		err = chan_handle_once(isp, chan);
 		if (err < 0) {
+			cmpxchg(&isp->ipc_error, 0, err);
+			wake_up_all(&isp->wait);
 			break;
 		}
+		err = -EAGAIN;
 	}
 	mutex_unlock(&chan->lock);
 
@@ -175,6 +183,10 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 		  unsigned long timeout)
 {
 	long t;
+	int err = READ_ONCE(isp->ipc_error);
+
+	if (err)
+		return err;
 
 	chan_write_msg(isp, chan, &chan->req);
 	dma_wmb();
@@ -184,14 +196,21 @@ int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 	if (!timeout)
 		return 0;
 
-	t = wait_event_timeout(isp->wait, chan_tx_done(isp, chan), timeout);
+	t = wait_event_timeout(isp->wait,
+			       READ_ONCE(isp->ipc_error) || chan_tx_done(isp, chan),
+			       timeout);
 	if (t == 0) {
 		dev_err(isp->dev,
 			"%s: timed out on request [0x%llx, 0x%llx, 0x%llx]\n",
 			chan->name, chan->req.arg0, chan->req.arg1,
 			chan->req.arg2);
-		return -ETIME;
+		cmpxchg(&isp->ipc_error, 0, -ETIME);
+		wake_up_all(&isp->wait);
+		return READ_ONCE(isp->ipc_error);
 	}
+
+	if (READ_ONCE(isp->ipc_error))
+		return READ_ONCE(isp->ipc_error);
 
 	isp_dbg(isp, "%s: request success (%ld)\n", chan->name, t);
 

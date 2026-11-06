@@ -2723,6 +2723,10 @@ F:	drivers/pwm/pwm-apple.c
 F:	drivers/reset/reset-apple-cio.c
 F:	drivers/rtc/rtc-macsmc.c
 F:	drivers/soc/apple/*
+F:	tools/asahi/isp-preview-flow-tests.py
+F:	tools/asahi/isp-preview-tests.py
+F:	tools/asahi/isp-tests.py
+F:	tools/asahi/isp/
 F:	tools/asahi/pmp-bootargs-tests.rs
 F:	drivers/spi/spi-apple.c
 F:	drivers/spmi/spmi-apple-controller.c

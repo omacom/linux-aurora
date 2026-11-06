@@ -21,7 +21,11 @@ static int cisp_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize,
 {
 	struct isp_channel *chan = isp->chan_io;
 	struct isp_message *req = &chan->req;
-	int err;
+	int err = READ_ONCE(isp->ipc_error);
+
+	/* Do not overwrite a command the firmware may still be reading. */
+	if (err)
+		return err;
 
 	req->arg0 = isp->cmd_iova;
 	req->arg1 = insize;

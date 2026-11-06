@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * KUnit tests for the videobuf2 queue of the Apple ISP driver, built into
- * isp-v4l2.c. They check the queue parameters vb2 accepts and the buffer
- * limit queue_setup() enforces, without any hardware.
+ * isp-v4l2.c. They check queue parameters, buffer limits and suspended
+ * return ownership and error wakeups without any hardware.
  */
 
 #include <kunit/device.h>
 #include <kunit/test.h>
 #include <linux/bitmap.h>
+#include <linux/completion.h>
+#include <linux/kthread.h>
 
 #define ISP_TEST_FRAME_SIZE 0x1000
 
@@ -107,7 +109,97 @@ static void isp_test_create_bufs_limit(struct kunit *test)
 					     sizes), -EINVAL);
 }
 
+/* Returned suspended buffers remain queued, but no longer outstanding. */
+static void isp_test_suspended_return(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_alloc(test);
+	struct apple_isp_hw hw = {};
+	struct isp_surf surface = {};
+	struct isp_channel chan = {};
+	struct isp_buffer *buf;
+	struct isp_buflist *bl;
+
+	isp->hw = &hw;
+	isp->fw_iova_mask = U64_MAX;
+	spin_lock_init(&isp->buf_lock);
+	INIT_LIST_HEAD(&isp->bufs_pending);
+	INIT_LIST_HEAD(&isp->bufs_submitted);
+	buf = kunit_kzalloc(test, sizeof(*buf), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, buf);
+	buf->surfs[0].iova = 0x300000;
+	list_add_tail(&buf->link, &isp->bufs_submitted);
+	bl = kunit_kzalloc(test, sizeof(*bl) + sizeof(bl->buffers[0]), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, bl);
+	bl->num_buffers = 1;
+	bl->buffers[0].iovas[0] = buf->surfs[0].iova;
+	bl->buffers[0].pool_type = CISP_POOL_TYPE_RENDERED;
+	surface.iova = 0x1000;
+	surface.virt = bl;
+	surface.size = sizeof(*bl) + sizeof(bl->buffers[0]);
+	isp->bt_surf = &surface;
+	chan.req.arg0 = surface.iova;
+	chan.req.arg1 = surface.size;
+	set_bit(ISP_STATE_SLEEPING, &isp->state);
+	KUNIT_EXPECT_EQ(test, ipc_bt_handle(isp, &chan), 0);
+	KUNIT_EXPECT_TRUE(test, list_empty(&isp->bufs_submitted));
+	KUNIT_EXPECT_PTR_EQ(test, isp->bufs_pending.next, &buf->link);
+	KUNIT_EXPECT_EQ(test, isp->sequence, 0);
+}
+
+struct isp_test_wait {
+	struct vb2_queue *queue;
+	struct completion entered;
+	struct completion exited;
+	long remaining;
+};
+
+static int isp_test_queue_waiter(void *arg)
+{
+	struct isp_test_wait *w = arg;
+	DEFINE_WAIT(wait);
+
+	prepare_to_wait(&w->queue->done_wq, &wait, TASK_UNINTERRUPTIBLE);
+	complete(&w->entered);
+	w->remaining = schedule_timeout(5 * HZ);
+	finish_wait(&w->queue->done_wq, &wait);
+	complete(&w->exited);
+	while (!kthread_should_stop())
+		schedule_timeout_interruptible(HZ);
+	return 0;
+}
+
+/* Use the real vb2 error wakeup, waitqueue and startup notification lock. */
+static void isp_test_error_wakeup(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_alloc(test);
+	struct isp_test_wait w = { .queue = &isp->vbq };
+	struct task_struct *task;
+
+	spin_lock_init(&isp->buf_lock);
+	init_waitqueue_head(&isp->vbq.done_wq);
+	isp->ipc_error = -EIO;
+	apple_isp_video_error(isp);
+	KUNIT_EXPECT_FALSE(test, isp->vbq.error);
+	set_bit(ISP_STATE_STREAMING, &isp->state);
+	isp->ipc_error = 0;
+	apple_isp_video_error(isp);
+	KUNIT_EXPECT_FALSE(test, isp->vbq.error);
+	init_completion(&w.entered);
+	init_completion(&w.exited);
+	task = kthread_run(isp_test_queue_waiter, &w, "isp-test-wait");
+	KUNIT_ASSERT_FALSE(test, IS_ERR(task));
+	wait_for_completion(&w.entered);
+	isp->ipc_error = -EIO;
+	apple_isp_video_error(isp);
+	wait_for_completion(&w.exited);
+	kthread_stop(task);
+	KUNIT_EXPECT_TRUE(test, isp->vbq.error);
+	KUNIT_EXPECT_GT(test, w.remaining, 0L);
+}
+
 static struct kunit_case isp_v4l2_test_cases[] = {
+	KUNIT_CASE(isp_test_suspended_return),
+	KUNIT_CASE(isp_test_error_wakeup),
 	KUNIT_CASE(isp_test_queue_init),
 	KUNIT_CASE(isp_test_reqbufs_limit),
 	KUNIT_CASE(isp_test_create_bufs_limit),
