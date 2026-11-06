@@ -710,6 +710,8 @@ static int dcp_v14_map_piodma(struct apple_dcp_v14 *v14, u32 id)
 #define DCP_V14_DESC_TIMEOUT_MS	3000
 /* A withdrawn description that is not back by then gets its link redone. */
 #define DCP_V14_DESC_RELINK_MS	2000
+/* An external display's timings start this soon after it is powered on. */
+#define DCP_V14_NORMAL_MODE_MS	500
 
 /* An external processor's default stride; no framebuffer is allocated for it. */
 #define DCP_V14_EXT_STRIDE	(1920 * 4)
@@ -3208,6 +3210,68 @@ static int dcp_v14_set_power(struct apple_dcp_v14 *v14, bool on)
 	return ret;
 }
 
+/* Handles one queued firmware callback, waiting up to @timeout for it. */
+static int dcp_v14_pump(struct apple_dcp_v14 *v14, unsigned long timeout)
+{
+	KUNIT_STATIC_STUB_REDIRECT(dcp_v14_pump, v14, timeout);
+	return dcp_v14_link_pump(&v14->link, timeout, dcp_v14_callback, v14);
+}
+
+/*
+ * Waits after A472(1) until the firmware runs the display's timings. It
+ * starts them in a deferred run mode change and then sets NormalModeActive
+ * (D104) to 1; with a DSC mode (3840x2560@60 on the J516C 14.7 image) that
+ * change ends only after A472 replied, NormalModeActive still 0. The first
+ * swap of a session sent before then is dropped ("swallowed swap ID 1 as
+ * timings are not enabled for External Display"), its A407 never completes
+ * and the session is lost. A slower mode's change ends within A472, which is
+ * why only a fast first mode failed. Later swaps sent early are held, not
+ * dropped, but every power-on is waited for alike: it costs one run mode
+ * change, about 20 ms.
+ *
+ * Firmware that has not reported NormalModeActive is not waited for.
+ * Called with the RPC lock held; the callbacks are handled as by
+ * dcp_v14_idle().
+ */
+static int dcp_v14_external_wait_normal(struct apple_dcp_v14 *v14)
+{
+	static const u8 key[64] = "NormalModeActive";
+	unsigned long deadline = jiffies + msecs_to_jiffies(DCP_V14_NORMAL_MODE_MS);
+	ktime_t start = ktime_get();
+	struct dcp_v14_property *p;
+	unsigned int pumped = 0;
+	int ret;
+
+	lockdep_assert_held(&v14->lock);
+	for (;;) {
+		p = dcp_v14_property(v14, 0, key, false);
+		if (IS_ERR_OR_NULL(p) || p->value) {
+			if (pumped)
+				dev_dbg(v14->dev, "display timings running %lld us after power-on\n",
+					ktime_us_delta(ktime_get(), start));
+			return 0;
+		}
+		if (v14->failed)
+			return -EIO;
+		if (!time_before(jiffies, deadline))
+			break;
+		ret = dcp_v14_pump(v14, deadline - jiffies);
+		pumped++;
+		if (ret == -ETIMEDOUT)
+			break;
+		if (ret && ret != -EAGAIN) {
+			v14->failed = true;
+			dev_err(v14->dev, "DCP notification failed: %d; recovery requires a reboot\n",
+				ret);
+			dcp_v14_external_stopped(v14);
+			return ret;
+		}
+	}
+	dev_warn(v14->dev, "display timings not running %u ms after power-on\n",
+		 DCP_V14_NORMAL_MODE_MS);
+	return -ETIMEDOUT;
+}
+
 /* The display is fully described, and no description is in transfer. */
 static bool dcp_v14_external_described(struct apple_dcp_v14 *v14)
 {
@@ -3364,6 +3428,9 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
 		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
 	if (!ret)
 		ret = dcp_v14_set_power(v14, true);
+	/* No swap before the timings run; see dcp_v14_external_wait_normal(). */
+	if (!ret)
+		ret = dcp_v14_external_wait_normal(v14);
 	if (!ret) {
 		v14->panel_width = mode.mode.hdisplay;
 		v14->panel_height = mode.mode.vdisplay;
@@ -3477,6 +3544,7 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
 #include "iomfb_v14_7_external_audio_test.c"
 #include "iomfb_v14_7_shared_colors_test.c"
+#include "iomfb_v14_7_normal_mode_test.c"
 #include "iomfb_v14_7_backlight_test.c"
 #include "iomfb_v14_7_backlight_lifetime_test.c"
 #endif
