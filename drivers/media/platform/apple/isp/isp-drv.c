@@ -685,6 +685,7 @@ static const struct apple_isp_hw apple_isp_hw_t6020 = {
 	.meta_size = ISP_META_SIZE_T8112,
 };
 
+/* T8122/26.6.2 metadata layout and units are not qualified: no gain control. */
 static const struct apple_isp_hw apple_isp_hw_t8122 = {
 	.gen = ISP_GEN_T8112,
 	.pmu_base = 0x2d0704000,
@@ -799,6 +800,7 @@ static const struct apple_isp_hw apple_isp_hw_t8140 = {
 	.boot_mode = 1,
 	.capture_meta_size = ISP_CAPTURE_META_SIZE_T8140,
 	.resident_fw = true,
+	.meta_exposure = true,
 };
 
 static const struct of_device_id apple_isp_of_match[] = {
