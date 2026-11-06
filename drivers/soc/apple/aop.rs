@@ -2309,6 +2309,25 @@ const HW_CFG_T8140: AopHwConfig = AopHwConfig {
     required_endpoints: &[0x20, 0x21, 0x22, 0x23, 0x2b],
 };
 
+/// T8152 (Mac mini): the firmware is preloaded by the bootloader and the setup
+/// mailbox belongs to the secure world, so there is no setup port: the CPU is
+/// started through the wrapper and RTKit boots on the primary mailbox. It
+/// advertises three AFK endpoints, 0x20 SPUApp, 0x21 wakehint and 0x22
+/// aop-audio, all announced with EPIC sub-header version 2. The firmware only
+/// brings its AFK endpoints up once all of them are started, which start_afk
+/// does back to back. Calls with the version 2 header on the aop-audio
+/// endpoint were all answered, with the tag echoed at the version 2 offset.
+const HW_CFG_T8152: AopHwConfig = AopHwConfig {
+    ec0p: 0,
+    aopt: 0,
+    alig: 0,
+    patch_bootargs: false,
+    epic_v4: false,
+    setup_port: false,
+    quiesce_on_unbind: true,
+    required_endpoints: &[0x20, 0x21, 0x22],
+};
+
 kernel::of_device_table!(
     OF_TABLE,
     MODULE_OF_TABLE,
@@ -2319,6 +2338,7 @@ kernel::of_device_table!(
         (of::DeviceId::new(c_str!("apple,t6000-aop")), &HW_CFG_T6000),
         (of::DeviceId::new(c_str!("apple,t6020-aop")), &HW_CFG_T6020),
         (of::DeviceId::new(c_str!("apple,t8140-aop")), &HW_CFG_T8140),
+        (of::DeviceId::new(c_str!("apple,t8152-aop")), &HW_CFG_T8152),
     ]
 );
 

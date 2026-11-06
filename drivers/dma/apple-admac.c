@@ -1034,8 +1034,15 @@ static const struct admac_hw admac_t8140_hw = {
 	.evolved_layout = true,
 };
 
+static const struct admac_hw admac_t8152_hw = {
+	/* macOS writes no global 0x28/0x2c value on this SoC */
+	.set_unk28 = false,
+	.evolved_layout = true,
+};
+
 static const struct of_device_id admac_of_match[] = {
 	{ .compatible = "apple,t8140-admac", .data = &admac_t8140_hw },
+	{ .compatible = "apple,t8152-admac", .data = &admac_t8152_hw },
 	{ .compatible = "apple,t8122-admac", .data = &admac_t8122_hw },
 	{ .compatible = "apple,t8103-admac", .data = &admac_t8013_hw },
 	{ .compatible = "apple,admac", .data = &admac_t8013_hw },
