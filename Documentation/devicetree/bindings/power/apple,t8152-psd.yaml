@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/apple,t8152-psd.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Apple T8152 PSD service slot power domain
+
+maintainers:
+  - Joshua Warren <816217+joshuaswarren@users.noreply.github.com>
+
+allOf:
+  - $ref: power-domain.yaml#
+
+description: |
+  The T8152 (M6) power state director (PSD) gates some blocks, among them the
+  USB controllers and their DARTs, behind a per-port service slot. Each
+  slot has a 0x100 byte register window at the PSD base plus (slot << 8) with
+  the status (0x80), request (0x90), diagnostic (0xa0) and valid (0xbc)
+  registers. A consumer must power the parent PMGR domains of the block
+  first, then request state 0 (running) and wait for the acknowledge. This
+  node models that as a power domain: the PMGR domains are its parents
+  (power-domains), powering it on writes the request. Power-off requests
+  state 6 (off).
+
+  A "apple,t8152-psd-group" node covers several slots that are brought up
+  together: one reg window per slot, requested in reg order with the active
+  state given by apple,psd-states, and put back to state 6 in reverse order.
+
+properties:
+  compatible:
+    enum:
+      - apple,t8152-psd
+      - apple,t8152-psd-group
+
+  reg:
+    minItems: 1
+    maxItems: 3
+
+  "#power-domain-cells":
+    const: 0
+
+  power-domains:
+    description:
+      Parent PMGR power domains, powered before the slot request. Absent when
+      the block has no PMGR power state.
+    minItems: 1
+    maxItems: 4
+
+  label:
+    description: Name of the power domain.
+
+  apple,psd-states:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 1
+    maxItems: 3
+    description:
+      Active PSD state requested for each reg window, in reg order (default
+      0, running). Each value is 0 to 5.
+
+  apple,psd-timeout-ms:
+    description: Acknowledge timeout in milliseconds (default 1000).
+
+required:
+  - compatible
+  - reg
+  - "#power-domain-cells"
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    soc {
+      #address-cells = <2>;
+      #size-cells = <2>;
+
+      ps_usb_aon: power-controller-aon {
+        #power-domain-cells = <0>;
+      };
+
+      ps_usb: power-controller-usb {
+        #power-domain-cells = <0>;
+      };
+
+      power-controller@1000 {
+        compatible = "apple,t8152-psd";
+        reg = <0x0 0x1000 0x0 0x100>;
+        #power-domain-cells = <0>;
+        power-domains = <&ps_usb_aon>, <&ps_usb>;
+        label = "psd_example";
+      };
+    };
+  - |
+    soc {
+      #address-cells = <2>;
+      #size-cells = <2>;
+
+      power-controller@2000 {
+        compatible = "apple,t8152-psd-group";
+        reg = <0x0 0x2000 0x0 0x100>,
+              <0x0 0x2100 0x0 0x100>,
+              <0x0 0x2200 0x0 0x100>;
+        apple,psd-states = <0 2 2>;
+        #power-domain-cells = <0>;
+        label = "psd_group_example";
+      };
+    };

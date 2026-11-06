@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple T8152 (M6) J873: PCIe-C tunnel of ACIO port 3 (ATC3, the free rear port): the tunnel's own
+ * 256-stream Gen3 DART and the PCIe-C root complex that the USB4 router tunnels PCIe through.
+ *
+ * Addresses are physical: ADT bus address + 0x200000000 below 0x400000000; the configuration space
+ * 0x1c80000000 is above that and unchanged. Sources: the ADT nodes apciec3 and dart-apciec3.
+ * The tunnel ranges are identity per port (PCI address = CPU address): a device behind the tunnel
+ * decodes the address it is given. The boot loader supplies the register tunables
+ * (apple,tunable-* of the port and of the DART nodes) through the usb4-3 aliases.
+ */
+
+/ {
+	aliases {
+		usb4-3-pcie = &apciec3;
+	};
+
+	soc {
+		usb4_3_pcie_tunnel: usb4-pcie-tunnel@0 {
+			#address-cells = <2>;
+			#size-cells = <2>;
+			/* Identity window over every address of the tunnel (below 0x2000000000). */
+			ranges = <0x0 0x0 0x0 0x0 0x20 0x0>;
+
+			usb4_3_pcie_dart: iommu@414000000 {
+				compatible = "apple,t8152-dart";
+				/*
+				 * ADT dart-apciec3 (dart,gen3, manual-availability): reg
+				 * 0x414000000, 256 SIDs, vm-base 0x10080000000 vm-size 0x7ff00000;
+				 * apciec-piodma-sid 254
+				 */
+				reg = <0x4 0x14000000 0x0 0xc000>,
+				      <0x2 0x00000280 0x0 0x10>;
+				interrupt-parent = <&aic>;
+				interrupts = <AIC_IRQ 1823 IRQ_TYPE_LEVEL_HIGH>;
+				#iommu-cells = <1>;
+				apple,static-topology;
+				apple,num-streams = <256>;
+				/*
+				 * Endpoint-visible window: the upper 2 GiB of the 32-bit bus space
+				 * minus the top MiB (the MSI doorbell is at 0xfffff000). The host
+				 * bridge adds the 1 TiB alias before the DART sees the address, as
+				 * on T602x.
+				 */
+				apple,dma-range = /bits/ 64 <0x80000000 0x7ff00000>;
+				apple,dma-offset = /bits/ 64 <0x10000000000>;
+				/* ADT dart-tunables-instance-0 as (offset, mask, value) */
+				apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+			};
+
+			apciec3: pcie@1c80000000 {
+				/*
+				 * ADT apciec,t8152. The driver selects the T8152 hardware table
+				 * from the first compatible; the t8103 string is the binding
+				 * fallback.
+				 */
+				compatible = "apple,t8152-pciec", "apple,t8103-pciec";
+				device_type = "pci";
+
+				/*
+				 * names and order as pcie-apple.c reads them; ltssm (0x410020000)
+				 * and the 8th range (0x414028000) are unused by the driver
+				 */
+				reg = <0x1c 0x80000000 0x0 0x10000000>,
+				      <0x4 0x14034000 0x0 0x4000>,
+				      <0x4 0x14020000 0x0 0x8000>,
+				      <0x4 0x14038000 0x0 0x4000>,
+				      <0x4 0x14060000 0x0 0x4000>,
+				      <0x4 0x10020000 0x0 0x4000>,
+				      <0x4 0x1402c000 0x0 0x4000>;
+				reg-names = "config", "rc", "port0", "fabric", "debug", "ltssm",
+					    "intr2axi";
+
+				interrupt-parent = <&aic>;
+				interrupts = <AIC_IRQ 1822 IRQ_TYPE_LEVEL_HIGH>;
+				power-domains = <&psd_atc3_pcie>;
+
+				/*
+				 * ADT msi-vector-offset 1879 and 512 vectors are shared by all PCIe
+				 * controllers of the SoC; this tunnel takes the slice at 1975.
+				 * UNVERIFIED: the slice is not checked against the other
+				 * controllers and MSI delivery was not measured. MSI is not
+				 * needed to enumerate.
+				 */
+				msi-controller;
+				msi-parent = <&apciec3>;
+				msi-ranges = <&aic AIC_IRQ 1975 IRQ_TYPE_EDGE_RISING 32>;
+
+				iommu-map = <0x0 &usb4_3_pcie_dart 0x0 0x40>;
+				iommu-map-mask = <0x3f>;
+
+				bus-range = <0x0 0x7f>;
+				#address-cells = <3>;
+				#size-cells = <2>;
+				/*
+				 * The ADT ranges (flags, pci lo, pci hi -> parent), decoded.
+				 */
+				ranges = <0x43000000 0x14 0x0 0x14 0x00000000 0x2 0x00000000>,
+					 <0x02000000 0x0 0x100000 0x16 0x00100000 0x0 0x3ff00000>,
+					 <0x42000000 0x0 0x40000000 0x16 0x40000000 0x0 0x40000000>;
+
+				apciec3_port: pci@0,0 {
+					device_type = "pci";
+					reg = <0x0 0x0 0x0 0x0 0x0>;
+					external-facing;
+
+					#address-cells = <3>;
+					#size-cells = <2>;
+					ranges;
+
+					interrupt-controller;
+					#interrupt-cells = <1>;
+					interrupt-map-mask = <0 0 0 7>;
+					interrupt-map = <0 0 0 1 &apciec3_port 0 0 0 0>,
+							<0 0 0 2 &apciec3_port 0 0 0 1>,
+							<0 0 0 3 &apciec3_port 0 0 0 2>,
+							<0 0 0 4 &apciec3_port 0 0 0 3>;
+				};
+			};
+		};
+	};
+};
+
+&usb4_3_acio {
+	apple,pcie-tunnel = <&usb4_3_pcie_tunnel>;
+};
