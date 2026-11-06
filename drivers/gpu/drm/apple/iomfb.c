@@ -1665,6 +1665,23 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *ctx,
 	return ret;
 }
 
+/*
+ * The catalog no longer describes the display, though no replacement
+ * parsed: its mode ids refer to a description since changed or withdrawn.
+ * It stays allocated for readers holding a snapshot, but is no longer
+ * offered or matched. A transfer started before the current attachment
+ * changes nothing (-ESTALE).
+ */
+int dcp_modes_withdraw(struct apple_dcp *dcp, u64 generation)
+{
+	guard(mutex)(&dcp->modes_lock);
+	if (generation != dcp->modes_generation)
+		return -ESTALE;
+	dcp->modes_admitted = false;
+	dcp->modes_provisional = false;
+	return 0;
+}
+
 /* Caller holds hpd_mutex -> dcpavserv.lock -> metadata.lock. */
 static bool dcp_exception_mode_current_locked(struct apple_dcp *dcp,
 					     const struct dcp_display_mode *mode)
