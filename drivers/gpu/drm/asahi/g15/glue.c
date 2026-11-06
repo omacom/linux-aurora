@@ -19,6 +19,7 @@
 #include <linux/pfn.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/apple/pmp.h>
+#include <linux/soc/apple/pmp-report.h>
 #include <linux/soc/apple/display.h>
 
 void asahi_g15_sha256(const u8 *data, size_t len, u8 *out);
@@ -37,6 +38,7 @@ int asahi_g15_pmp_prepare(struct device *dev);
 int asahi_g15_display_prepare(struct device *dev);
 int asahi_g15_pmp_get(struct device *dev);
 int asahi_g15_pmp_ready(void);
+int asahi_g15_pmp_report_t6031(bool enable);
 void asahi_g15_pmp_put(struct device *dev);
 bool asahi_g15_reserved_uat(u32 index, u64 start, u64 size);
 
@@ -182,6 +184,12 @@ int asahi_g15_pmp_get(struct device *dev)
 int asahi_g15_pmp_ready(void)
 {
 	return apple_pmp_t6030_gpu_ready();
+}
+
+/* T6031: the AGX request of the PMP report, after the firmware is running. */
+int asahi_g15_pmp_report_t6031(bool enable)
+{
+	return apple_pmp_report_t6031_gfx(enable);
 }
 
 /*
