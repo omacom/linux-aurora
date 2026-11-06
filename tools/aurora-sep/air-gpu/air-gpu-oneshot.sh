@@ -40,7 +40,7 @@ t8122_clkgen            e1c|e5c|none                       clock-generator slot:
 t8122_sgx_setup         none|t6030                         SGX write before the firmware starts: none (default) or T6030 0x70001
 t8122_unit_mask_a       0x[0-9a-fA-F]{1,9}|[1-9][0-9]{0,10}  HwDataB unit mask A: nonzero, within 0x700000001 (default)
 t8122_unit_mask_b       0x[1-7]|[1-7]                      HwDataB unit mask B: nonzero, within 0x7 (default 0x3)
-t8122_pstate_cap        [1-5]                              highest GPU performance state, 1 to 5 (default 2; above 2 has no temperature feedback yet)
+t8122_pstate_cap        [1-5]                              ceiling 1..5; default thermal, fallback 2
 m3_expose               -1|0|1                             render node: -1 auto (on for J613/J615, the default), 0 off, 1 on
 m3_timeout_nohang       0|1                                on a job timeout, fail the job without the hang path
 '

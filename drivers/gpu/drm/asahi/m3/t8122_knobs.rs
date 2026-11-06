@@ -25,11 +25,11 @@ pub(crate) const UNIT_MASK_B: u32 = 0x7;
 /// No unit-mask bit outside these is accepted: the default masks.
 pub(crate) const UNIT_MASK_A_LIMIT: u64 = 0x7_0000_0003;
 pub(crate) const UNIT_MASK_B_LIMIT: u64 = 0x7;
-/// The default performance-state ceiling: the lowest two states.
+/// The startup and sensor-failure cap, also the fixed ceiling with thermal control off.
 pub(crate) const PSTATE_CAP: u32 = 2;
 /// The highest performance-state ceiling the experiment accepts. The same as the driver's own
-/// limit when the fast-die temperature controller is off (`m3_adt_config::ADT_MAX_PSTATE_LIMIT`):
-/// J613/J615 have no SoC die temperature zone yet, so there is no thermal feedback above it.
+/// limit when thermal control is off (`m3_adt_config::ADT_MAX_PSTATE_LIMIT`). An omitted cap
+/// lets thermal control use the published table; explicit experiment caps remain bounded.
 pub(crate) const PSTATE_CAP_MAX: u32 = 5;
 
 /// Parse a decimal or `0x`-prefixed hexadecimal `u64`. A leading sign is not accepted.
@@ -162,6 +162,25 @@ pub(crate) struct Values {
     pub(crate) unit_mask_a: u64,
     pub(crate) unit_mask_b: u32,
     pub(crate) pstate_cap: u32,
+    pub(crate) pstate_cap_explicit: bool,
+}
+
+/// Firmware ceiling and initial runtime cap for one T8122 boot.
+pub(crate) struct PstateLimits {
+    /// None lets the existing policy select the ceiling from the published table.
+    pub(crate) ceiling: Option<u32>,
+    pub(crate) safe: u32,
+}
+
+impl Values {
+    /// Only thermal control may lift an omitted experiment cap. Explicit caps retain their
+    /// fixed ceiling and initial cap, including when thermal control is disabled.
+    pub(crate) fn pstate_limits(&self, thermal_enabled: bool) -> PstateLimits {
+        PstateLimits {
+            ceiling: (self.pstate_cap_explicit || !thermal_enabled).then_some(self.pstate_cap),
+            safe: self.pstate_cap,
+        }
+    }
 }
 
 /// A parameter given with a value it does not accept: its name and what it accepts.
@@ -217,6 +236,7 @@ pub(crate) fn resolve(raw: &Raw) -> Result<Values, Refusal> {
         unit_mask_a,
         unit_mask_b,
         pstate_cap,
+        pstate_cap_explicit: raw.pstate_cap != UNSET,
     })
 }
 
@@ -265,6 +285,7 @@ mod tests {
         assert_eq!(v.sgx_setup, Some((0xd1_4000, 0x7_0001)));
         assert_eq!((v.unit_mask_a, v.unit_mask_b), (0x7_0000_0003, 7));
         assert_eq!(v.pstate_cap, 2);
+        assert!(!v.pstate_cap_explicit);
     }
 
     #[test]
@@ -328,6 +349,30 @@ mod tests {
             assert!(resolve(&with(|r| r.pstate_cap = cap)).is_err(), "cap {cap}");
         }
         assert_eq!(PSTATE_CAP_MAX, 5);
+    }
+
+    #[test]
+    fn omitted_cap_allows_the_table_only_with_thermal_control() {
+        let v = resolve(&with(|_| {})).unwrap();
+        let controlled = v.pstate_limits(true);
+        assert_eq!(controlled.ceiling, None);
+        assert_eq!(controlled.safe, 2);
+        let fixed = v.pstate_limits(false);
+        assert_eq!(fixed.ceiling, Some(2));
+        assert_eq!(fixed.safe, 2);
+    }
+
+    #[test]
+    fn explicit_caps_preserve_their_ceiling_and_startup_cap() {
+        for cap in 1..=PSTATE_CAP_MAX {
+            let v = resolve(&with(|r| r.pstate_cap = u64::from(cap))).unwrap();
+            assert!(v.pstate_cap_explicit);
+            for thermal_enabled in [false, true] {
+                let limits = v.pstate_limits(thermal_enabled);
+                assert_eq!(limits.ceiling, Some(cap));
+                assert_eq!(limits.safe, cap);
+            }
+        }
     }
 
     #[test]

@@ -182,9 +182,9 @@ impl PstatePolicy {
     }
 
     /// Clamp the `asahi.m3_max_pstate` and `asahi.m3_boot_pstate` settings to the published table
-    /// of `hwdata` (the generated HwData object image), and to `ceiling` when given (the T8122
-    /// start experiment's `asahi.t8122_pstate_cap`).
-    fn new(dev: &device::Device, hwdata: &[u8], ceiling: Option<u32>) -> Result<Self> {
+    /// of `hwdata` (the generated HwData object image), and to an explicit T8122 experiment
+    /// cap. Its omitted cap permits the table with thermal control, starting at state 2.
+    fn new(dev: &device::Device, hwdata: &[u8], experiment: Option<&Experiment>) -> Result<Self> {
         let hwb_max = offset_of!(raw::HwDataBG15V14_8_3, max_pstate);
         let hwb_freq = offset_of!(raw::HwDataBG15V14_8_3, frequencies);
         let table_max = read_u32(hwdata, hwb_max)?;
@@ -194,6 +194,7 @@ impl PstatePolicy {
         let freq = |i: u32| read_u32(hwdata, hwb_freq + 4 * i as usize);
         // Unset: the thermal limit is on.
         let thermal = m3_params::thermal_param().unwrap_or(ThermalMode::On);
+        let limits = experiment.map(|e| e.pstate_limits(thermal != ThermalMode::Off));
         // Unset: the whole table when the thermal limit bounds the runtime cap, the default cap
         // otherwise.
         let requested = m3_params::max_pstate_param().unwrap_or(match thermal {
@@ -219,7 +220,7 @@ impl PstatePolicy {
             );
             max = ADT_MAX_PSTATE_LIMIT;
         }
-        if let Some(ceiling) = ceiling {
+        if let Some(ceiling) = limits.as_ref().and_then(|l| l.ceiling) {
             if max > ceiling {
                 dev_info!(
                     dev,
@@ -234,7 +235,9 @@ impl PstatePolicy {
         // starts at (and never goes below) the cap used without it.
         let safe = match thermal {
             ThermalMode::Off => max,
-            ThermalMode::Hold | ThermalMode::On => max.min(ADT_MAX_PSTATE_LIMIT),
+            ThermalMode::Hold | ThermalMode::On => {
+                max.min(limits.as_ref().map_or(ADT_MAX_PSTATE_LIMIT, |l| l.safe))
+            }
         };
         let boot = m3_params::boot_pstate_param()
             .unwrap_or(u64::from(safe))
@@ -313,7 +316,7 @@ impl Contents {
         storage::validate_iomaps(iomaps).map_err(|_| EINVAL)?;
         let images = build_images(dev, firmware, soc, experiment, iomaps)?;
         let hwdata = images.get(HWDATA).and_then(|i| i.as_deref()).ok_or(EINVAL)?;
-        let pstates = PstatePolicy::new(dev, hwdata, experiment.map(|e| e.pstate_cap()))?;
+        let pstates = PstatePolicy::new(dev, hwdata, experiment)?;
         let table = match soc.pstates {
             PstateTable::Fixed { states, top_mhz } => (states, top_mhz),
             PstateTable::DeviceTree => crate::m3::m3_board::opp_table_shape(pdev, soc).ok_or_else(|| {
