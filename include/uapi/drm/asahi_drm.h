@@ -409,7 +409,9 @@ enum drm_asahi_feature {
 
 	/**
 	 * @DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES: M5: render commands accept
-	 * DRM_ASAHI_RENDER_STAGE_PREFIXES.
+	 * DRM_ASAHI_RENDER_STAGE_PREFIXES in a shorter command form. The kernel
+	 * no longer reports this bit; see
+	 * DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2.
 	 */
 	DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES = (1UL) << 25,
 
@@ -440,6 +442,13 @@ enum drm_asahi_feature {
 	 * DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS as an ordering hint.
 	 */
 	DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS = (1UL) << 30,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2: M5: render commands accept
+	 * DRM_ASAHI_RENDER_STAGE_PREFIXES with the full struct
+	 * drm_asahi_cmd_render.
+	 */
+	DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2 = (1UL) << 31,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -1369,7 +1378,7 @@ enum drm_asahi_render_flags {
 	 * whole ones. Earlier renders in the tiling prefix are waited on to
 	 * completion. The command must be the full struct drm_asahi_cmd_render.
 	 * Not combined with DRM_ASAHI_RENDER_FRAGMENT_BARRIERS. Requires
-	 * DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES.
+	 * DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2.
 	 */
 	DRM_ASAHI_RENDER_STAGE_PREFIXES = (1U << 23),
 

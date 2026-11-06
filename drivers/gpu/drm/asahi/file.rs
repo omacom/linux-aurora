@@ -89,9 +89,9 @@ pub(crate) const DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: u64 =
 pub(crate) const DRM_ASAHI_RENDER_SHADER_WRITES: u32 =
     uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_SHADER_WRITES;
 /// Renders may carry separate tiling prefixes of both subqueues
-/// (DRM_ASAHI_RENDER_STAGE_PREFIXES).
-pub(crate) const DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES: u64 =
-    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES as u64;
+/// (DRM_ASAHI_RENDER_STAGE_PREFIXES), as the full render command.
+pub(crate) const DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2 as u64;
 /// The tiling half waits only on the render and compute prefixes of the command's stage-prefix
 /// fields, its fragment half on the whole ones.
 #[allow(dead_code)]
