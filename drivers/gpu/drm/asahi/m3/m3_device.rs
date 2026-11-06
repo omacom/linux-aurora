@@ -176,6 +176,12 @@ impl Device {
     /// Read-only snapshot. Do not select or acknowledge fault banks here;
     /// the firmware owns those registers until recovery is ported.
     pub(crate) fn log_engine_state(&self, vm: &crate::mmu::Vm) -> Result {
+        if self.firmware.profile() == super::m3_profile::Profile::Extended {
+            // Adaptive clock gating can leave individual engine banks inaccessible
+            // even while the GPU performance-state register says powered up.
+            dev_info!(self.dev.as_ref(), "M3: adaptive firmware fault evidence uses retained metadata; engine banks may be gated\n");
+            return Ok(());
+        }
         let sgx_guard = self.sgx.try_access().ok_or(ENODEV)?;
         let sgx = sgx_guard.as_view();
         let pstate = sgx.try_read32(0xe01000)? & 0xf;

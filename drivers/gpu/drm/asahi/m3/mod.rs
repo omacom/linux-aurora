@@ -198,3 +198,12 @@ mod t8122_admission;
 pub(crate) mod m3_soc;
 
 mod t8122_hwdata;
+
+mod m3_init_26;
+mod m3_profile;
+mod m3_mmio_26;
+
+#[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+mod m3_power_26;
+
+mod m3_channel_format;
