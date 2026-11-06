@@ -308,6 +308,9 @@ pub(crate) trait Backend: Send + Sync {
     fn supports_submission(&self) -> bool { true }
     /// Whether this backend's scheduler workers run in their queue creator's cluster (M5).
     fn creator_cluster_scheduling(&self) -> bool { false }
+    /// The reclaim-safe queue for the scheduler's timeout work, whose handler signals the
+    /// fences of timed-out jobs.
+    fn fence_queue(&self) -> Arc<workqueue::OwnedQueue>;
     fn supports_engine(&self, _engine: Engine) -> bool { true }
     /// Device policy applied to a validated command before it is ordered (the M5 resource
     /// plan).
@@ -472,15 +475,19 @@ impl<B: Backend> Scheduler<B> {
             Engine::Compute => (COMPUTE_CREDITS, c_str!("asahi_g17_compute")),
         };
         let device = dev.as_ref().as_ref();
-        let scheduler = if backend.creator_cluster_scheduling() {
+        let submit = if backend.creator_cluster_scheduling() {
             // The run and free work stays in the creating CPU's cluster, as the event work
             // follows the submitter, instead of wherever an unbound worker last ran.
             let queue = workqueue::OwnedQueue::new_ordered_reclaim(name)?;
             queue.restrict(Cpumask::cluster_of(CpuId::current()))?;
-            sched::Scheduler::new_with_submit_wq(device, 1, credits, 0, TIMEOUT_MS, name, queue)?
+            Some(queue)
         } else {
-            sched::Scheduler::new(device, 1, credits, 0, TIMEOUT_MS, name)?
+            // drm_sched allocates its own ordered reclaim-safe queue.
+            None
         };
+        let scheduler = sched::Scheduler::new_with_queues(
+            device, 1, credits, 0, TIMEOUT_MS, name, submit, Some(backend.fence_queue()),
+        )?;
         let entity = sched::Entity::new(&scheduler, sched::Priority::Kernel)?;
         Ok(Self {
             entity,

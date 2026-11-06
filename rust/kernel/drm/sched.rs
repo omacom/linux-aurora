@@ -461,6 +461,9 @@ struct SchedulerOwner<T: JobImpl> {
     /// The driver's submission queue, if it supplied one. Fields drop after `Drop::drop`, so the
     /// queue is destroyed only after `drm_sched_fini` has stopped the scheduler's work on it.
     _submit_wq: Option<crate::workqueue::OwnedQueue>,
+    /// The driver's timeout queue, if it supplied one; possibly shared with other schedulers. This
+    /// reference keeps it alive until `drm_sched_fini` has synchronized the timeout work.
+    _timeout_wq: Option<Arc<crate::workqueue::OwnedQueue>>,
 }
 
 impl<T: JobImpl> Drop for SchedulerOwner<T> {
@@ -518,25 +521,34 @@ impl<T: JobImpl> Scheduler<T> {
             timeout_ms,
             name,
             None,
+            None,
         )
     }
 
-    /// Creates a new DRM Scheduler object whose run and free work goes to `submit_wq`.
+    /// Creates a new DRM Scheduler object whose run and free work goes to `submit_wq` and whose
+    /// timeout work goes to `timeout_wq`, each where given.
     ///
-    /// The scheduler owns the queue and destroys it after it has been finalized. Like the queue
-    /// drm_sched allocates itself, it must be ordered and usable for memory reclaim (see
-    /// [`OwnedQueue::new_ordered_reclaim`]), so that one scheduler's jobs run and are freed one at a
-    /// time.
+    /// Without `submit_wq`, drm_sched allocates an ordered reclaim-safe queue itself. With one,
+    /// the scheduler owns it and destroys it after it has been finalized; like drm_sched's own it
+    /// must be ordered and usable for memory reclaim (see [`OwnedQueue::new_ordered_reclaim`]), so
+    /// that one scheduler's jobs run and are freed one at a time.
+    ///
+    /// Without `timeout_wq`, the timeout work runs on `system_percpu_wq`, which memory reclaim
+    /// cannot rely on. A driver whose timeout handler signals job fences passes a queue usable for
+    /// memory reclaim (such as [`OwnedQueue::new_percpu_reclaim`]); several schedulers may share
+    /// it, and each keeps a reference until it has been finalized.
     ///
     /// [`OwnedQueue::new_ordered_reclaim`]: crate::workqueue::OwnedQueue::new_ordered_reclaim
-    pub fn new_with_submit_wq(
+    /// [`OwnedQueue::new_percpu_reclaim`]: crate::workqueue::OwnedQueue::new_percpu_reclaim
+    pub fn new_with_queues(
         device: &device::Device,
         num_rqs: u32,
         credit_limit: u32,
         hang_limit: u32,
         timeout_ms: time::Msecs,
         name: &'static CStr,
-        submit_wq: crate::workqueue::OwnedQueue,
+        submit_wq: Option<crate::workqueue::OwnedQueue>,
+        timeout_wq: Option<Arc<crate::workqueue::OwnedQueue>>,
     ) -> Result<Scheduler<T>> {
         Self::init(
             UniqueArc::new_uninit(GFP_KERNEL)?,
@@ -546,7 +558,8 @@ impl<T: JobImpl> Scheduler<T> {
             hang_limit,
             timeout_ms,
             name,
-            Some(submit_wq),
+            submit_wq,
+            timeout_wq,
         )
     }
 
@@ -560,6 +573,7 @@ impl<T: JobImpl> Scheduler<T> {
         timeout_ms: time::Msecs,
         name: &'static CStr,
         submit_wq: Option<crate::workqueue::OwnedQueue>,
+        timeout_wq: Option<Arc<crate::workqueue::OwnedQueue>>,
     ) -> Result<Scheduler<T>> {
         // Allocate the owner before starting C workers: no fallible allocation
         // may abandon an initialized scheduler without running drm_sched_fini.
@@ -575,7 +589,7 @@ impl<T: JobImpl> Scheduler<T> {
         let init_ops = bindings::drm_sched_init_args {
             ops: &Self::OPS,
             submit_wq: submit_wq.as_ref().map_or(core::ptr::null_mut(), |queue| queue.as_raw()),
-            timeout_wq: core::ptr::null_mut(),
+            timeout_wq: timeout_wq.as_ref().map_or(core::ptr::null_mut(), |queue| queue.as_raw()),
             num_rqs,
             credit_limit,
             hang_limit,
@@ -602,6 +616,7 @@ impl<T: JobImpl> Scheduler<T> {
                 .write(SchedulerOwner {
                     allocation,
                     _submit_wq: submit_wq,
+                    _timeout_wq: timeout_wq,
                 })
                 .into(),
         ))

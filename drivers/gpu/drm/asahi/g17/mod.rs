@@ -1076,10 +1076,15 @@ struct Shared {
     /// When work was last published while the governor is requested (0: none since its last
     /// step). Publishers without the device mutex set it too.
     governor_activity_ns: AtomicU64,
-    /// M5: the event work's queue. Unbound, so the event work runs in the affinity pod (the L2)
-    /// of the CPU that last published work, not on whichever CPU the completion IRQ thread first
-    /// ran on. On a two-die part that keeps completion processing on the submitter's die.
-    events: Option<workqueue::OwnedQueue>,
+    /// The queue of all work that signals job fences: the event work, and every scheduler's
+    /// timeout work. Memory reclaim may wait on those fences, so it is reclaim-safe. On M5 it is
+    /// unbound, so the event work runs in the affinity pod (the L2) of the CPU that last
+    /// published work, not on whichever CPU the completion IRQ thread first ran on; on a two-die
+    /// part that keeps completion processing on the submitter's die. Elsewhere it is per-CPU and
+    /// high priority, as `system_highpri_wq`.
+    events: Arc<workqueue::OwnedQueue>,
+    /// M5: the event work and the scheduler workers follow the submitting CPU.
+    follows_submitter: bool,
     /// M5: the CPU of the last publication, `u32::MAX` before the first.
     submitter: AtomicU32,
     #[pin]
@@ -1252,17 +1257,25 @@ impl Shared {
             return;
         }
         // Already queued if this fails, which is just as good.
-        let _ = match (&self.events, self.submitter()) {
-            (Some(events), Some(cpu)) => {
-                events.enqueue_on::<Arc<Shared>, EVENT_WORK>(cpu, self.clone())
-            }
-            _ => workqueue::system_highpri().enqueue::<Arc<Shared>, EVENT_WORK>(self.clone()),
+        let _ = match self.submitter() {
+            Some(cpu) => self.events.enqueue_on::<Arc<Shared>, EVENT_WORK>(cpu, self.clone()),
+            None => self.events.enqueue::<Arc<Shared>, EVENT_WORK>(self.clone()),
         };
+    }
+
+    /// The queue for the schedulers' timeout work, which signals the fences of timed-out jobs.
+    pub(super) fn fence_queue(&self) -> Arc<workqueue::OwnedQueue> {
+        self.events.clone()
+    }
+
+    /// Whether the event work and the scheduler workers follow the submitting CPU (M5).
+    pub(super) fn follows_submitter(&self) -> bool {
+        self.follows_submitter
     }
 
     /// Records the publishing CPU for the event work's placement (M5).
     fn note_submitter(&self) {
-        if self.events.is_some() {
+        if self.follows_submitter {
             self.submitter.store(kernel::cpu::CpuId::current().as_u32(), Ordering::Relaxed);
         }
     }
@@ -1513,11 +1526,14 @@ impl Gpu {
         let render_policy = if m5 { Some(render_resources::M5Policy::new(&id)?) } else { None };
         // The bare-metal M5 boot runs both engines; other M5 profiles take no submission.
         let submits = !m5 || cfg.profile == FirmwareProfile::M5PublishedRoots;
-        let events = if m5 {
-            Some(workqueue::OwnedQueue::new_unbound(c"aurora_g17_events", true)?)
-        } else {
-            None
-        };
+        let events = Arc::new(
+            if m5 {
+                workqueue::OwnedQueue::new_unbound_reclaim(c"aurora_g17_events", true)?
+            } else {
+                workqueue::OwnedQueue::new_percpu_reclaim(c"aurora_g17_events", true)?
+            },
+            GFP_KERNEL,
+        )?;
         let shared = Arc::pin_init(
             pin_init!(Shared {
                 drm <- new_mutex!(Some(dev.into()), "g17::Shared::drm"),
@@ -1552,6 +1568,7 @@ impl Gpu {
                 governor_armed: AtomicBool::new(false),
                 governor_activity_ns: AtomicU64::new(0),
                 events,
+                follows_submitter: m5,
                 submitter: AtomicU32::new(u32::MAX),
                 grow <- new_work!("g17::Shared::grow"),
                 reclaim_work <- new_work!("g17::Shared::reclaim_work"),

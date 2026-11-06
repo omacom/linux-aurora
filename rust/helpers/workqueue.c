@@ -23,9 +23,9 @@ rust_helper_alloc_ordered_workqueue(const char *name, unsigned int flags)
 }
 
 __rust_helper struct workqueue_struct *
-rust_helper_alloc_unbound_workqueue(const char *name, bool highpri)
+rust_helper_alloc_workqueue_flags(const char *name, unsigned int flags)
 {
-	return alloc_workqueue("%s", WQ_UNBOUND | (highpri ? WQ_HIGHPRI : 0), 0, name);
+	return alloc_workqueue("%s", flags, 0, name);
 }
 
 __rust_helper int rust_helper_workqueue_restrict(struct workqueue_struct *wq,
