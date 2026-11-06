@@ -556,7 +556,14 @@ struct SndSocT8140AopData {
     dev: ARef<device::Device>,
     adata: Arc<dyn AOP>,
     service: EPICService,
-    ring: Arc<SourceRing>,
+    /// The low-power microphone's source ring; `None` on machines without lpai.
+    ring: Option<Arc<SourceRing>>,
+    /// The machine has the lpai microphone, whose run state also raises the
+    /// gated audio fabric, and PMGR serializer leaves the AP must power
+    /// (T8140). On T8152 neither exists: the firmware powers its own fabric
+    /// and the serializers, and lpai, hpai and tap attach with
+    /// kIOReturnNoDevice.
+    has_lpai: bool,
     ring_bytes: Atomic<u32>,
     sequence: Atomic<u32>,
     /// The low-power microphone PCM holds a reference on `lpai_run`.
@@ -613,6 +620,9 @@ struct SndSocT8140AopData {
     /// [`SndSocT8140AopData::lpai_run_get`].
     #[pin]
     lpai_run: Mutex<LpaiRun>,
+    /// The T8152 speaker's thermal limiter, see [`spk_thermal`].
+    #[pin]
+    spkr_thermal: SpinLock<SpkThermal>,
 }
 
 const SPKR_START_WORK: u64 = 0;
@@ -903,6 +913,9 @@ impl SndSocT8140AopData {
     /// power up fails the stream; recovering a domain from that state is the
     /// power-domain driver's business, not a consumer's.
     fn power_up(&self, name: &str, pds: &[&Option<PowerDomain>], attempts: u32) -> Result<()> {
+        if !self.has_lpai {
+            return Ok(());
+        }
         for (i, slot) in pds.iter().enumerate() {
             let Some(pd) = slot else {
                 dev_err!(self.dev, "{}: power domain not attached\n", name);
@@ -944,9 +957,55 @@ impl SndSocT8140AopData {
     fn service_startup(&self, svc: &Service, pds: &[&Option<PowerDomain>]) -> Result<()> {
         self.attach_device(svc.dev_id, svc.name)?;
         self.service_set_power(svc, SPKR_POWER_STATE_PW0)?;
+        if !self.has_lpai {
+            self.log_service_props(svc, "pw0");
+        }
         self.power_up_raising(svc.name, pds)?;
         svc.running.store(false, Relaxed);
         Ok(())
+    }
+
+    /// T8152 bring-up diagnostics: log what the firmware reports for a
+    /// service (properties 200, 300, 301 and 302) so that the stream format
+    /// and the serializer state can be read from the log. Read-only.
+    fn log_service_props(&self, svc: &Service, when: &str) {
+        for modifier in [
+            PROP_POWER_STATE,
+            PROP_CHANNEL_CONTROL,
+            PROP_STREAM_FORMAT,
+            PROP_RING_GEOMETRY,
+        ] {
+            let msg = AudioGetDeviceProp::new(svc.dev_id, modifier);
+            // SAFETY: the message is a plain packed firmware record.
+            let bytes = unsafe {
+                slice::from_raw_parts(
+                    ptr::from_ref(&msg).cast::<u8>(),
+                    mem::size_of::<AudioGetDeviceProp>(),
+                )
+            };
+            match self
+                .adata
+                .epic_call_ret(&self.service, EPIC_SUBTYPE_WRAPPED_CALL, bytes, 64)
+            {
+                Ok((ret, data)) => dev_dbg!(
+                    self.dev,
+                    "{} {}: property {} retcode {:#x} data {:02x?}\n",
+                    svc.name,
+                    when,
+                    modifier,
+                    ret,
+                    &data[..]
+                ),
+                Err(e) => dev_dbg!(
+                    self.dev,
+                    "{} {}: property {} call failed: {:?}\n",
+                    svc.name,
+                    when,
+                    modifier,
+                    e
+                ),
+            }
+        }
     }
 
     /// [`Self::power_up`] with the fabric raised first.
@@ -967,6 +1026,9 @@ impl SndSocT8140AopData {
     /// microphone is attached for the firmware's lifetime, so hold it in
     /// `runn` around `f`, once its first report has arrived.
     fn with_fabric_raised<R>(&self, f: impl FnOnce() -> Result<R>) -> Result<R> {
+        if !self.has_lpai {
+            return f();
+        }
         self.lpai_run_get()?;
         let mut polls = 0;
         while !self.reported.load(Relaxed) && polls < FABRIC_RAISE_POLLS {
@@ -994,6 +1056,9 @@ impl SndSocT8140AopData {
         }
         self.service_set_power(svc, SPKR_POWER_STATE_PWRD)?;
         svc.running.store(true, Relaxed);
+        if !self.has_lpai {
+            self.log_service_props(svc, "pwrd");
+        }
         Ok(())
     }
 
@@ -1039,14 +1104,23 @@ impl SndSocT8140AopData {
     // data after the copy-time gain, it senses no current or voltage. ----
 
     fn sense_startup(&self) -> Result<()> {
+        if !self.has_lpai {
+            return Ok(());
+        }
         self.service_startup(&self.tap, &[&self.pd_mca0])
     }
 
     fn sense_prepare(&self) -> Result<()> {
+        if !self.has_lpai {
+            return Ok(());
+        }
         self.service_run(&self.tap)
     }
 
     fn sense_shutdown(&self) {
+        if !self.has_lpai {
+            return;
+        }
         self.service_shutdown(&self.tap, &[&self.pd_mca0])
     }
 
@@ -1138,6 +1212,17 @@ impl SndSocT8140AopData {
     /// Output mute (property 700) is independent of the amplifier's SD_MODE;
     /// the amplifier stays off across a failure here.
     fn spkr_set_mute(&self, muted: bool) -> Result<()> {
+        if !self.has_lpai {
+            // T8152: the firmware answers every property above 302 with
+            // 0xe00002f0 (unsupported), the mute request included (measured on
+            // an M6 Mac mini); the amplifier is muted through its own codec.
+            dev_dbg!(
+                self.dev,
+                "speaker mute {} not requested on this firmware\n",
+                muted
+            );
+            return Ok(());
+        }
         let ret = self.epic_wrapped_call(&AudioSetDeviceProp::new(
             AUDIO_DEV_SPKR,
             PROP_OUTPUT_MUTE,
@@ -1340,7 +1425,7 @@ impl ReportListener for SndSocT8140AopData {
         let dma_area = unsafe { (*(*st.substream).runtime).dma_area };
         let buffer_bytes = st.buffer_bytes;
         let new_ptr = copy_span(
-            &self.ring,
+            self.ring.as_ref().ok_or(ENODEV)?,
             dma_area,
             buffer_bytes,
             ring_bytes,
@@ -2238,7 +2323,7 @@ unsafe extern "C" fn asoc_pcm_hw_params(
 /// Called by ASoC on this driver's registered component, with live
 /// arguments belonging to one of its links.
 unsafe extern "C" fn asoc_pcm_prepare(
-    _component: *mut bindings::snd_soc_component,
+    component: *mut bindings::snd_soc_component,
     substream: *mut bindings::snd_pcm_substream,
 ) -> i32 {
     // SAFETY: ASoC hands its ops a live substream whose private data is the
@@ -2258,6 +2343,14 @@ unsafe extern "C" fn asoc_pcm_prepare(
         // SAFETY: the managed buffer is dma_bytes long and no DMA runs before
         // trigger START.
         unsafe { ptr::write_bytes(area, 0, bytes) };
+    }
+    // SAFETY: ASoC calls this op on a component whose descriptor/context stays live.
+    let data = unsafe { component_data(component) };
+    if !data.has_lpai {
+        // The speaker cooled while no stream ran.
+        let mut thermal = data.spkr_thermal.lock();
+        thermal.cool_idle();
+        thermal.reset_highpass();
     }
     0
 }
@@ -2287,6 +2380,242 @@ fn spkr_f32_bits(sample: i32, gain_q31: u32) -> u32 {
     let scaled = (i64::from(sample) * i64::from(gain_q31)) >> 31; // |scaled| < SPKR_CEILING_Q31
     f32_bits_of_q31(scaled as i32)
 }
+
+/// Feed-forward thermal limiter of the T8152 speaker.
+///
+/// The J873 has no speaker tap: the AOP offers no sense stream, so there is
+/// nothing a daemon could measure.  The vendor protects this speaker with a
+/// thermal model driven by the signal itself, and so does this limiter, in the
+/// copy path where no stream can bypass it.  The vendor's numbers for the
+/// speaker (one type-A speaker for all channels): amplifier sensitivity
+/// 11.9 V per full scale, voice-coil resistance 4.6 ohm, coil 40 C/W with a
+/// time constant of 3.4 s, magnet 60 C/W with 210 s, ambient 50 C, limit
+/// 140 C.  The thermal part is the two-filter model of the Linux speaker
+/// daemon: the power of every word (x * 11.9 V)^2 / 4.6 ohm, with x the word
+/// after the limiter gain in units of the I2S full scale, heats the magnet
+/// towards ambient + 60 C/W * P and the coil towards the magnet + 40 C/W * P;
+/// the gain falls from 0 dB to the sustained level (a full-scale square wave
+/// at 98 % of (140 - 50) / (40 + 60) = 0.9 W, -15.43 dB) over the last 20 C
+/// below the limit.  Beyond the vendor, the attack is immediate (one block of
+/// 128 words) and the release follows the vendor's 20 s, and the amplifier is
+/// assumed at the voltage of the full 11.9 V per full scale.  All of it is
+/// fixed point: no floating point exists in the kernel.  `CEILING` is a hard
+/// amplitude ceiling in the first audible tests (-20 dB below the sustained
+/// level), taken out only by a rebuild.
+mod spk_thermal {
+    // Temperatures are Q40 degrees C, gains Q30, the power in units of
+    // (I2S full scale)^2 * 2^32.
+    const KCQ: i64 = 315236;
+    const KMQ: i64 = 472854;
+    const AC: i64 = 26317;
+    const AM: i64 = 426;
+    const T_AMB_Q: i64 = 54975581388800;
+    const LO_Q: i64 = 131941395333120;
+    const WIN_Q: i64 = 21990232555520;
+    const HYST_Q: i64 = 5497558138880;
+    const REL: i64 = 572586;
+    /// 10^(-15.43 dB * k / 64 / 20) in Q30, rounded down.
+    const GTAB: [i64; 65] = [
+        1073741824, 1044350352, 1015763411, 987958979, 960915636, 934612548, 909029454, 884146644,
+        859944950, 836405728, 813510843, 791242658, 769584020, 748518241, 728029096, 708100798,
+        688717996, 669865759, 651529563, 633695283, 616349179, 599477889, 583068416, 567108119,
+        551584701, 536486206, 521801000, 507517772, 493625518, 480113536, 466971416, 454189035,
+        441756545, 429664369, 417903192, 406463952, 395337838, 384516279, 373990937, 363753705,
+        353796697, 344112240, 334692876, 325531348, 316620597, 307953760, 299524160, 291325303,
+        283350873, 275594726, 268050888, 260713546, 253577050, 246635900, 239884750, 233318399,
+        226931788, 220719998, 214678242, 208801867, 203086346, 197527275, 192120373, 186861473,
+        181746525,
+    ];
+    /// Start state: the coil just below the start of the limiting window (the
+    /// driver cannot know how warm the speaker is).
+    const T_START_COIL_Q: i64 = 130841883705344;
+    const T_START_MAGNET_Q: i64 = 100495362778726;
+    /// The hard amplitude ceiling of the first audible tests: -20 dB below the
+    /// sustained level (a worst-case power of about 9 mW); kept for the unit
+    /// tests of the model.
+    #[allow(dead_code)]
+    pub(super) const CEILING_M20_Q30: i64 = 18174652;
+    /// The ceiling of the speaker path: 0.078 of full scale (0.93 V peak and
+    /// about 94 mW for a sine at an amplifier gain of 15, by this model), 6 dB
+    /// below the level at which the vendor's own driver plays a 440 Hz tone at
+    /// its maximum volume, measured with one microphone at one place.
+    pub(super) const CEILING_Q30: i64 = 83_800_000;
+    /// No ceiling (unit tests, later steps).
+    #[allow(dead_code)]
+    pub(super) const CEILING_0DB_Q30: i64 = 1073741824;
+    /// 10 ms steps of the idle cooling: 1 - exp(-0.01 s / tau) in Q32.
+    const AC10: i64 = 12613698;
+    const AM10: i64 = 204517;
+    const ONE: i64 = 1 << 30;
+
+    fn gain_for_reduction(r16: i64) -> i64 {
+        let k = (r16 >> 10) as usize;
+        let f = r16 & 1023;
+        if k >= 64 {
+            return GTAB[64];
+        }
+        GTAB[k] + (((GTAB[k + 1] - GTAB[k]) * f) >> 10)
+    }
+
+    // Fixed high-pass of the speaker path: 2nd-order Butterworth, 100 Hz at
+    // 48 kHz, direct form I, Q28 coefficients, 64-bit state.  The speaker
+    // cone moves far more at low frequencies for the same voltage and the
+    // power model of the limiter has no excursion term; below 100 Hz the
+    // speaker radiates almost nothing anyway.  The output is held to the
+    // input's full scale (a step through a high-pass overshoots by up to
+    // 2x), so the ceiling stays a true peak ceiling.  |x| <= 2^31 and the
+    // coefficients are below 2^29: the sum of five products stays below
+    // 2^63 (the state, below 2.5 full scales, keeps it under 2^61).
+    const HP_B0: i64 = 265_962_279;
+    const HP_B1: i64 = -531_924_558;
+    const HP_B2: i64 = 265_962_279;
+    const HP_A1: i64 = -531_901_772;
+    const HP_A2: i64 = 263_511_889;
+    const HP_SHIFT: u32 = 28;
+    const HP_LIMIT: i64 = 1 << 30;
+
+    #[derive(Default)]
+    pub(super) struct Highpass {
+        x1: i64,
+        x2: i64,
+        y1: i64,
+        y2: i64,
+    }
+
+    impl Highpass {
+        pub(super) fn step(&mut self, x: i32) -> i32 {
+            let x = i64::from(x);
+            let acc = HP_B0 * x + HP_B1 * self.x1 + HP_B2 * self.x2
+                - HP_A1 * self.y1
+                - HP_A2 * self.y2;
+            // The feedback keeps the unclamped value: feeding the clamped one
+            // back would latch a nearly full-scale sine into sustained
+            // clipping.  The state stays below 2.5 full scales.
+            let y = (acc + (1 << (HP_SHIFT - 1))) >> HP_SHIFT;
+            self.x2 = self.x1;
+            self.x1 = x;
+            self.y2 = self.y1;
+            self.y1 = y;
+            y.clamp(-HP_LIMIT, HP_LIMIT) as i32
+        }
+    }
+
+    pub(super) struct SpkThermal {
+        t_coil: i64,
+        t_magnet: i64,
+        hyst_coil: i64,
+        hyst_magnet: i64,
+        gain: i64,
+        ceiling: i64,
+        hp: Highpass,
+        last: Option<kernel::time::Instant<kernel::time::Monotonic>>,
+    }
+
+    impl SpkThermal {
+        pub(super) fn new(ceiling: i64) -> Self {
+            Self {
+                t_coil: T_START_COIL_Q,
+                t_magnet: T_START_MAGNET_Q,
+                hyst_coil: T_START_COIL_Q,
+                hyst_magnet: T_START_MAGNET_Q,
+                gain: ONE,
+                ceiling,
+                hp: Highpass::default(),
+                last: None,
+            }
+        }
+
+        /// Limit one block of words (the I2S full scale is 2^30), in place, and
+        /// advance the model by the block.
+        pub(super) fn block(&mut self, words: &mut [i32]) {
+            let g = (self.gain * self.ceiling) >> 30;
+            let (mut tc, mut tm) = (self.t_coil, self.t_magnet);
+            for w in words.iter_mut() {
+                let y = (i64::from(*w) * g) >> 30;
+                let yq = y >> 14;
+                let pfs = yq * yq;
+                let tgt_c = tm + pfs * KCQ;
+                let tgt_m = T_AMB_Q + pfs * KMQ;
+                tc += (((tgt_c - tc) >> 12) * AC) >> 20;
+                tm += (((tgt_m - tm) >> 12) * AM) >> 20;
+                *w = y as i32;
+            }
+            self.t_coil = tc;
+            self.t_magnet = tm;
+            self.hyst_coil = self.hyst_coil.max(tc).min(tc + HYST_Q);
+            self.hyst_magnet = self.hyst_magnet.max(tm).min(tm + HYST_Q);
+            let temp = self.hyst_coil.max(self.hyst_magnet);
+            let r16 = if temp <= LO_Q {
+                0
+            } else {
+                core::cmp::min(65536, ((temp - LO_Q) >> 20) * 65536 / (WIN_Q >> 20))
+            };
+            let target = gain_for_reduction(r16);
+            if target < self.gain {
+                self.gain = target;
+            } else {
+                self.gain += ((target - self.gain) * REL) >> 32;
+            }
+            self.last = Some(kernel::time::Instant::now());
+        }
+
+        /// Filter one block of words in place with the speaker path's high-pass
+        /// (before `block`; the filter state carries over from block to block).
+        pub(super) fn highpass(&mut self, words: &mut [i32]) {
+            for w in words.iter_mut() {
+                *w = self.hp.step(*w);
+            }
+        }
+
+        /// Start the high-pass from rest (a new stream).
+        pub(super) fn reset_highpass(&mut self) {
+            self.hp = Highpass::default();
+        }
+
+        /// Let the speaker cool for the time since the last block: the same
+        /// filters with no power, in steps of 10 ms (at most 20 minutes).
+        pub(super) fn cool_idle(&mut self) {
+            let Some(last) = self.last.take() else {
+                return;
+            };
+            let ms = core::cmp::min(last.elapsed().as_millis(), 20 * 60 * 1000);
+            self.cool(ms as u64);
+        }
+
+        pub(super) fn cool(&mut self, ms: u64) {
+            let (mut tc, mut tm) = (self.t_coil, self.t_magnet);
+            for _ in 0..ms / 10 {
+                tc += (((tm - tc) >> 12) * AC10) >> 20;
+                tm += (((T_AMB_Q - tm) >> 12) * AM10) >> 20;
+            }
+            self.t_coil = tc;
+            self.t_magnet = tm;
+            self.hyst_coil = tc;
+            self.hyst_magnet = tm;
+        }
+
+        /// Unit tests: start from a given state.
+        #[allow(dead_code)]
+        pub(super) fn cool_from(&mut self, coil: i64, magnet: i64, ms: u64) {
+            self.t_coil = coil;
+            self.t_magnet = magnet;
+            self.cool(ms);
+        }
+
+        #[allow(dead_code)]
+        pub(super) fn state(&self) -> (i64, i64, i64, i64, i64) {
+            (
+                self.t_coil,
+                self.t_magnet,
+                self.hyst_coil,
+                self.hyst_magnet,
+                self.gain,
+            )
+        }
+    }
+}
+
+use spk_thermal::SpkThermal;
 
 /// Copy between userspace and the front-end buffers.  The speaker front-end
 /// converts and limits; the jack front-ends copy verbatim (their buffers are
@@ -2360,10 +2689,34 @@ unsafe extern "C" fn asoc_pcm_copy(
         if iov.copy_from_iter(&mut chunk[..n]) != n {
             return EFAULT.to_errno();
         }
-        for (i, word) in chunk[..n].chunks_exact(4).enumerate() {
-            let sample = i32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-            let bits = spkr_f32_bits(sample, gain);
-            dst[off + i * 4..off + i * 4 + 4].copy_from_slice(&bits.to_le_bytes());
+        if data.has_lpai {
+            for (i, word) in chunk[..n].chunks_exact(4).enumerate() {
+                let sample = i32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                let bits = spkr_f32_bits(sample, gain);
+                dst[off + i * 4..off + i * 4 + 4].copy_from_slice(&bits.to_le_bytes());
+            }
+        } else {
+            // T8152: every word goes through the thermal limiter, the one
+            // protection this speaker has.
+            let mut words = [0i32; 128];
+            let count = n / 4;
+            for (w, word) in words.iter_mut().zip(chunk[..n].chunks_exact(4)) {
+                let sample = i32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+                *w = ((i64::from(sample) * i64::from(gain)) >> 31) as i32;
+            }
+            {
+                let mut thermal = data.spkr_thermal.lock();
+                thermal.highpass(&mut words[..count]);
+                thermal.block(&mut words[..count]);
+            }
+            // The amplifier takes plain PCM from the AOP link (there is no
+            // LEAP on this machine to consume float32 words), but only the
+            // low 24 bits of each word: measured, a word beyond 2^23 wraps.
+            // The limiter's full scale, 2^30, is therefore 2^23 on the wire.
+            for (i, w) in words[..count].iter().enumerate() {
+                let w24 = *w >> 7;
+                dst[off + i * 4..off + i * 4 + 4].copy_from_slice(&w24.to_le_bytes());
+            }
         }
         off += n;
     }
@@ -2725,6 +3078,24 @@ fn pcm_stream(
     }
 }
 
+fn pcm_stream_range(
+    name: &'static core::ffi::CStr,
+    formats: u64,
+    channels_min: u32,
+    channels_max: u32,
+) -> bindings::snd_soc_pcm_stream {
+    bindings::snd_soc_pcm_stream {
+        stream_name: name.as_char_ptr(),
+        formats,
+        rates: bindings::SNDRV_PCM_RATE_48000,
+        rate_min: 48000,
+        rate_max: 48000,
+        channels_min,
+        channels_max,
+        ..Default::default()
+    }
+}
+
 /// The AOP-configured serializers take 24-bit samples from the low bits
 /// of each 32-bit DMA word: S24_LE.
 const OUT_FORMATS: u64 = bindings::BINDINGS_SNDRV_PCM_FMTBIT_S24_LE;
@@ -2737,7 +3108,10 @@ const S32_FORMATS: u64 = bindings::BINDINGS_SNDRV_PCM_FMTBIT_S32_LE;
 /// renumbers every DAI after it and silently repoints the existing links.
 const DAI_COUNT: usize = 2 + FE_COUNT;
 
-fn dai_drivers(ops: &DaiOps) -> [bindings::snd_soc_dai_driver; DAI_COUNT] {
+// `mono_speaker`: T8152, whose speaker serializer takes one 32-bit word per
+// 48 kHz frame (measured: the DMA drains 192000 bytes per second whatever the
+// stream), so the speaker front-end must also accept one channel.
+fn dai_drivers(ops: &DaiOps, mono_speaker: bool) -> [bindings::snd_soc_dai_driver; DAI_COUNT] {
     [
         bindings::snd_soc_dai_driver {
             name: c"cout".as_char_ptr(),
@@ -2762,7 +3136,12 @@ fn dai_drivers(ops: &DaiOps) -> [bindings::snd_soc_dai_driver; DAI_COUNT] {
             id: FE_DAI_ID_BASE + 1,
             ops: &ops.fe,
             // the speaker front-end: S32 in, converted through the ceiling
-            playback: pcm_stream(c"PCM1 TX", S32_FORMATS, 2),
+            playback: pcm_stream_range(
+                c"PCM1 TX",
+                S32_FORMATS,
+                if mono_speaker { 1 } else { 2 },
+                2,
+            ),
             ..Default::default()
         },
         bindings::snd_soc_dai_driver {
@@ -2780,7 +3159,12 @@ fn dai_drivers(ops: &DaiOps) -> [bindings::snd_soc_dai_driver; DAI_COUNT] {
             name: c"spkr".as_char_ptr(),
             id: BE_DAI_ID_SPKR,
             ops: &ops.spkr,
-            playback: pcm_stream(c"SPKR TX", S32_FORMATS, 2),
+            playback: pcm_stream_range(
+                c"SPKR TX",
+                S32_FORMATS,
+                if mono_speaker { 1 } else { 2 },
+                2,
+            ),
             capture: pcm_stream(c"SPKR RX", S32_FORMATS, 2),
             ..Default::default()
         },
@@ -2806,7 +3190,7 @@ const _: () = assert!(mem::offset_of!(AsocContext, component) == 0);
 impl AsocContext {
     fn new(data: Arc<SndSocT8140AopData>) -> Result<KBox<Self>> {
         let ops = KBox::new(DaiOps::new(), GFP_KERNEL)?;
-        let dais = KBox::new(Opaque::new(dai_drivers(&ops)), GFP_KERNEL)?;
+        let dais = KBox::new(Opaque::new(dai_drivers(&ops, !data.has_lpai)), GFP_KERNEL)?;
         let volume = KBox::new(
             Opaque::new(bindings::soc_mixer_control {
                 min: 0,
@@ -2931,89 +3315,91 @@ impl SndSocT8140AopDriver {
             closed: AtomicFlag::new(false),
         };
 
-        // The low-power microphone: its ring is reported to us by the
-        // firmware for the AOP's lifetime.
-        data.attach_device(AUDIO_DEV_LPAI, "lpai")?;
-        data.set_channel_control()?;
-        data.read_geometry()?;
-        let listener: Arc<dyn ReportListener> = data.clone();
-        data.adata
-            .add_report_listener(data.service, EPIC_SUBTYPE_PRODUCER_REPORT, listener)?;
+        if data.has_lpai {
+            // The low-power microphone: its ring is reported to us by the
+            // firmware for the AOP's lifetime.
+            data.attach_device(AUDIO_DEV_LPAI, "lpai")?;
+            data.set_channel_control()?;
+            data.read_geometry()?;
+            let listener: Arc<dyn ReportListener> = data.clone();
+            data.adata
+                .add_report_listener(data.service, EPIC_SUBTYPE_PRODUCER_REPORT, listener)?;
 
-        // SAFETY: FFI call with the live device and the module; `this.card` receives the new card.
-        let ret = unsafe {
-            bindings::snd_card_new(
-                data.dev.as_raw(),
-                -1,
-                ptr::null(),
-                THIS_MODULE.as_ptr(),
-                0,
-                &mut this.card,
-            )
-        };
-        if ret < 0 {
-            dev_err!(data.dev, "unable to allocate the sound card\n");
-            return Err(Error::from_errno(ret));
-        }
-        // Named like the other AOP audio cards: Apple<chassis><interface>.
-        let chassis = fwnode
-            .property_read::<CString>(c_str!("apple,chassis-name"))
-            .required_by(&data.dev)?;
-        let machine_kind = fwnode
-            .property_read::<CString>(c_str!("apple,machine-kind"))
-            .required_by(&data.dev)?;
-        let id_str = CString::try_from_fmt(fmt!("Apple{}AOP", *chassis))?;
-        let shortname = CString::try_from_fmt(fmt!("{} {} AOP", *machine_kind, *chassis))?;
-        let longname = CString::try_from_fmt(fmt!("{} {} AOP Audio", *machine_kind, *chassis))?;
-        // SAFETY: `card` was created by `snd_card_new` above and is not
-        // registered yet, so nothing else accesses it.
-        let card = unsafe { &mut *this.card };
-        let named = copy_str(&mut card.driver, c"t8140-aop-audio".to_bytes_with_nul())
-            .and_then(|()| copy_str(&mut card.id, id_str.to_bytes_with_nul()))
-            .and_then(|()| copy_str(&mut card.shortname, shortname.to_bytes_with_nul()))
-            .and_then(|()| copy_str(&mut card.longname, longname.to_bytes_with_nul()));
-        if let Err(e) = named {
-            dev_err!(
-                data.dev,
-                "apple,chassis-name or apple,machine-kind too long for the card names\n"
-            );
-            return Err(e);
-        }
+            // SAFETY: FFI call with the live device and the module; `this.card` receives the new card.
+            let ret = unsafe {
+                bindings::snd_card_new(
+                    data.dev.as_raw(),
+                    -1,
+                    ptr::null(),
+                    THIS_MODULE.as_ptr(),
+                    0,
+                    &mut this.card,
+                )
+            };
+            if ret < 0 {
+                dev_err!(data.dev, "unable to allocate the sound card\n");
+                return Err(Error::from_errno(ret));
+            }
+            // Named like the other AOP audio cards: Apple<chassis><interface>.
+            let chassis = fwnode
+                .property_read::<CString>(c_str!("apple,chassis-name"))
+                .required_by(&data.dev)?;
+            let machine_kind = fwnode
+                .property_read::<CString>(c_str!("apple,machine-kind"))
+                .required_by(&data.dev)?;
+            let id_str = CString::try_from_fmt(fmt!("Apple{}AOP", *chassis))?;
+            let shortname = CString::try_from_fmt(fmt!("{} {} AOP", *machine_kind, *chassis))?;
+            let longname = CString::try_from_fmt(fmt!("{} {} AOP Audio", *machine_kind, *chassis))?;
+            // SAFETY: `card` was created by `snd_card_new` above and is not
+            // registered yet, so nothing else accesses it.
+            let card = unsafe { &mut *this.card };
+            let named = copy_str(&mut card.driver, c"t8140-aop-audio".to_bytes_with_nul())
+                .and_then(|()| copy_str(&mut card.id, id_str.to_bytes_with_nul()))
+                .and_then(|()| copy_str(&mut card.shortname, shortname.to_bytes_with_nul()))
+                .and_then(|()| copy_str(&mut card.longname, longname.to_bytes_with_nul()));
+            if let Err(e) = named {
+                dev_err!(
+                    data.dev,
+                    "apple,chassis-name or apple,machine-kind too long for the card names\n"
+                );
+                return Err(e);
+            }
 
-        this.new_pcm(0, c"lpai", c"Low-Power Microphone", &Self::LPAI_OPS)?;
-        this.new_pcm(1, c"hpai", c"High-Quality Microphone", &Self::HPAI_OPS)?;
+            this.new_pcm(0, c"lpai", c"Low-Power Microphone", &Self::LPAI_OPS)?;
+            this.new_pcm(1, c"hpai", c"High-Quality Microphone", &Self::HPAI_OPS)?;
 
-        // Both microphones' jack: unplugged while a lid is closed.
-        let mut jack = ptr::null_mut();
-        // SAFETY: `card` was created by `snd_card_new` above and is not registered yet; the jack
-        // becomes one of its devices and is freed with it.
-        let ret = unsafe {
-            bindings::snd_jack_new(
-                this.card,
-                c"Internal Mic".as_char_ptr(),
-                bindings::snd_jack_types_SND_JACK_MICROPHONE as i32,
-                &mut jack,
-                true,
-                // No input device of its own: the lid it follows already
-                // is one, and the control is what userspace reads.
-                true,
-            )
-        };
-        if ret < 0 {
-            dev_err!(data.dev, "unable to create the microphone jack\n");
-            return Err(Error::from_errno(ret));
-        }
-        data.mic_jack.store(jack, Relaxed);
-        this.register_lid_handler()?;
-        // The state as the card is registered, from the only reporter.
-        data.as_arc_borrow().queue_jack_report();
-        data.flush_jack_report();
+            // Both microphones' jack: unplugged while a lid is closed.
+            let mut jack = ptr::null_mut();
+            // SAFETY: `card` was created by `snd_card_new` above and is not registered yet; the jack
+            // becomes one of its devices and is freed with it.
+            let ret = unsafe {
+                bindings::snd_jack_new(
+                    this.card,
+                    c"Internal Mic".as_char_ptr(),
+                    bindings::snd_jack_types_SND_JACK_MICROPHONE as i32,
+                    &mut jack,
+                    true,
+                    // No input device of its own: the lid it follows already
+                    // is one, and the control is what userspace reads.
+                    true,
+                )
+            };
+            if ret < 0 {
+                dev_err!(data.dev, "unable to create the microphone jack\n");
+                return Err(Error::from_errno(ret));
+            }
+            data.mic_jack.store(jack, Relaxed);
+            this.register_lid_handler()?;
+            // The state as the card is registered, from the only reporter.
+            data.as_arc_borrow().queue_jack_report();
+            data.flush_jack_report();
 
-        // SAFETY: `card` was created by `snd_card_new` above and is not registered yet.
-        let ret = unsafe { bindings::snd_card_register(this.card) };
-        if ret < 0 {
-            dev_err!(data.dev, "unable to register the sound card\n");
-            return Err(Error::from_errno(ret));
+            // SAFETY: `card` was created by `snd_card_new` above and is not registered yet.
+            let ret = unsafe { bindings::snd_card_register(this.card) };
+            if ret < 0 {
+                dev_err!(data.dev, "unable to register the sound card\n");
+                return Err(Error::from_errno(ret));
+            }
         }
 
         // The ASoC side: the jack (cout) and speaker back-ends, the
@@ -3195,23 +3581,29 @@ unsafe extern "C" fn hpai_pcm_hw_params(
     }
 }
 
+// The match data says whether the machine has the lpai microphone, its source
+// ring and the AP-powered serializer leaves (T8140), or not (T8152).
 kernel::of_device_table!(
     OF_TABLE,
     MODULE_OF_TABLE,
     <SndSocT8140AopDriver as platform::Driver>::IdInfo,
-    [(of::DeviceId::new(c_str!("apple,t8140-aop-audio")), ())]
+    [
+        (of::DeviceId::new(c_str!("apple,t8140-aop-audio")), true),
+        (of::DeviceId::new(c_str!("apple,t8152-aop-audio")), false),
+    ]
 );
 
 impl platform::Driver for SndSocT8140AopDriver {
-    type IdInfo = ();
+    type IdInfo = bool;
     type Data<'bound> = SndSocT8140AopDriver;
 
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
 
     fn probe<'bound>(
         pdev: &'bound platform::Device<Core<'_>>,
-        _info: Option<&'bound Self::IdInfo>,
+        info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
+        let has_lpai = *info.ok_or(ENODEV)?;
         let dev = ARef::<device::Device>::from(pdev.as_ref());
         // SAFETY: this is a service device the AOP core registered, being
         // probed here; the lookup defers the probe until the core has
@@ -3230,18 +3622,28 @@ impl platform::Driver for SndSocT8140AopDriver {
         // owned by the AOP driver because the firmware binds it once per boot.
         // SAFETY: no DMA is in flight on this device yet.
         unsafe { pdev.dma_set_mask_and_coherent(DmaMask::new::<42>())? };
-        let ring = adata.source_ring(pdev.as_ref(), RING_BYTES)?;
+        let ring = if has_lpai {
+            Some(adata.source_ring(pdev.as_ref(), RING_BYTES)?)
+        } else {
+            None
+        };
 
         // The serializer leaves.  A missing one only disables the paths that
-        // need it; those fail to open with ENODEV.
+        // need it; those fail to open with ENODEV.  T8152 has none: the
+        // firmware powers its own serializers.
         let mut pds: [Option<PowerDomain>; 5] = [None, None, None, None, None];
-        for (slot, (name, dt_name)) in pds.iter_mut().zip([
-            ("mca1", c"mca1"),
-            ("mca0", c"mca0"),
-            ("tx0", c"tx0"),
-            ("leap mca", c"mca"),
-            ("rx0", c"rx0"),
-        ]) {
+        let leaves: &[(&'static str, &'static core::ffi::CStr)] = if has_lpai {
+            &[
+                ("mca1", c"mca1"),
+                ("mca0", c"mca0"),
+                ("tx0", c"tx0"),
+                ("leap mca", c"mca"),
+                ("rx0", c"rx0"),
+            ]
+        } else {
+            &[]
+        };
+        for (slot, (name, dt_name)) in pds.iter_mut().zip(leaves.iter().copied()) {
             match PowerDomain::attach(&dev, name, dt_name) {
                 Ok(Some(pd)) => *slot = Some(pd),
                 Ok(None) => dev_warn!(dev, "no {} power domain\n", name),
@@ -3257,6 +3659,7 @@ impl platform::Driver for SndSocT8140AopDriver {
                 adata,
                 service: svc,
                 ring,
+                has_lpai,
                 ring_bytes: Atomic::new(0),
                 sequence: Atomic::new(0),
                 powered: AtomicFlag::new(false),
@@ -3294,6 +3697,7 @@ impl platform::Driver for SndSocT8140AopDriver {
                     users: 0,
                     running: false,
                 }),
+                spkr_thermal <- new_spinlock!(SpkThermal::new(spk_thermal::CEILING_Q30)),
             }),
             GFP_KERNEL,
         )?;
@@ -3635,5 +4039,181 @@ mod lid_tests {
         // grabbed: the lid closes unseen; on release the bitmap reads closed
         assert!(switch.record(&lid, true));
         assert!(lid.mic_cut());
+    }
+}
+
+#[kunit_tests(snd_soc_t8140_aop_audio_thermal)]
+mod thermal_tests {
+    use super::spk_thermal::{Highpass, SpkThermal, CEILING_0DB_Q30, CEILING_M20_Q30, CEILING_Q30};
+
+    /// The 100 Hz square wave at the I2S full scale, 240 words per half period.
+    fn square(i: usize) -> i32 {
+        if (i / 240) % 2 == 0 {
+            0x4000_0000
+        } else {
+            -0x4000_0000
+        }
+    }
+
+    fn run_square(l: &mut SpkThermal, blocks: usize) -> i32 {
+        let mut words = [0i32; 128];
+        let mut peak = 0i32;
+        for b in 0..blocks {
+            for (k, w) in words.iter_mut().enumerate() {
+                *w = square(b * 128 + k);
+            }
+            l.block(&mut words);
+            for w in words.iter() {
+                peak = peak.max(w.abs());
+            }
+        }
+        peak
+    }
+
+    /// The same numbers as the host model of the J873 speaker limiter (ten
+    /// seconds of a full-scale square wave, then two seconds of silence).
+    #[test]
+    fn ten_seconds_of_full_scale_square_match_the_host_model() {
+        let mut l = SpkThermal::new(CEILING_0DB_Q30);
+        let peak = run_square(&mut l, 3750);
+        assert_eq!(peak, 1_073_741_824);
+        assert_eq!(
+            l.state(),
+            (
+                152358436004836,
+                102381555896261,
+                152358436004836,
+                102381555896261,
+                206396213
+            )
+        );
+        let silence = [0i32; 128];
+        for _ in 0..750 {
+            let mut w = silence;
+            l.block(&mut w);
+        }
+        assert_eq!(
+            l.state(),
+            (
+                130024328395229,
+                101932305864922,
+                135521886534109,
+                102381555896261,
+                226457860
+            )
+        );
+    }
+
+    /// Peak of the high-pass output for a sine of peak 2^28 made by an integer
+    /// oscillator (`next = 2 cos(w) cur - prev`, Q30): `c2` is 2 cos(w) and
+    /// `s1` the first sample; the peak is taken over the last two periods
+    /// after the start-up has died out.
+    fn highpass_peak(c2: i64, s1: i64, period: usize) -> i64 {
+        let mut hp = Highpass::default();
+        let (mut prev, mut cur) = (0i64, s1);
+        let mut peak = 0i64;
+        for n in 0..8000usize {
+            let y = i64::from(hp.step(prev as i32));
+            if n >= 8000 - 2 * period {
+                peak = peak.max(y.abs());
+            }
+            let next = ((c2 * cur) >> 30) - prev;
+            prev = cur;
+            cur = next;
+        }
+        peak
+    }
+
+    /// Amplitude relative to the input peak 2^28, in 1/10000: the ideal
+    /// Butterworth magnitudes are 0.2425, 0.7071, 0.9701 and 0.9987.
+    fn highpass_gain(c2: i64, s1: i64, period: usize) -> i64 {
+        highpass_peak(c2, s1, period) * 10_000 / (1 << 28)
+    }
+
+    #[test]
+    fn the_highpass_follows_a_100_hz_butterworth() {
+        // 50, 100, 200 and 440 Hz at 48 kHz
+        assert!((highpass_gain(2_147_437_652, 1_756_893, 960) - 2_425).abs() <= 100);
+        assert!((highpass_gain(2_147_299_668, 3_513_712, 480) - 7_071).abs() <= 100);
+        assert!((highpass_gain(2_146_747_759, 7_026_821, 240) - 9_701).abs() <= 100);
+        assert!((highpass_gain(2_143_922_726, 15_452_226, 109) - 9_987).abs() <= 100);
+    }
+
+    #[test]
+    fn the_highpass_blocks_a_constant_and_holds_full_scale() {
+        let mut hp = Highpass::default();
+        let mut last = 0i32;
+        for _ in 0..300_000 {
+            last = hp.step(1 << 20);
+        }
+        assert!(i64::from(last).abs() < 1 << 15);
+        // a full-scale square wave at 120 Hz: the overshoot is held to full scale
+        let mut hp = Highpass::default();
+        let mut peak = 0i32;
+        for i in 0..40_000usize {
+            let x = if (i / 200) % 2 == 0 { 1 << 30 } else { -(1 << 30) };
+            peak = peak.max(hp.step(x).abs());
+        }
+        assert_eq!(peak, 1 << 30);
+    }
+
+    /// A full-scale 440 Hz sine (peak 2^30, integer oscillator) through the
+    /// high-pass: its linear peak is 0.9987 of full scale, so no sample may
+    /// sit on the clamp (a clamped feedback latched it into clipping).
+    #[test]
+    fn a_full_scale_sine_does_not_latch_the_highpass_into_clipping() {
+        let mut hp = Highpass::default();
+        let (mut prev, mut cur) = (0i64, 61_808_904i64);
+        let mut clamped = 0;
+        for n in 0..48_000usize {
+            let y = hp.step(prev as i32);
+            if n >= 48_000 - 3_000 && y.abs() == 1 << 30 {
+                clamped += 1;
+            }
+            let next = ((2_143_922_726i64 * cur) >> 30) - prev;
+            prev = cur;
+            cur = next;
+        }
+        assert_eq!(clamped, 0);
+    }
+
+    #[test]
+    fn the_coil_stays_below_the_limit_with_a_full_scale_square() {
+        let mut l = SpkThermal::new(CEILING_0DB_Q30);
+        run_square(&mut l, 3750 * 6);
+        // 140 C in Q40
+        assert!(l.state().0 < 140i64 << 40);
+    }
+
+    /// At the speaker ceiling a full-scale square wave stays far below the
+    /// sustained power (0.19 W against 0.9 W at 11.9 V per full scale): the
+    /// thermal gain never moves, the ceiling is a pure peak limit.
+    #[test]
+    fn the_speaker_ceiling_is_a_peak_limit_below_the_sustained_level() {
+        let mut l = SpkThermal::new(CEILING_Q30);
+        let peak = run_square(&mut l, 3750 * 3);
+        assert_eq!(i64::from(peak), CEILING_Q30);
+        assert_eq!(l.state().4, 1 << 30);
+    }
+
+    #[test]
+    fn idle_cooling_matches_the_host_model() {
+        let mut l = SpkThermal::new(CEILING_0DB_Q30);
+        l.cool_from(
+            139i64 << 40,
+            (50i64 << 40) + (((139i64 - 50) * 60 << 40) / 100),
+            60_000,
+        );
+        assert_eq!(l.state().0, 99824966751432);
+        assert_eq!(l.state().1, 99097783336276);
+    }
+
+    #[test]
+    fn the_first_audible_ceiling_is_20_db_below_the_sustained_level() {
+        let mut l = SpkThermal::new(CEILING_M20_Q30);
+        let mut w = [0x4000_0000i32; 128];
+        l.block(&mut w);
+        assert_eq!(w[0], 18174652);
+        assert_eq!(w[127], 18174652);
     }
 }
