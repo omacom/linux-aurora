@@ -24,7 +24,7 @@
 void asahi_g15_sha256(const u8 *data, size_t len, u8 *out);
 bool asahi_g15_board(void);
 bool asahi_g15_machine(const char *compatible);
-void asahi_g15_hold_power(struct device *dev);
+void asahi_g15_hold_power(struct device *dev, bool sleep_hold);
 void asahi_g15_release_power(struct device *dev);
 bool asahi_g15_module_try_get(void);
 void asahi_g15_module_put(void);
@@ -222,12 +222,24 @@ bool asahi_g15_machine(const char *compatible)
  * Keep the GFX domain powered for the whole (retained) session, like the
  * firmware session itself; released only by a start that failed before the
  * firmware was touched (asahi_g15_release_power()).
+ *
+ * With @sleep_hold (T6031), through system sleep as well. In the noirq
+ * phase genpd counts the GPU, the only device in the domain, as suspended,
+ * whatever its runtime-PM state, and powers the domain off under the
+ * running firmware, which nothing starts again. genpd spares a device in
+ * the wakeup path only in a domain with GENPD_FLAG_ACTIVE_WAKEUP, which
+ * PMGR gives only to a domain it finds on when it probes it. As a syscore
+ * device the GPU is left out of system sleep instead: genpd never counts it
+ * as suspended, and the domain stays on, as dwc3-apple keeps its core's
+ * domain on and the ISP and the SEP those of their resident firmware.
+ * Nothing changes while the system is awake.
  */
-void asahi_g15_hold_power(struct device *dev)
+void asahi_g15_hold_power(struct device *dev, bool sleep_hold)
 {
 	pm_runtime_get_noresume(dev);
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
+	dev_pm_syscore_device(dev, sleep_hold);
 }
 
 /*
@@ -238,6 +250,7 @@ void asahi_g15_hold_power(struct device *dev)
  */
 void asahi_g15_release_power(struct device *dev)
 {
+	dev_pm_syscore_device(dev, false);
 	pm_runtime_put_noidle(dev);
 	pm_runtime_disable(dev);
 	pm_runtime_set_suspended(dev);
