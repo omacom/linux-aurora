@@ -2082,6 +2082,7 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 	struct brcmf_pub *drvr = ifp->drvr;
 	s32 val;
 	s32 err;
+	s32 mfp_err;
 	const struct brcmf_tlv *rsn_ie;
 	const u8 *ie;
 	u32 ie_len;
@@ -2092,6 +2093,8 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 	s32 okc_enable;
 	u16 pmkid_count;
 	const u8 *group_mgmt_cs = NULL;
+	bool owe_offload;
+	bool mfp_configured = false;
 
 	profile->use_fwsup = BRCMF_PROFILE_FWSUP_NONE;
 	profile->is_ft = false;
@@ -2123,7 +2126,8 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 				 sme->crypto.cipher_group);
 			return -EINVAL;
 		}
-	} else if (val & (WPA2_AUTH_PSK | WPA2_AUTH_UNSPECIFIED | WPA2_AUTH_1X_SHA256)) {
+	} else if (val & (WPA2_AUTH_PSK | WPA2_AUTH_UNSPECIFIED |
+			  WPA2_AUTH_1X_SHA256 | WPA3_AUTH_OWE)) {
 		switch (sme->crypto.akm_suites[0]) {
 		case WLAN_AKM_SUITE_8021X:
 			val = WPA2_AUTH_UNSPECIFIED;
@@ -2167,7 +2171,11 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 			break;
 		case WLAN_AKM_SUITE_OWE:
 			val = WPA3_AUTH_OWE;
-			profile->use_fwsup = BRCMF_PROFILE_FWSUP_ROAM;
+			if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OWE) &&
+			    brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FWSUP))
+				profile->use_fwsup = BRCMF_PROFILE_FWSUP_OWE;
+			else
+				profile->use_fwsup = BRCMF_PROFILE_FWSUP_ROAM;
 			break;
 		case WLAN_AKM_SUITE_8021X_SUITE_B_192:
 			val = WPA3_AUTH_1X_SUITE_B_SHA384;
@@ -2226,8 +2234,12 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 	if (profile->use_fwsup == BRCMF_PROFILE_FWSUP_SAE)
 		brcmf_dbg(INFO, "using SAE offload\n");
 
-	if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFP))
+	owe_offload = profile->use_fwsup == BRCMF_PROFILE_FWSUP_OWE;
+	if (!brcmf_feat_is_enabled(ifp, BRCMF_FEAT_MFP)) {
+		if (owe_offload && sme->mfp == NL80211_MFP_REQUIRED)
+			return -EOPNOTSUPP;
 		goto skip_mfp_config;
+	}
 	/* The MFP mode (1 or 2) needs to be determined, parse IEs. The
 	 * IE will not be verified, just a quick search for MFP config
 	 */
@@ -2275,22 +2287,39 @@ brcmf_set_key_mgmt(struct net_device *ndev, struct cfg80211_connect_params *sme)
 		}
 	}
 
-	brcmf_fil_bsscfg_int_set(netdev_priv(ndev), "mfp", mfp);
+	if (owe_offload && sme->mfp == NL80211_MFP_REQUIRED)
+		mfp = BRCMF_MFP_REQUIRED;
+	mfp_err = brcmf_fil_bsscfg_int_set(netdev_priv(ndev), "mfp", mfp);
+	if (mfp_err && owe_offload)
+		return mfp_err;
+	mfp_configured = true;
 	offset += RSN_CAP_LEN;
 	if (mfp && (ie_len - offset >= RSN_PMKID_COUNT_LEN)) {
 		pmkid_count = ie[offset] + (ie[offset + 1] << 8);
-		offset += RSN_PMKID_COUNT_LEN + (pmkid_count * WLAN_PMKID_LEN);
+		offset += RSN_PMKID_COUNT_LEN;
+		if (pmkid_count > (ie_len - offset) / WLAN_PMKID_LEN)
+			return -EINVAL;
+		offset += pmkid_count * WLAN_PMKID_LEN;
 		if (ie_len - offset >= WPA_IE_MIN_OUI_LEN) {
 			group_mgmt_cs = &ie[offset];
 			if (memcmp(group_mgmt_cs, RSN_OUI, TLV_OUI_LEN) == 0) {
-				brcmf_fil_bsscfg_data_set(ifp, "bip",
-							  (void *)group_mgmt_cs,
-							  WPA_IE_MIN_OUI_LEN);
+				mfp_err = brcmf_fil_bsscfg_data_set(ifp, "bip",
+								    (void *)group_mgmt_cs,
+								    WPA_IE_MIN_OUI_LEN);
+				if (mfp_err && owe_offload)
+					return mfp_err;
 			}
 		}
 	}
 
 skip_mfp_config:
+	/* OWE offload may omit the RSNE; the requested PMF policy still applies. */
+	if (owe_offload && !mfp_configured &&
+	    sme->mfp == NL80211_MFP_REQUIRED) {
+		err = brcmf_fil_bsscfg_int_set(ifp, "mfp", BRCMF_MFP_REQUIRED);
+		if (err)
+			return err;
+	}
 	if (val != WFA_AUTH_DPP) {
 		brcmf_dbg(CONN, "setting wpa_auth to 0x%0x\n", val);
 		err = brcmf_fil_bsscfg_int_set(netdev_priv(ndev), "wpa_auth",
@@ -2447,6 +2476,7 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 	const void *ie;
 	u32 ie_len;
 	s32 err = 0;
+	bool owe_offload;
 
 	brcmf_dbg(TRACE, "Enter\n");
 	if (!check_vif_up(ifp->vif))
@@ -2455,6 +2485,15 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 	if (!params->ssid) {
 		bphy_err(drvr, "Invalid ssid\n");
 		return -EOPNOTSUPP;
+	}
+
+	owe_offload = params->crypto.n_akm_suites &&
+		      params->crypto.akm_suites[0] == WLAN_AKM_SUITE_OWE &&
+		      brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OWE) &&
+		      brcmf_feat_is_enabled(ifp, BRCMF_FEAT_FWSUP);
+	if (owe_offload) {
+		clear_bit(BRCMF_VIF_STATUS_EAP_SUCCESS, &ifp->vif->sme_state);
+		clear_bit(BRCMF_VIF_STATUS_ASSOC_SUCCESS, &ifp->vif->sme_state);
 	}
 
 	if (params->channel_hint)
@@ -2581,6 +2620,12 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 		if (err)
 			goto done;
 	}
+	if (owe_offload) {
+		/* Firmware owns the RSNE/DH exchange for a fully offloaded join. */
+		err = brcmf_fil_iovar_data_set(ifp, "wpaie", NULL, 0);
+		if (err)
+			goto done;
+	}
 	brcmf_set_join_pref(ifp, &params->bss_select);
 	if (params->ssid_len < IEEE80211_MAX_SSID_LEN)
 		brcmf_dbg(CONN, "SSID \"%s\", len (%zu)\n", params->ssid,
@@ -2624,8 +2669,15 @@ brcmf_cfg80211_connect(struct wiphy *wiphy, struct net_device *ndev,
 		bphy_err(drvr, "BRCMF_C_SET_SSID failed (%d)\n", err);
 
 done:
-	if (err)
+	if (err) {
 		clear_bit(BRCMF_VIF_STATUS_CONNECTING, &ifp->vif->sme_state);
+		if (owe_offload) {
+			clear_bit(BRCMF_VIF_STATUS_EAP_SUCCESS,
+				  &ifp->vif->sme_state);
+			clear_bit(BRCMF_VIF_STATUS_ASSOC_SUCCESS,
+				  &ifp->vif->sme_state);
+		}
+	}
 	brcmf_dbg(TRACE, "Exit\n");
 	return err;
 }
@@ -6343,17 +6395,27 @@ static bool brcmf_is_linkup(struct brcmf_cfg80211_vif *vif,
 {
 	u32 event = e->event_code;
 	u32 status = e->status;
+	bool owe_offload = vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_OWE;
+
+	/* Late firmware events must not seed the next OWE connection. */
+	if (owe_offload &&
+	    !test_bit(BRCMF_VIF_STATUS_CONNECTING, &vif->sme_state))
+		return false;
 
 	if ((vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_PSK ||
-	     vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_SAE) &&
+	     vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_SAE ||
+	     vif->profile.use_fwsup == BRCMF_PROFILE_FWSUP_OWE) &&
 	    event == BRCMF_E_PSK_SUP &&
 	    status == BRCMF_E_STATUS_FWSUP_COMPLETED)
 		set_bit(BRCMF_VIF_STATUS_EAP_SUCCESS, &vif->sme_state);
-	if (event == BRCMF_E_SET_SSID && status == BRCMF_E_STATUS_SUCCESS) {
-		brcmf_dbg(CONN, "Processing set ssid\n");
+	if ((event == BRCMF_E_SET_SSID ||
+	     (owe_offload && event == BRCMF_E_ROAM)) &&
+	    status == BRCMF_E_STATUS_SUCCESS) {
+		brcmf_dbg(CONN, "Processing association success\n");
 		memcpy(vif->profile.bssid, e->addr, ETH_ALEN);
 		if (vif->profile.use_fwsup != BRCMF_PROFILE_FWSUP_PSK &&
-		    vif->profile.use_fwsup != BRCMF_PROFILE_FWSUP_SAE)
+		    vif->profile.use_fwsup != BRCMF_PROFILE_FWSUP_SAE &&
+		    vif->profile.use_fwsup != BRCMF_PROFILE_FWSUP_OWE)
 			return true;
 
 		set_bit(BRCMF_VIF_STATUS_ASSOC_SUCCESS, &vif->sme_state);
@@ -6831,7 +6893,8 @@ brcmf_bss_connect_done(struct brcmf_cfg80211_info *cfg,
 		conn_params.resp_ie_len = conn_info->resp_ie_len;
 		authorized = completed &&
 			     ((profile->use_fwsup == BRCMF_PROFILE_FWSUP_SAE) ||
-			      (profile->use_fwsup == BRCMF_PROFILE_FWSUP_PSK));
+			      (profile->use_fwsup == BRCMF_PROFILE_FWSUP_PSK) ||
+			      (profile->use_fwsup == BRCMF_PROFILE_FWSUP_OWE));
 		cfg80211_connect_done(ndev, &conn_params, GFP_KERNEL);
 		if (authorized) {
 			cfg80211_port_authorized(ndev, profile->bssid, NULL, 0,
@@ -6972,6 +7035,10 @@ brcmf_notify_roaming_status(struct brcmf_if *ifp,
 		if (test_bit(BRCMF_VIF_STATUS_CONNECTED,
 			     &ifp->vif->sme_state)) {
 			brcmf_bss_roaming_done(cfg, ifp->ndev, e);
+		} else if (ifp->vif->profile.use_fwsup ==
+			   BRCMF_PROFILE_FWSUP_OWE) {
+			/* Initial OWE ROAM success still needs handshake completion. */
+			return brcmf_notify_connect_status(ifp, e, data);
 		} else {
 			brcmf_bss_connect_done(cfg, ifp->ndev, e, true);
 			brcmf_net_setcarrier(ifp, true);
@@ -8255,6 +8322,9 @@ static int brcmf_setup_wiphy(struct wiphy *wiphy, struct brcmf_if *ifp)
 				      NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK);
 		wiphy_ext_feature_set(wiphy,
 				      NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_1X);
+		if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_OWE))
+			wiphy_ext_feature_set(wiphy,
+					      NL80211_EXT_FEATURE_OWE_OFFLOAD);
 		if (brcmf_feat_is_enabled(ifp, BRCMF_FEAT_SAE))
 			wiphy_ext_feature_set(wiphy,
 					      NL80211_EXT_FEATURE_SAE_OFFLOAD);
