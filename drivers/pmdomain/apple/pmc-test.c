@@ -11,9 +11,9 @@
 
 #define APPLE_PMC_TEST_RAILS_SIZE	0x4000
 
-static struct apple_pmc *apple_pmc_test_alloc(struct kunit *test)
+static struct apple_pmc *apple_pmc_test_alloc_hw(struct kunit *test,
+						 const struct apple_pmc_hw *hw)
 {
-	const struct apple_pmc_hw *hw = &apple_pmc_hw_t8140;
 	struct apple_pmc *pmc;
 
 	pmc = kunit_kzalloc(test, sizeof(*pmc), GFP_KERNEL);
@@ -30,8 +30,14 @@ static struct apple_pmc *apple_pmc_test_alloc(struct kunit *test)
 						   APPLE_PMC_TEST_RAILS_SIZE,
 						   GFP_KERNEL);
 	KUNIT_ASSERT_NOT_NULL(test, (void __force *)pmc->rails);
+	dev_set_drvdata(pmc->dev, pmc);
 
 	return pmc;
+}
+
+static struct apple_pmc *apple_pmc_test_alloc(struct kunit *test)
+{
+	return apple_pmc_test_alloc_hw(test, &apple_pmc_hw_t8140);
 }
 
 static void apple_pmc_test_set_dcs_vote(struct apple_pmc *pmc,
@@ -152,11 +158,54 @@ static void apple_pmc_test_release_restores_ap_vote(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, apple_pmc_enable_read(pmc, rail), pmc->saved_enable[rail]);
 }
 
+/* T8132: with the agent's pending bit clear, a floor update is written. */
+static void apple_pmc_test_t8132_floor_update(struct kunit *test)
+{
+	struct apple_pmc *pmc = apple_pmc_test_alloc_hw(test, &apple_pmc_hw_t8132);
+	unsigned int agent = pmc->hw->ap_agent;
+	void __iomem *reg = pmc->voters + agent * pmc->hw->agent_stride;
+
+	KUNIT_ASSERT_EQ(test, apple_pmc_floor_update(pmc->dev, agent, 0xff, 0x35), 0);
+	KUNIT_EXPECT_EQ(test, readl(reg) & 0xff, 0x35);
+}
+
+/*
+ * T8132: while the PMC has not taken up the agent's previous floor, the
+ * update times out and leaves the floor word alone.
+ */
+static void apple_pmc_test_t8132_pending_stuck(struct kunit *test)
+{
+	struct apple_pmc *pmc = apple_pmc_test_alloc_hw(test, &apple_pmc_hw_t8132);
+	unsigned int agent = pmc->hw->ap_agent;
+	void __iomem *reg = pmc->voters + agent * pmc->hw->agent_stride;
+
+	writel(0x12, reg);
+	writel(BIT(agent), reg + 4);
+	KUNIT_EXPECT_EQ(test, apple_pmc_floor_update(pmc->dev, agent, 0xff, 0x35),
+			-ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, readl(reg), 0x12);
+}
+
+/* T8140 has no pending bit: the word after the floor word is not waited on. */
+static void apple_pmc_test_t8140_ignores_pending_word(struct kunit *test)
+{
+	struct apple_pmc *pmc = apple_pmc_test_alloc(test);
+	unsigned int agent = pmc->hw->ap_agent;
+	void __iomem *reg = pmc->voters + agent * pmc->hw->agent_stride;
+
+	writel(BIT(agent), reg + 4);
+	KUNIT_ASSERT_EQ(test, apple_pmc_floor_update(pmc->dev, agent, 0xff, 0x35), 0);
+	KUNIT_EXPECT_EQ(test, readl(reg) & 0xff, 0x35);
+}
+
 static struct kunit_case apple_pmc_test_cases[] = {
 	KUNIT_CASE(apple_pmc_test_partial_enable),
 	KUNIT_CASE(apple_pmc_test_release_restores_ap_vote),
 	KUNIT_CASE(apple_pmc_test_agent_enable),
 	KUNIT_CASE(apple_pmc_test_dcs_limit_restores_ap_vote),
+	KUNIT_CASE(apple_pmc_test_t8132_floor_update),
+	KUNIT_CASE(apple_pmc_test_t8132_pending_stuck),
+	KUNIT_CASE(apple_pmc_test_t8140_ignores_pending_word),
 	{}
 };
 

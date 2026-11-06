@@ -24,7 +24,9 @@ description: |
 
 properties:
   compatible:
-    const: apple,t8140-pmc
+    enum:
+      - apple,t8132-pmc
+      - apple,t8140-pmc
 
   reg:
     items:
