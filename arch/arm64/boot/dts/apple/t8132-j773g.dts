@@ -15,6 +15,26 @@
 / {
 	compatible = "apple,j773g", "apple,t8132", "apple,arm-platform";
 	model = "Apple Mac mini (M4, 2024)";
+
+	aliases {
+		bluetooth0 = &bluetooth0;
+		ethernet0 = &ethernet0;
+		wifi0 = &wifi0;
+	};
+};
+
+/*
+ * Persistent console capture for early T8132 bring-up failures. Keep this
+ * near the top of RAM, outside m1n1's kernel/initramfs load area.
+ */
+&{/reserved-memory} {
+	ramoops@103e0000000 {
+		compatible = "ramoops";
+		reg = <0x103 0xe0000000 0x0 0x200000>;
+		record-size = <0x40000>;
+		console-size = <0x100000>;
+		pmsg-size = <0x40000>;
+	};
 };
 
 /*
@@ -22,4 +42,145 @@
  */
 &framebuffer0 {
 	power-domains = <&ps_dispext0_fe>, <&ps_dptx_phy>;
+};
+
+&smc_mbox {
+	status = "okay";
+};
+
+&smc {
+	status = "okay";
+
+	smc_reboot: reboot {
+		compatible = "apple,smc-reboot";
+		nvmem-cells = <&shutdown_flag>, <&boot_stage>,
+			      <&boot_error_count>, <&panic_count>;
+		nvmem-cell-names = "shutdown_flag", "boot_stage",
+				   "boot_error_count", "panic_count";
+	};
+
+	smc_rtc: rtc {
+		compatible = "apple,smc-rtc";
+		nvmem-cells = <&rtc_offset>;
+		nvmem-cell-names = "rtc_offset";
+	};
+};
+
+&nub_spmi {
+	status = "okay";
+
+	pmic1: pmic@e {
+		compatible = "apple,abbey-pmic", "apple,spmi-nvmem";
+		reg = <0xe SPMI_USID>;
+
+		nvmem-layout {
+			compatible = "fixed-layout";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			pm_setting: pm-setting@2001 {
+				reg = <0x2001 0x1>;
+			};
+
+			rtc_offset: rtc-offset@2100 {
+				reg = <0x2100 0x6>;
+			};
+
+			fault_shadow: fault-shadow@867b {
+				reg = <0x867b 0x10>;
+			};
+
+			socd: socd@8b00 {
+				reg = <0x8b00 0x1800>;
+			};
+
+			boot_stage: boot-stage@f801 {
+				reg = <0xf801 0x1>;
+			};
+
+			boot_error_count: boot-error-count@f802,0 {
+				reg = <0xf802 0x1>;
+				bits = <0 4>;
+			};
+
+			panic_count: panic-count@f802,4 {
+				reg = <0xf802 0x1>;
+				bits = <4 4>;
+			};
+
+			shutdown_flag: shutdown-flag@f80f,3 {
+				reg = <0xf80f 0x1>;
+				bits = <3 1>;
+			};
+		};
+	};
+};
+
+/* Internal SSD */
+
+&ans_mbox {
+	status = "okay";
+};
+
+&sart {
+	status = "okay";
+};
+
+&nvme {
+	status = "okay";
+};
+
+/*
+ * Internal PCIe: Wi-Fi and Bluetooth (BCM4388) on port 0 and Ethernet on
+ * port 2 (an AQC113 on the 10 Gb Ethernet model). Port 1 is not wired.
+ * Fixed bus numbers let the device nodes below carry the MAC and
+ * Bluetooth addresses and the calibration the loader fills in.
+ */
+
+&pcie0 {
+	iommu-map = <0x100 &pcie0_dart 1 1>,
+		    <0x200 &pcie2_dart 1 1>;
+	status = "okay";
+};
+
+&pcie0_dart {
+	status = "okay";
+};
+
+&pcie2_dart {
+	status = "okay";
+};
+
+&pcie0_port0 {
+	pwren-gpios = <&smc_gpio 19 GPIO_ACTIVE_HIGH>;
+	bus-range = <1 1>;
+	status = "okay";
+
+	wifi0: wifi@0,0 {
+		compatible = "pci14e4,4434";
+		reg = <0x10000 0x0 0x0 0x0 0x0>;
+		/* To be filled by the loader */
+		local-mac-address = [00 00 00 00 00 00];
+		apple,antenna-sku = "XX";
+		brcm,board-type = "apple,sakhalin";
+	};
+
+	bluetooth0: bluetooth@0,1 {
+		compatible = "pci14e4,5f72";
+		reg = <0x10100 0x0 0x0 0x0 0x0>;
+		/* To be filled by the loader */
+		local-bd-address = [00 00 00 00 00 00];
+		brcm,board-type = "apple,sakhalin";
+	};
+};
+
+&pcie0_port2 {
+	bus-range = <2 2>;
+	status = "okay";
+
+	ethernet0: ethernet@0,0 {
+		reg = <0x20000 0x0 0x0 0x0 0x0>;
+		/* To be filled by the loader */
+		local-mac-address = [00 10 18 00 00 00];
+	};
 };

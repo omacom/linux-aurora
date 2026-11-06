@@ -56,7 +56,9 @@ properties:
               - apple,t6000-pcie
           - const: apple,pcie
       - items:
-          - const: apple,t8122-pcie
+          - enum:
+              - apple,t8122-pcie
+              - apple,t8132-pcie
           - const: apple,t6020-pcie
       - const: apple,t6020-pcie
       - const: apple,t8140-pcie
@@ -198,6 +200,9 @@ allOf:
         compatible:
           contains:
             const: apple,t6020-pcie
+          not:
+            contains:
+              const: apple,t8132-pcie
     then:
       properties:
         reg-names:
@@ -250,7 +255,9 @@ allOf:
             properties:
               compatible:
                 contains:
-                  const: apple,t8140-pcie
+                  enum:
+                    - apple,t8132-pcie
+                    - apple,t8140-pcie
           then:
             properties:
               reg:
