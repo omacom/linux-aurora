@@ -137,6 +137,21 @@ pub(crate) fn early_tiling() -> bool {
     *module_parameters::g15_early_tiling.value() != 0
 }
 
+/// The compute share budget, ns: the compute GPU time one VM's flight may hold while a job of
+/// another VM waits (0: off, the engine schedules as without it). A non-zero budget is clamped
+/// to 100 us..1 s; below one command it still admits one.
+pub(crate) fn share_budget_ns() -> u64 {
+    match *module_parameters::g15_share_budget_us.value() as u64 {
+        0 => 0,
+        us => us.clamp(100, 1_000_000) * 1000,
+    }
+}
+
+/// How long the compute share budget applies after a job of another VM was held, ns (1 ms..10 s).
+pub(crate) fn share_window_ns() -> u64 {
+    (*module_parameters::g15_share_window_ms.value()).clamp(1, 10_000) as u64 * 1_000_000
+}
+
 /// Fills the generation part of GET_PARAMS group 0.
 pub(crate) fn fill(gpu: &Gpu, params: &mut uapi::drm_asahi_params_global) -> Result {
     params.features |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS as u64
