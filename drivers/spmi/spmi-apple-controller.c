@@ -34,10 +34,13 @@
 
 #define SPMI_IRQ_MASK_BASE 0x20
 #define SPMI_IRQ_ACK_BASE 0x60
+/*
+ * Peripheral interrupts come first, up to 256 of them depending on the SoC
+ * (apple_spmi_hw.peripheral_irqs); the controller's own 32 events follow, the
+ * first being "notify", the RX FIFO no longer empty.
+ */
 #define SPMI_NUM_PERIPHERAL_IRQS 256
-#define SPMI_NUM_IRQS (SPMI_NUM_PERIPHERAL_IRQS + 32)
-
-#define SPMI_IRQ_NOTIFY 256
+#define SPMI_NUM_CTRL_IRQS 32
 
 /* SPMI_RSP_REG reply word */
 #define SPMI_REPLY_FRAME_PARITY_STATUS GENMASK(31, 16)
@@ -57,6 +60,7 @@ struct apple_spmi_hw {
 	u32 reply;
 	u32 rx_empty;
 	bool legacy_irqs;
+	u32 peripheral_irqs;
 };
 
 static const struct apple_spmi_hw apple_spmi_gen1 = {
@@ -65,6 +69,20 @@ static const struct apple_spmi_hw apple_spmi_gen1 = {
 	.reply = SPMI_RSP_REG,
 	.rx_empty = SPMI_RX_FIFO_EMPTY,
 	.legacy_irqs = true,
+	.peripheral_irqs = 256,
+};
+
+/*
+ * As gen1, but with 192 peripheral interrupts: macOS's nub-spmi0 numbers its
+ * events from 0xc0, and with a reply waiting the pending bit is 192.
+ */
+static const struct apple_spmi_hw apple_spmi_t6000 = {
+	.status = SPMI_STATUS_REG,
+	.command = SPMI_CMD_REG,
+	.reply = SPMI_RSP_REG,
+	.rx_empty = SPMI_RX_FIFO_EMPTY,
+	.legacy_irqs = true,
+	.peripheral_irqs = 192,
 };
 
 static const struct apple_spmi_hw apple_spmi_gen4 = {
@@ -86,6 +104,17 @@ struct apple_spmi {
 	bool notify_irq;
 	bool prev_fail;
 };
+
+static u32 apple_spmi_notify(struct apple_spmi *spmi)
+{
+	return spmi->hw->peripheral_irqs;
+}
+
+/* 32-bit mask (and ack) words for the peripheral interrupts and the events */
+static size_t apple_spmi_irq_words(struct apple_spmi *spmi)
+{
+	return (spmi->hw->peripheral_irqs + SPMI_NUM_CTRL_IRQS) / 32;
+}
 
 static void apple_spmi_irq_ack_raw(struct apple_spmi *spmi, u32 irq)
 {
@@ -190,7 +219,7 @@ static int spmi_raw_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid, u16 param,
 		if (!spmi->hw->legacy_irqs)
 			return -EIO;
 		writel(SPMI_ACT_FIFO_FLUSH, spmi->regs + SPMI_ACT_REG);
-		apple_spmi_irq_ack_raw(spmi, SPMI_IRQ_NOTIFY);
+		apple_spmi_irq_ack_raw(spmi, apple_spmi_notify(spmi));
 		spmi->prev_fail = false;
 	}
 	reinit_completion(&spmi->fifo_rx);
@@ -329,12 +358,13 @@ static int apple_spmi_irq_domain_translate(struct irq_domain *irqd,
 					unsigned long *hwirq,
 					unsigned int *type)
 {
+	struct apple_spmi *spmi = irqd->host_data;
 	u32 *args = fwspec->param;
 
 	if (fwspec->param_count != 2)
 		return -EINVAL;
 
-	if (args[0] >= SPMI_NUM_PERIPHERAL_IRQS)
+	if (args[0] >= spmi->hw->peripheral_irqs)
 		return -EINVAL;
 	*hwirq = args[0];
 	*type = args[1] & IRQ_TYPE_SENSE_MASK;
@@ -344,6 +374,7 @@ static int apple_spmi_irq_domain_translate(struct irq_domain *irqd,
 static int apple_spmi_irq_domain_alloc(struct irq_domain *irqd, unsigned int virq,
 				unsigned int nr_irqs, void *arg)
 {
+	struct apple_spmi *spmi = irqd->host_data;
 	unsigned int type = IRQ_TYPE_NONE;
 	struct irq_fwspec *fwspec = arg;
 	irq_hw_number_t hwirq;
@@ -353,7 +384,7 @@ static int apple_spmi_irq_domain_alloc(struct irq_domain *irqd, unsigned int vir
 	if (ret)
 		return ret;
 
-	if (hwirq + nr_irqs > SPMI_NUM_PERIPHERAL_IRQS)
+	if (hwirq + nr_irqs > spmi->hw->peripheral_irqs)
 		return -EINVAL;
 
 	for (i = 0; i < nr_irqs; i++) {
@@ -392,14 +423,14 @@ static void apple_spmi_irq_handler(struct irq_desc *desc)
 	unsigned long val, offset, bit;
 
 	chained_irq_enter(chip, desc);
-	val = readl(spmi->regs + SPMI_IRQ_ACK_BASE + (SPMI_IRQ_NOTIFY / 32) * 4);
-	if (val & BIT(SPMI_IRQ_NOTIFY % 32)) {
-		apple_spmi_irq_ack_raw(spmi, SPMI_IRQ_NOTIFY);
+	val = readl(spmi->regs + SPMI_IRQ_ACK_BASE + (apple_spmi_notify(spmi) / 32) * 4);
+	if (val & BIT(apple_spmi_notify(spmi) % 32)) {
+		apple_spmi_irq_ack_raw(spmi, apple_spmi_notify(spmi));
 		complete(&spmi->fifo_rx);
 		handled = true;
 	}
 
-	for (offset = 0; offset < SPMI_NUM_PERIPHERAL_IRQS / 8; offset += sizeof(val)) {
+	for (offset = 0; offset < spmi->hw->peripheral_irqs / 8; offset += sizeof(val)) {
 		val = readq(spmi->regs + SPMI_IRQ_ACK_BASE + offset);
 		/**
 		 * because of other masters in the bus, we're going to get a multitude of
@@ -422,7 +453,7 @@ static void apple_spmi_teardown_irq(void *data)
 {
 	struct apple_spmi *spmi = data;
 
-	for (size_t offset = 0; offset < SPMI_NUM_IRQS / 8; offset += 4)
+	for (size_t offset = 0; offset < apple_spmi_irq_words(spmi) * 4; offset += 4)
 		writel(0, spmi->regs + SPMI_IRQ_MASK_BASE + offset);
 
 	synchronize_irq(spmi->irq);
@@ -442,7 +473,7 @@ static int apple_spmi_init_irq(struct platform_device *pdev,
 
 	raw_spin_lock_init(&spmi->irq_mask_lock);
 
-	for (size_t offset = 0; offset < SPMI_NUM_IRQS / 8; offset += 4) {
+	for (size_t offset = 0; offset < apple_spmi_irq_words(spmi) * 4; offset += 4) {
 		writel(0, spmi->regs + SPMI_IRQ_MASK_BASE + offset);
 		writel(U32_MAX, spmi->regs + SPMI_IRQ_ACK_BASE + offset);
 	}
@@ -456,7 +487,7 @@ static int apple_spmi_init_irq(struct platform_device *pdev,
 		return ret;
 
 	irq_set_chained_handler_and_data(spmi->irq, apple_spmi_irq_handler, spmi);
-	apple_spmi_irq_unmask_raw(spmi, SPMI_IRQ_NOTIFY);
+	apple_spmi_irq_unmask_raw(spmi, apple_spmi_notify(spmi));
 	spmi->notify_irq = true;
 
 	return 0;
@@ -512,6 +543,7 @@ static int apple_spmi_probe(struct platform_device *pdev)
 
 static const struct of_device_id apple_spmi_match_table[] = {
 	{ .compatible = "apple,t8142-spmi", .data = &apple_spmi_gen4 },
+	{ .compatible = "apple,t6000-spmi", .data = &apple_spmi_t6000 },
 	{ .compatible = "apple,t8103-spmi", .data = &apple_spmi_gen1 },
 	{ .compatible = "apple,spmi", .data = &apple_spmi_gen1 },
 	{}
