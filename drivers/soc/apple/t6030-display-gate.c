@@ -1461,7 +1461,7 @@ static int __init gate_ext_apply(struct gate_ext *ext, bool native)
 	/* The driver must wait for this request's acknowledgement before RUN. */
 	if (!ret)
 		ret = gate_set_u32(cs, ext->dcp, "apple,pmp-report", ext->entry->phandle);
-	/* No external display is attached in system sleep: the PMP may drop it. */
+	/* In system sleep its displays are dark or detached: the PMP may drop it. */
 	if (!ret)
 		ret = gate_add_bool(cs, ext->entry, "apple,release-for-sleep");
 	if (!ret)
