@@ -2282,9 +2282,27 @@
     "{output}"
    ],
    "note": "Build only the host Kconfig tool in an isolated output directory; check all built-in/module dependency combinations."
+  },
+  {
+   "name": "tools/aurora-sep/tests/test_capture_wait.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/aurora-sep/tests",
+    "-p",
+    "test_capture_wait.py",
+    "-v"
+   ],
+   "rust": "1.85.0",
+   "timeout": 120
   }
  ],
  "helpers": {
+  "tools/aurora-sep/tests/capture-wait.rs": "Synthetic time/SPI/IRQ leaves and behavioral cases compiled with production await_capture by test_capture_wait.py.",
   "tools/testing/selftests/drivers/gpu/apple-dcp/run.py": "the implementation behind tools/testing/selftests/drivers/gpu/apple-dcp/run.sh, which is listed",
   "tools/testing/selftests/drivers/gpu/asahi-g15/uat-owner.c": "compiled and executed by the registered asahi-g15/run.py actual reservation-owner fixture",
   "tools/testing/selftests/drivers/gpu/asahi-g15/pmp-bridge.c": "compiled and executed by the registered asahi-g15/run.py maintained PMP fixture",

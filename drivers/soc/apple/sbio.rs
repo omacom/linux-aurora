@@ -1653,7 +1653,7 @@ impl SepData {
             dev_err!(self.dev, "verify: could not start the capture ({:?})\n", e);
             return bio::VerifyOutcome::Failed(ENROL_STATUS_SENSOR);
         }
-        let advertised = match self.await_capture() {
+        let advertised = match self.await_capture(CapturePurpose::Verification) {
             CaptureWait::Ready(n) => n,
             CaptureWait::Timeout => {
                 dev_warn!(self.dev, "verify: the capture ended without a frame\n");
@@ -2712,7 +2712,7 @@ impl SepData {
             return ImageOutcome::Failed(ENROL_STATUS_SENSOR);
         }
 
-        let available = match self.await_capture() {
+        let available = match self.await_capture(CapturePurpose::Enrollment) {
             CaptureWait::Ready(n) => n,
             CaptureWait::Timeout => {
                 dev_warn!(self.dev, "enrol: capture {} ended without a frame\n", counter);
@@ -2846,7 +2846,7 @@ impl SepData {
         }
     }
 
-    fn await_capture(&self) -> CaptureWait {
+    fn await_capture(&self, purpose: CapturePurpose) -> CaptureWait {
         let mut previous: Option<[u8; sensor::STATUS_LEN]> = None;
         let mut armed_reported = false;
 
@@ -2865,9 +2865,13 @@ impl SepData {
         // attempt budget would then be spent in milliseconds and time the
         // capture out before the frame lands. Time-bounding degrades, at worst,
         // to the same duration as the poll path.
-        let deadline_ns = crate::shim::monotonic_ns().saturating_add(
-            u64::from(ENROL_POLL_ATTEMPTS) * u64::from(ENROL_POLL_MS) * 1_000_000,
+        let timeout_ns = u64::from(ENROL_POLL_ATTEMPTS) * u64::from(ENROL_POLL_MS) * 1_000_000;
+        let started_ns = crate::shim::monotonic_ns();
+        let mut deadline_ns = started_ns.saturating_add(timeout_ns);
+        let verification_deadline_ns = started_ns.saturating_add(
+            u64::from(VERIFY_CAPTURE_TIMEOUT_MS) * 1_000_000,
         );
+        let mut waiting_for_finger = matches!(purpose, CapturePurpose::Verification);
         let mut attempt: u32 = 0;
         loop {
             if !bio::capture_is_live(&self.bio_session.lock(), self.capture_epoch.load(Relaxed)) {
@@ -2880,6 +2884,12 @@ impl SepData {
                     return CaptureWait::Abandon;
                 }
             };
+
+            // Cancellation or suspend may have happened during the SPI read.
+            // Do not carry even a complete frame into the old operation.
+            if !bio::capture_is_live(&self.bio_session.lock(), self.capture_epoch.load(Relaxed)) {
+                return CaptureWait::Abandon;
+            }
 
             if attempt == 0 || previous != Some(st.raw) {
                 previous = Some(st.raw);
@@ -2902,19 +2912,30 @@ impl SepData {
                 }
             }
 
-            if st.state == sensor::STATE_ARMED && !armed_reported {
-                armed_reported = true;
+            // Keep one idle verification armed longer than enrollment, but
+            // retain an absolute upper bound even if its caller never cancels.
+            // A transition out of ARMED still ends the idle extension.
+            let now_ns = crate::shim::monotonic_ns();
+            if matches!(purpose, CapturePurpose::Verification) && now_ns >= verification_deadline_ns {
+                return CaptureWait::Timeout;
             }
+            // A late ARMED report or frame cannot revive an expired arming,
+            // enrollment or progress budget, even if SPI consumed the time.
+            if now_ns >= deadline_ns {
+                return CaptureWait::Timeout;
+            }
+            if waiting_for_finger && st.state == sensor::STATE_ARMED {
+                deadline_ns = now_ns.saturating_add(timeout_ns);
+            } else if st.state == sensor::STATE_READING || armed_reported {
+                waiting_for_finger = false;
+            }
+            armed_reported |= st.state == sensor::STATE_ARMED;
 
             if let sensor::Offset12::Available(count) = st.offset12() {
                 if count == 0 {
                     return CaptureWait::Timeout;
                 }
                 return CaptureWait::Ready(count);
-            }
-
-            if crate::shim::monotonic_ns() >= deadline_ns {
-                break;
             }
 
             if use_irq {
@@ -2928,8 +2949,6 @@ impl SepData {
             }
             attempt = attempt.saturating_add(1);
         }
-        let _ = sensor::status();
-        CaptureWait::Timeout
     }
 
     pub(crate) fn on_sbio(&self, msg: Message) {

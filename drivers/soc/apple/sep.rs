@@ -364,6 +364,11 @@ enum CaptureWait {
     Abandon,
 }
 
+enum CapturePurpose {
+    Enrollment,
+    Verification,
+}
+
 const ENROL_STATUS_SENSOR: u32 = 1;
 const ENROL_STATUS_ENCLAVE: u32 = 2;
 const ENROL_STATUS_TOO_MANY: u32 = 3;
@@ -434,6 +439,9 @@ const ENROL_POLL_MS: u32 = 2;
 const ENROL_IRQ_WAIT_MS: u32 = 250;
 
 const ENROL_CAPTURE_TIMEOUT_MS: u32 = 60_000;
+// A forgotten userspace verifier must not retain one capture indefinitely.
+// Five minutes preserves a long idle prompt without the old minute-long churn.
+const VERIFY_CAPTURE_TIMEOUT_MS: u32 = 300_000;
 const ENROL_POLL_ATTEMPTS: u32 = ENROL_CAPTURE_TIMEOUT_MS / ENROL_POLL_MS;
 static_assert!(ENROL_POLL_ATTEMPTS * ENROL_POLL_MS == ENROL_CAPTURE_TIMEOUT_MS);
 
