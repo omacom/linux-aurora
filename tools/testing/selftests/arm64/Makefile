@@ -4,7 +4,7 @@
 ARCH ?= $(shell uname -m 2>/dev/null || echo not)
 
 ifneq (,$(filter $(ARCH),aarch64 arm64))
-ARM64_SUBTARGETS ?= tags signal pauth fp mte bti abi gcs user4k
+ARM64_SUBTARGETS ?= tags signal pauth fp mte bti abi gcs user4k apple_context
 else
 ARM64_SUBTARGETS :=
 endif
