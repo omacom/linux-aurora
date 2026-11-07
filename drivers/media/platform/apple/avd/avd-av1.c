@@ -1400,16 +1400,19 @@ static void update_dec_buf_info(struct avd_decoded_buffer *buf,
 static int avd_av1_check_tiles(struct avd_ctx *ctx, struct avd_av1_run *run,
 			       unsigned int entries)
 {
-	size_t payload = vb2_get_plane_payload(&run->base.bufs.src->vb2_buf, 0);
 	unsigned int tiles = run->frame->tile_info.tile_cols *
 			     run->frame->tile_info.tile_rows;
 	unsigned int t;
+	size_t payload;
 
 	if (entries < tiles) {
 		dev_err_ratelimited(ctx->dev->dev, "AV1: %u tiles but %u tile entries\n",
 				    tiles, entries);
 		return -EINVAL;
 	}
+	if (!tiles)
+		return 0;
+	payload = vb2_get_plane_payload(&run->base.bufs.src->vb2_buf, 0);
 	for (t = 0; t < tiles; t++) {
 		const struct v4l2_ctrl_av1_tile_group_entry *e = &run->tile_group[t];
 

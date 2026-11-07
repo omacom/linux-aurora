@@ -73,9 +73,11 @@ static unsigned int avd_qfw_picture_banks(const struct avd_dev *, unsigned int);
 static bool vp_feature=true;
 static bool avd_qfw_has_vp_done(const struct avd_dev *d){return d->queued&&vp_feature;}
 static void *vb2_plane_vaddr(struct vb2_buffer *b,int p){(void)p;return b->cpu;}
+/* The tests' single tile entry lies inside the first MiB of the bitstream buffer. */
+static unsigned long vb2_get_plane_payload(struct vb2_buffer *b,unsigned int p){(void)b;(void)p;return 1UL<<20;}
 static struct vb2_v4l2_buffer *current_src,*current_dst;
 static struct vb2_v4l2_buffer *v4l2_m2m_next_src_buf(void *m){(void)m;return current_src;}
-struct v4l2_ctrl {unsigned int id; union {void *p;} p_cur;};
+struct v4l2_ctrl {unsigned int id; unsigned int elems; union {void *p;} p_cur;};
 struct v4l2_ctrl_ref {struct v4l2_ctrl_ref *next; struct v4l2_ctrl *ctrl; bool p_req_valid; union {void *p;} p_req;};
 struct v4l2_ctrl_handler {struct v4l2_ctrl_ref *ctrl_refs;};
 #define list_for_each_entry(ref,head,node) for((ref)=*(head);(ref);(ref)=(ref)->next)
@@ -90,7 +92,7 @@ static unsigned int request_gets,request_puts;
 static struct v4l2_ctrl_handler *v4l2_ctrl_request_hdl_find(void *req,void *h){(void)h;assert(req==&request_hdl);request_gets++;return &request_hdl;}
 static void v4l2_ctrl_request_hdl_put(struct v4l2_ctrl_handler *h){assert(h==&request_hdl);request_puts++;}
 static struct v4l2_ctrl *v4l2_ctrl_find(void *h,u32 id){
- (void)h;controls[0].p_cur.p=&seq;controls[1].p_cur.p=&params;controls[2].p_cur.p=&tile;controls[3].p_cur.p=&grain;
+ (void)h;controls[0].p_cur.p=&seq;controls[1].p_cur.p=&params;controls[2].p_cur.p=&tile;controls[2].elems=1;controls[3].p_cur.p=&grain;
  if(id==V4L2_CID_STATELESS_AV1_SEQUENCE)return &controls[0];
  if(id==V4L2_CID_STATELESS_AV1_FRAME)return &controls[1];
  if(id==V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY)return &controls[2];
