@@ -3226,7 +3226,8 @@ static int atc_tunnel_set_t602x(struct apple_atcphy *atcphy, unsigned int dpin,
 static bool apple_atc_tunnel_is_t6030(struct apple_atcphy *atcphy)
 {
 	return (of_machine_is_compatible("apple,t6030") ||
-		of_machine_is_compatible("apple,t6031")) &&
+		of_machine_is_compatible("apple,t6031") ||
+		of_machine_is_compatible("apple,j516m")) &&
 	       atcphy->hw->gen == ATCPHY_GENERATION_T8122;
 }
 

@@ -117,7 +117,8 @@ bool dcp_is_usb4_output(struct apple_dcp *dcp)
 static bool dcp_fabric_t603x(void)
 {
 	return of_machine_is_compatible("apple,t6030") ||
-	       of_machine_is_compatible("apple,t6031");
+	       of_machine_is_compatible("apple,t6031") ||
+	       of_machine_is_compatible("apple,j516m");
 }
 
 /* SoC flow support and board wiring are separate qualifications. */
@@ -1776,7 +1777,8 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
 
 	/* The crossbar driver runs both in its T6030 mode (t6030_dpin). */
 	if (!of_machine_is_compatible("apple,t6030") &&
-	    !of_machine_is_compatible("apple,t6031"))
+	    !of_machine_is_compatible("apple,t6031") &&
+	    !of_machine_is_compatible("apple,j516m"))
 		return 0;
 	guard(mutex)(&dcp->tb_lock);
 	route = dcp->active_typec_route;
