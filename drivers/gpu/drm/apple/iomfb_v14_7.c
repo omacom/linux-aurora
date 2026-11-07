@@ -2066,8 +2066,8 @@ int iomfb_v14_7_external_prepare(struct apple_dcp *dcp)
 		goto refuse;
 	}
 	/* The callbacks here are those of one firmware image. */
-	if (of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid) ||
-	    strcmp(uuid, DCP_V14_FIRMWARE_UUID)) {
+	if (!dcp_ext_firmware_admitted(dev->of_node)) {
+		of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid);
 		dev_err(dev, "external display processor firmware %s is not supported\n",
 			uuid ?: "(unknown)");
 		ret = -ENODEV;
@@ -2160,20 +2160,13 @@ static int dcpext_check_power(struct apple_dcp *dcp)
 	struct device *dev = dcp->dev;
 	struct device_node *ps, *entry;
 	struct regmap *map;
-	const char *label;
 	u32 offset, value;
 	int ret;
 
-	ps = of_parse_phandle(dev->of_node, "power-domains", 0);
-	if (!ps)
-		return -ENODEV;
 	/* The CPU domain of this pipe: dispext<N>_cpu. */
-	ret = of_property_read_string(ps, "label", &label);
-	if (ret || !strstarts(label, "dispext") || strlen(label) < 4 ||
-	    strcmp(label + strlen(label) - 4, "_cpu")) {
-		of_node_put(ps);
+	ps = dcp_ext_cpu_domain(dev->of_node);
+	if (!ps)
 		return -EINVAL;
-	}
 	ret = of_property_read_u32(ps, "reg", &offset);
 	map = syscon_node_to_regmap(ps->parent);
 	of_node_put(ps);
