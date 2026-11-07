@@ -27,9 +27,8 @@ pub(crate) const UNIT_MASK_A_LIMIT: u64 = 0x7_0000_0003;
 pub(crate) const UNIT_MASK_B_LIMIT: u64 = 0x7;
 /// The default performance-state ceiling: the lowest two states.
 pub(crate) const PSTATE_CAP: u32 = 2;
-/// The highest performance-state ceiling the experiment accepts. The same as the driver's own
-/// limit when the fast-die temperature controller is off (`m3_adt_config::ADT_MAX_PSTATE_LIMIT`):
-/// J613/J615 have no SoC die temperature zone yet, so there is no thermal feedback above it.
+/// The highest performance-state ceiling the experiment accepts. States above the default
+/// require the thermal governor and usable die-temperature readings, not just a higher ceiling.
 pub(crate) const PSTATE_CAP_MAX: u32 = 5;
 
 /// Parse a decimal or `0x`-prefixed hexadecimal `u64`. A leading sign is not accepted.

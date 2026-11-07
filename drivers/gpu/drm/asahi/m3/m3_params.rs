@@ -22,6 +22,8 @@ use kernel::{
     prelude::*, //
 };
 
+use crate::m3::m3_thermal_policy::ThermalMode;
+
 /// Parse a decimal or `0x`-prefixed hexadecimal `u64`.
 fn parse_u64(text: &str) -> Option<u64> {
     let text = text.trim();
@@ -544,21 +546,6 @@ fn parse_thermal(text: &str) -> Option<u64> {
 
 static M3_THERMAL: AtomicU64 = AtomicU64::new(THERMAL_UNSET);
 m3_param!("m3_thermal", M3_THERMAL, parse_thermal);
-
-/// How the runtime backend limits the GPU performance state by temperature.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum ThermalMode {
-    /// Today's fixed cap: the firmware is given the cap as its highest state, and nothing
-    /// changes it at runtime.
-    Off,
-    /// The firmware is given the whole table as its highest state, and the runtime cap words
-    /// hold the fixed cap for the whole boot. The same performance as `Off`, if the firmware
-    /// follows the runtime cap: this checks that it does.
-    Hold,
-    /// As `Hold`, and the runtime cap follows the SoC die temperature, up to the whole table
-    /// while the die is cool.
-    On,
-}
 
 /// The `asahi.m3_thermal` setting, if given.
 pub(crate) fn thermal_param() -> Option<ThermalMode> {
