@@ -167,7 +167,8 @@ int asahi_g15_display_prepare(struct device *dev)
 		name = "T6031";
 		ret = apple_drm_t6031_link_device(dev);
 	} else if (of_device_is_compatible(dev->of_node, "apple,agx-t6034")) {
-		compatible = "apple,t6034-display-subsystem";
+		compatible = of_machine_is_compatible("apple,j516m") ?
+			"apple,t6031-display-subsystem" : "apple,t6034-display-subsystem";
 		name = "T6034";
 		ret = apple_drm_t6034_link_device(dev);
 	} else {
