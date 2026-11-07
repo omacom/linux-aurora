@@ -476,9 +476,11 @@ pub(crate) fn admit(
         && cfg.platform == hw::Platform::DeviceTree
         && glue::machine(kernel::c_str!("apple,j514c"))
         && glue::machine(kernel::c_str!("apple,t6031"));
-    let j514m_board = cfg.chip_id == 0x6034
+    // T6034 boards: the J514M and the 16-inch J516M, which carries the same die.
+    let t6034_board = cfg.chip_id == 0x6034
         && cfg.platform == hw::Platform::DeviceTree
-        && glue::machine(kernel::c_str!("apple,j514m"))
+        && (glue::machine(kernel::c_str!("apple,j514m"))
+            || glue::machine(kernel::c_str!("apple,j516m")))
         && glue::machine(kernel::c_str!("apple,t6034"));
     if pmp {
         if !glue::board() {
@@ -494,8 +496,8 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
-    } else if (cfg.chip_id == 0x6034 && !j514m_board)
-        || (!glue::machine(cfg.machine) && !j514c_board)
+    } else if (cfg.chip_id == 0x6034 && !t6034_board)
+        || (!glue::machine(cfg.machine) && !j514c_board && !t6034_board)
     {
         dev_err!(dev, "G15: not a {} machine\n", cfg.name);
         return Err(ENODEV);
@@ -511,7 +513,7 @@ pub(crate) fn admit(
             return Err(err);
         }
     }
-    if j514c_board || j514m_board {
+    if j514c_board || t6034_board {
         if let hw::Board::DeviceTree(reference) = cfg.board {
             dev_warn!(
                 dev,

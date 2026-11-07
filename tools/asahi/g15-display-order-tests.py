@@ -221,9 +221,11 @@ int main(int argc, char **argv)
 		CHECK(publish(&d34) == 0 && d34.refs == 1);
 		CHECK(prepare(&g34) == 0 && links_made == 1 && last_link.supplier == &d34);
 		machine("apple,t6034", "apple,j516m");
-		CHECK(prepare(&g34) == -ENODEV && links_made == 1);
+		CHECK(prepare(&g34) == 0 && links_made == 2 && last_link.supplier == &d34);
+		machine("apple,t6034", "apple,j999");
+		CHECK(prepare(&g34) == -ENODEV && links_made == 2);
 		machine("apple,t6031", "apple,j514m");
-		CHECK(prepare(&g34) == -ENODEV && links_made == 1);
+		CHECK(prepare(&g34) == -ENODEV && links_made == 2);
 		machine("apple,t6034", "apple,j514m");
 		withdraw(&d34);
 		CHECK(!d34.refs && prepare(&g34) == -EPROBE_DEFER);
@@ -243,7 +245,7 @@ C_MUTANTS = {
     "t6031-reads-t6030-slot": ("&apple_t6031_display);", "&apple_t6030_display);"),
     "t6034-reads-t6031-slot": ("&apple_t6034_display);", "&apple_t6031_display);"),
     "t6034-published-as-t6031": ("return &apple_t6034_display;", "return &apple_t6031_display;"),
-    "t6034-no-board-check": ('if (!of_machine_is_compatible("apple,j514m"))', 'if (false)'),
+    "t6034-no-board-check": ('if (!of_machine_is_compatible("apple,j514m") &&\n\t    !of_machine_is_compatible("apple,j516m"))', 'if (false)'),
     "t6031-published-as-t6030": ("return &apple_t6031_display;", "return &apple_t6030_display;"),
     "no-machine-check": ("!of_machine_is_compatible(machine) ||", ""),
     "withdraw-keeps-display": ("*slot = NULL;", ";"),

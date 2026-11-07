@@ -41,7 +41,7 @@ int main(void)
  const char *socs[]={"apple,t6034","apple,t6031","apple,t6030",NULL};
  dcp="apple,t6034-dcp";
  for(unsigned i=0;i<ARRAY_SIZE(boards);i++) for(unsigned j=0;j<ARRAY_SIZE(socs);j++) {
-  board=boards[i];soc=socs[j];bool expected=i==0&&j==0,known;
+  board=boards[i];soc=socs[j];bool expected=i<2&&j==0,known;
   assert(gate_t6034_default_board()==expected);
   assert(gate_t6034_wanted(-1)==expected);
   assert(!gate_t6034_wanted(0));
@@ -65,6 +65,8 @@ source="\n".join([prefix,types,defines,records,functions,main])
 mutants={
  'control':source,
  'lost-board-soc':source.replace('.soc = "apple,t6034",','.soc = NULL,'),
+ 'lost-j516m-default':source.replace('of_machine_is_compatible("apple,j516m")','false'),
+ 'lost-j516m-record':source.replace('.machine = "apple,j516m",','.machine = "apple,j516x",'),
  'lost-owner-optout':source.replace('return sw < 0 ? default_board : sw;','return sw < 0 ? default_board : true;'),
  'lost-firmware-identity':source.replace('return uuid && !strcmp(uuid, board->firmware_uuid);','return uuid != NULL;'),
 }

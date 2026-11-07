@@ -1,0 +1,203 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * T6034 external display processor dcpext0.
+ *
+ * The J516M ADT places dcpext0 exactly 0x8000_0000 below the panel's DCP
+ * block: coprocessor 0x3_06c0_0000, mailbox 0x3_06c0_8000, firmware DART
+ * 0x3_0530_c000 and display DART 0x3_0530_4000 (both on interrupt 1047),
+ * display pipe 0x3_0400_0000. Its preloaded 14.7 firmware is the panel's
+ * image (F493F03E-...), and its nub has the T6030 dcpext segment layout, so
+ * it runs on the T6030 dcpext handoff protocol: compatible falls back to
+ * apple,t6030-dcpext.
+ *
+ * Power: as for the panel, dispext0_fe is the child of dispext0_cpu on
+ * T6031/T6034, so the processor holds the front end (and with it all three
+ * states); its DART and mailbox hold dispext0_cpu, which is what m1n1's
+ * display DART handoff and the display gate check.
+ *
+ * Every node stays disabled. m1n1 describes the firmware memory and the
+ * display DART only with chosen asahi,t6034-dcpext=1 / asahi,t6034-dispext=1,
+ * and the display gate enables the nodes only when those markers are there.
+ */
+
+/ {
+	aliases {
+		dcpext0 = &dcpext;
+	};
+};
+
+&soc {
+	dcpext_dart: iommu@30530c000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0x0530c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext0_cpu>;
+		status = "disabled";
+	};
+
+	dcpext_mbox: mailbox@306c08000 {
+		compatible = "apple,t6031-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x3 0x06c08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT order 1069 1068 1071 1070, as the panel's 1030 1029 1032 1031 */
+		interrupts = <AIC_IRQ 0 1068 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1069 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1070 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1071 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+		power-domains = <&ps_dispext0_cpu>;
+		resets = <&ps_dispext0_cpu>;
+		status = "disabled";
+	};
+
+	/* ADT atcN-dpxbar (compatible atc-dpxbar,t602x), one per Type-C port. */
+	atcphy0_xbar: mux@70304c000 {
+		compatible = "apple,t6031-display-crossbar",
+			     "apple,t6020-display-crossbar";
+		reg = <0x7 0x0304c000 0x0 0x4000>;
+		#mux-control-cells = <1>;
+		power-domains = <&ps_atc0_usb>;
+	};
+
+	atcphy1_xbar: mux@b0304c000 {
+		compatible = "apple,t6031-display-crossbar",
+			     "apple,t6020-display-crossbar";
+		reg = <0xb 0x0304c000 0x0 0x4000>;
+		#mux-control-cells = <1>;
+		power-domains = <&ps_atc1_usb>;
+	};
+
+	atcphy2_xbar: mux@f0304c000 {
+		compatible = "apple,t6031-display-crossbar",
+			     "apple,t6020-display-crossbar";
+		reg = <0xf 0x0304c000 0x0 0x4000>;
+		#mux-control-cells = <1>;
+		power-domains = <&ps_atc2_usb>;
+	};
+
+	dcpext: dcp@306c00000 {
+		compatible = "apple,t6034-dcpext", "apple,t6030-dcpext",
+			     "apple,dcpext";
+		reg = <0x3 0x06c00000 0x0 0x4000>;
+		reg-names = "coproc";
+		mboxes = <&dcpext_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext_dart 5>;
+		power-domains = <&ps_dispext0_fe>;
+		resets = <&ps_dispext0_cpu>;
+		/*
+		 * The gate sets this too; naming it here gives the entry the
+		 * phandle the gate requires (dtc emits one only if referenced).
+		 */
+		apple,pmp-report = <&pmp_report_dispext0>;
+		phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
+		       <&atcphy2 PHY_TYPE_DP>;
+		phy-names = "typec0", "typec1", "typec2";
+		mux-controls = <&atcphy0_xbar 0>, <&atcphy1_xbar 0>,
+			       <&atcphy2_xbar 0>,
+			       <&atcphy0_xbar 1>, <&atcphy0_xbar 2>,
+			       <&atcphy1_xbar 1>, <&atcphy1_xbar 2>,
+			       <&atcphy2_xbar 1>, <&atcphy2_xbar 2>;
+		mux-control-names = "typec0", "typec1", "typec2",
+				    "typec0-dpin0", "typec0-dpin1",
+				    "typec1-dpin0", "typec1-dpin1",
+				    "typec2-dpin0", "typec2-dpin1";
+		apple,connector-type = "USB-C";
+		/* display-crossbar0 upstream port: dispext0 */
+		apple,dcp-index = <1>;
+		apple,typec-dptx-phys = <0 1 2>;
+		apple,typec-mux-indices = <0 0 0>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		/* Enabled together with the processor by the display gate. */
+		typec-routes {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			route@0 {
+				reg = <0>;
+				mode-switch;
+				status = "disabled";
+
+				port {
+					dcpext_typec0: endpoint {
+						remote-endpoint = <&typec0_dcpext>;
+					};
+				};
+			};
+
+			route@1 {
+				reg = <1>;
+				mode-switch;
+				status = "disabled";
+
+				port {
+					dcpext_typec1: endpoint {
+						remote-endpoint = <&typec1_dcpext>;
+					};
+				};
+			};
+
+			route@2 {
+				reg = <2>;
+				mode-switch;
+				status = "disabled";
+
+				port {
+					dcpext_typec2: endpoint {
+						remote-endpoint = <&typec2_dcpext>;
+					};
+				};
+			};
+		};
+	};
+};
+
+/* The driver waits for the PMP to acknowledge this request before RUN. */
+&pmp_report_dispext0 {
+	apple,always-on;
+};
+
+&typec0 {
+	ports {
+		port@3 {
+			reg = <3>;
+
+			typec0_dcpext: endpoint {
+				remote-endpoint = <&dcpext_typec0>;
+			};
+		};
+	};
+};
+
+&typec1 {
+	ports {
+		port@3 {
+			reg = <3>;
+
+			typec1_dcpext: endpoint {
+				remote-endpoint = <&dcpext_typec1>;
+			};
+		};
+	};
+};
+
+&typec2 {
+	ports {
+		port@3 {
+			reg = <3>;
+
+			typec2_dcpext: endpoint {
+				remote-endpoint = <&dcpext_typec2>;
+			};
+		};
+	};
+};

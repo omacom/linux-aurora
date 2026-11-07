@@ -11,7 +11,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 FUNCTIONS = {
-    'include/linux/soc/apple/dp-tunnel.h': ['apple_dp_tunnel_t6030_pclk'],
+    'include/linux/soc/apple/dp-tunnel.h': ['apple_dp_tunnel_t6030_pclk', 'apple_dp_tunnel_m3_soc'],
     'drivers/gpu/drm/apple/dcp-fabric-core.c': ['dcp_fabric_tunnel_clock_blocked'],
     'drivers/gpu/drm/apple/dcp-fabric.c': [
         'dcp_fabric_snapshot_port', 'dcp_typec_tunnel_ctl'],
@@ -19,7 +19,7 @@ FUNCTIONS = {
 
 
 def function(source, name):
-    match = re.search(r'^(?:static\s+)?(?:inline\s+)?(?:int|void|u8|struct mux_control \*)\s*' +
+    match = re.search(r'^(?:static\s+)?(?:inline\s+)?(?:int|void|u8|bool|struct mux_control \*)\s*' +
                       name + r'\([^;]*?\)\n\{', source, re.M | re.S)
     if not match:
         raise ValueError(name)

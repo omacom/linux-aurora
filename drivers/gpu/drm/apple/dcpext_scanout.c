@@ -516,7 +516,7 @@ static int scanout_recheck_dart(struct device_node *dart, struct device_node *dc
 		return -EINVAL;
 	/* The display DART of this processor's own pipe shares its CPU domain. */
 	dart_pd = of_parse_phandle(dart, "power-domains", 0);
-	dcp_pd = of_parse_phandle(dcp, "power-domains", 0);
+	dcp_pd = dcp_ext_cpu_domain(dcp);
 	of_node_put(dart_pd);
 	of_node_put(dcp_pd);
 	if (!dart_pd || dart_pd != dcp_pd)
@@ -760,14 +760,11 @@ int dcpext_scanout_register(struct apple_dcp *dcp)
 {
 	struct device_node *node;
 	struct dcpext_scanout *scanout;
-	const char *uuid;
 	int ret;
 
 	if (!dcp->external || dcp->fw_compat != DCP_FIRMWARE_V_14_7)
 		return -ENODEV;
-	if (dcpext_pageflip &&
-	    (of_property_read_string(dcp->dev->of_node, "apple,firmware-uuid", &uuid) ||
-	     strcmp(uuid, "DDF38191-93B3-324A-BC8F-643006F5AC82")))
+	if (dcpext_pageflip && !dcp_ext_firmware_admitted(dcp->dev->of_node))
 		return -EOPNOTSUPP;
 	node = of_get_child_by_name(dcp->dev->of_node, "scanout");
 	if (!scanout_node_verified(node)) {

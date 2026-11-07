@@ -55,6 +55,9 @@ struct apple_dcp_typec_port {
 static bool t6030;
 static bool of_machine_is_compatible(const char *compatible)
 {
+	/* apple_dp_tunnel_m3_soc() also asks for T6034, which no scenario here models. */
+	if (!strcmp(compatible, "apple,t6034"))
+		return false;
 	assert(!strcmp(compatible, "apple,t6030"));
 	return t6030;
 }

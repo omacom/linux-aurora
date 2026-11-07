@@ -1382,6 +1382,66 @@ static int dcp_external_start_locked(struct apple_dcp *dcp)
  * that DART, and stream 0 among the display subsystem's iommus, so that
  * framebuffers are mapped for it as for the panel.
  */
+/* Display subsystems an external processor on the T6030 handoff can join. */
+static const struct of_device_id dcp_ext_display_ids[] = {
+	{ .compatible = "apple,t6030-display-subsystem" },
+	/* T6034: dcpext0 on the T6030 handoff protocol. */
+	{ .compatible = "apple,t6034-display-subsystem" },
+	{},
+};
+
+/*
+ * The external processor images the 14.7 external path speaks to: the
+ * T6030 image, and on T6034 the SoC's own image, which
+ * the panel's DCP already runs natively on the same 14.7 layouts.
+ */
+bool dcp_ext_firmware_admitted(const struct device_node *np)
+{
+	const char *uuid;
+
+	if (of_property_read_string(np, "apple,firmware-uuid", &uuid))
+		return false;
+	if (!strcmp(uuid, "DDF38191-93B3-324A-BC8F-643006F5AC82"))
+		return true;
+	return of_machine_is_compatible("apple,t6034") &&
+	       !strcmp(uuid, "F493F03E-CC40-3D89-9A08-5F259BA2B246");
+}
+
+static bool dcp_ext_domain_is(struct device_node *ps, const char *part)
+{
+	const char *label;
+	size_t len, plen = strlen(part);
+
+	if (!ps || of_property_read_string(ps, "label", &label) ||
+	    !strstarts(label, "dispext"))
+		return false;
+	len = strlen(label);
+	return len > plen && !strcmp(label + len - plen, part);
+}
+
+/*
+ * The CPU power domain of an external processor's pipe, dispext<N>_cpu,
+ * with a reference. T6030 names it first in the processor's power-domains;
+ * on T6031/T6034 the processor holds dispext<N>_fe, the
+ * child of dispext<N>_cpu there, as disp_fe is of disp_cpu.
+ */
+struct device_node *dcp_ext_cpu_domain(const struct device_node *np)
+{
+	struct device_node *ps, *parent;
+
+	ps = of_parse_phandle(np, "power-domains", 0);
+	if (dcp_ext_domain_is(ps, "_fe")) {
+		parent = of_parse_phandle(ps, "power-domains", 0);
+		of_node_put(ps);
+		ps = parent;
+	}
+	if (!dcp_ext_domain_is(ps, "_cpu")) {
+		of_node_put(ps);
+		return NULL;
+	}
+	return ps;
+}
+
 bool dcp_t6030_ext_native(const struct device_node *np)
 {
 	struct of_phandle_args dart, args;
@@ -1403,7 +1463,7 @@ bool dcp_t6030_ext_native(const struct device_node *np)
 	of_node_put(piodma);
 	if (dart.args_count != 1 || dart.args[0] != 4 || !of_device_is_available(dart.np))
 		goto out;
-	display = of_find_compatible_node(NULL, NULL, "apple,t6030-display-subsystem");
+	display = of_find_matching_node(NULL, dcp_ext_display_ids);
 	n = display && of_device_is_available(display) ?
 		of_count_phandle_with_args(display, "iommus", "#iommu-cells") : 0;
 	for (i = 0; i < n && !native; i++) {

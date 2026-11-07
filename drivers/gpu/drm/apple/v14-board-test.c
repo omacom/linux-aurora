@@ -125,8 +125,31 @@ static void v14_board_j514m(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
 	KUNIT_EXPECT_FALSE(test, b->panel_nits);
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j514m_wrong_soc, &known));
-	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j516m, &known));
+	/* The J516M has a record of its own. */
+	KUNIT_EXPECT_PTR_NE(test, b, board_for("apple,t6034-dcp", j516m, &known));
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514m, &known));
+}
+
+/* The J516M: the J514M's T6034 DCP and image, with the J516 panel. */
+static void v14_board_j516m(struct kunit *test)
+{
+	const struct dcp_v14_board *b;
+	bool known;
+
+	b = board_for("apple,t6034-dcp", j516m, &known);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_STREQ(test, b->name, "J516M");
+	KUNIT_EXPECT_STREQ(test, b->debugfs, "dcp-j516m");
+	KUNIT_EXPECT_STREQ(test, b->machine, "apple,j516m");
+	KUNIT_EXPECT_STREQ(test, b->soc, "apple,t6034");
+	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t6034-handoff");
+	KUNIT_EXPECT_EQ(test, b->panel_width, 3456);
+	KUNIT_EXPECT_EQ(test, b->panel_height, 2234);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, b->panel_nits);
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j516m, &known));
 }
 
 /* A T6031 DCP on a T6034 has no record: refused. */
@@ -277,6 +300,7 @@ static struct kunit_case v14_board_cases[] = {
 	KUNIT_CASE(v14_board_j516c),
 	KUNIT_CASE(v14_board_j514c),
 	KUNIT_CASE(v14_board_j514m),
+	KUNIT_CASE(v14_board_j516m),
 	KUNIT_CASE(v14_board_t6031_other_boards),
 	KUNIT_CASE(v14_board_j516c_image),
 	KUNIT_CASE(v14_board_unchanged),

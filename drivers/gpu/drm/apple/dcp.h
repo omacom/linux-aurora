@@ -97,6 +97,8 @@ void dcp_send_message(struct apple_dcp *dcp, u8 endpoint, u64 message);
 
 int dcp_dptx_connect_oob(struct platform_device *pdev, u32 port);
 bool dcp_t6030_ext_native(const struct device_node *np);
+bool dcp_ext_firmware_admitted(const struct device_node *np);
+struct device_node *dcp_ext_cpu_domain(const struct device_node *np);
 void dcp_external_ready(struct apple_dcp *dcp);
 void dcp_external_retry(struct apple_dcp *dcp, const char *why, int error,
 			unsigned int base_ms);

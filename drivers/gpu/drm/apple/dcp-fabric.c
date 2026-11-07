@@ -211,7 +211,7 @@ bool dcp_typec_dual_stream(void)
 bool dcp_typec_ordered_dual_stream(void)
 {
 	return dcp_fabric_ordered_dual_stream(dcp_typec_dual_stream(),
-					    of_machine_is_compatible("apple,t6030"));
+					    apple_dp_tunnel_m3_soc());
 }
 
 /*
@@ -257,7 +257,7 @@ static int dcp_route_clock_rate(struct apple_dcp_typec_route *route,
 {
 	int ret;
 
-	if (of_machine_is_compatible("apple,t6030")) {
+	if (apple_dp_tunnel_m3_soc()) {
 		typeof(apple_atc_dp_tunnel_rate_source) *fn;
 
 		if (dcp_fabric_t6030_pclk(route->mux_index, dpin) < 0)
@@ -902,7 +902,7 @@ static void dcp_fabric_snapshot_port(struct apple_dcp_typec_port *port,
 		route->core.tunnel = route->tunnel;
 		route->core.dpin = route->tunnel_dpin;
 		route->core.tunnel_clock_blocked = dcp_fabric_tunnel_clock_blocked(
-			of_machine_is_compatible("apple,t6030"), route->mux_index);
+			apple_dp_tunnel_m3_soc(), route->mux_index);
 		*tail = &route->core;
 		tail = &route->core.next;
 	}
@@ -1763,7 +1763,7 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
 	struct mux_control *xbar = NULL;
 	int ret;
 
-	if (!of_machine_is_compatible("apple,t6030"))
+	if (!apple_dp_tunnel_m3_soc())
 		return 0;
 	guard(mutex)(&dcp->tb_lock);
 	route = dcp->active_typec_route;
@@ -1805,7 +1805,7 @@ int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 unit,
 		return -ENODEV;
 	if (!dcp_fabric_callback_valid(route->tunnel_generation, dcp->tb_generation))
 		return -ESTALE;
-	if (of_machine_is_compatible("apple,t6030") &&
+	if (apple_dp_tunnel_m3_soc() &&
 	    (unit || dcp->dptx_dfp_port != 1 + route->tunnel_dpin ||
 	     apple_dp_tunnel_t6030_pclk(route->mux_index,
 				      route->tunnel_dpin) < 0))
@@ -1903,7 +1903,7 @@ static struct mux_control *
 dcp_typec_tunnel_ctl(struct apple_dcp_typec_route *route, unsigned int dpin)
 {
 	if (dpin > 1 ||
-	    (dcp_fabric_tunnel_clock_blocked(of_machine_is_compatible("apple,t6030"),
+	    (dcp_fabric_tunnel_clock_blocked(apple_dp_tunnel_m3_soc(),
 					     route->mux_index) & BIT(dpin)))
 		return NULL;
 	if (route->dpin[dpin])

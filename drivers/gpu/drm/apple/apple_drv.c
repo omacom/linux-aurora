@@ -139,7 +139,8 @@ EXPORT_SYMBOL_GPL(apple_drm_t6031_link_device);
 
 int apple_drm_t6034_link_device(struct device *consumer)
 {
-	if (!of_machine_is_compatible("apple,j514m"))
+	if (!of_machine_is_compatible("apple,j514m") &&
+	    !of_machine_is_compatible("apple,j516m"))
 		return -ENODEV;
 	return apple_g15_link_device(consumer, "apple,t6034", "apple,agx-t6034",
 				     &apple_t6034_display);

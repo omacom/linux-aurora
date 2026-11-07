@@ -58,13 +58,17 @@ fn main() {
  assert_eq!(c.gpu_revision,0x11);
  assert_eq!((c.hw_ids[0].version,c.hw_ids[0].counts),(0x07041100,0x0021040a));
  // An empty table is the first diagnostic build. A completed profile may
- // contain only the measured row for this exact board.
- assert_eq!(c.firmware.len(),1);
+ // contain only the measured rows, each pinned to its exact board: the J514M,
+ // and the J516M, measured with the same image.
+ assert_eq!(c.firmware.len(),2);
  if !c.firmware.is_empty() {
   use lookup::{Measured,Verdict};
-  assert_eq!(c.firmware.len(),1);
   let b=&c.firmware[0];
   assert_eq!(b.machine.map(|m|m.to_bytes()),Some(b"apple,j514m".as_slice()));
+  let j516m=&c.firmware[1];
+  assert_eq!(j516m.machine.map(|m|m.to_bytes()),Some(b"apple,j516m".as_slice()));
+  assert_eq!((j516m.text_size,j516m.data_size,j516m.marker,j516m.text_sha256),
+             (b.text_size,b.data_size,b.marker,b.text_sha256));
   let exact=Measured {text_size:b.text_size,data_size:b.data_size,marker:b.marker,sha256:b.text_sha256};
   let verdict=|measured:&Measured,board:&[u8]| {
    let qualified=c.firmware.iter().map(|b| {
@@ -74,9 +78,12 @@ fn main() {
    lookup::verdict(measured,qualified,0)
   };
   assert_eq!(verdict(&exact,b"apple,j514m"),Verdict::Pinned(0));
-  for board in [b"apple,j514c".as_slice(),b"apple,j516c",b"apple,j516m",b"apple,j514s",b"apple,j999"] {
+  assert_eq!(verdict(&exact,b"apple,j516m"),Verdict::Pinned(1));
+  for board in [b"apple,j514c".as_slice(),b"apple,j516c",b"apple,j514s",b"apple,j999"] {
    assert_eq!(verdict(&exact,board),Verdict::Refused);
   }
+  let mut changed=exact;changed.sha256[31]^=1;
+  assert_eq!(verdict(&changed,b"apple,j516m"),Verdict::Refused);
   let mut changed=exact;changed.sha256[31]^=1;
   assert_eq!(verdict(&changed,b"apple,j514m"),Verdict::Refused);
   let mut changed=exact;changed.text_size+=0x4000;
