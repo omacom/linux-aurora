@@ -71,3 +71,17 @@
 		status = "disabled";
 	};
 };
+
+/*
+ * J516M ADT confirms the J516C display register and interrupt layout.
+ * External displays (dcpext, HDMI) are not described here yet.
+ */
+&clk_disp0 {
+	/*
+	 * Preserve the captured boot-clock metadata, as the J514M path does.
+	 * Firmware warns that this is below its video clock;
+	 * that warning is not proof of the programmed clock or a startup veto.
+	 * The metadata does not qualify sustained power or thermal behavior.
+	 */
+	clock-frequency = <400000000>;
+};
