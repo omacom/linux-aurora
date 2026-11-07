@@ -567,6 +567,7 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 	push(AVD_OP_SL_REF | AVD_OP_SL_REF_FLAG_CABAC(sl->cabac_init_idc == 1) |
 		     AVD_OP_SL_REF_FLAG1(sl->cabac_init_idc == 2) |
 		     AVD_OP_SL_REF_FLAG2(
+			     sl->slice_type == V4L2_H264_SLICE_TYPE_B &&
 			     !(sl->flags &
 			       V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED)) |
 		     AVD_OP_SL_REF_NUM_L0(sl->num_ref_idx_l0_active_minus1) |
