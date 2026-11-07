@@ -1217,7 +1217,7 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t6031 = {
 	.status = 0x10,
 	.starts_pmp = true,
 	.name = "T6031",
-	.fallback = "leave out apple_t6031_display.enable=1",
+	.fallback = "apple_t6031_display.enable=0",
 	.pwrstate = "apple,t6031-pmgr-pwrstate",
 	.devices_ordered = true,
 };

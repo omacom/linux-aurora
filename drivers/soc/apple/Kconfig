@@ -229,7 +229,7 @@ config APPLE_T6030_DISPLAY_GATE
 
 	  It also serves T6031 (M3 Max) device trees with apple,t6031-handoff,
 	  in the same way and only with the PMP values the boot loader passes.
-	  There the native display is on by default on the J516C, unless
+	  There the native display is on by default on J514C and J516C, unless
 	  apple_t6031_display.enable=0; the other T6031 boards need
 	  apple_t6031_display.enable=1 on the kernel command line. The T6031
 	  GPU driver starts its firmware only after this native display is
@@ -264,7 +264,7 @@ config APPLE_DISPLAY_GATE_KUNIT_TEST
 	help
 	  Runs the display gate on test device trees with the T6030, T6031
 	  and T8122 display nodes, without Apple hardware. On T6031: on by
-	  default only on the default board (the J516C), otherwise only with
+	  default only on J514C and J516C, otherwise only with
 	  apple_t6031_display.enable=1, off with apple_t6031_display.enable=0,
 	  only with the boot loader's handoff marker and this Mac's PMP values,
 	  and with nothing changed when a check fails. On T6030: on by default, as

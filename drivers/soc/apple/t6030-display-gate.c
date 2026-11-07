@@ -53,8 +53,8 @@
  * option.
  *
  * On T6031 (M3 Max) the gate serves the same handoff, marked
- * apple,t6031-handoff. Its default is scoped to the J516C: there the native
- * display is on unless apple_t6031_display.enable=0; the other T6031 boards
+ * apple,t6031-handoff. Its default is scoped to J514C and J516C: there the native
+ * display is on unless apple_t6031_display.enable=0; other T6031 boards
  * need apple_t6031_display.enable=1. The T6031 GPU starts its firmware only
  * after this native display is up, so enable=0 (or a display that never
  * comes up) keeps the GPU off for that boot too: it is not a display-only
@@ -84,6 +84,10 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <video/nomodeset.h>
+
+#ifdef CONFIG_APPLE_DISPLAY_GATE_KUNIT_TEST
+#include <kunit/static_stub.h>
+#endif
 
 enum {
 	GATE_DCP_DART,
@@ -147,10 +151,29 @@ static bool gate_requested __initdata = true;
 
 /*
  * apple_t6031_display.enable: -1 while it is not on the command line, else 0
- * or 1. Unset, the T6031 native display is on only on gate_t6031_board.
+ * or 1. Unset, the native display is on for the exact J514C/J516C + T6031 pairs.
  */
 static int gate_t6031_switch __initdata = -1;
-static const char *gate_t6031_board __initdata = "apple,j516c";
+
+/* Only the current KUnit case may substitute its synthetic root identity. */
+static bool __init gate_t6031_is_compatible(const char *compat)
+{
+#ifdef CONFIG_APPLE_DISPLAY_GATE_KUNIT_TEST
+	KUNIT_STATIC_STUB_REDIRECT(gate_t6031_is_compatible, compat);
+#endif
+	return of_machine_is_compatible(compat);
+}
+
+static const char *__init gate_t6031_default_board(void)
+{
+	if (!gate_t6031_is_compatible("apple,t6031"))
+		return NULL;
+	if (gate_t6031_is_compatible("apple,j516c"))
+		return "apple,j516c";
+	if (gate_t6031_is_compatible("apple,j514c"))
+		return "apple,j514c";
+	return NULL;
+}
 /* The resolved request, set by gate_run() on a T6031. */
 static bool gate_t6031_requested __initdata;
 
@@ -252,7 +275,7 @@ static const struct gate_soc gate_t8122 __initconst = {
 
 /*
  * T6031 (M3 Max): the T6030 handoff at the T6031 addresses, on by default on
- * the J516C and off unless apple_t6031_display.enable=1 on the other boards;
+ * J514C/J516C and off unless apple_t6031_display.enable=1 on other boards;
  * apple_t6031_display.enable=0 keeps it, and with it the GPU, off everywhere.
  * The PMP values must come from the boot
  * loader: there is no built-in fallback. The PMP image is T6031's own;
@@ -1971,12 +1994,12 @@ static void __init gate_run(void)
 		gate_describe();
 
 	if (gate_soc == &gate_t6031) {
-		bool board = of_machine_is_compatible(gate_t6031_board);
+		const char *board = gate_t6031_default_board();
 
-		gate_t6031_requested = gate_t6031_wanted(gate_t6031_switch, board);
+		gate_t6031_requested = gate_t6031_wanted(gate_t6031_switch, !!board);
 		if (gate_t6031_switch < 0 && board)
 			gate_info("native display on by default on %s; apple_t6031_display.enable=0 keeps the boot framebuffer\n",
-				  gate_t6031_board);
+				  board);
 	}
 
 	if (!*gate_soc->requested) {
