@@ -2200,6 +2200,25 @@
    "note": "Actual display publication, T6030/T6031 link and admit() bodies on OF/device-link and admission-order models; C and admit() mutants must build and fail. No hardware or private fixtures."
   },
   {
+   "name": "tools/asahi/g15-j514c-display-default-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-j514c-display-default-tests.py"
+   ],
+   "note": "Production J514C/J516C display default selector and owner choice with compiled missing-board, missing-SoC and lost-disable mutants; no hardware/private fixtures."
+  },
+  {
+   "name": "tools/asahi/g15-j514c-firmware-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-j514c-firmware-tests.py"
+   ],
+   "rust": "1.93.1",
+   "note": "Production full firmware lookup against T6031 rows; exact J514C identity and other-board refusal. Public synthetic inputs only; no firmware images."
+  },
+  {
    "name": "tools/testing/selftests/drivers/gpu/asahi-g15/run.py",
    "group": "tools",
    "argv": [

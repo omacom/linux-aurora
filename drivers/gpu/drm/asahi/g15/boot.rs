@@ -46,7 +46,7 @@ use super::fw::initdata::runtime;
 use super::hw;
 use super::initdata::{self, InitData};
 use super::object::Objects;
-use super::{identity, regs, uat, Config, Shared};
+use super::{identity, params, regs, uat, Config, Shared};
 use crate::driver::AsahiDrmDevice as AsahiDevice;
 use crate::mmu;
 
@@ -467,6 +467,15 @@ pub(crate) fn admit(
 ) -> Result<Admitted> {
     let dev = pdev.as_ref();
     let pmp = cfg.platform == hw::Platform::AdtWithPmp;
+    // J514C uses the same-die T6031 path on a normal boot. This does not qualify
+    // the inherited J516C reference words. Keep exact board AND SoC checks;
+    // T6034 boards must never inherit this four-cluster T6031 configuration.
+    // The remaining display, DT/ADT, full firmware identity, hardware identity
+    // and record-builder admission below is unchanged.
+    let j514c_board = cfg.chip_id == 0x6031
+        && cfg.platform == hw::Platform::DeviceTree
+        && glue::machine(kernel::c_str!("apple,j514c"))
+        && glue::machine(kernel::c_str!("apple,t6031"));
     if pmp {
         if !glue::board() {
             return Err(ENODEV);
@@ -481,7 +490,7 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
-    } else if !glue::machine(cfg.machine) {
+    } else if !glue::machine(cfg.machine) && !j514c_board {
         dev_err!(dev, "G15: not a {} machine\n", cfg.name);
         return Err(ENODEV);
     } else {
@@ -494,6 +503,18 @@ pub(crate) fn admit(
                 dev_err!(dev, "native display not admitted: {:?}\n", err);
             }
             return Err(err);
+        }
+    }
+    if j514c_board {
+        if let hw::Board::DeviceTree(reference) = cfg.board {
+            dev_warn!(
+                dev,
+                "J514C bring-up: unqualified J516C reference: max_power_mw={} relative_power={:?} fast_die_mask={:#018x} alarm_mask={:#018x}; OPP powers are boot-loader stand-ins\n",
+                reference.max_power_mw,
+                reference.relative_power,
+                reference.fast_die_mask,
+                reference.alarm_mask
+            );
         }
     }
     let adt = adt::read(dev, cfg)
