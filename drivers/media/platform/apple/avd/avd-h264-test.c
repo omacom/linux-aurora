@@ -54,13 +54,14 @@ static void avd_slice_data_test(struct kunit *test)
 		KUNIT_EXPECT_EQ(test, off, U32_MAX);
 }
 
-/* The size of the slice table in avd-h264.c */
-#define AVD_TEST_MAX_SLICES	4096
-
 struct avd_slice_fits_case {
 	const char *desc;
+	/* the negotiated coded geometry, in macroblocks */
 	u16 width_mbs;
 	u16 height_map_units;
+	/* the SPS control geometry, which does not have to match */
+	u16 sps_width_mbs;
+	u16 sps_height_map_units;
 	bool fields;
 	size_t held;
 	size_t held_bytes;
@@ -70,25 +71,40 @@ struct avd_slice_fits_case {
 };
 
 static const struct avd_slice_fits_case avd_slice_fits_cases[] = {
-	{ "one-macroblock frame, first slice", 1, 1, false, 0, 0, 16, 384, true },
-	{ "one-macroblock frame, second slice", 1, 1, false, 1, PAGE_SIZE, 16, 384 },
-	{ "one-macroblock field pair, second slice", 1, 1, true, 1, PAGE_SIZE, 16, 384, true },
-	{ "one-macroblock field pair, third slice", 1, 1, true, 2, 2 * PAGE_SIZE, 16, 384 },
-	{ "320x240, last slice", 20, 15, false, 299, 299 * PAGE_SIZE, 16, 115200, true },
-	{ "320x240, one slice over", 20, 15, false, 300, 300 * PAGE_SIZE, 16, 115200 },
-	{ "1920x1088, last slice of the table", 120, 68, false,
-	  AVD_TEST_MAX_SLICES - 1, 0, 16, 3133440, true },
-	{ "1920x1088, one slice over the table", 120, 68, false,
-	  AVD_TEST_MAX_SLICES, 0, 16, 3133440 },
-	{ "data up to the budget", 120, 68, false, 1, SZ_512M - PAGE_SIZE,
-	  PAGE_SIZE, SZ_256M, true },
-	{ "data one byte over the budget", 120, 68, false, 1,
+	{ "one-macroblock frame, first slice", 1, 1, 1, 1, false,
+	  0, 0, 16, 384, true },
+	{ "one-macroblock frame, second slice", 1, 1, 1, 1, false,
+	  1, PAGE_SIZE, 16, 384 },
+	{ "one-macroblock field pair, second slice", 1, 1, 1, 1, true,
+	  1, PAGE_SIZE, 16, 384, true },
+	{ "one-macroblock field pair, third slice", 1, 1, 1, 1, true,
+	  2, 2 * PAGE_SIZE, 16, 384 },
+	{ "320x240, last slice", 20, 15, 20, 15, false,
+	  299, 299 * PAGE_SIZE, 16, 115200, true },
+	{ "320x240, one slice over", 20, 15, 20, 15, false,
+	  300, 300 * PAGE_SIZE, 16, 115200 },
+	{ "1920x1088, slice 8159 of 8160", 120, 68, 120, 68, false,
+	  8159, 8159 * PAGE_SIZE, 1, 3133440, true },
+	{ "1920x1088, slice 8160 of 8160", 120, 68, 120, 68, false,
+	  8160, 8160 * PAGE_SIZE, 1, 3133440 },
+	{ "1920x1088, slice 8160 with no data", 120, 68, 120, 68, false,
+	  8160, 0, 1, 3133440 },
+	{ "data up to the budget", 120, 68, 120, 68, false, 1,
+	  SZ_512M - PAGE_SIZE, PAGE_SIZE, SZ_256M, true },
+	{ "data one byte over the budget", 120, 68, 120, 68, false, 1,
 	  SZ_512M - PAGE_SIZE, PAGE_SIZE + 1, SZ_256M },
-	{ "no decoded size, data up to the page budget", 120, 68, false, 1,
-	  (AVD_TEST_MAX_SLICES - 1) * PAGE_SIZE, 1, 0, true },
-	{ "no decoded size, data over the page budget", 120, 68, false, 1,
-	  AVD_TEST_MAX_SLICES * PAGE_SIZE, 1, 0 },
-	{ "slice of almost 4 GiB", 120, 68, false, 0, 0, U32_MAX, SZ_256M },
+	{ "no decoded size, data up to the page budget", 120, 68, 120, 68, false,
+	  1, 8159 * PAGE_SIZE, 1, 0, true },
+	{ "no decoded size, data over the page budget", 120, 68, 120, 68, false,
+	  1, 8160 * PAGE_SIZE, 1, 0 },
+	{ "slice of almost 4 GiB", 120, 68, 120, 68, false, 0, 0, U32_MAX, SZ_256M },
+	/* The SPS claims a geometry 16 times the negotiated coded size; the
+	 * negotiated geometry sets the bound, not the SPS.
+	 */
+	{ "64x64 negotiated, SPS 256x256, first slice", 4, 4, 256, 256, false,
+	  0, 0, 16, 384, true },
+	{ "64x64 negotiated, SPS 256x256, 17th slice", 4, 4, 256, 256, false,
+	  16, 16 * PAGE_SIZE, 1, 384 },
 };
 
 KUNIT_ARRAY_PARAM_DESC(avd_slice_fits, avd_slice_fits_cases, desc);
@@ -96,13 +112,18 @@ KUNIT_ARRAY_PARAM_DESC(avd_slice_fits, avd_slice_fits_cases, desc);
 static void avd_slice_fits_test(struct kunit *test)
 {
 	const struct avd_slice_fits_case *c = test->param_value;
+	struct v4l2_pix_format_mplane pix = {
+		.width = (u32)c->width_mbs * 16,
+		.height = (u32)c->height_map_units * 16,
+	};
 	struct v4l2_ctrl_h264_sps sps = {
-		.pic_width_in_mbs_minus1 = c->width_mbs - 1,
-		.pic_height_in_map_units_minus1 = c->height_map_units - 1,
+		.pic_width_in_mbs_minus1 = c->sps_width_mbs - 1,
+		.pic_height_in_map_units_minus1 = c->sps_height_map_units - 1,
 		.flags = c->fields ? 0 : V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY,
 	};
 
-	KUNIT_EXPECT_EQ(test, avd_h264_slice_fits(&sps, c->held, c->held_bytes,
+	KUNIT_EXPECT_EQ(test, avd_h264_slice_fits(&pix, &sps, c->held,
+						  c->held_bytes,
 						  c->len, c->decoded_size),
 			c->fits);
 }
