@@ -1038,7 +1038,7 @@ static const struct avd_variant avd_t6041_variant = {
 	.submit_offset = 0x40,
 	.submit_queue_max_offset = 0x44,
 	.submit_queue_status_offset = 0x7c,
-	.quirks = AVD_QUIRK_HEVC_V5_HEADER,
+	.quirks = AVD_QUIRK_HEVC_V5_HEADER | AVD_QUIRK_NO_RECOVERY_RESET,
 };
 
 /*

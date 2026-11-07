@@ -164,7 +164,7 @@ void avd_pm_drain_end(struct avd_dev *avd)
 static void avd_pm_resubmit(struct avd_dev *avd)
 {
 	/* queue_mutex may be held by the caller of pm_runtime_resume_and_get(). */
-	mod_delayed_work(system_wq, &avd->queue_work, 0);
+	mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 }
 
 static int avd_pm_queue_drain(struct avd_dev *avd)
@@ -290,16 +290,37 @@ int avd_pm_backend_resume(struct avd_dev *avd)
 	return avd_backend_boot(avd);
 }
 
+/* Caller holds a runtime PM reference and queue_mutex. */
+int avd_pm_park(struct avd_dev *avd)
+{
+	int ret;
+
+	if (!avd->pm.dart_active)
+		return -EHOSTDOWN;
+	avd_pm_disable_irq(avd);
+	dev_warn(avd->dev, "recover: stop firmware\n");
+	avd->backend->shutdown(avd);
+	if (avd->domain && !avd->pm.dma_parked) {
+		if (!avd->empty_domain)
+			return -ENODEV;
+		dev_warn(avd->dev, "recover: block DMA\n");
+		ret = iommu_attach_device(avd->empty_domain, avd->dev);
+		if (ret) {
+			dev_err(avd->dev, "recover: DART empty attach failed: %d\n", ret);
+			return ret;
+		}
+		avd->pm.dma_parked = true;
+		/* Outstanding transfers drain into faults before any reset/free. */
+		usleep_range(5000, 6000);
+	}
+	return 0;
+}
+
 int avd_pm_recover(struct avd_dev *avd)
 {
 	bool suspended;
 	int ret;
 
-	/*
-	 * Recovery is rare and touches the decoder, its reset and its DART:
-	 * leave a step-by-step trail in the log before each step, so a failure
-	 * that takes the machine down still shows how far recovery got.
-	 */
 	if (!avd->pm.dart_active) {
 		dev_err(avd->dev, "recover: decoder DART inactive, not touching it\n");
 		return -EHOSTDOWN;
@@ -309,52 +330,43 @@ int avd_pm_recover(struct avd_dev *avd)
 	dev_warn(avd->dev, "recover: start (runtime %s, irq %s)\n",
 		 suspended ? "suspended" : "active",
 		 avd->pm.irq_enabled ? "on" : "off");
-	/* Every caller holds a runtime PM reference; anything else is a bug. */
 	if (WARN_ONCE(suspended,
 		      "avd: recovery with the decoder powered off\n"))
 		return -EHOSTDOWN;
-	avd_pm_disable_irq(avd);
-	dev_warn(avd->dev, "recover: stop firmware\n");
-	avd->backend->shutdown(avd);
+	ret = avd_pm_park(avd);
+	if (ret)
+		return ret;
 	/*
-	 * Block the decoder's DMA at its DART before resetting the engine: with
-	 * the empty domain attached, any transfer still in flight faults at the
-	 * DART instead of reaching memory that may already be reused, and the
-	 * pmgr reset (which does not wait for the engine to go idle on every
-	 * SoC) never cuts a transfer that is half way through the DART. Then
-	 * give outstanding transfers time to drain into faults.
+	 * On the J616C the machine hangs right after this reset, while the
+	 * decoder's DART domain is restored. The cause is not known yet, so
+	 * stay parked: players fall back to software.
 	 */
-	if (avd->domain) {
-		if (!avd->empty_domain)
-			return -ENODEV;
-		dev_warn(avd->dev, "recover: block DMA\n");
-		ret = iommu_attach_device(avd->empty_domain, avd->dev);
-		if (ret) {
-			dev_err(avd->dev, "recover: DART empty attach failed: %d\n", ret);
-			return ret;
-		}
-		usleep_range(5000, 6000);
+	if (avd->variant && avd->variant->quirks & AVD_QUIRK_NO_RECOVERY_RESET) {
+		dev_err(avd->dev, "recover: staying parked, no reset on this SoC\n");
+		return -EIO;
 	}
 	dev_warn(avd->dev, "recover: reset\n");
 	ret = reset_control_reset(avd->rstc);
-	if (ret)
+	if (ret) {
+		/* A failed reset must never restore the decoder's DMA mappings. */
 		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
-	if (avd->domain) {
+		return ret;
+	}
+	if (avd->pm.dma_parked) {
 		dev_warn(avd->dev, "recover: restore DMA\n");
 		iommu_detach_device(avd->empty_domain, avd->dev);
-		/* Do not reboot against an empty/blocked domain after a failed restore. */
 		if (iommu_get_domain_for_dev(avd->dev) != avd->domain) {
 			dev_err(avd->dev, "recover: DART domain not restored\n");
 			return -EIO;
 		}
+		avd->pm.dma_parked = false;
 	}
-	if (ret)
-		return ret;
 	dev_warn(avd->dev, "recover: boot firmware\n");
 	ret = avd_pm_backend_resume(avd);
 	if (ret) {
 		dev_err(avd->dev, "recover: boot failed: %d\n", ret);
-		avd->backend->shutdown(avd);
+		/* Boot may have started the engine: park it again before retiring. */
+		avd_pm_park(avd);
 		return ret;
 	}
 	dev_warn(avd->dev, "recover: done\n");
@@ -371,6 +383,10 @@ int avd_pm_power_on(struct avd_dev *avd)
 	avd->pm.dart_active = true;
 	avd_pm_drain_unmaps(avd);
 	mutex_unlock(&avd->pm.lock);
+
+	/* Rest/retirement survives autosuspend: never boot with DMA parked. */
+	if (avd->faulted || avd->rest_until || avd->pm.dma_parked)
+		return 0;
 
 	/* Do not hold pm.lock: boot may allocate or release DMA buffers. */
 	ret = backend->resume ? backend->resume(avd) : avd_pm_backend_resume(avd);
@@ -398,7 +414,7 @@ int avd_pm_power_off(struct avd_dev *avd)
 	if (!avd->pm.queue->idle(avd))
 		return -EBUSY;
 
-	if (backend->suspend) {
+	if (backend->suspend && !avd->pm.dma_parked) {
 		ret = backend->suspend(avd);
 		if (ret)
 			return ret;
