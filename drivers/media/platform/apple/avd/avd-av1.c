@@ -1396,10 +1396,36 @@ static void update_dec_buf_info(struct avd_decoded_buffer *buf,
 		buf->av1.ref_frame_idx[i] = frame->ref_frame_idx[i];
 }
 
+/* The engine fetches each tile from these: bad values make it read wild addresses. */
+static int avd_av1_check_tiles(struct avd_ctx *ctx, struct avd_av1_run *run,
+			       unsigned int entries)
+{
+	size_t payload = vb2_get_plane_payload(&run->base.bufs.src->vb2_buf, 0);
+	unsigned int tiles = run->frame->tile_info.tile_cols *
+			     run->frame->tile_info.tile_rows;
+	unsigned int t;
+
+	if (entries < tiles) {
+		dev_err_ratelimited(ctx->dev->dev, "AV1: %u tiles but %u tile entries\n",
+				    tiles, entries);
+		return -EINVAL;
+	}
+	for (t = 0; t < tiles; t++) {
+		const struct v4l2_ctrl_av1_tile_group_entry *e = &run->tile_group[t];
+
+		if ((u64)e->tile_offset + e->tile_size > payload) {
+			dev_err_ratelimited(ctx->dev->dev, "AV1: tile %u at %u+%u past %zu bytes\n",
+					    t, e->tile_offset, e->tile_size, payload);
+			return -EINVAL;
+		}
+	}
+	return 0;
+}
+
 static int avd_av1_run_preamble(struct avd_ctx *ctx, struct avd_av1_run *run)
 {
 	struct v4l2_ctrl *ctrl;
-	int dst_len, tlb_len;
+	int dst_len, ret, tlb_len;
 
 	avd_run_preamble(ctx, &run->base);
 
@@ -1436,6 +1462,9 @@ static int avd_av1_run_preamble(struct avd_ctx *ctx, struct avd_av1_run *run)
 	if (WARN_ON(!ctrl))
 		return -EINVAL;
 	run->tile_group = ctrl->p_cur.p;
+	ret = avd_av1_check_tiles(ctx, run, ctrl->elems);
+	if (ret)
+		return ret;
 
 	ctrl = v4l2_ctrl_find(&ctx->ctrl_hdl,
 			      V4L2_CID_STATELESS_AV1_FILM_GRAIN);
