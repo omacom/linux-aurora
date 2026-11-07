@@ -18,7 +18,7 @@
 #define MAX_GPIO 64
 
 /*
- * J700 and J714c reset their trackpad analog front end through the SMC
+ * J700, J714c and J716s reset their trackpad analog front end through the SMC
  * "pcIO" key rather than a gPxx GPIO key. The Apple device tree describes the
  * reset as a platform function such as pKW8("pcIO", 0x10000, 0x130000): an
  * eight-byte write with 0x10000 in the low word, 0x130000 in the high word
@@ -38,6 +38,7 @@ static const struct macsmc_pcio_line macsmc_j700_pcio[] = {
 	{ }
 };
 
+/* J714c and J716s: the same template in both Apple device trees */
 static const struct macsmc_pcio_line macsmc_j714c_pcio[] = {
 	/* multi-touch function-afe-reset: pKW8("pcIO", 0x10000, 0x11c0000) */
 	{ 28, 0x10000, 0x11c0000 },
@@ -322,7 +323,8 @@ static int macsmc_gpio_probe(struct platform_device *pdev)
 	if (device_is_compatible(&pdev->dev, "apple,smc-gpio")) {
 		if (of_machine_is_compatible("apple,j700"))
 			smcgp->pcio = macsmc_j700_pcio;
-		else if (of_machine_is_compatible("apple,j714c"))
+		else if (of_machine_is_compatible("apple,j714c") ||
+			 of_machine_is_compatible("apple,j716s"))
 			smcgp->pcio = macsmc_j714c_pcio;
 	}
 
