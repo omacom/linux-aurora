@@ -1000,10 +1000,17 @@ static int macsmc_power_probe(struct platform_device *pdev)
 		return ret;
 	dev_set_drvdata(dev, power);
 
-	INIT_WORK(&power->critical_work, macsmc_power_critical_work);
+	/* devm_work_autocancel() initialises critical_work */
 	ret = devm_work_autocancel(dev, &power->critical_work, macsmc_power_critical_work);
 	if (ret)
 		return ret;
+
+	/*
+	 * Must be ready before the notifier is registered below: an SMC event
+	 * can arrive as soon as it is, and re-initialising a work item that
+	 * is already queued corrupts the workqueue.
+	 */
+	INIT_DELAYED_WORK(&power->dbg_log_work, macsmc_dbg_work);
 
 	/*
 	 * Check for battery presence.
@@ -1208,9 +1215,6 @@ static int macsmc_power_probe(struct platform_device *pdev)
 
 	power->nb.notifier_call = macsmc_power_event;
 	blocking_notifier_chain_register(&smc->event_handlers, &power->nb);
-
-	INIT_WORK(&power->critical_work, macsmc_power_critical_work);
-	INIT_DELAYED_WORK(&power->dbg_log_work, macsmc_dbg_work);
 
 	g_power = power;
 
