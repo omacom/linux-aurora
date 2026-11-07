@@ -169,7 +169,8 @@ static int apple_rtkit_helper_probe(struct platform_device *pdev)
 		       helper->asc_base + APPLE_ASC_CPU_CONTROL);
 
 	/* Works for both wake and boot */
-	if (of_device_is_compatible(dev->of_node, "apple,t8142-mtp"))
+	if (of_device_is_compatible(dev->of_node, "apple,t8142-mtp") ||
+	    of_device_is_compatible(dev->of_node, "apple,t6050-mtp"))
 		ret = apple_rtkit_wake_early_ap(helper->rtk);
 	else
 		ret = apple_rtkit_wake(helper->rtk);
