@@ -10,6 +10,7 @@
 /dts-v1/;
 
 #include "t6034.dtsi"
+#include "t6034-dcp.dtsi"
 #include "t603x-j514-j516.dtsi"
 
 / {
@@ -27,6 +28,17 @@
 
 &bluetooth0 {
 	brcm,board-type = "apple,jura";
+};
+
+/* J516 panel dimensions, as on the J516C (same 16-inch chassis and panel). */
+&dcp {
+	panel {
+		compatible = "apple,panel-j516", "apple,panel-mini-led", "apple,panel";
+		width-mm = <346>;
+		height-mm = <223>;
+		adj-height-mm = <216>;
+		apple,max-brightness = <500>;
+	};
 };
 
 &aop_audio {

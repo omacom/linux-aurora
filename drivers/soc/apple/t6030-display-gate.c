@@ -190,7 +190,8 @@ static bool gate_t6034_requested __initdata;
 static bool __init gate_t6034_default_board(void)
 {
 	return of_machine_is_compatible("apple,t6034") &&
-	       of_machine_is_compatible("apple,j514m");
+	       (of_machine_is_compatible("apple,j514m") ||
+		of_machine_is_compatible("apple,j516m"));
 }
 
 static bool __init gate_t6034_wanted(int sw)
@@ -2060,7 +2061,7 @@ static void __init gate_run(void)
 		}
 		gate_t6034_requested = gate_t6034_wanted(gate_t6034_switch);
 		if (gate_t6034_switch < 0)
-			gate_info("native display on by default on J514M; apple_t6034_display.enable=0 keeps the boot framebuffer\n");
+			gate_info("native display on by default on J514M/J516M; apple_t6034_display.enable=0 keeps the boot framebuffer\n");
 	}
 
 	if (!*gate_soc->requested) {
