@@ -131,19 +131,14 @@
 		// Registers SYS_OFF_PRIO_HIGH (192) restart + power-off
 		// handlers; the apple,t6050-wdt restart handler is priority
 		// 128 (apple_wdt.c), so once this probes,
-		// `reboot` goes through SMC 'phra' instead of the wdt.
-		// Kept disabled until an SMC 'phra' restart is shown to land
-		// in stage-1 m1n1 like the wdt reset does (remote reboots
-		// depend on that). It also writes boot_stage/shutdown_flag in
-		// the PMIC scratchpad, whose offsets are not yet verified.
+		// `reboot` goes through SMC 'phra' instead of the wdt. The
+		// PMIC scratchpad cells it writes match t6031 (M3 Max).
 		smc_reboot: reboot {
 			compatible = "apple,smc-reboot";
 			nvmem-cells = <&shutdown_flag>, <&boot_stage>,
 				      <&boot_error_count>, <&panic_count>;
 			nvmem-cell-names = "shutdown_flag", "boot_stage",
 					   "boot_error_count", "panic_count";
-
-			status = "disabled";
 		};
 
 		smc_rtc: rtc {
