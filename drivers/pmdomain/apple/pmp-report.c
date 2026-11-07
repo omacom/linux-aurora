@@ -1530,10 +1530,20 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
 		goto err_free;
 	}
 
-	if (of_property_read_bool(node, "apple,always-on")) {
-		ent->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
+	/*
+	 * Hold the request through system sleep for a consumer in the wakeup
+	 * path, as the PMGR domains do. A display processor sets that path
+	 * because its firmware is not shut down for sleep and cannot be
+	 * restarted: without the flag genpd withdraws the request at
+	 * suspend_noirq, the PMP drops the block, and the processor is dead
+	 * when the request is asserted again at resume (T600x dcpext1 on
+	 * pmp-dispext1, which is not always-on). An always-on entry seeds its
+	 * request at probe as before, and apple,release-for-sleep still
+	 * withdraws its request explicitly.
+	 */
+	ent->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
+	if (of_property_read_bool(node, "apple,always-on"))
 		apple_pmp_report_entry_set_state(&ent->genpd, true);
-	}
 
 	ent->genpd.power_on = apple_pmp_report_entry_power_on;
 	ent->genpd.power_off = apple_pmp_report_entry_power_off;
