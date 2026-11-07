@@ -346,10 +346,39 @@ static const struct gate_soc gate_t6034 __initconst = {
 	.fw_uuids = "asahi,t6034-fw-uuids",
 };
 
+static bool gate_j516m_requested __initdata;
+
+/* ADT-confirmed T6031 display layout, admitted only on the J516M. */
+static const struct gate_soc gate_j516m __initconst = {
+	.machine = "apple,j516m",
+	.prefix = "apple-t6034-display: ",
+	.name = "T6034",
+	.dcp_compat = "apple,t6031-dcp",
+	.display_compat = "apple,t6031-display-subsystem",
+	.marker = "apple,t6031-handoff",
+	.pwrstate_compat = "apple,t6031-pmgr-pwrstate",
+	.dcp_full_name = "dcp@386c00000",
+	.pmp_values = "/chosen/asahi,t6031-pmp",
+	.pmp_uuid = gate_t6031_pmp_uuid,
+	.report_compat = "apple,t6031-pmp-v2-report",
+	.disp_entry = "report@10",
+	.reuse_pmp = true,
+	.pmp_compat = "apple,t6031-pmp-v2",
+	.ans_entry = "report@21",
+	.requested = &gate_j516m_requested,
+	.opt_in = "apple_t6034_display.enable=1",
+	.ps_chain = { PMP_PS_DISP_FE, PMP_PS_DISP_CPU, PMP_PS_DISP_SYS },
+	.pmp_ps_any_pmgr = true,
+	.describe = true,
+	.fw_uuids = "asahi,t6031-fw-uuids",
+	/* External displays (dcpext) are not qualified on the J516M: left off. */
+};
+
 static const struct gate_soc *const gate_socs[] __initconst = {
 	&gate_t6030,
 	&gate_t8122,
 	&gate_t6031,
+	&gate_j516m,
 	&gate_t6034,
 };
 
@@ -2052,6 +2081,9 @@ static void __init gate_run(void)
 			gate_info("native display on by default on %s; apple_t6031_display.enable=0 keeps the boot framebuffer\n",
 				  board);
 	}
+
+	if (gate_soc == &gate_j516m)
+		gate_j516m_requested = gate_t6034_switch > 0;
 
 	if (gate_soc == &gate_t6034) {
 		if (!gate_t6034_default_board()) {

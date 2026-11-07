@@ -197,6 +197,24 @@ static const struct dcp_v14_board dcp_v14_board_j516c = {
 	.panel_nits = true,
 };
 
+/* J516M uses the J516C image; its first boot offered only a 120 Hz panel timing. */
+static const struct dcp_v14_board dcp_v14_board_j516m = {
+	.name = "J516M",
+	.debugfs = "dcp-j516m",
+	.dcp_compatible = "apple,t6031-dcp",
+	.machine = "apple,j516m",
+	.soc = "apple,t6034",
+	.firmware_uuid = DCP_V14_J516C_FIRMWARE_UUID,
+	.handoff = "apple,t6031-handoff",
+	.panel_width = 3456,
+	.panel_height = 2234,
+	.promotion = true,
+	.log_bringup = true,
+	.base_edid = true,
+	/* Same pinned DCP image as J516C: zero stamps cap this panel at 60 fps. */
+	.swap_timestamps = true,
+};
+
 /*
  * J514C (MacBook Pro 14", M3 Max): the T6031 DCP running the J516C image
  * (the DCP image is the SoC's; its UUID is checked at probe), in the J514S
@@ -236,6 +254,7 @@ static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
 	&dcp_v14_board_j514m,
+	&dcp_v14_board_j516m,
 };
 
 struct dcp_v14_property {
