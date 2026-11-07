@@ -20,7 +20,9 @@ properties:
     oneOf:
       - const: apple,t6000-pmp-v2
       - items:
-          - const: apple,t8140-pmp-v2
+          - enum:
+              - apple,t8140-pmp-v2
+              - apple,t6034-pmp-v2
           - const: apple,t6000-pmp-v2
 
   reg:

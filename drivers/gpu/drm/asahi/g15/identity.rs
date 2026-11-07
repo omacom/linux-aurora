@@ -70,10 +70,12 @@ impl From<&FirmwareBuild> for Measured {
 
 /// Identifies the loaded firmware build: the pinned build, or `None` for a build admitted by
 /// its digest prefix (`g15_accept_text_prefix`).
+/// With `allow_prefix` false, only a complete pinned identity may be admitted.
 pub(crate) fn firmware(
     dev: &device::Device,
     adt: &super::adt::GpuAdt,
     builds: &'static [FirmwareBuild],
+    allow_prefix: bool,
 ) -> Result<Option<&'static FirmwareBuild>> {
     let size = usize::try_from(adt.text.end - adt.text.start)?;
     let data_size = adt.data.end - adt.data.start;
@@ -97,7 +99,14 @@ pub(crate) fn firmware(
     let qualified = builds
         .iter()
         .map(|b| (Measured::from(b), b.machine.map_or(true, glue::machine)));
-    match lookup::verdict(&m, qualified, super::params::accept_text_prefix()) {
+    // A profile may require exact identities even after its first build is
+    // pinned. Empty profiles remain measurement-only in either policy.
+    let accept_prefix = if !allow_prefix || builds.is_empty() {
+        0
+    } else {
+        super::params::accept_text_prefix()
+    };
+    match lookup::verdict(&m, qualified, accept_prefix) {
         Verdict::Pinned(i) => {
             let build = builds.get(i).ok_or(EINVAL)?;
             dev_info!(dev, "GPU firmware build: {}\n", build.name);
