@@ -1388,7 +1388,9 @@ int apple_pmp_report_t6031_gfx(bool enable)
 	int len = 0, ret = -ENODEV;
 
 	if (!IS_ENABLED(CONFIG_APPLE_T6031_GPU_PMP_REPORT) ||
-	    !of_machine_is_compatible("apple,t6031"))
+	    (!of_machine_is_compatible("apple,t6031") &&
+	     !(of_machine_is_compatible("apple,t6034") &&
+	       of_machine_is_compatible("apple,j516m"))))
 		return -ENODEV;
 
 	rcu_read_lock();
