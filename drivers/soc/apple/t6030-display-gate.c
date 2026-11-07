@@ -236,6 +236,7 @@ struct gate_soc {
 	const char *fw_uuids;		/* /chosen strings naming each firmware image */
 	bool quiet_without_nodes;	/* no display nodes in the device tree is normal */
 	bool dcpext;			/* the external display processors and their DARTs */
+	bool ext_fe_first;		/* dcpext -> dispextN_fe -> _cpu -> _sys (T6031/T6034) */
 };
 
 static const struct gate_soc gate_t6030 __initconst = {
@@ -345,6 +346,13 @@ static const struct gate_soc gate_t6034 __initconst = {
 	.pmp_ps_any_pmgr = true,
 	.describe = true,
 	.fw_uuids = "asahi,t6034-fw-uuids",
+	/*
+	 * dcpext0 on the T6030 handoff protocol (markers
+	 * apple,t6030-dcpext-memory-ready / -dispext-handoff from m1n1 with
+	 * chosen asahi,t6034-dcpext / -dispext). Without them it stays off.
+	 */
+	.dcpext = true,
+	.ext_fe_first = true,
 };
 
 static const struct gate_soc *const gate_socs[] __initconst = {
@@ -1371,15 +1379,32 @@ static int __init gate_ext_resolve(struct gate_ext *ext)
 		return -EINVAL;
 
 	/* Do not enable a CPU whose power ownership is not fully described. */
-	ext->cpu = gate_ps_parent(ext->dcp);
-	if (!gate_ps_dispext(ext->cpu, "cpu", &ext->index))
-		return -EINVAL;
-	ext->fe = gate_ps_parent(ext->cpu);
-	if (!gate_ps_dispext(ext->fe, "fe", &ext->index))
-		return -EINVAL;
-	ext->sys = gate_ps_parent(ext->fe);
-	if (!gate_ps_dispext(ext->sys, "sys", &ext->index))
-		return -EINVAL;
+	if (gate_soc->ext_fe_first) {
+		/*
+		 * T6031/T6034: dispextN_fe is the child of dispextN_cpu, as
+		 * disp_fe is of disp_cpu, so the processor holds the front end
+		 * and with it all three states. Its DART and mailbox hold the CPU.
+		 */
+		ext->fe = gate_ps_parent(ext->dcp);
+		if (!gate_ps_dispext(ext->fe, "fe", &ext->index))
+			return -EINVAL;
+		ext->cpu = gate_ps_parent(ext->fe);
+		if (!gate_ps_dispext(ext->cpu, "cpu", &ext->index))
+			return -EINVAL;
+		ext->sys = gate_ps_parent(ext->cpu);
+		if (!gate_ps_dispext(ext->sys, "sys", &ext->index))
+			return -EINVAL;
+	} else {
+		ext->cpu = gate_ps_parent(ext->dcp);
+		if (!gate_ps_dispext(ext->cpu, "cpu", &ext->index))
+			return -EINVAL;
+		ext->fe = gate_ps_parent(ext->cpu);
+		if (!gate_ps_dispext(ext->fe, "fe", &ext->index))
+			return -EINVAL;
+		ext->sys = gate_ps_parent(ext->fe);
+		if (!gate_ps_dispext(ext->sys, "sys", &ext->index))
+			return -EINVAL;
+	}
 	for (i = 0; i < 2; i++) {
 		domain = gate_ps_parent(i ? ext->mbox : ext->dart);
 		of_node_put(domain);
