@@ -638,6 +638,7 @@ static void stream_slice_mv(struct avd_ctx *ctx, struct avd_hevc_run *run,
 			     !(sl->flags &
 			       V4L2_HEVC_SLICE_PARAMS_FLAG_COLLOCATED_FROM_L0)) |
 		     AVD_OP_SL_REF_FLAG1(
+			     sl->slice_type == V4L2_HEVC_SLICE_TYPE_B &&
 			     !(sl->flags &
 			       V4L2_HEVC_SLICE_PARAMS_FLAG_MVD_L1_ZERO)) |
 		     AVD_OP_SL_REF_FLAG2(
