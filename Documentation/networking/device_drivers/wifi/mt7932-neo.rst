@@ -113,7 +113,8 @@ Station security
 ----------------
 
 The driver advertises PSK, PSK-SHA256, SAE and OWE with CCMP, plus
-BIP-CMAC-128 for management protection. Firmware performs SAE
+BIP-CMAC-128 for management protection. PSK also accepts a TKIP group key,
+described below. Firmware performs SAE
 authentication and the four-way handshake and owns PTK, GTK and IGTK;
 there is no host key-install interface or external-auth exchange.
 
@@ -153,6 +154,18 @@ hash-to-element and both) are accepted; firmware chooses the exchange without
 a host PWE field. Exact PWE policy behavior on 2.4 and 5 GHz still needs
 qualification. SAE-PK, SAE-EXT-KEY and additional ciphers are not advertised. OWE and
 6 GHz support are described below.
+
+TKIP is registered so that WPA2-PSK can join a WPA/WPA2 mixed-mode access point,
+which pairs a CCMP unicast key with a TKIP group key. Pairwise TKIP, WPA1, and a
+TKIP group key with SAE or OWE are refused. Firmware owns the TKIP group key like
+any other. MIC failure reporting and TKIP countermeasures are left to firmware and
+have not been verified: firmware runs the four-way handshake, so the host has no
+KCK and calling ``cfg80211_michael_mic_failure()`` would do nothing.
+
+J700 hardware testing joined one mixed-mode router on 2.4 and 5 GHz, and stayed
+connected to a hostapd access point through 14 group rekeys at 60 second intervals
+with ARP and mDNS still received. DHCP renewal, IPv6 router advertisements and a
+commercial access point's own rekey still need qualification.
 
 J700 hardware testing with NetworkManager and wpa_supplicant on a PSK+SAE
 transition network has confirmed, on 2.4 GHz channel 6 and 5 GHz channel 149:
