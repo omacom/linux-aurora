@@ -25,6 +25,7 @@ properties:
           - apple,t6020-dockchannel
           - apple,t6030-dockchannel
           - apple,t6031-dockchannel
+          - apple,t6050-dockchannel
           - apple,t8112-dockchannel
           - apple,t8122-dockchannel
           - apple,t8140-dockchannel
