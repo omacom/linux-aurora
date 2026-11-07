@@ -107,7 +107,31 @@ static void avd_slice_fits_test(struct kunit *test)
 			c->fits);
 }
 
+static void avd_scaling_flat_test(struct kunit *test)
+{
+	struct v4l2_ctrl_h264_pps pps = {};
+	struct v4l2_ctrl_h264_scaling_matrix *m;
+
+	m = kunit_kzalloc(test, sizeof(*m), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, m);
+	memset(m->scaling_list_4x4, 16, sizeof(m->scaling_list_4x4));
+	memset(m->scaling_list_8x8, 16, sizeof(m->scaling_list_8x8));
+	KUNIT_EXPECT_TRUE(test, avd_h264_scaling_is_flat(&pps, m));
+
+	/* The 8x8 lists only count with transform_8x8_mode. */
+	m->scaling_list_8x8[1][63] = 17;
+	KUNIT_EXPECT_TRUE(test, avd_h264_scaling_is_flat(&pps, m));
+	pps.flags = V4L2_H264_PPS_FLAG_TRANSFORM_8X8_MODE;
+	KUNIT_EXPECT_FALSE(test, avd_h264_scaling_is_flat(&pps, m));
+
+	m->scaling_list_8x8[1][63] = 16;
+	KUNIT_EXPECT_TRUE(test, avd_h264_scaling_is_flat(&pps, m));
+	m->scaling_list_4x4[5][15] = 6;
+	KUNIT_EXPECT_FALSE(test, avd_h264_scaling_is_flat(&pps, m));
+}
+
 static struct kunit_case avd_h264_test_cases[] = {
+	KUNIT_CASE(avd_scaling_flat_test),
 	KUNIT_CASE_PARAM(avd_slice_data_test, avd_slice_data_gen_params),
 	KUNIT_CASE_PARAM(avd_slice_fits_test, avd_slice_fits_gen_params),
 	{}
