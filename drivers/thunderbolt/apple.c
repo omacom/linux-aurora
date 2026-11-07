@@ -151,6 +151,15 @@ static const struct apple_cio_hw apple_cio_t6030_hw = {
 	.dp = &apple_dpin_m3,
 };
 
+/*
+ * T6031/T6034 (M3 Max): the ACIO bring-up stays the t8103 one it has used so
+ * far (the link already works with it); only the DP IN policy is the M3 one.
+ * DP tunnels still need the root to be on apple_dpin_qualified_soc.
+ */
+static const struct apple_cio_hw apple_cio_t6031_hw = {
+	.dp = &apple_dpin_m3,
+};
+
 /* Type 7 uses its existing ready-state check and has no qualified DP route. */
 static const struct apple_cio_hw apple_cio_t8142_hw = {
 	.dp = &apple_dpin_disabled,
@@ -376,6 +385,8 @@ static const struct of_device_id apple_dpin_qualified_soc[] = {
 	{ .compatible = "apple,t6020" },
 	{ .compatible = "apple,t6021" },
 	{ .compatible = "apple,t6030" },
+	/* T6034: T8122-generation ATC PHYs and the M3 DP IN flow, as on T6030. */
+	{ .compatible = "apple,t6034" },
 	{},
 };
 
@@ -3334,6 +3345,10 @@ static const struct of_device_id apple_acio_match[] = {
 	{
 		.compatible = "apple,t6030-usb4-acio",
 		.data = &apple_cio_t6030_hw,
+	},
+	{
+		.compatible = "apple,t6031-usb4-acio",
+		.data = &apple_cio_t6031_hw,
 	},
 	{
 		.compatible = "apple,t6020-usb4-acio",

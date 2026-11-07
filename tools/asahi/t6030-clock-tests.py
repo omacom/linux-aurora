@@ -10,7 +10,7 @@ import resource
 import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 FUNCTIONS = {
-    'include/linux/soc/apple/dp-tunnel.h': ['apple_dp_tunnel_t6030_pclk'],
+    'include/linux/soc/apple/dp-tunnel.h': ['apple_dp_tunnel_t6030_pclk', 'apple_dp_tunnel_m3_soc'],
     'drivers/gpu/drm/apple/dcp-fabric-core.h': ['dcp_fabric_t6030_pclk'],
     'drivers/gpu/drm/apple/dcp-fabric-session.h': ['dcp_fabric_callback_valid'],
     'drivers/phy/apple/atc.c': [

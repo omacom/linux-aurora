@@ -180,6 +180,17 @@ static inline bool apple_dp_tunnel_route_wired(struct device_node *route,
  * T6030 old trees may omit DPIN names on their three-output T602X crossbar.
  * Consumers qualify their SoC flow separately and never select these muxes.
  */
+/*
+ * SoCs whose DP IN tunnels run the T6030 (M3) flow: T8122-generation ATC PHYs
+ * clocking both DP IN outputs, and a crossbar that routes every output itself.
+ * T6034 has the same ATC generation.
+ */
+static inline bool apple_dp_tunnel_m3_soc(void)
+{
+	return of_machine_is_compatible("apple,t6030") ||
+	       of_machine_is_compatible("apple,t6034");
+}
+
 static inline bool apple_dp_tunnel_dual_stream(struct device_node *connector_np)
 {
 	struct device_node *port __free(device_node) = NULL;
