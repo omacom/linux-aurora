@@ -109,3 +109,29 @@ to this Mac; neither the installer nor this option migrates firmware or stage1.
 J615 hardware qualification is pending. The retained **Aurora previous (GPU off)**
 entry remains available. After reboot and desktop login, run
 `aurora-m3-gpu-check --details` and collect the installer's `--m3-report`.
+
+## J613/J615 temperature-guarded performance ceiling
+
+The T8122 default ceiling remains state 2. With the state-2 fallback repair in
+this driver, an explicit `asahi.t8122_pstate_cap=5 asahi.m3_thermal=on` permits
+states up to 5 only while the governor has usable die-temperature readings.
+Do not apply this higher ceiling to an older kernel: its implementation can
+also raise the boot and sensor-failure cap.
+
+The repaired driver starts at state 2 and immediately returns there for missing,
+failed, stale, stuck or implausible temperature readings, or at the critical
+temperature. A lower requested ceiling still wins. `m3_thermal=off` and `hold`
+do not permit states above 2. Non-T8122 cap selection is unchanged.
+
+J615 now supplies `macsmc_soc_die` from the six Tg GPU-family keys and the six
+CPU die keys also used on J613. All twelve must be discovered before the J615
+zone is registered; a later read failure in any sensor fails the whole reading.
+Do not substitute a partial `macsmc_hwmon.soc_die_keys` list. These are raw sensor
+readings, not a calibration or a hardware safety certification.
+
+First boot with `asahi.t8122_pstate_cap=5 asahi.m3_thermal=hold` and confirm that
+the firmware respects the runtime cap of 2 under GPU load. Before relying on
+`m3_thermal=on`, check the boot log for all twelve keys, a runtime range of 2..5
+and usable temperatures during GPU work. Keep a bootable previous kernel.
+Verify rendering and temperature response on the running kernel; passing the
+host policy tests alone does not qualify hardware behavior.

@@ -678,7 +678,7 @@ M3_PERSISTENT_TRANSACTION_ACTIVE=0
 M3_PERSISTENT_MAIN_ARMED=0
 M3_GPU_BIN=/usr/local/bin
 M3_GPU_SCRIPTS=(
-  "air-gpu-oneshot.sh d0259869b8519439a4dbcdae08ef1b0e17fdcaf84ac746fca61febf6a325f8aa"
+  "air-gpu-oneshot.sh 3a7a4c4e4dff8a9b5a281f56c2b2ad264d465e16e4f1e01741bc5a60e8f593c6"
   "air-gpu-collect.sh face8fac811b59c31a8e98e6ca704a2cb33eceada8bc37986397cb393b050b30"
   "air-gpu-job.sh 9a0eb9aab52fd099488054e4ed4846c579b19fc9f78144245242b6975a40da1d"
 )
