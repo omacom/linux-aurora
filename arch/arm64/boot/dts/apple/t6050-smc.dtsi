@@ -1,0 +1,175 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * T6050 SMC (System Management Controller) and the SPMI PMIC NVMEM cells
+ * its reboot and RTC children need, from the J714c ADT. Based on
+ * omarchy-m5's dt/t6050-smc.dtsi (github.com/betizzel/omarchy-m5); the
+ * structure follows t6031-die0.dtsi and t8122.dtsi.
+ *
+ * Board files add hwmon sensors (hwmon-*.dtsi) on top of &smc_hwmon. The
+ * T6050 SMC has no F0Md/F1Md: its fan mode keys are F0md/F1md (ui8,
+ * writable), so every T6050 board overrides apple,fan-mode after including
+ * hwmon-fan*.dtsi.
+ */
+
+#include <dt-bindings/spmi/spmi.h>
+
+&soc {
+	// ADT /arm-io/nub-spmi0: compatible "aapl,spmi", gen = 4,
+	// reg[0] = 0x8a014000 (-> 0x28a014000), ADT size 0x4000. The full
+	// ADT size is used: the gen 4 FIFO registers below sit at 0x200-0x220,
+	// outside the 0x100 window t6031 maps for its gen 1 layout (a 0x100
+	// resource only worked because ioremap maps a whole 16K page).
+	// interrupts = [256, 726, 281, ...]: 256 is the controller-internal
+	// SPMI_IRQ_NOTIFY hwirq (identical in all five SPMI nodes), 726 is the
+	// AIC line (same index convention as wdt: ADT interrupts[0] = 721).
+	// This is a gen 4 controller (ADT "gen" = 4): STATUS/CMD/REPLY sit at
+	// 0x200/0x210/0x220 and RX-empty is bit 30 (as in m1n1). The
+	// gen 1 layout (t8103) does not apply, so there is no fallback
+	// compatible. Linux runs gen 4 polled: its IRQ registers are
+	// undocumented.
+	//
+	// No power-domains: the ADT node has no power-gates, and ps_nub_spmi0
+	// (pmgr 0x120, boot value 0x1400024f = auto-PM + clock-gated) is
+	// apple,always-on in t6050-pmgr.dtsi.  t6031's equivalent node also has
+	// none.  Referencing it would only add a genpd dependency.
+	nub_spmi0: spmi@28a014000 {
+		/* Polled: this tree's gen 4 SPMI driver has no interrupt support. */
+		compatible = "apple,t6050-spmi", "apple,t8142-spmi";
+		reg = <0x2 0x8a014000 0x0 0x4000>;
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		// ADT /arm-io/nub-spmi0/spmi-abbeyL1: compatible
+		// "pmu,spmi","pmu,abbey", reg[0] = 0xe -> USID 14, is-primary.
+		// (spmi-mosquitoM0 = USID 9, btm = USID 0xb on the same bus.)
+		//
+		// Cell offsets are the Asahi "chapel" layout (t6031-die0.dtsi);
+		// the ADT abbey properties confirm the ones it lists:
+		//   info-pm_setting      = 0x2001
+		//   info-clock_offset    = {0x2100, 6}   (info-rtc_scrpad
+		//   0x2100)
+		//   info-fault_shadow    = {0x867b, 0x10}
+		//   info-scrpad_socd     = {0x8b00, 0x1800}
+		//   info-leg_scrpad      = 0xf800  -> boot_stage 0xf801 etc.
+		//   are
+		//                          base+1/+2/+3/+0xf as on chapel/stowe
+		//                          (the +N offsets are not in the ADT)
+		pmic1: pmic@e {
+			compatible = "apple,abbey-pmic", "apple,spmi-nvmem";
+			reg = <0xe SPMI_USID>;
+
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				pm_setting: pm-setting@2001 {
+					reg = <0x2001 0x1>;
+				};
+
+				rtc_offset: rtc-offset@2100 {
+					reg = <0x2100 0x6>;
+				};
+
+				fault_shadow: fault-shadow@867b {
+					reg = <0x867b 0x10>;
+				};
+
+				socd: socd@8b00 {
+					reg = <0x8b00 0x1800>;
+				};
+
+				boot_stage: boot-stage@f801 {
+					reg = <0xf801 0x1>;
+				};
+
+				boot_error_count: boot-error-count@f802,0 {
+					reg = <0xf802 0x1>;
+					bits = <0 4>;
+				};
+
+				panic_count: panic-count@f802,4 {
+					reg = <0xf802 0x1>;
+					bits = <4 4>;
+				};
+
+				boot_error_stage: boot-error-stage@f803 {
+					reg = <0xf803 0x1>;
+				};
+
+				shutdown_flag: shutdown-flag@f80f,3 {
+					reg = <0xf80f 0x1>;
+					bits = <3 1>;
+				};
+			};
+		};
+	};
+
+	// "smc" reg: ASC wrapper (driver does not map it; only index 1 is
+	// ioremapped).  "sram" reg: ADT iop-smc-nub region-base = 0x28de00000,
+	// region-size = 0x140000 (Asahi uses 0x100000 on M1-M4; the T6050
+	// firmware region is 0x140000, and the driver rejects any shmem buffer
+	// outside this window). smc_gpio is deliberately defined here although
+	// nothing consumes it yet.
+	smc: smc@28c600000 {
+		compatible = "apple,t6050-smc", "apple,t8103-smc";
+		reg = <0x2 0x8c600000 0x0 0x4000>,
+		      <0x2 0x8de00000 0x0 0x140000>;
+		reg-names = "smc", "sram";
+		mboxes = <&smc_mbox>;
+
+		smc_gpio: gpio {
+			compatible = "apple,smc-gpio";
+			#gpio-cells = <2>;
+			gpio-controller;
+		};
+
+		smc_hwmon: hwmon {
+			compatible = "apple,smc-hwmon";
+		};
+
+		// Registers SYS_OFF_PRIO_HIGH (192) restart + power-off
+		// handlers; the apple,t6050-wdt restart handler is priority
+		// 128 (apple_wdt.c), so once this probes,
+		// `reboot` goes through SMC 'phra' instead of the wdt.
+		// Kept disabled until an SMC 'phra' restart is shown to land
+		// in stage-1 m1n1 like the wdt reset does (remote reboots
+		// depend on that). It also writes boot_stage/shutdown_flag in
+		// the PMIC scratchpad, whose offsets are not yet verified.
+		smc_reboot: reboot {
+			compatible = "apple,smc-reboot";
+			nvmem-cells = <&shutdown_flag>, <&boot_stage>,
+				      <&boot_error_count>, <&panic_count>;
+			nvmem-cell-names = "shutdown_flag", "boot_stage",
+					   "boot_error_count", "panic_count";
+
+			status = "disabled";
+		};
+
+		smc_rtc: rtc {
+			compatible = "apple,smc-rtc";
+			nvmem-cells = <&rtc_offset>;
+			nvmem-cell-names = "rtc_offset";
+		};
+	};
+
+	// ADT /arm-io/smc: compatible "iop,ascwrap-v6" (same as ans/mtp),
+	// reg[0] = 0x8c600000 (ASC wrapper, size 0x88000), mailbox at
+	// reg[0] + 0x8000 exactly like ans_mbox/mtp_mbox (as in m1n1),
+	// interrupts = [900, 899, 902, 901] = [n+1, n, n+3, n+2] with n = 899,
+	// so send-empty = 899 ... recv-not-empty = 902 (same reordering as
+	// ANS 1348,1347,1350,1349 -> 1347..1350 and MTP 677,676,679,678).
+	// No power-gates / clock-gates in the ADT node -> no power-domains.
+	smc_mbox: mbox@28c608000 {
+		compatible = "apple,t6050-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x2 0x8c608000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 899 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 900 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 901 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 902 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+};

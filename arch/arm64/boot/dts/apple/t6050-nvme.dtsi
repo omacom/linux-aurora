@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * NVMe related devices for the Apple T6050 "M5 Max" SoC
+ *
+ * Register windows from the J714c ADT (/arm-io/ans and /arm-io/sart-ans);
+ * node layout and the M4-generation driver variant follow t8140.dtsi.
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+&soc {
+	ans_mbox: mailbox@419608000 {
+		compatible = "apple,t6050-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x4 0x19608000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1347 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1348 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1349 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1350 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+		power-domains = <&ps_ans>;
+	};
+
+	sart: iommu@41dc50000 {
+		compatible = "apple,t6050-sart"; /* SARTv4, its own register layout */
+		reg = <0x4 0x1dc50000 0x0 0xc000>;
+		power-domains = <&ps_ans>;
+	};
+
+	nvme: nvme@45dcc0000 {
+		compatible = "apple,t6050-nvme-ans2", "apple,t8140-nvme-ans2";
+		// The ADT sizes the controller window at 0x10000; the linear
+		// submission queue registers sit above that, as on T8140.
+		reg = <0x4 0x5dcc0000 0x0 0x30000>,
+		      <0x4 0x19600000 0x0 0x4000>,
+		      <0x4 0x1dcc0000 0x0 0x60010>;
+		reg-names = "nvme", "ans", "nvmmu";
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 2338 IRQ_TYPE_LEVEL_HIGH>;
+		mboxes = <&ans_mbox>;
+		// The port-0 lane PHY must stay on for the controller: with it
+		// powered down as unused, enable never reaches CSTS.RDY.
+		power-domains = <&ps_ans>, <&ps_apcie_sys_st0>,
+				<&ps_apcie_phy_sw>, <&ps_aphy_st0_aus5>;
+		power-domain-names = "ans", "apcie0", "apcie_phy", "aphy_st0";
+		resets = <&ps_ans>;
+		apple,sart = <&sart>;
+	};
+};
