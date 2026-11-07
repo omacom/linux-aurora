@@ -13,6 +13,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/interrupt-controller/apple-aic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
@@ -88,6 +89,13 @@
 };
 
 &mtp_hid {
+	/*
+	 * ADT multi-touch function-afe-reset = smc-pmu pKW8('pcIO', 0x10000,
+	 * 0x11c0000), SMC pcIO output 28; level 1 asserts the reset. Left to
+	 * the MTP firmware, the AFE sometimes never answers ("No HINT_L").
+	 */
+	apple,afe-reset-gpios = <&smc_gpio 28 GPIO_ACTIVE_HIGH>;
+
 	actuator {
 	};
 
@@ -98,7 +106,6 @@
 
 	mtp_mt: multi-touch {
 		firmware-name = "apple/tpmtfw-j714c.bin";
-		apple,firmware-managed-reset;
 		apple,power-method = <2>;
 	};
 
