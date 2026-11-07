@@ -203,6 +203,26 @@ static const struct dcp_v14_board dcp_v14_board_j514m = {
 	.log_bringup = true,
 };
 
+/*
+ * J516M (MacBook Pro 16", binned M3 Max): the T6034 DCP, image and handoff
+ * of the J514M in the J516C chassis, so the J516 panel: 3456x2234 with 74
+ * notch rows above the 3456x2160 boot framebuffer. Panel controls stay off
+ * as on the J514M.
+ */
+static const struct dcp_v14_board dcp_v14_board_j516m = {
+	.name = "J516M",
+	.debugfs = "dcp-j516m",
+	.dcp_compatible = "apple,t6034-dcp",
+	.machine = "apple,j516m",
+	.soc = "apple,t6034",
+	.firmware_uuid = DCP_V14_J516C_FIRMWARE_UUID,
+	.handoff = "apple,t6034-handoff",
+	.panel_width = 3456,
+	.panel_height = 2234,
+	.promotion = true,
+	.log_bringup = true,
+};
+
 static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_t6030,
 	&dcp_v14_board_j613,
@@ -210,6 +230,7 @@ static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
 	&dcp_v14_board_j514m,
+	&dcp_v14_board_j516m,
 };
 
 struct dcp_v14_property {
