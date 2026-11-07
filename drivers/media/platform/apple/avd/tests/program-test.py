@@ -45,6 +45,7 @@ typedef uint64_t dma_addr_t;
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
 #define VISIBLE_IF_KUNIT
+#define EXPORT_SYMBOL_IF_KUNIT(sym)
 #define AVD_QUIRK_LSR 1
 #define AVD_QUIRK_NO_PIPE_STATE 2
 #define AVD_QUIRK_H264_MV_128 (1U << 4)
@@ -728,6 +729,16 @@ def conformance(out):
         data = subprocess.check_output([str(exe)], text=True)
         programs[label] = dict(line.split(' ', 1) for line in data.splitlines())
         (out / (label + '.json')).write_text(json.dumps(programs[label], indent=2) + '\n')
+    # The baseline set the temporal-direct bit (15) of the slice reference
+    # header word for every slice; it belongs to B slices only. Clear it in
+    # the baseline I/P programs so the checks below compare everything else.
+    for key, program in programs['before'].items():
+        parts = key.split('/')
+        if len(parts) == 5 and parts[0].isdigit() and parts[2] != '1':
+            programs['before'][key] = ' '.join(
+                f'{int(w, 16) & ~0x8000:08x}'
+                if len(w) == 8 and int(w, 16) >> 18 == 0x2d << 6 else w
+                for w in program.split())
     unchanged = sparse = normalized = 0
     for key, program in programs['after'].items():
         if key.startswith('guard/type/'):
