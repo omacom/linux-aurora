@@ -43,6 +43,8 @@
 #include "nvme.h"
 
 #define APPLE_ANS_BOOT_TIMEOUT	  USEC_PER_SEC
+/* RTKit handshake timeout for the T6050 ANS, see apple_nvme_alloc() */
+#define APPLE_NVME_T6050_HANDSHAKE_TIMEOUT_MS 10000
 
 #define APPLE_ANS_COPROC_CPU_CONTROL	 0x44
 #define APPLE_ANS_COPROC_CPU_CONTROL_RUN BIT(4)
@@ -2441,6 +2443,14 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
 				    "Failed to initialize RTKit");
 		goto out_detach_genpd;
 	}
+
+	/*
+	 * The T6050 ANS firmware handed over by iBoot can take about 3 s to
+	 * answer the power-state and endpoint-map handshake.
+	 */
+	if (of_device_is_compatible(dev->of_node, "apple,t6050-nvme-ans2"))
+		apple_rtkit_set_handshake_timeout(anv->rtk,
+						  APPLE_NVME_T6050_HANDSHAKE_TIMEOUT_MS);
 
 	ret = devm_add_action_or_reset(dev, apple_nvme_free_rtkit, anv);
 	if (ret)
