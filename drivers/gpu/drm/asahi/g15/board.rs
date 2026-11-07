@@ -158,6 +158,7 @@ pub(crate) fn hardware_record(
         };
     }
     let inputs = record::Inputs {
+        chip_id: cfg.chip_id,
         props,
         zones: &zones,
         main: &main,

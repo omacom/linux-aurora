@@ -5182,6 +5182,7 @@ static const struct of_device_id of_match[] = {
 	{ .compatible = "apple,t6030-dcpext", .data = &apple_dcp_hw_t6030_dcpext, },
 	{ .compatible = "apple,t8122-dcp", .data = &apple_dcp_hw_t8122, },
 	{ .compatible = "apple,t6031-dcp", .data = &apple_dcp_hw_t6031, },
+	{ .compatible = "apple,t6034-dcp", .data = &apple_dcp_hw_t6031, },
 	{ .compatible = "apple,t8122-dcpext", .data = &apple_dcp_hw_t8122_dcpext, },
 	{ .compatible = "apple,dcp",       .data = &apple_dcp_hw_dcp,    },
 	{ .compatible = "apple,dcpext",    .data = &apple_dcp_hw_dcpext, },

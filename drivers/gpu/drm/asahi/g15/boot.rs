@@ -469,13 +469,17 @@ pub(crate) fn admit(
     let pmp = cfg.platform == hw::Platform::AdtWithPmp;
     // J514C uses the same-die T6031 path on a normal boot. This does not qualify
     // the inherited J516C reference words. Keep exact board AND SoC checks;
-    // T6034 boards must never inherit this four-cluster T6031 configuration.
+    // T6034 boards use their own profile and never inherit T6031 admission.
     // The remaining display, DT/ADT, full firmware identity, hardware identity
     // and record-builder admission below is unchanged.
     let j514c_board = cfg.chip_id == 0x6031
         && cfg.platform == hw::Platform::DeviceTree
         && glue::machine(kernel::c_str!("apple,j514c"))
         && glue::machine(kernel::c_str!("apple,t6031"));
+    let j514m_board = cfg.chip_id == 0x6034
+        && cfg.platform == hw::Platform::DeviceTree
+        && glue::machine(kernel::c_str!("apple,j514m"))
+        && glue::machine(kernel::c_str!("apple,t6034"));
     if pmp {
         if !glue::board() {
             return Err(ENODEV);
@@ -490,7 +494,9 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
-    } else if !glue::machine(cfg.machine) && !j514c_board {
+    } else if (cfg.chip_id == 0x6034 && !j514m_board)
+        || (!glue::machine(cfg.machine) && !j514c_board)
+    {
         dev_err!(dev, "G15: not a {} machine\n", cfg.name);
         return Err(ENODEV);
     } else {
@@ -505,11 +511,12 @@ pub(crate) fn admit(
             return Err(err);
         }
     }
-    if j514c_board {
+    if j514c_board || j514m_board {
         if let hw::Board::DeviceTree(reference) = cfg.board {
             dev_warn!(
                 dev,
-                "J514C bring-up: unqualified J516C reference: max_power_mw={} relative_power={:?} fast_die_mask={:#018x} alarm_mask={:#018x}; OPP powers are boot-loader stand-ins\n",
+                "{} bring-up: unqualified J516C reference: max_power_mw={} relative_power={:?} fast_die_mask={:#018x} alarm_mask={:#018x}; OPP powers are boot-loader stand-ins\n",
+                cfg.name,
                 reference.max_power_mw,
                 reference.relative_power,
                 reference.fast_die_mask,
@@ -519,7 +526,9 @@ pub(crate) fn admit(
     }
     let adt = adt::read(dev, cfg)
         .inspect_err(|e| dev_err!(dev, "GPU regions not admitted: {:?}\n", e))?;
-    identity::firmware(dev, &adt, cfg.firmware)
+    // T6034 requires complete identities; the older profiles keep their
+    // existing explicitly requested bring-up prefix policy.
+    identity::firmware(dev, &adt, cfg.firmware, cfg.chip_id != 0x6034)
         .inspect_err(|e| dev_err!(dev, "loaded GFX TEXT identity mismatch: {:?}\n", e))?;
     dev_info!(dev, "M3: firmware identity accepted\n");
     if cfg.board == hw::Board::None {

@@ -51,6 +51,8 @@ static const struct dcp_v14_board *board_for(const char *dcp, const char *const 
 
 static const char *const j516c[] = { "apple,j516c", "apple,t6031", "apple,arm-platform", NULL };
 static const char *const j514c[] = { "apple,j514c", "apple,t6031", "apple,arm-platform", NULL };
+static const char *const j514m[] = { "apple,j514m", "apple,t6034", "apple,arm-platform", NULL };
+static const char *const j514m_wrong_soc[] = { "apple,j514m", "apple,t6031", NULL };
 static const char *const j516m[] = { "apple,j516m", "apple,t6034", "apple,arm-platform", NULL };
 static const char *const j516s[] = { "apple,j516s", "apple,t6030", "apple,arm-platform", NULL };
 static const char *const j613[] = { "apple,j613", "apple,t8122", "apple,arm-platform", NULL };
@@ -108,6 +110,25 @@ static void v14_board_j514c(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
 	/* Not the J516C record. */
 	KUNIT_EXPECT_PTR_NE(test, b, board_for("apple,t6031-dcp", j516c, &known));
+}
+
+static void v14_board_j514m(struct kunit *test)
+{
+	const struct dcp_v14_board *b;
+	bool known;
+
+	b = board_for("apple,t6034-dcp", j514m, &known);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_STREQ(test, b->machine, "apple,j514m");
+	KUNIT_EXPECT_STREQ(test, b->soc, "apple,t6034");
+	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t6034-handoff");
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, b->panel_nits);
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j514m_wrong_soc, &known));
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j516m, &known));
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514m, &known));
 }
 
 /* A T6031 DCP on a T6034 has no record: refused. */
@@ -296,6 +317,7 @@ static struct kunit_case v14_board_cases[] = {
 	KUNIT_CASE(v14_board_j504),
 	KUNIT_CASE(v14_board_j516c),
 	KUNIT_CASE(v14_board_j514c),
+	KUNIT_CASE(v14_board_j514m),
 	KUNIT_CASE(v14_board_t6031_other_boards),
 	KUNIT_CASE(v14_board_j516c_image),
 	KUNIT_CASE(v14_board_unchanged),
