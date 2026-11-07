@@ -87,7 +87,25 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
      machine="apple,j613";const struct dcp_v14_board*j=iomfb_v14_7_board(&dev);
      assert(!IS_ERR(j)&&j->panel_width==2560 && j->panel_height==1664);
      machine="apple,j700";assert(IS_ERR(iomfb_v14_7_board(&dev)));
-     machine="apple,j504";assert(IS_ERR(iomfb_v14_7_board(&dev)));
+     /* J504 (14" M3 MacBook Pro): the J613 image, the J514 panel, 60 or 120 Hz. */
+     machine="apple,j504";const struct dcp_v14_board*p14=iomfb_v14_7_board(&dev);
+     assert(!IS_ERR(p14)&&p14&&!strcmp(p14->name,"J504")&&!strcmp(p14->debugfs,"dcp-j504"));
+     assert(p14->panel_width==3024&&p14->panel_height==1964&&p14->promotion&&p14->log_bringup);
+     assert(!strcmp(p14->firmware_uuid,"90F849E1-B422-367E-B389-50246F8DEC47"));
+     assert(!strcmp(p14->handoff,"apple,t8122-handoff")&&p14->panel_nits&&!p14->swap_timestamps);
+     assert(p14->ctm_set==A(421)&&p14->ctm_get==A(420));
+     image_uuid=p14->firmware_uuid;assert(probe_gate(&dev,p14)==0);
+     image_uuid="C042E95C-B9D8-3F0E-94B3-582A08AA6FDD";assert(probe_gate(&dev,p14)==-ENODEV);
+     image_uuid="F493F03E-CC40-3D89-9A08-5F259BA2B246";assert(probe_gate(&dev,p14)==-ENODEV);
+     image_uuid=NULL;assert(probe_gate(&dev,p14)==-ENODEV);
+     image_uuid=p14->firmware_uuid;marker_value=0;assert(probe_gate(&dev,p14)==-ENODEV);marker_value=1;
+     {struct apple_dcp_v14 q={.dev=&dev,.board=p14};width=3024;height=1890;stride=width*4;notch=74;
+      assert(dcp_v14_geometry(&q)==0&&q.panel_height==1964&&q.notch_rows==74);
+      height=1964;notch=0;assert(dcp_v14_geometry(&q)==0&&q.panel_height==1964);
+      width=2560;height=1600;stride=width*4;notch=64;assert(dcp_v14_geometry(&q)==-EINVAL);}
+     /* Other T8122 Macs (J433/J434 iMacs) have no record. */
+     machine="apple,j433";assert(IS_ERR(iomfb_v14_7_board(&dev)));
+     machine="apple,j434";assert(IS_ERR(iomfb_v14_7_board(&dev)));
      dcp.compatible="apple,t6030-dcp";machine="apple,j516s";assert(iomfb_v14_7_board(&dev)==&dcp_v14_board_t6030);
      dcp.compatible="apple,t8122-dcp";
      struct apple_dcp_v14 v={.dev=&dev,.board=b};width=2880;height=1800;stride=width*4;notch=64;
@@ -139,7 +157,7 @@ with tempfile.TemporaryDirectory(prefix='dcp14-panels-') as directory:
      machine="apple,j613";assert(IS_ERR(iomfb_v14_7_board(&dev)));
      machine="apple,j516m";assert(IS_ERR(iomfb_v14_7_board(&dev)));
      dcp.compatible="apple,t6030-dcp";machine="apple,j516s";assert(iomfb_v14_7_board(&dev)==&dcp_v14_board_t6030);
-     puts("current J615/J613/T6030/J516C/J514C admission + hidden/full notch, wrong geometry controls: PASS");
+     puts("current J615/J613/J504/T6030/J516C/J514C admission + hidden/full notch, wrong geometry controls: PASS");
     #endif
     }
     '''

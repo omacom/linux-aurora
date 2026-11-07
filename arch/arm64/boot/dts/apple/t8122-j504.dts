@@ -31,6 +31,26 @@
 	};
 };
 
+&dcp {
+	panel: panel {
+		compatible = "apple,panel-j504", "apple,panel-mini-led", "apple,panel";
+		/*
+		 * The J514S panel: 3024x1964 at 254 ppi; 189 mm high without the
+		 * 74 notch rows. The J504 boot framebuffer is 3024x1890 below them.
+		 */
+		width-mm = <302>;
+		height-mm = <196>;
+		adj-height-mm = <189>;
+		apple,max-brightness = <500>;
+	};
+};
+
+/* The boot framebuffer is the same panel, as on the J613 (HiDPI scale for simpledrm). */
+&framebuffer0 {
+	panel = <&panel>;
+	post-init-providers = <&panel>;
+};
+
 &wifi0 {
 	brcm,board-type = "apple,tresco";
 };

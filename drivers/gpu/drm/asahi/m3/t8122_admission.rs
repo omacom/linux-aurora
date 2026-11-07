@@ -2,6 +2,12 @@
 
 //! Read-only T8122 identity admission. Firmware startup remains disabled.
 
+/// The T8122 boards the M3 runtime starts on by default: the M3 MacBook Airs (13" J613, 15" J615)
+/// and the 14" M3 MacBook Pro (J504). All three load the same 14.8.3 G15G image (UUID
+/// `DF697F05-…`, checked separately by firmware admission). The other T8122 Macs (the J433 and
+/// J434 iMacs) are not listed.
+pub(crate) const T8122_BOARDS: [&[u8]; 3] = [b"apple,j613", b"apple,j615", b"apple,j504"];
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub(crate) active_cores: u32,
@@ -151,6 +157,17 @@ pub(crate) fn read_identity(
 
 #[cfg(test)]
 mod tests {
+    use super::T8122_BOARDS;
+
+    #[test]
+    fn the_t8122_runtime_boards_are_exactly_the_airs_and_the_14_inch_pro() {
+        // Exact: dropping the J504 or adding another T8122 Mac (J433, J434) must fail here.
+        assert_eq!(T8122_BOARDS, [&b"apple,j613"[..], b"apple,j615", b"apple,j504"]);
+        for other in [&b"apple,j433"[..], b"apple,j434", b"apple,t8122"] {
+            assert!(!T8122_BOARDS.contains(&other));
+        }
+    }
+
     use super::*;
 
     const G15G_C0: u32 = 0x0702_2000;
