@@ -75,6 +75,7 @@ pub(crate) mod glue {
         pub(crate) fn asahi_g15_display_prepare(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_get(dev: *mut core::ffi::c_void) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_ready() -> core::ffi::c_int;
+        pub(crate) fn asahi_g15_pmp_report_t6031(enable: bool) -> core::ffi::c_int;
         pub(crate) fn asahi_g15_pmp_put(dev: *mut core::ffi::c_void);
         fn asahi_g15_reserved_uat(index: u32, start: u64, size: u64) -> bool;
     }
@@ -480,6 +481,10 @@ pub(crate) fn admit(
         && cfg.platform == hw::Platform::DeviceTree
         && glue::machine(kernel::c_str!("apple,j514m"))
         && glue::machine(kernel::c_str!("apple,t6034"));
+    let j516m_board = cfg.chip_id == 0x6034
+        && cfg.platform == hw::Platform::DeviceTree
+        && glue::machine(kernel::c_str!("apple,j516m"))
+        && glue::machine(kernel::c_str!("apple,t6034"));
     if pmp {
         if !glue::board() {
             return Err(ENODEV);
@@ -494,7 +499,7 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
-    } else if (cfg.chip_id == 0x6034 && !j514m_board)
+    } else if (cfg.chip_id == 0x6034 && !j514m_board && !j516m_board)
         || (!glue::machine(cfg.machine) && !j514c_board)
     {
         dev_err!(dev, "G15: not a {} machine\n", cfg.name);
@@ -511,7 +516,7 @@ pub(crate) fn admit(
             return Err(err);
         }
     }
-    if j514c_board || j514m_board {
+    if j514c_board || j514m_board || j516m_board {
         if let hw::Board::DeviceTree(reference) = cfg.board {
             dev_warn!(
                 dev,
@@ -679,6 +684,13 @@ pub(crate) fn start(
             id.version,
             id.counts
         );
+        return Err(eproto());
+    }
+    if cfg.chip_id == 0x6034
+        && glue::machine(kernel::c_str!("apple,j516m"))
+        && !hw::j516m::identity_matches(id.version, id.counts, id.cores)
+    {
+        dev_err!(d, "J516M powered identity differs from the measured bin\n");
         return Err(eproto());
     }
     // Binning: any non-empty enabled set in each cluster, nothing above the core slots.

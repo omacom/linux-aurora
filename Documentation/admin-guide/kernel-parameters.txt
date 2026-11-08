@@ -549,6 +549,11 @@ Kernel parameters
 	apm=		[APM] Advanced Power Management
 			See header of arch/x86/kernel/apm_32.c.
 
+	apple_t6034_display.dcpext= [ARM64]
+			Enable the opt-in J516M/T6034 external display handoff.
+			Requires apple_t6034_display.enable=1 and matching
+			boot-loader handoff metadata. Default: disabled.
+
 	apparmor=	[APPARMOR] Disable or enable AppArmor at boot time
 			Format: { "0" | "1" }
 			See security/apparmor/Kconfig help text
