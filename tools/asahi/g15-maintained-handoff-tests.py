@@ -137,7 +137,7 @@ fn main() {
         OWNER_CALLS.set(0); let bytes = fixture(kind);
         assert!(parse(&dev, &Adt { data: &bytes }).is_err()); assert_eq!(OWNER_CALLS.get(), 0);
     }
-    assert_eq!(BUILDS.len(), 5, "maintained B0 firmware row must not require an absent profile symbol");
+    assert_eq!(BUILDS.len(), 7, "maintained B0 firmware row must not require an absent profile symbol");
     for (row, machine) in [(1, &b"apple,j516s"[..]), (2, &b"apple,j514s"[..])] {
         assert_eq!(BUILDS[row].machine.unwrap().to_bytes(), machine);
         assert_eq!((BUILDS[row].text_size, BUILDS[row].data_size, BUILDS[row].marker), (0x5c000, 0x114000, 0x58e88));
@@ -172,6 +172,36 @@ fn main() {
     assert_eq!(identify(&changed, b"apple,j514s"), Verdict::Refused);
     changed = measured; changed.marker += 8;
     assert_eq!(identify(&changed, b"apple,j514s"), Verdict::Refused);
+    // Issue #247: the 4118 build pins on the J514S and the J516S, each to
+    // its own row, without the bring-up override.
+    let digest = [0x41,0x18,0x33,0xa7,0xde,0xd7,0x73,0xfe,
+                  0xea,0xc4,0xa1,0x81,0x55,0x2e,0x3f,0xf5,
+                  0x58,0x2e,0xaf,0x44,0x35,0xf2,0xdd,0x8f,
+                  0x62,0x0c,0x1e,0xd0,0xb3,0x1d,0xf1,0xb0];
+    for (row, machine) in [(5, &b"apple,j514s"[..]), (6, &b"apple,j516s"[..])] {
+        assert_eq!(BUILDS[row].machine.unwrap().to_bytes(), machine);
+        assert_eq!((BUILDS[row].text_size, BUILDS[row].data_size, BUILDS[row].marker), (0x5c000, 0x114000, 0x58e88));
+        assert_eq!(BUILDS[row].text_sha256, digest);
+    }
+    let measured = Measured { text_size: 0x5c000, data_size: 0x114000, marker: 0x58e88, sha256: digest };
+    assert_eq!(identify(&measured, b"apple,j514s"), Verdict::Pinned(5),
+               "J514S 4118 firmware must pin without a prefix override");
+    assert_eq!(identify(&measured, b"apple,j516s"), Verdict::Pinned(6),
+               "J516S 4118 firmware must pin without a prefix override");
+    for other in [&b"apple,j514c"[..], b"apple,j516c", b"apple,j514m", b"apple,j516m", b"apple,t6030"] {
+        assert_eq!(identify(&measured, other), Verdict::Refused);
+    }
+    for machine in [&b"apple,j514s"[..], b"apple,j516s"] {
+        let mut changed = measured;
+        changed.sha256[31] ^= 1;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+        changed = measured; changed.text_size += 0x1000;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+        changed = measured; changed.data_size += 0x1000;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+        changed = measured; changed.marker += 8;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+    }
     for error in [0, -517, -12] {
         INIT_ERROR.set(error); let shared = Arc::new(Shared); let result = Rtkit::new(&dev, &shared);
         assert_eq!(result.is_ok(), error == 0);
