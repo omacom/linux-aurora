@@ -263,6 +263,8 @@ struct apple_isp_hw {
 	bool setfile_stride_fixup;
 	/* The IMX958 module takes setfile 2226_02, not 2224_01 */
 	bool imx958_2226;
+	/* Compute the setfile's noise reduction radial gains from its lens shading */
+	bool setfile_radial_gain;
 };
 
 enum isp_sensor_id {

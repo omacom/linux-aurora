@@ -4,6 +4,9 @@
 #include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/gcd.h>
+#include <linux/log2.h>
+#include <linux/math.h>
+#include <linux/math64.h>
 #include <linux/unaligned.h>
 #include <kunit/static_stub.h>
 
@@ -657,6 +660,105 @@ static void isp_setfile_fixup_h17(void *data, size_t len)
 	}
 }
 
+/*
+ * The noise reduction radial gains (setfile record 0xc404) from the lens
+ * shading table (0xc003), as macOS's appleh16camerad computes them before
+ * loading the setfile: per radius bin, 4096 over the mean shading gain of
+ * the four Bayer planes along the rays to the four image corners.
+ */
+static u8 *isp_setfile_record(u8 *data, size_t len, u32 tag, size_t *size)
+{
+	size_t off = 0x14;
+
+	while (off + 12 <= len) {
+		u32 sz = get_unaligned_le32(data + off);
+
+		if (get_unaligned_le32(data + off + 4) || sz < 8 || off + 4 + sz > len)
+			return NULL;
+		if (get_unaligned_le32(data + off + 8) == tag) {
+			*size = sz;
+			return data + off + 4;
+		}
+		off += 4 + sz;
+	}
+	return NULL;
+}
+
+#define LSC_PLANES	4
+#define LSC_TABLE	0x5c
+#define RG_BINS		257
+
+static u32 isp_lsc_gain(const u8 *lsc, size_t lsc_size, int plane, s64 x, s64 y)
+{
+	const u8 *h = lsc + 0x12 + plane * 0x12;
+	u32 sx = get_unaligned_le16(h + 2), sy = get_unaligned_le16(h + 4);
+	u32 base = get_unaligned_le32(h + 6);
+	u32 gx = get_unaligned_le16(h + 14), gy = get_unaligned_le16(h + 16);
+	s64 fx, fy, ax, ay;
+	s64 ix, iy;
+	u32 t00, t10, t01, t11;
+	size_t i00;
+
+	/* x and y in 1/256 half-resolution pixels; fx, fy in 1/256 cells */
+	fx = div_s64(x, sx);
+	fy = div_s64(y, sy);
+	ix = clamp_t(s64, fx >> 8, 0, gx - 2);
+	iy = clamp_t(s64, fy >> 8, 0, gy - 2);
+	ax = clamp_t(s64, fx - (ix << 8), 0, 256);
+	ay = clamp_t(s64, fy - (iy << 8), 0, 256);
+	i00 = LSC_TABLE + 2 * (base + iy * gx + ix);
+	if (i00 + 2 * (gx + 2) > lsc_size + 4)
+		return 4096;
+	t00 = get_unaligned_le16(lsc + i00);
+	t10 = get_unaligned_le16(lsc + i00 + 2);
+	t01 = get_unaligned_le16(lsc + i00 + 2 * gx);
+	t11 = get_unaligned_le16(lsc + i00 + 2 * gx + 2);
+	return ((t00 * (256 - ax) + t10 * ax) * (256 - ay) +
+		(t01 * (256 - ax) + t11 * ax) * ay) >> 16;
+}
+
+static void isp_setfile_radial_gain(u8 *data, size_t len)
+{
+	size_t lsc_size, rg_size;
+	u8 *lsc = isp_setfile_record(data, len, 0xc003, &lsc_size);
+	u8 *rg = isp_setfile_record(data, len, 0xc404, &rg_size);
+	s64 cx, cy, dx[4], dy[4], dist[4], rmax = 0;
+	u32 w, h, shift;
+	int i, c, p;
+
+	if (!lsc || !rg || lsc_size < LSC_TABLE || rg_size < 0xe + 2 * RG_BINS - 4)
+		return;
+	w = get_unaligned_le16(lsc + 0xe);
+	h = get_unaligned_le16(lsc + 0x10);
+	if (!w || !h)
+		return;
+
+	/* full-resolution pixels in 1/256; the optical centre sits 156 rows up */
+	cx = (s64)w << 7;
+	cy = ((s64)h << 7) - (156 << 8);
+	for (c = 0; c < 4; c++) {
+		dx[c] = ((c & 1) ? (s64)w << 8 : 0) - cx;
+		dy[c] = ((c & 2) ? (s64)h << 8 : 0) - cy;
+		dist[c] = int_sqrt64(dx[c] * dx[c] + dy[c] * dy[c]);
+		rmax = max(rmax, dist[c]);
+	}
+	shift = order_base_2(DIV_ROUND_UP(rmax, 256 << 8));
+	put_unaligned_le16(shift, rg + 0xc);
+
+	for (i = 0; i < RG_BINS; i++) {
+		s64 t = min_t(s64, (s64)i << (shift + 8), rmax);
+		u64 sum = 0;
+
+		for (p = 0; p < LSC_PLANES; p++)
+			for (c = 0; c < 4; c++)
+				sum += isp_lsc_gain(lsc, lsc_size, p,
+						    (cx + div64_s64(t * dx[c], dist[c])) / 2,
+						    (cy + div64_s64(t * dy[c], dist[c])) / 2);
+		put_unaligned_le16(min_t(u64, div64_u64(16ULL * 4096 * 4096, sum), 0xffff),
+				   rg + 0xe + 2 * i);
+	}
+}
+
 static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 {
 	struct isp_format *fmt = isp_get_format(isp, ch);
@@ -704,6 +806,8 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 	/* Seen on T6040 only; T8140 runs its setfiles as they are. */
 	if (isp->hw->gen == ISP_GEN_T6040 || isp->hw->setfile_stride_fixup)
 		isp_setfile_fixup_h17(isp->data_surf->virt, len);
+	if (isp->hw->setfile_radial_gain)
+		isp_setfile_radial_gain(isp->data_surf->virt, len);
 
 	err = isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
 				       setfile->size);
