@@ -18,9 +18,15 @@
 
 #include <linux/types.h>
 
+void *sep_key_register(void *ctx, int (*open)(void *, void **),
+		       void (*release)(void *),
+		       long (*ioctl)(void *, unsigned int, unsigned long));
+void sep_key_unregister(void *device);
+
 struct apple_sep_fv_new_file_key;
 
 void sep_cancel_work_sync(void *work);
+void sep_flush_work(void *work);
 void sep_cancel_delayed_work_sync(void *work);
 
 /* -- pm_shim.c ---------------------------------------------------------- */

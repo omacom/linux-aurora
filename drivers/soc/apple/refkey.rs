@@ -14,7 +14,7 @@ use kernel::sync::atomic::Relaxed;
 pub(crate) const REFKEY_ENVELOPE_VERSION: u32 = 2;
 
 impl SepData {
-    fn sks_req_refkey(&self, keybag: i32, der_set: &[u8]) -> Result<SksRequest> {
+    pub(crate) fn sks_req_refkey(&self, keybag: i32, der_set: &[u8]) -> Result<SksRequest> {
         let (keybag, envelope) = match self.profile.key_store {
             // The 13.5 operation envelope is 3. Use the designated identity
             // session rather than the source handle; class F with -1 expired
@@ -43,7 +43,7 @@ impl SepData {
         })
     }
 
-    fn sks_prepare_identity_refkey(
+    pub(crate) fn sks_prepare_identity_refkey(
         &self,
         handle: crate::sks::KeyBagHandle,
         secret: &[u8],
@@ -157,7 +157,7 @@ impl SepData {
         Some(refkey_blob)
     }
 
-    fn refkey_pub(blob: &[u8]) -> Option<&[u8]> {
+    pub(crate) fn refkey_pub(blob: &[u8]) -> Option<&[u8]> {
         let rk_tlv = crate::der::refkey_find(blob, b"rk")?;
         let pub_raw =
             crate::der::refkey_find(rk_tlv, b"pub").and_then(crate::der::octet_string_body)?;
