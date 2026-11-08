@@ -122,6 +122,7 @@ static void dcpavserv_init(struct apple_epic_service *service, const char *name,
 		dcp->dcpavserv.service = afk_service_get(service);
 		if (dcp->dcpavserv.service) {
 			dcp->dcpavserv.enabled = true;
+			dcp->dcpavserv.mcdp29xx = class && !strcmp(class, "AppleDCPMCDP29XX");
 			dcp->dcpavserv.epoch++;
 			/* A new instance: the host is no client of it yet. */
 			dcp->dcpavserv.opened = NULL;

@@ -23,6 +23,8 @@ struct dcpavserv {
 	struct completion enable_completion;
 	u32 unit;
 	struct apple_epic_service *service;
+	/* The MCDP29xx DP->HDMI converter's service: DDC/CI at 0xB7 */
+	bool mcdp29xx;
 	/*
 	 * The 14.7 external role's AV client, per instance: an instance is
 	 * named by the epoch it was published in, so a slot reused for its
