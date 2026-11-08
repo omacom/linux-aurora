@@ -163,7 +163,7 @@ j516m_source = j516m_source.replace('apple,j514m', 'apple,j516m')
 j516m_source = j516m_source.replace('b"apple,j516m",b"apple,j514s"', 'b"apple,j514m",b"apple,j514s"')
 j516m_source = j516m_source.replace('0x7b5fc7f5fd', '0x7b5ed7f5fd')
 j516m_source = j516m_source.replace('[0x1fd,0x1fd,0x1fc,0x1ed]', '[0x1fd,0x1fd,0x1ed,0x1ed]')
-j516m_source = j516m_source.replace(' assert_eq!((c.hw_ids', ' assert!(j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041200,0x0021040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041100,0x0001040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0x7b5fc7f5fd));\n' + ' assert_eq!((c.hw_ids', 1)
+j516m_source = j516m_source.replace(' assert_eq!((c.hw_ids', ' assert!(j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041200,0x0021040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041100,0x0001040a,0x7b5ed7f5fd));\n assert!(j516m::identity_matches(0x07041100,0x0021040a,0x7b5fc7f5fd));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5fc));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5ff));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0));\n' + ' assert_eq!((c.hw_ids', 1)
 with tempfile.TemporaryDirectory(prefix='t6034-profile-') as temp:
  for name,code in [('profile-j514m',source),('profile-j516m',j516m_source),('measurement-refusal',identity_source)]:
   p=Path(temp)/name;p.with_suffix('.rs').write_text(code)
