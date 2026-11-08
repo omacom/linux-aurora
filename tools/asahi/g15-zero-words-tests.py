@@ -18,11 +18,12 @@ parameters (four constants; the tables are unchanged), and when the two stamp
 renumbering margins became tuning constants (the tables are unchanged). Its T6030
 configuration module is
 independently pinned to the original bytes,
-except for the J514S B0 FirmwareBuild row and the J514S cd05 and J516S cd05
-FirmwareBuild rows added to its firmware table: the module is the original
-pinned bytes (0079ae08) plus those three rows, and the whole hw.rs pin was
-refreshed with each (with the cd05 rows removed, both pins are their earlier
-values e9b80be9 and cab592b5). prepare_board() is pinned too;
+except for the J514S B0 FirmwareBuild row, the J514S cd05 and J516S cd05
+FirmwareBuild rows and the J514S 4118 and J516S 4118 FirmwareBuild rows added
+to its firmware table: the module is the original pinned bytes (0079ae08) plus
+those five rows, and the whole hw.rs pin was refreshed with each (with the 4118
+rows removed, both pins are their earlier values fb2118b6 and 2667963a; with
+the cd05 rows also removed, e9b80be9 and cab592b5). prepare_board() is pinned too;
 it was refreshed for the same Board change (its T6030 arm is unchanged).
 """
 
@@ -39,11 +40,11 @@ G15 = "drivers/gpu/drm/asahi/g15"
 GOLDEN_FILES = {
     "board/data.rs": "7c5ff1077ca3296cbfc9e7144294162b6dea78a3774c38eeed4b0f59a14d7a5c",
     "board/template.rs": "286872f5474a67534f214e83e659253299f85143f3dc59035fa80894022e2549",
-    "hw.rs": "95e745970891153307a8d6bbc04749d553de7fb490b9ef2ff0563cde7252d8bc",
+    "hw.rs": "f45a0f11f952fea4e36809267ffd240ee1e381e8f3400de5e8527cd316b9f225",
     "power/idle.rs": "4928ecf7699b3ca85ff5143eb6e996efd40d47321e29a238a02c8873bc9f102c",
 }
 GOLDEN_FUNCTIONS = {
-    ("hw.rs", "pub(crate) mod t6030 {"): "2667963ad7a0957bacf8118965a500586637b622a99e49916f111fcd02670fcd",
+    ("hw.rs", "pub(crate) mod t6030 {"): "4016ec0d46831482382a92791b625e10fb2f6e4e28115a9498fdde0776f82e52",
     ("initdata.rs", "fn templates("): "c3115c9926d3d7d93317cb8510e93b04f30b0c256811d7137568e822dd93b8ee",
     ("initdata.rs", "pub(crate) fn prepare_board("): "ebef64ab87ef7b1f994eb7fa2a2424d05bc4fc9e88cbfbf18e51570bdfc4222d",
     ("board.rs", "pub(crate) fn from_adt("): "cecd0b28db5bd94d3b75c1bbb5f35204e8bf0699f74e5b3d08228c59025f6ac2",
