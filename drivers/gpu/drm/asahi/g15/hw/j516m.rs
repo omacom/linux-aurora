@@ -25,6 +25,11 @@ pub(crate) const CONFIG: Config = Config {
     ..super::t6034::CONFIG
 };
 
+/// The 14-core-CPU, 30-core-GPU J516M: its G15C revision and counts, and exactly 30 enabled
+/// cores. Which cores are fused off differs between Macs of the same bin, so the mask itself is
+/// not pinned (the per-cluster plausibility check in `start()` still applies).
+pub(crate) const ENABLED_CORES: u32 = 30;
+
 pub(crate) fn identity_matches(version: u32, counts: u32, cores: u64) -> bool {
-    version == 0x07041100 && counts == 0x0021040a && cores == 0x7b5ed7f5fd
+    version == 0x07041100 && counts == 0x0021040a && cores.count_ones() == ENABLED_CORES
 }
