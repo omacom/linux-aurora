@@ -685,6 +685,30 @@ static int parse_color_modes(struct dcp_parse_ctx *handle,
 }
 
 /*
+ * A T6031 external processor (firmware 14.7) publishes every timing with an
+ * empty ColorModes: the color modes are the display's ColorElements, less the
+ * IDs the timing lists as unsafe or DSC-only. @timing is the timing's
+ * dictionary. Only full-range SDR RGB is taken, as for H17P external SDR.
+ */
+static int parse_shared_colors(const struct dcp_parse_ctx *handle,
+			       const struct dcp_parse_ctx *timing,
+			       struct dcp_display_mode *out)
+{
+	struct timing_color_restrictions limits = {};
+	struct dcp_parse_ctx scan = *timing, colors;
+	int ret;
+
+	ret = parse_timing_color_restrictions(&scan, &limits);
+	if (ret)
+		return ret;
+	ret = parse(handle->shared_colors, handle->shared_colors_len, &colors);
+	if (ret)
+		return ret;
+	colors.dcp = handle->dcp;
+	return parse_color_modes(&colors, out, true, &limits, NULL);
+}
+
+/*
  * Calculate the pixel clock for a mode given the 16:16 fixed-point refresh
  * rate. The pixel clock is the refresh rate times the pixel count. DRM
  * specifies the clock in kHz. The intermediate result may overflow a u32, so
@@ -722,6 +746,7 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 	bool have_preferred = false, have_interlaced = false;
 	bool is_preferred = false;
 	struct drm_display_mode *mode = &out->mode;
+	const struct dcp_parse_ctx timing = *handle;
 
 	*out = (struct dcp_display_mode) {
 		.sdr_rgb.score = -1,
@@ -828,6 +853,13 @@ static int parse_mode(struct dcp_parse_ctx *handle,
 	    horiz.sync_polarity >= 0 && vert.sync_polarity >= 0) {
 		out->sdr_rgb = unsafe_rgb8;
 		out->automatic_rgb8_quirk = handle->automatic_1080p180_rgb8;
+	}
+
+	if (!internal && handle->shared_colors && out->best.score < 0 &&
+	    out->sdr.score < 0 && out->sdr_rgb.score < 0 && out->sdr_444.score < 0) {
+		ret = parse_shared_colors(handle, &timing, out);
+		if (ret)
+			return ret;
 	}
 
 	if (out->sdr_rgb.score >= 0)

@@ -197,6 +197,24 @@ static const struct dcp_v14_board dcp_v14_board_j516c = {
 	.panel_nits = true,
 };
 
+/* J516M uses the J516C image; its first boot offered only a 120 Hz panel timing. */
+static const struct dcp_v14_board dcp_v14_board_j516m = {
+	.name = "J516M",
+	.debugfs = "dcp-j516m",
+	.dcp_compatible = "apple,t6031-dcp",
+	.machine = "apple,j516m",
+	.soc = "apple,t6034",
+	.firmware_uuid = DCP_V14_J516C_FIRMWARE_UUID,
+	.handoff = "apple,t6031-handoff",
+	.panel_width = 3456,
+	.panel_height = 2234,
+	.promotion = true,
+	.log_bringup = true,
+	.base_edid = true,
+	/* Same pinned DCP image as J516C: zero stamps cap this panel at 60 fps. */
+	.swap_timestamps = true,
+};
+
 /*
  * J514C (MacBook Pro 14", M3 Max): the T6031 DCP running the J516C image
  * (the DCP image is the SoC's; its UUID is checked at probe), in the J514S
@@ -236,6 +254,7 @@ static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
 	&dcp_v14_board_j514m,
+	&dcp_v14_board_j516m,
 };
 
 struct dcp_v14_property {
@@ -293,6 +312,18 @@ struct apple_dcp_v14 {
 	 * and the kernel sets the mode (A411) and the power state (A472).
 	 */
 	bool external;
+	/*
+	 * External, T6031 (J516C 14.7 image): timings list no ColorModes, and
+	 * take theirs from the published ColorElements. The mode catalog so
+	 * depends on both, and is rebuilt when either changes.
+	 */
+	bool shared_colors;
+	/*
+	 * A ColorElements change left the timings without a mode, and the
+	 * display was reported withdrawn then: the TimingElements removal
+	 * that follows on an unplug does not report it again.
+	 */
+	bool colors_withdrew;
 	/* External: start signal and first client open done. */
 	bool opened;
 	/* External: the display is powered (A472) in the mode last set. */
@@ -745,6 +776,8 @@ static int dcp_v14_map_piodma(struct apple_dcp_v14 *v14, u32 id)
 #define DCP_V14_DESC_TIMEOUT_MS	3000
 /* A withdrawn description that is not back by then gets its link redone. */
 #define DCP_V14_DESC_RELINK_MS	2000
+/* An external display's timings start this soon after it is powered on. */
+#define DCP_V14_NORMAL_MODE_MS	500
 
 /* An external processor's default stride; no framebuffer is allocated for it. */
 #define DCP_V14_EXT_STRIDE	(1920 * 4)
@@ -881,7 +914,10 @@ static bool dcp_v14_external_hold(struct apple_dcp *dcp, bool hdmi_hpd)
  */
 void iomfb_v14_7_external_withdrawn(struct apple_dcp *dcp)
 {
-	bool hdmi_hpd = dcp_hdmi_port_attached(dcp);
+	bool hdmi_hpd;
+
+	KUNIT_STATIC_STUB_REDIRECT(iomfb_v14_7_external_withdrawn, dcp);
+	hdmi_hpd = dcp_hdmi_port_attached(dcp);
 
 	if ((READ_ONCE(dcp->typec_cable_connected) && !READ_ONCE(dcp->typec_crtc_off)) ||
 	    hdmi_hpd)
@@ -906,6 +942,44 @@ bool iomfb_v14_7_external_release(struct apple_dcp *dcp)
 	dev_info(dcp->dev, "display not described again: reporting it disconnected\n");
 	dcp_v14_external_hotplug(dcp, false);
 	return true;
+}
+
+/* The published raw property @key of service 0, or NULL. */
+static struct dcp_v14_raw *dcp_v14_raw_find(struct apple_dcp_v14 *v14, const char *key)
+{
+	u32 i;
+
+	for (i = 0; i < v14->raw_count; i++)
+		if (!v14->raw[i].service && !strcmp(v14->raw[i].key, key))
+			return &v14->raw[i];
+	return NULL;
+}
+
+/*
+ * Builds the mode catalog from the published TimingElements and, where the
+ * timings take their colors from there (shared_colors), the ColorElements
+ * published now. -ENODATA without timings.
+ */
+static int dcp_v14_external_catalog(struct apple_dcp_v14 *v14, struct apple_dcp *dcp,
+				    u64 generation)
+{
+	struct dcp_v14_raw *timings = dcp_v14_raw_find(v14, "TimingElements");
+	struct dcp_v14_raw *colors;
+	struct dcp_parse_ctx ctx;
+	int ret;
+
+	if (!timings)
+		return -ENODATA;
+	ret = parse(timings->data, timings->size, &ctx);
+	if (ret)
+		return ret;
+	ctx.dcp = dcp;
+	colors = v14->shared_colors ? dcp_v14_raw_find(v14, "ColorElements") : NULL;
+	if (colors && colors->size) {
+		ctx.shared_colors = colors->data;
+		ctx.shared_colors_len = colors->size;
+	}
+	return dcp_modes_replace(dcp, &ctx, generation);
 }
 
 /*
@@ -969,22 +1043,47 @@ static void dcp_v14_external_published(struct apple_dcp_v14 *v14, const char *ke
 			dcp_connector_update_dict(connector, key, &chunks);
 	}
 
-	if (!strcmp(key, "TimingElements")) {
-		if (removed) {
+	if (!strcmp(key, "TimingElements") && removed) {
+		if (!v14->colors_withdrew)
 			iomfb_v14_7_external_withdrawn(dcp);
+		v14->colors_withdrew = false;
+	} else if (!strcmp(key, "TimingElements") ||
+		   (part == DCP_V14_DESC_COLOR && v14->shared_colors &&
+		    dcp_v14_raw_find(v14, "TimingElements"))) {
+		/*
+		 * With shared colors the catalog depends on the timings and the
+		 * colors both, published in either order: rebuild it on either.
+		 * A removal has no transfer; it applies to the current attachment.
+		 */
+		if (removed)
+			generation = dcp_modes_transfer_begin(dcp);
+		ret = dcp_v14_external_catalog(v14, dcp, generation);
+		if (ret == -ESTALE)
 			return;
-		}
-		ret = parse(raw->data, raw->size, &ctx);
-		if (!ret) {
-			ctx.dcp = dcp;
-			ret = dcp_modes_replace(dcp, &ctx, generation);
+		if (ret && part == DCP_V14_DESC_COLOR) {
+			/*
+			 * The colors the catalog's modes were chosen from changed,
+			 * and the timings no longer give a mode: no mode is left.
+			 */
+			dev_warn(dcp->dev, "display colors leave no usable timing: %d\n", ret);
+			if (dcp_modes_withdraw(dcp, generation))
+				return;
+			v14->described &= ~DCP_V14_DESC_TIMING;
+			wake_up_all(&v14->described_wait);
+			if (!v14->colors_withdrew)
+				iomfb_v14_7_external_withdrawn(dcp);
+			v14->colors_withdrew = true;
+			return;
 		}
 		if (ret) {
 			dev_warn(dcp->dev, "display timings not used: %d\n", ret);
 			return;
 		}
+		v14->colors_withdrew = false;
 		if (READ_ONCE(dcp->nr_modes))
 			v14->described |= DCP_V14_DESC_TIMING;
+		else if (v14->shared_colors)
+			v14->described &= ~DCP_V14_DESC_TIMING;
 		wake_up_all(&v14->described_wait);
 		dev_info(dcp->dev, "display has %u usable modes\n", READ_ONCE(dcp->nr_modes));
 		dcp_v14_external_hotplug(dcp, READ_ONCE(dcp->nr_modes) > 0);
@@ -2071,9 +2170,14 @@ int iomfb_v14_7_external_prepare(struct apple_dcp *dcp)
 		dcp->coproc_reg = NULL;
 		goto refuse;
 	}
-	/* The callbacks here are those of one firmware image. */
+	/*
+	 * The callbacks here are those of one firmware image: T6030's, or on a
+	 * T6031 external processor the J516C image its internal DCP runs.
+	 */
 	if (of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid) ||
-	    strcmp(uuid, DCP_V14_FIRMWARE_UUID)) {
+	    (strcmp(uuid, DCP_V14_FIRMWARE_UUID) &&
+	     (!of_device_is_compatible(dev->of_node, "apple,t6031-dcpext") ||
+	      strcmp(uuid, DCP_V14_J516C_FIRMWARE_UUID)))) {
 		dev_err(dev, "external display processor firmware %s is not supported\n",
 			uuid ?: "(unknown)");
 		ret = -ENODEV;
@@ -2160,23 +2264,38 @@ bool iomfb_v14_7_external_failed(struct apple_dcp *dcp)
 	       (dcp->v14 && READ_ONCE(dcp->v14->failed));
 }
 
+/* True if @ps is a power state labelled dispext<N><suffix>. */
+static bool dcpext_ps_is(struct device_node *ps, const char *suffix)
+{
+	const char *label;
+
+	return ps && !of_property_read_string(ps, "label", &label) &&
+	       strstarts(label, "dispext") && strlen(label) >= strlen(suffix) &&
+	       !strcmp(label + strlen(label) - strlen(suffix), suffix);
+}
+
 /* Refuse startup unless both the hardware floor and PMP vote are in place. */
 static int dcpext_check_power(struct apple_dcp *dcp)
 {
 	struct device *dev = dcp->dev;
-	struct device_node *ps, *entry;
+	struct device_node *ps, *fe, *entry;
 	struct regmap *map;
-	const char *label;
 	u32 offset, value;
 	int ret;
 
 	ps = of_parse_phandle(dev->of_node, "power-domains", 0);
 	if (!ps)
 		return -ENODEV;
-	/* The CPU domain of this pipe: dispext<N>_cpu. */
-	ret = of_property_read_string(ps, "label", &label);
-	if (ret || !strstarts(label, "dispext") || strlen(label) < 4 ||
-	    strcmp(label + strlen(label) - 4, "_cpu")) {
+	/*
+	 * The floor is on the pipe's CPU domain, dispext<N>_cpu. On T6031 the
+	 * pipe sits on dispext<N>_fe, whose parent is the CPU domain.
+	 */
+	if (of_device_is_compatible(dev->of_node, "apple,t6031-dcpext")) {
+		fe = ps;
+		ps = dcpext_ps_is(fe, "_fe") ? of_parse_phandle(fe, "power-domains", 0) : NULL;
+		of_node_put(fe);
+	}
+	if (!dcpext_ps_is(ps, "_cpu")) {
 		of_node_put(ps);
 		return -EINVAL;
 	}
@@ -2251,6 +2370,8 @@ static int dcpext_boot(struct apple_dcp *dcp)
 	v14->dev = dev;
 	v14->dcp = dcp;
 	v14->external = dcp->external_native;
+	v14->shared_colors = v14->external &&
+		of_device_is_compatible(dev->of_node, "apple,t6031-dcpext");
 	if (v14->external) {
 		struct clk *clk = clk_get_optional(dev, NULL);
 
@@ -3165,6 +3286,68 @@ static int dcp_v14_set_power(struct apple_dcp_v14 *v14, bool on)
 	return ret;
 }
 
+/* Handles one queued firmware callback, waiting up to @timeout for it. */
+static int dcp_v14_pump(struct apple_dcp_v14 *v14, unsigned long timeout)
+{
+	KUNIT_STATIC_STUB_REDIRECT(dcp_v14_pump, v14, timeout);
+	return dcp_v14_link_pump(&v14->link, timeout, dcp_v14_callback, v14);
+}
+
+/*
+ * Waits after A472(1) until the firmware runs the display's timings. It
+ * starts them in a deferred run mode change and then sets NormalModeActive
+ * (D104) to 1; with a DSC mode (3840x2560@60 on the J516C 14.7 image) that
+ * change ends only after A472 replied, NormalModeActive still 0. The first
+ * swap of a session sent before then is dropped ("swallowed swap ID 1 as
+ * timings are not enabled for External Display"), its A407 never completes
+ * and the session is lost. A slower mode's change ends within A472, which is
+ * why only a fast first mode failed. Later swaps sent early are held, not
+ * dropped, but every power-on is waited for alike: it costs one run mode
+ * change, about 20 ms.
+ *
+ * Firmware that has not reported NormalModeActive is not waited for.
+ * Called with the RPC lock held; the callbacks are handled as by
+ * dcp_v14_idle().
+ */
+static int dcp_v14_external_wait_normal(struct apple_dcp_v14 *v14)
+{
+	static const u8 key[64] = "NormalModeActive";
+	unsigned long deadline = jiffies + msecs_to_jiffies(DCP_V14_NORMAL_MODE_MS);
+	ktime_t start = ktime_get();
+	struct dcp_v14_property *p;
+	unsigned int pumped = 0;
+	int ret;
+
+	lockdep_assert_held(&v14->lock);
+	for (;;) {
+		p = dcp_v14_property(v14, 0, key, false);
+		if (IS_ERR_OR_NULL(p) || p->value) {
+			if (pumped)
+				dev_dbg(v14->dev, "display timings running %lld us after power-on\n",
+					ktime_us_delta(ktime_get(), start));
+			return 0;
+		}
+		if (v14->failed)
+			return -EIO;
+		if (!time_before(jiffies, deadline))
+			break;
+		ret = dcp_v14_pump(v14, deadline - jiffies);
+		pumped++;
+		if (ret == -ETIMEDOUT)
+			break;
+		if (ret && ret != -EAGAIN) {
+			v14->failed = true;
+			dev_err(v14->dev, "DCP notification failed: %d; recovery requires a reboot\n",
+				ret);
+			dcp_v14_external_stopped(v14);
+			return ret;
+		}
+	}
+	dev_warn(v14->dev, "display timings not running %u ms after power-on\n",
+		 DCP_V14_NORMAL_MODE_MS);
+	return -ETIMEDOUT;
+}
+
 /* The display is fully described, and no description is in transfer. */
 static bool dcp_v14_external_described(struct apple_dcp_v14 *v14)
 {
@@ -3321,17 +3504,9 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
 		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
 	if (!ret)
 		ret = dcp_v14_set_power(v14, true);
-	/*
-	 * The mode was set with the pipe off. A mode that needs DSC is then
-	 * reset again ("pipe not enabled"), and the power-on only configures
-	 * DSC: the firmware starts the timings in a mode set of its own, after
-	 * the hotplug notification it sends itself, and drops a swap that
-	 * reaches it before then without completing it, so A407 times out.
-	 * Setting the mode once more with the pipe on starts the timings
-	 * before the first swap.
-	 */
+	/* No swap before the timings run; see dcp_v14_external_wait_normal(). */
 	if (!ret)
-		ret = dcp_v14_set_mode(v14, mode.color_mode_id, mode.timing_mode_id);
+		ret = dcp_v14_external_wait_normal(v14);
 	if (!ret) {
 		v14->panel_width = mode.mode.hdisplay;
 		v14->panel_height = mode.mode.vdisplay;
@@ -3451,7 +3626,8 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_DISPLAY_KUNIT_TEST)
 #include "iomfb_v14_7_external_audio_test.c"
-#include "iomfb_v14_7_external_modeset_test.c"
+#include "iomfb_v14_7_shared_colors_test.c"
+#include "iomfb_v14_7_normal_mode_test.c"
 #include "iomfb_v14_7_backlight_test.c"
 #include "iomfb_v14_7_backlight_lifetime_test.c"
 #endif
