@@ -1255,6 +1255,9 @@ static const struct apple_isp_hw apple_isp_hw_t6050 = {
 	/* The J714c's IMX958 (build revision 2) is tuned by 2226_02 */
 	.imx958_2226 = true,
 	.setfile_radial_gain = true,
+	/* As macOS's appleh16camerad sets them for the J714c's IMX958 */
+	.lsc_ideal_percent = 84,
+	.ae_fd_scene_metering = true,
 };
 
 static const struct of_device_id apple_isp_of_match[] = {

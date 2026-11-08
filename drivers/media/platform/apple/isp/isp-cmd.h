@@ -70,6 +70,7 @@
 #define CISP_CMD_CH_ALS_DISABLE				     0x0a1d
 #define CISP_CMD_CH_CNR_START				     0x0a2f
 #define CISP_CMD_CH_MBNR_ENABLE				     0x0a3a
+#define CISP_CMD_CH_LSC_IDEAL_PERCENT_SET		     0x0a4e
 #define CISP_CMD_CH_OUTPUT_CONFIG_SET			     0x0b01
 #define CISP_CMD_CH_OUTPUT_CONFIG_SCL1_SET		     0x0b09
 #define CISP_CMD_CH_PREVIEW_STREAM_SET			     0x0b0d
@@ -764,6 +765,15 @@ struct cmd_apple_ch_ae_fd_scene_metering_config_set {
 static_assert(sizeof(struct cmd_apple_ch_ae_fd_scene_metering_config_set) ==
 	      0x24);
 
+/* The lens shading falloff the firmware corrects to, in percent at the corner */
+struct cmd_ch_lsc_ideal_percent_set {
+	u64 opcode;
+	u32 chan;
+	u16 percent;
+	u16 pad;
+} __packed;
+static_assert(sizeof(struct cmd_ch_lsc_ideal_percent_set) == 0x10);
+
 struct cmd_apple_ch_ae_metering_mode_set {
 	u64 opcode;
 	u32 chan;
@@ -792,6 +802,8 @@ int isp_cmd_apple_ch_ae_fd_scene_metering_config_set(struct apple_isp *isp,
 						     u32 chan);
 int isp_cmd_apple_ch_ae_metering_mode_set(struct apple_isp *isp, u32 chan,
 					  u32 mode);
+int isp_cmd_ch_lsc_ideal_percent_set(struct apple_isp *isp, u32 chan,
+				     u16 percent);
 int isp_cmd_apple_ch_ae_flicker_freq_update_current_set(struct apple_isp *isp,
 							u32 chan, u32 freq);
 

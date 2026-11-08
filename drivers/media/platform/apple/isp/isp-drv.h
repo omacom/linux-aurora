@@ -265,6 +265,10 @@ struct apple_isp_hw {
 	bool imx958_2226;
 	/* Compute the setfile's noise reduction radial gains from its lens shading */
 	bool setfile_radial_gain;
+	/* The lens shading falloff to correct to, in percent at the corner (0: unset) */
+	u16 lsc_ideal_percent;
+	/* H17 firmware that takes the face-detection scene metering setup */
+	bool ae_fd_scene_metering;
 };
 
 enum isp_sensor_id {

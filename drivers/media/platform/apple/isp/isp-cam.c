@@ -809,6 +809,13 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 	if (isp->hw->setfile_radial_gain)
 		isp_setfile_radial_gain(isp->data_surf->virt, len);
 
+	if (isp->hw->lsc_ideal_percent) {
+		err = isp_cmd_ch_lsc_ideal_percent_set(isp, ch,
+						       isp->hw->lsc_ideal_percent);
+		if (err)
+			return err;
+	}
+
 	err = isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
 				       setfile->size);
 	if (err)
@@ -1045,8 +1052,8 @@ select_config:
 	if (err)
 		return err;
 
-	/* The H17 firmware faults on this face-detection metering setup. */
-	if (!h17) {
+	/* Most H17 firmware faults on this face-detection metering setup. */
+	if (!h17 || isp->hw->ae_fd_scene_metering) {
 		err = isp_cmd_apple_ch_ae_fd_scene_metering_config_set(isp,
 								       ch);
 		if (err)

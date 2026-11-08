@@ -729,6 +729,17 @@ int isp_cmd_apple_ch_ae_metering_mode_set(struct apple_isp *isp, u32 chan,
 	return CISP_SEND_IN(isp, args);
 }
 
+int isp_cmd_ch_lsc_ideal_percent_set(struct apple_isp *isp, u32 chan,
+				     u16 percent)
+{
+	struct cmd_ch_lsc_ideal_percent_set args = {
+		.opcode = CISP_OPCODE(CISP_CMD_CH_LSC_IDEAL_PERCENT_SET),
+		.chan = chan,
+		.percent = percent,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
 int isp_cmd_apple_ch_ae_flicker_freq_update_current_set(struct apple_isp *isp,
 							u32 chan, u32 freq)
 {
