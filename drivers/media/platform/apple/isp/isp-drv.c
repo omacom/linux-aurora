@@ -1154,6 +1154,62 @@ static const struct apple_isp_hw apple_isp_hw_t8142 = {
 	.setfile_stride_fixup = true,
 };
 
+/*
+ * T6050 (M5 Max, J714c): the J714c ADT's dart-isp0 dapf-instance-0 ranges,
+ * rounded out to 16 KiB pages, with eight DSID broadcast-clear windows.
+ */
+static const struct isp_mmio_window apple_isp_fw_mmio_t6050[] = {
+	{ 0x2220004000, 0x14000 },	/* DSID broadcast-clear windows */
+	{ 0x2222004000, 0x14000 },
+	{ 0x2224004000, 0x14000 },
+	{ 0x2226004000, 0x14000 },
+	{ 0x2228004000, 0x14000 },
+	{ 0x222a004000, 0x14000 },
+	{ 0x222c004000, 0x14000 },
+	{ 0x222e004000, 0x14000 },
+	{ 0x280680000, 0x8000 },
+	{ 0x280900000, 0x4000 },	/* PMGR, ISP power states */
+	{ 0x284240000, 0x28000 },	/* PMGR, as T8140's PMP clock scratch window */
+	{ 0x284e3c000, 0x4000 },
+	{ 0x286724000, 0x4000 },	/* PMP bandwidth scratch */
+	{ 0x29062c000, 0x20000 },
+	{ 0x509660000, 0x4000 },
+};
+
+/*
+ * T6050 (M5 Max, J714c) boots as T6040: the same isp0 and dart-isp0
+ * addresses, mailbox at +0x2924000, and 32 MiB of firmware main memory at
+ * IOVA 0 whose __TEXT and __DATA end at 0x1fec000. The broadcast-clear
+ * window is the first of the eight in its DAPF ranges. The PMP clock scratch
+ * word is not known yet; without it the driver sends no PMP control.
+ */
+static const struct apple_isp_hw apple_isp_hw_t6050 = {
+	.gen = ISP_GEN_T6040,
+	.fw_abi = ISP_FW_ABI_H17,
+	.pmu_base = 0x0,
+
+	.dsid_count = 1,
+	.dsid_slots = 8,
+	.dsid_clr_base0 = 0x2220016000,
+	.dsid_clr_range0 = 0x2fc,
+
+	.clock_scratch = 0x0,
+	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
+
+	.scl1 = true,
+	/* The sensor link is LPDP ("SIF 0 (LPDP)"), as on T8142. */
+	.lpdp = true,
+	.meta_size = ISP_META_SIZE_T8140,
+	.fw_mmio = apple_isp_fw_mmio_t6050,
+	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t6050),
+
+	.coproc_control = ISP_COPROC_CONTROL_T8140,
+	.boot_mode = 1,
+	.shared_size = 0xde600000,
+	.resident_fw = true,
+	.meta_exposure = true,
+};
+
 static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t8103-isp", .data = &apple_isp_hw_t8103 },
 	{ .compatible = "apple,t8112-isp", .data = &apple_isp_hw_t8112 },
@@ -1164,6 +1220,7 @@ static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t6031-isp", .data = &apple_isp_hw_t6031 },
 	{ .compatible = "apple,t8140-isp", .data = &apple_isp_hw_t8140 },
 	{ .compatible = "apple,t8142-isp", .data = &apple_isp_hw_t8142 },
+	{ .compatible = "apple,t6050-isp", .data = &apple_isp_hw_t6050 },
 	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6040 },
 	{ .compatible = "apple,t8132-isp", .data = &apple_isp_hw_t8132 },
 	{},
