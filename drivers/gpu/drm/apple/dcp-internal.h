@@ -644,6 +644,8 @@ struct apple_dcp {
 	bool hdmi_edge_seen;
 	struct delayed_work hdmi_settle_wq;
 	struct delayed_work hdmi_recheck_wq;
+	/* Reconnects a still-attached HDMI display after system sleep. */
+	struct delayed_work hdmi_resume_wq;
 	/* T6030 HDMI converter service requests, see dcp-hdmi.c */
 	struct dcp_hdmi *hdmi;
 };
