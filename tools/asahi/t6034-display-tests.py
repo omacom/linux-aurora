@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only OR MIT
-"""Run production J514M display selection and opt-out policy on the host."""
+"""Run production J514M and J516M display selection and opt-out policy on the host."""
 from pathlib import Path
 import re
 import subprocess
@@ -33,6 +33,7 @@ defines='\n'.join(l for l in driver.splitlines() if l.startswith('#define DCP_V1
 records=driver[driver.index('static const struct dcp_v14_board dcp_v14_board_t6030'):driver.index('struct dcp_v14_property {')]
 functions='\n'.join([item(gate,'static bool __init gate_t6031_wanted('),
  item(gate,'static bool __init gate_t6034_default_board('),item(gate,'static bool __init gate_t6034_wanted('),
+ item(gate,'static bool __init gate_j516m_default_board('),item(gate,'static bool __init gate_j516m_wanted('),
  item(driver,'const struct dcp_v14_board *dcp_v14_board_select('),item(driver,'bool dcp_v14_board_admits(')])
 main = r'''
 int main(void)
@@ -58,6 +59,26 @@ int main(void)
  }
  board="apple,j514m";soc="apple,t6034";dcp="apple,t6031-dcp";bool known;
  assert(!dcp_v14_board_select(dcp_is,machine_is,NULL,&known));
+ /* J516M: the T6031 display layout on a T6034; default on, apple_t6034_display.enable=0 off */
+ for(unsigned i=0;i<ARRAY_SIZE(boards);i++) for(unsigned j=0;j<ARRAY_SIZE(socs);j++) {
+  board=boards[i];soc=socs[j];bool expected=i==1&&j==0;
+  assert(gate_j516m_default_board()==expected);
+  assert(gate_j516m_wanted(-1)==expected);
+  assert(!gate_j516m_wanted(0));
+  assert(gate_j516m_wanted(1)==expected);
+  dcp="apple,t6031-dcp";
+  const struct dcp_v14_board *b=dcp_v14_board_select(dcp_is,machine_is,NULL,&known);
+  if(i==1) {
+   assert(known && (!!b)==expected);
+   if(!b)continue;
+   assert(!strcmp(b->name,"J516M") && !strcmp(b->handoff,"apple,t6031-handoff"));
+   assert(b->promotion && b->swap_timestamps && !b->ctm_set);
+   assert(dcp_v14_board_admits(b,"F493F03E-CC40-3D89-9A08-5F259BA2B246"));
+   assert(!dcp_v14_board_admits(b,"DDF38191-93B3-324A-BC8F-643006F5AC82"));
+  }
+ }
+ board="apple,j516m";soc="apple,t6034";dcp="apple,t6034-dcp";
+ assert(!dcp_v14_board_select(dcp_is,machine_is,NULL,&known));
  return 0;
 }
 '''
@@ -67,6 +88,8 @@ mutants={
  'lost-board-soc':source.replace('.soc = "apple,t6034",','.soc = NULL,'),
  'lost-owner-optout':source.replace('return sw < 0 ? default_board : sw;','return sw < 0 ? default_board : true;'),
  'lost-firmware-identity':source.replace('return uuid && !strcmp(uuid, board->firmware_uuid);','return uuid != NULL;'),
+ 'j516m-any-soc':source.replace('return of_machine_is_compatible("apple,t6034") &&\n\t       of_machine_is_compatible("apple,j516m");','return of_machine_is_compatible("apple,j516m");'),
+ 'j516m-opt-in':source.replace('return gate_j516m_default_board() && gate_t6031_wanted(sw, true);','return gate_j516m_default_board() && sw > 0;'),
 }
 with tempfile.TemporaryDirectory(prefix='t6034-display-') as directory:
  for name,c in mutants.items():
@@ -76,7 +99,8 @@ with tempfile.TemporaryDirectory(prefix='t6034-display-') as directory:
   assert (result.returncode==0)==(name=='control'),(name,result.stderr)
   print(name+': '+('pass' if name=='control' else 'caught'))
 assert 'gate_t6034_requested = gate_t6034_wanted(gate_t6034_switch);' in gate
-print('T6034 normal display defaults, owner disable, exact root pair and firmware identity: PASS')
+assert 'gate_j516m_requested = gate_j516m_wanted(gate_t6034_switch);' in gate
+print('T6034 (J514M, J516M) normal display defaults, owner disable, exact root pair and firmware identity: PASS')
 
 # Compile the production report layout records and OF match table. Matching
 # T6034 through its generic T6020 fallback binds a report that never creates
