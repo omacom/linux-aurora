@@ -648,6 +648,25 @@ static int apple_isp_probe(struct platform_device *pdev)
 		apple_isp_wdt_init(isp);
 	}
 
+	if (isp->hw->camera_light) {
+		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "cil");
+		if (!res ||
+		    of_property_read_u32(dev->of_node, "apple,cil-config",
+					 &isp->cil_config)) {
+			dev_err(dev, "no camera light described, not using the camera\n");
+			err = -ENODEV;
+			goto detach_genpd;
+		}
+		/* Not requested: the pin sits in a GPIO block Linux does not own. */
+		isp->cil = devm_ioremap(dev, res->start, resource_size(res));
+		if (!isp->cil) {
+			err = -ENOMEM;
+			goto detach_genpd;
+		}
+		isp->cil_on_high = of_property_read_bool(dev->of_node,
+							 "apple,cil-active-high");
+	}
+
 	isp->irq = platform_get_irq(pdev, 0);
 	if (isp->irq < 0) {
 		err = isp->irq;
@@ -1208,6 +1227,7 @@ static const struct apple_isp_hw apple_isp_hw_t6050 = {
 	.shared_size = 0xde600000,
 	.resident_fw = true,
 	.meta_exposure = true,
+	.camera_light = true,
 };
 
 static const struct of_device_id apple_isp_of_match[] = {

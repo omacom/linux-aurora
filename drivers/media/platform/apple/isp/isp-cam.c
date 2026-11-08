@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright 2023 Eileen Yoon <eyn@gmx.com> */
 
+#include <linux/delay.h>
 #include <linux/firmware.h>
 #include <linux/gcd.h>
 #include <linux/unaligned.h>
@@ -1054,6 +1055,8 @@ static enum hrtimer_restart apple_isp_wdt_timer(struct hrtimer *timer)
 	struct apple_isp *isp = container_of(timer, struct apple_isp,
 					     wdt_timer);
 
+	if (isp->hw->camera_light && !isp->cil_lit)
+		return HRTIMER_NORESTART;
 	apple_isp_wdt_kick(isp);
 	hrtimer_forward_now(timer, ns_to_ktime(ISP_WDT_PERIOD_NS));
 
@@ -1069,6 +1072,8 @@ void apple_isp_wdt_init(struct apple_isp *isp)
 static void apple_isp_wdt_start(struct apple_isp *isp)
 {
 	if (!isp->wdt || isp->wdt_running)
+		return;
+	if (isp->hw->camera_light && !isp->cil_lit)
 		return;
 
 	isp->wdt_running = true;
@@ -1086,16 +1091,64 @@ void apple_isp_wdt_stop(struct apple_isp *isp)
 	isp->wdt_running = false;
 }
 
+#define ISP_GPIO_DATA		BIT(0)
+#define ISP_GPIO_MODE		GENMASK(3, 1)
+#define ISP_GPIO_INPUT_ENABLE	BIT(9)
+/* The mode and the pin's level, as the input buffer reads it */
+#define ISP_GPIO_CHECK		(ISP_GPIO_MODE | ISP_GPIO_DATA)
+
+/*
+ * Light the camera light before the sensor may stream: drive its pin as an
+ * output at the on level, with the input buffer on so the pin's level reads
+ * back, and refuse to stream unless it does.
+ */
+static int apple_isp_light_on(struct apple_isp *isp)
+{
+	u32 val, on = isp->cil_on_high ? ISP_GPIO_DATA : 0;
+
+	if (!isp->hw->camera_light)
+		return 0;
+	if (!isp->cil_lit)
+		isp->cil_saved = readl(isp->cil);
+	val = (isp->cil_config & ~ISP_GPIO_DATA) | ISP_GPIO_INPUT_ENABLE | on;
+	writel(val, isp->cil);
+	usleep_range(10, 20);
+	if ((readl(isp->cil) & ISP_GPIO_CHECK) != (val & ISP_GPIO_CHECK)) {
+		dev_err(isp->dev, "camera light did not come on (0x%x, wrote 0x%x), not streaming\n",
+			readl(isp->cil), val);
+		writel(isp->cil_saved, isp->cil);
+		return -EIO;
+	}
+	isp->cil_lit = true;
+	return 0;
+}
+
+/* Only once the sensor has stopped streaming. */
+void apple_isp_light_off(struct apple_isp *isp)
+{
+	if (!isp->hw->camera_light || !isp->cil_lit)
+		return;
+	apple_isp_wdt_stop(isp);
+	isp->cil_lit = false;
+	writel(isp->cil_saved, isp->cil);
+}
+
 int apple_isp_start_capture(struct apple_isp *isp)
 {
 	int err;
+
+	err = apple_isp_light_on(isp);
+	if (err)
+		return err;
 
 	/* Serviced from before the channel starts... */
 	apple_isp_wdt_start(isp);
 
 	err = isp_cmd_ch_start(isp, 0); // TODO channel mask
-	if (err)
+	if (err) {
 		apple_isp_wdt_stop(isp);
+		apple_isp_light_off(isp);
+	}
 
 	return err;
 }
@@ -1109,6 +1162,7 @@ void apple_isp_stop_capture(struct apple_isp *isp)
 
 	/* ... until its buffers are back. */
 	apple_isp_wdt_stop(isp);
+	apple_isp_light_off(isp);
 }
 
 #if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)

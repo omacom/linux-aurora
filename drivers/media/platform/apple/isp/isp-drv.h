@@ -251,6 +251,11 @@ struct apple_isp_hw {
 	 * detected only once.
 	 */
 	bool deferred_start;
+	/*
+	 * The camera light is the driver's to drive: no stream starts unless
+	 * it is lit, and the capture watchdog is fed only while it is.
+	 */
+	bool camera_light;
 
 	/* The xx24 setfiles' lens shading strides need zeroing (T8142). */
 	bool setfile_stride_fixup;
@@ -375,6 +380,12 @@ struct apple_isp {
 	void __iomem *gpio;
 	void __iomem *mbox2;
 	void __iomem *wdt;
+	/* The camera light's GPIO register (hw->camera_light) */
+	void __iomem *cil;
+	u32 cil_config;
+	u32 cil_saved;
+	bool cil_on_high;
+	bool cil_lit;
 	void __iomem *dapf;
 	struct hrtimer wdt_timer;
 	bool wdt_running;
