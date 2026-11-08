@@ -599,7 +599,7 @@ static const struct cfg80211_ops mt_cfg_ops = {
 int mt_register_regulatory_gate(struct mt7932 *m)
 {
 	static const int rates[] = {10,20,55,110,60,90,120,180,240,360,480,540};
-	static const u32 ciphers[] = { WLAN_CIPHER_SUITE_CCMP };
+	static const u32 ciphers[] = { WLAN_CIPHER_SUITE_CCMP, WLAN_CIPHER_SUITE_TKIP };
 	static const u32 akms[] = {
 		WLAN_AKM_SUITE_PSK, WLAN_AKM_SUITE_SAE, WLAN_AKM_SUITE_OWE,
 	};
