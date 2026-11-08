@@ -1,0 +1,139 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple MacBook Pro (14-inch, M5 Pro, 2026)
+ *
+ * target-type: J714s (Mac17,9)
+ *
+ * A T6050 laid out as on the J716s. Binned parts have fewer CPU cores
+ * (15 of 18 on the unit this was written on); the loader removes the
+ * cores the ADT does not list, as for the other binned Apple SoCs. The
+ * loader also supplies usable memory, CPU release addresses, framebuffer
+ * geometry and the keyboard layout. Peripheral power domains come from
+ * t6050-pmgr.dtsi; the framebuffer holds the display domain.
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/apple-aic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
+
+#include "t6050.dtsi"
+#include "t6050-smc.dtsi"
+
+/ {
+	compatible = "apple,j714s", "apple,t6050", "apple,arm-platform";
+	#address-cells = <2>;
+	chassis-type = "laptop";
+	interrupt-parent = <&aic>;
+	model = "Apple MacBook Pro (14-inch, M5 Pro, 2026)";
+	#size-cells = <2>;
+
+	aliases {
+		keyboard = &keyboard;
+		serial0 = &serial0;
+	};
+
+	chosen {
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		stdout-path = "serial0:1500000n8";
+
+		framebuffer@0 {
+			compatible = "apple,simple-framebuffer",
+				     "simple-framebuffer";
+			reg = <0 0 0 0>; /* Filled by the loader. */
+			power-domains = <&ps_disp_cpu>;
+			apple,internal-panel; /* simpledrm reports it as eDP */
+
+			/* m1n1 only enables it on chips it knows. */
+			status = "okay";
+		};
+	};
+
+	memory@10000000000 {
+		reg = <0x100 0 0 0>; /* Filled by the loader. */
+		device_type = "memory";
+	};
+
+	/* ADT pwm0/kbd-backlight: channel 0 at 25 kHz */
+	led-controller {
+		compatible = "pwm-leds";
+
+		led-0 {
+			color = <LED_COLOR_ID_WHITE>;
+			default-state = "keep";
+			function = LED_FUNCTION_KBD_BACKLIGHT;
+			label = "kbd_backlight";
+			max-brightness = <255>;
+			pwms = <&fpwm0 0 40000>;
+		};
+	};
+};
+
+&fpwm0 {
+	status = "okay";
+};
+
+&mtp {
+	status = "okay";
+};
+
+&mtp_mbox {
+	status = "okay";
+};
+
+&mtp_dart {
+	status = "okay";
+};
+
+&mtp_dockchannel {
+	status = "okay";
+};
+
+&mtp_hid {
+	/*
+	 * ADT multi-touch function-afe-reset = smc-pmu pKW8('pcIO', 0x10000,
+	 * 0x11c0000), SMC pcIO output 28 as on the J714c and J716s; level 1
+	 * asserts the reset.
+	 */
+	apple,afe-reset-gpios = <&smc_gpio 28 GPIO_ACTIVE_HIGH>;
+
+	actuator {
+	};
+
+	keyboard: keyboard {
+		hid-country-code = <0>;
+		apple,keyboard-layout-id = <0>;
+	};
+
+	multi-touch {
+		firmware-name = "apple/tpmtfw-j714s.bin";
+		apple,power-method = <2>;
+	};
+
+	stm {
+	};
+};
+
+#include "hwmon-common.dtsi"
+#include "hwmon-fan-dual.dtsi"
+#include "hwmon-laptop.dtsi"
+
+/*
+ * The T6050 SMC spells the fan mode keys F0md/F1md; F0Md/F1Md from
+ * hwmon-fan*.dtsi do not exist.
+ */
+&smc_hwmon {
+	fan-F0Ac {
+		apple,fan-mode = "F0md";
+	};
+
+	fan-F1Ac {
+		apple,fan-mode = "F1md";
+	};
+};
