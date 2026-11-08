@@ -38,7 +38,7 @@ static const struct macsmc_pcio_line macsmc_j700_pcio[] = {
 	{ }
 };
 
-/* J714c and J716s: the same template in both Apple device trees */
+/* J714c, J714s and J716s: the same template in their Apple device trees */
 static const struct macsmc_pcio_line macsmc_j714c_pcio[] = {
 	/* multi-touch function-afe-reset: pKW8("pcIO", 0x10000, 0x11c0000) */
 	{ 28, 0x10000, 0x11c0000 },
@@ -324,6 +324,7 @@ static int macsmc_gpio_probe(struct platform_device *pdev)
 		if (of_machine_is_compatible("apple,j700"))
 			smcgp->pcio = macsmc_j700_pcio;
 		else if (of_machine_is_compatible("apple,j714c") ||
+			 of_machine_is_compatible("apple,j714s") ||
 			 of_machine_is_compatible("apple,j716s"))
 			smcgp->pcio = macsmc_j714c_pcio;
 	}
