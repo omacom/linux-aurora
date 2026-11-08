@@ -1149,6 +1149,21 @@
    "rust": "1.85.0"
   },
   {
+   "name": "tools/aurora-sep/tests/test_application_keys.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/aurora-sep/tests",
+    "-p",
+    "test_application_keys.py",
+    "-v"
+   ]
+  },
+  {
    "name": "tools/aurora-sep/tests/test_blocking_requests.py",
    "group": "aurora-sep",
    "argv": [
