@@ -19,6 +19,7 @@
 
 #include "t6050.dtsi"
 #include "t6050-smc.dtsi"
+#include "t6050-j714c-isp.dtsi"
 
 / {
 	compatible = "apple,j714c", "apple,t6050", "apple,arm-platform";
