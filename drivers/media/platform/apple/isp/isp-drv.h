@@ -261,6 +261,8 @@ struct apple_isp_hw {
 
 	/* The xx24 setfiles' lens shading strides need zeroing (T8142). */
 	bool setfile_stride_fixup;
+	/* The IMX958 module takes setfile 2226_02, not 2224_01 */
+	bool imx958_2226;
 };
 
 enum isp_sensor_id {
@@ -312,6 +314,7 @@ enum isp_sensor_id {
 	ISP_IMX853_7622_01,
 	ISP_IMX913_7523_01,
 	ISP_IMX958_2224_01,
+	ISP_IMX958_2226_02,
 	ISP_VD56G0_6221_01,
 	ISP_VD56G0_6222_01,
 };
