@@ -18,9 +18,11 @@ parameters (four constants; the tables are unchanged), and when the two stamp
 renumbering margins became tuning constants (the tables are unchanged). Its T6030
 configuration module is
 independently pinned to the original bytes,
-except for the J514S B0 FirmwareBuild row added to its firmware table: the
-module is the original pinned bytes (0079ae08) plus that one 15-line row, and
-the whole hw.rs pin was refreshed with it. prepare_board() is pinned too;
+except for the J514S B0 FirmwareBuild row and the J514S cd05 FirmwareBuild row
+added to its firmware table: the module is the original pinned bytes (0079ae08)
+plus those two 15-line rows, and the whole hw.rs pin was refreshed with each
+(with the cd05 row removed, both pins are their earlier values e9b80be9 and
+cab592b5). prepare_board() is pinned too;
 it was refreshed for the same Board change (its T6030 arm is unchanged).
 """
 
@@ -37,11 +39,11 @@ G15 = "drivers/gpu/drm/asahi/g15"
 GOLDEN_FILES = {
     "board/data.rs": "7c5ff1077ca3296cbfc9e7144294162b6dea78a3774c38eeed4b0f59a14d7a5c",
     "board/template.rs": "286872f5474a67534f214e83e659253299f85143f3dc59035fa80894022e2549",
-    "hw.rs": "c54a4f8342fb466f82f4b9cfed6a137ee1ca1f4d80ede4e1b7f397d39223558e",
+    "hw.rs": "82ee9d163da888e6dc506635e8e4a59cd3f4b4c34b3879e162702b8561093d9e",
     "power/idle.rs": "4928ecf7699b3ca85ff5143eb6e996efd40d47321e29a238a02c8873bc9f102c",
 }
 GOLDEN_FUNCTIONS = {
-    ("hw.rs", "pub(crate) mod t6030 {"): "cab592b5d776be9ede93b96b1b0526c1d838ef2948a5e4a86caa4ec71f71c2ca",
+    ("hw.rs", "pub(crate) mod t6030 {"): "d6c3020007646cba504db26bdfe5232e45185aba1d4603931da9a8d29bec40de",
     ("initdata.rs", "fn templates("): "c3115c9926d3d7d93317cb8510e93b04f30b0c256811d7137568e822dd93b8ee",
     ("initdata.rs", "pub(crate) fn prepare_board("): "ebef64ab87ef7b1f994eb7fa2a2424d05bc4fc9e88cbfbf18e51570bdfc4222d",
     ("board.rs", "pub(crate) fn from_adt("): "cecd0b28db5bd94d3b75c1bbb5f35204e8bf0699f74e5b3d08228c59025f6ac2",
