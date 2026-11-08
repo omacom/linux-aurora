@@ -5,23 +5,38 @@
 #include "isp-drv.h"
 #include "isp-iommu.h"
 #include "isp-ipc.h"
+#include <linux/unaligned.h>
+
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+#include <kunit/static_stub.h>
+#endif
 
 #define CISP_OPCODE_SHIFT     32UL
 #define CISP_OPCODE(x)	      (((u64)(x)) << CISP_OPCODE_SHIFT)
 #define CISP_OPCODE_GET(x)    (((u64)(x)) >> CISP_OPCODE_SHIFT)
 
 #define CISP_TIMEOUT	      msecs_to_jiffies(3000)
-#define CISP_SEND_IN(x, a)    (cisp_send((x), &(a), sizeof(a), 0, CISP_TIMEOUT))
-#define CISP_SEND_INOUT(x, a) (cisp_send((x), &(a), sizeof(a), sizeof(a), CISP_TIMEOUT))
+#define CISP_SEND_IN(x, a)    (isp_cmd_send((x), &(a), sizeof(a), 0, CISP_TIMEOUT))
+#define CISP_SEND_INOUT(x, a) (isp_cmd_send((x), &(a), sizeof(a), sizeof(a), CISP_TIMEOUT))
 #define CISP_SEND_OUT(x, a)   (cisp_send_read((x), (a), sizeof(*a), sizeof(*a)))
-#define CISP_POST_IN(x, a)    (cisp_send((x), &(a), sizeof(a), 0, 0))
-#define CISP_POST_INOUT(x, a)    (cisp_send((x), &(a), sizeof(a), sizeof(a), 0))
+#define CISP_POST_IN(x, a)    (isp_cmd_send((x), &(a), sizeof(a), 0, 0))
+#define CISP_POST_INOUT(x, a)    (isp_cmd_send((x), &(a), sizeof(a), sizeof(a), 0))
 
-static int cisp_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize, int timeout)
+int isp_cmd_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize, int timeout)
 {
-	struct isp_channel *chan = isp->chan_io;
-	struct isp_message *req = &chan->req;
+	struct isp_channel *chan;
+	struct isp_message *req;
 	int err;
+
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+	KUNIT_STATIC_STUB_REDIRECT(isp_cmd_send, isp, args, insize, outsize, timeout);
+#endif
+	/* Before the command area is overwritten */
+	err = isp_ipc_resync(isp);
+	if (err)
+		return err;
+	chan = isp->chan_io;
+	req = &chan->req;
 
 	req->arg0 = isp->cmd_iova;
 	req->arg1 = insize;
@@ -29,6 +44,19 @@ static int cisp_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize,
 
 	memcpy(isp->cmd_virt, args, insize);
 	err = ipc_chan_send(isp, chan, timeout);
+	/*
+	 * An answered request leaves the ring in step, so a malformed answer
+	 * fails only this command. A timeout is resolved before the next one.
+	 */
+	if (isp_is_p010(isp)) {
+		struct isp_message *rsp = &chan->rsp;
+
+		if (!err && timeout &&
+		    (rsp->arg1 != outsize || rsp->arg2 || rsp->arg3 ||
+		     rsp->arg4 || rsp->arg5 || rsp->arg6 || rsp->arg7 ||
+		     get_unaligned_le64(isp->cmd_virt) != get_unaligned_le64(args)))
+			err = -EIO;
+	}
 	if (err) {
 		u64 opcode;
 		memcpy(&opcode, args, sizeof(opcode));
@@ -45,7 +73,7 @@ static int cisp_send_read(struct apple_isp *isp, void *args, u32 insize,
 			  u32 outsize)
 {
 	/* TODO do I need to lock the iova space? */
-	int err = cisp_send(isp, args, insize, outsize, CISP_TIMEOUT);
+	int err = isp_cmd_send(isp, args, insize, outsize, CISP_TIMEOUT);
 	if (err)
 		return err;
 
@@ -151,16 +179,24 @@ int isp_cmd_set_dsid_clr_req_base(struct apple_isp *isp, u64 dsid_clr_base,
 	return CISP_SEND_IN(isp, args);
 }
 
-int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, u64 dsid_clr_base,
-				  u32 dsid_clr_range)
+int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, const u64 *bases,
+				  unsigned int count, u32 dsid_clr_range)
 {
 	struct cmd_set_dsid_clr_multi_bc_reg_base args = {
 		.opcode = CISP_OPCODE(CISP_CMD_SET_DSID_CLR_MULTI_BC_REG_BASE),
-		.count = 1,
+		.count = count,
 		.dsid_clr_range = dsid_clr_range,
-		.dsid_clr_base = dsid_clr_base,
 	};
-	return CISP_SEND_IN(isp, args);
+
+	/* The caller, isp_set_dsid_clr(), bounds count by the array. */
+	if (!count)
+		return -EINVAL;
+	memcpy(args.dsid_clr_base, bases, count * sizeof(*bases));
+
+	return isp_cmd_send(isp, &args,
+			 offsetof(typeof(args), dsid_clr_base) +
+				 count * sizeof(*bases), 0,
+			 CISP_TIMEOUT);
 }
 
 int isp_cmd_pmp_ctrl_set(struct apple_isp *isp, u64 clock_scratch,
@@ -224,6 +260,8 @@ int isp_cmd_flicker_sensor_set(struct apple_isp *isp, u32 mode)
 		.opcode = CISP_OPCODE(CISP_CMD_FLICKER_SENSOR_SET),
 		.mode = mode,
 	};
+	if (isp_is_p010(isp))
+		return CISP_SEND_IN(isp, args);
 	return CISP_SEND_INOUT(isp, args);
 }
 
@@ -250,6 +288,16 @@ int isp_cmd_ch_info_get(struct apple_isp *isp, u32 chan,
 	kfree(h17);
 
 	return err;
+}
+
+int isp_cmd_ch_camera_config_get(struct apple_isp *isp, u32 chan, u32 index,
+				 struct cmd_ch_camera_config_h17 *args)
+{
+	memset(args, 0, sizeof(*args));
+	args->config.opcode = CISP_OPCODE(CISP_CMD_CH_CAMERA_CONFIG_GET);
+	args->config.chan = chan;
+	args->config.preset = index;
+	return CISP_SEND_OUT(isp, args);
 }
 
 int isp_cmd_ch_camera_config_current_get(struct apple_isp *isp, u32 chan,
@@ -460,9 +508,9 @@ int isp_cmd_ch_buffer_pool_config_set(struct apple_isp *isp, u32 chan, u16 type)
 		.opcode = CISP_OPCODE(CISP_CMD_CH_BUFFER_POOL_CONFIG_SET),
 		.chan = chan,
 		.type = type,
-		.count = ISP_MAX_BUFFERS,
-		.meta_size0 = size,
-		.meta_size1 = size,
+		.count = isp_num_meta(isp),
+		.meta_size0 = isp_is_p010(isp) ? 0x8000 : size,
+		.meta_size1 = isp_is_p010(isp) ? 0x8000 : size,
 		.unk0 = 0,
 		.unk1 = 0,
 		.unk2 = 0,
@@ -481,7 +529,8 @@ int isp_cmd_ch_buffer_pool_config_set_rendered(struct apple_isp *isp, u32 chan,
 	struct cmd_ch_buffer_pool_config_set_rendered args = {
 		.opcode = CISP_OPCODE(CISP_CMD_CH_BUFFER_POOL_CONFIG_SET),
 		.chan = chan,
-		.type = CISP_POOL_TYPE_RENDERED,
+		.type = isp->hw->scl1 ? CISP_POOL_TYPE_RENDERED_SCL1 :
+					CISP_POOL_TYPE_RENDERED,
 		.count = count,
 		.plane0_size = plane0_size,
 		.plane0_stride = plane0_stride,
@@ -554,6 +603,49 @@ int isp_cmd_apple_ch_temporal_filter_disable(struct apple_isp *isp, u32 chan)
 		.opcode =
 			CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_DISABLE),
 		.chan = chan,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_start_h17(struct apple_isp *isp, u32 chan)
+{
+	struct cmd_apple_ch_temporal_filter_start_h17 args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_START),
+		.chan = chan,
+		.unk_c = 1,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_high_strength_set(struct apple_isp *isp, u32 chan,
+					   u32 enable)
+{
+	struct cmd_apple_ch_temporal_filter_enable_set args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_HIGH_STRENGTH),
+		.chan = chan,
+		.enable = enable,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_band0_mod_set(struct apple_isp *isp, u32 chan,
+				       u32 enable)
+{
+	struct cmd_apple_ch_temporal_filter_enable_set args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_BAND0_MODULATION),
+		.chan = chan,
+		.enable = enable,
+	};
+	return CISP_SEND_IN(isp, args);
+}
+
+int isp_cmd_apple_ch_tnr_band0_threshold_set(struct apple_isp *isp, u32 chan,
+					     u32 first, u32 second)
+{
+	struct cmd_apple_ch_temporal_filter_band0_threshold args = {
+		.opcode = CISP_OPCODE(CISP_CMD_APPLE_CH_TEMPORAL_FILTER_BAND0_THRESHOLD),
+		.chan = chan,
+		.threshold = { first, second },
 	};
 	return CISP_SEND_IN(isp, args);
 }
