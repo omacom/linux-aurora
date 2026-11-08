@@ -4081,6 +4081,9 @@ pub(crate) struct SbioOp {
 const SBIO_MAX_PAYLOAD: usize = 0x97;
 
 pub(crate) const SBIO_IMAGE_INIT_LEN: usize = 0x97;
+pub(crate) const SBIO_CREDENTIAL_IMAGE_INIT_LEN: usize =
+    SBIO_IMAGE_INIT_LEN + crate::scrd::SCRD_ACM_HANDLE_LEN;
+
 static_assert!(SBIO_IMAGE_INIT_LEN <= SBIO_MAX_PAYLOAD);
 
 const fn pad_payload(src: &[u8]) -> [u8; SBIO_MAX_PAYLOAD] {
@@ -4696,6 +4699,15 @@ pub(crate) fn sbio_free_identity_count(user: UserId) -> SbioOp {
     }
 }
 
+pub(crate) fn sbio_catacomb_id(user: UserId) -> SbioOp {
+    SbioOp {
+        opcode: 0x33,
+        payload: pad_payload(&user.value().to_le_bytes()),
+        payload_len: 4,
+        name: c"CATACOMB_ID",
+    }
+}
+
 const OP_SBIO_DELETE_IDENTITY: u16 = 0x57;
 pub(crate) fn sbio_delete_identity(identity: &IdentityV1) -> SbioOp {
     SbioOp {
@@ -4909,6 +4921,41 @@ pub(crate) fn sbio_prepare_image_processing() -> SbioOp {
 }
 
 const OP_SBIO_IMAGE_INIT: u16 = 0x06;
+/// Bind a match to a credential set, rather than returning identification only.
+pub(crate) fn sbio_credential_image_init(
+    base: &SbioOp,
+    context: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN],
+) -> Result<[u8; SBIO_CREDENTIAL_IMAGE_INIT_LEN]> {
+    if base.opcode() != OP_SBIO_IMAGE_INIT || base.payload().len() != SBIO_IMAGE_INIT_LEN {
+        return Err(EINVAL);
+    }
+    let mut payload = [0u8; SBIO_CREDENTIAL_IMAGE_INIT_LEN];
+    payload[..SBIO_IMAGE_INIT_LEN].copy_from_slice(base.payload());
+    payload[..4].copy_from_slice(&8u32.to_le_bytes());
+    payload[0x93..SBIO_IMAGE_INIT_LEN]
+        .copy_from_slice(&(context.len() as u32).to_le_bytes());
+    payload[SBIO_IMAGE_INIT_LEN..].copy_from_slice(context);
+    Ok(payload)
+}
+
+#[kernel::macros::kunit_tests(apple_sep_credential_capture)]
+mod credential_capture_tests {
+    use super::*;
+
+    #[test]
+    fn credential_match_preserves_capture_fields() -> Result {
+        let user = UserId::new(501).ok_or(EINVAL)?;
+        let base = sbio_image_processing_init(ImagePurpose::Matching, true, true, 0, user, 1000);
+        let context = [0x5a; crate::scrd::SCRD_ACM_HANDLE_LEN];
+        let payload = sbio_credential_image_init(&base, &context)?;
+        assert_eq!(&payload[..4], &8u32.to_le_bytes());
+        assert_eq!(&payload[4..0x93], &base.payload()[4..0x93]);
+        assert_eq!(&payload[0x93..0x97], &16u32.to_le_bytes());
+        assert_eq!(&payload[0x97..], &context);
+        assert!(sbio_credential_image_init(&sbio_match_result(), &context).is_err());
+        Ok(())
+    }
+}
 pub(crate) fn sbio_image_processing_init(
     purpose: ImagePurpose,
     first_image: bool,

@@ -17,6 +17,7 @@ const SCRD_MAGIC: [u8; 4] = *b"DRCS";
 const SCRD_CMD_INITIALIZE: u8 = 0x0a;
 const SCRD_CMD_CONTEXT_CREATE_TRACKED: u8 = 0x24;
 const SCRD_CMD_CONTEXT_EXTERNALIZE: u8 = 0x13;
+const SCRD_CMD_CONTEXT_DELETE: u8 = 0x02;
 const SCRD_CMD_VERIFY_POLICY: u8 = 0x03;
 
 const SCRD_INIT_LOG_LEVEL: u8 = 0x28;
@@ -87,6 +88,18 @@ pub(crate) fn scrd_context_externalize(handle: &[u8; SCRD_ACM_HANDLE_LEN]) -> Sc
         payload,
         payload_len: 8 + SCRD_ACM_HANDLE_LEN,
         name: c"SCRD_EXTERNALIZE",
+    }
+}
+
+pub(crate) fn scrd_context_delete(handle: &[u8; SCRD_ACM_HANDLE_LEN]) -> ScrdCommand {
+    let mut payload = [0u8; SCRD_MAX_LOGICAL];
+    scrd_header(&mut payload, SCRD_CMD_CONTEXT_DELETE, 0, 1);
+    payload[8..8 + SCRD_ACM_HANDLE_LEN].copy_from_slice(handle);
+    ScrdCommand {
+        request: SCRD_REQUEST_COMMAND,
+        payload,
+        payload_len: 8 + SCRD_ACM_HANDLE_LEN,
+        name: c"SCRD_CONTEXT_DELETE",
     }
 }
 
