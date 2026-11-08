@@ -54,6 +54,8 @@ static const char *const j514c[] = { "apple,j514c", "apple,t6031", "apple,arm-pl
 static const char *const j514m[] = { "apple,j514m", "apple,t6034", "apple,arm-platform", NULL };
 static const char *const j514m_wrong_soc[] = { "apple,j514m", "apple,t6031", NULL };
 static const char *const j516m[] = { "apple,j516m", "apple,t6034", "apple,arm-platform", NULL };
+static const char *const j516m_wrong_soc[] = { "apple,j516m", "apple,t6031", NULL };
+static const char *const t6034_other[] = { "apple,j999", "apple,t6034", "apple,arm-platform", NULL };
 static const char *const j516s[] = { "apple,j516s", "apple,t6030", "apple,arm-platform", NULL };
 static const char *const j613[] = { "apple,j613", "apple,t8122", "apple,arm-platform", NULL };
 static const char *const j504[] = { "apple,j504", "apple,t8122", "apple,arm-platform", NULL };
@@ -131,12 +133,47 @@ static void v14_board_j514m(struct kunit *test)
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514m, &known));
 }
 
-/* A T6031 DCP on a T6034 has no record: refused. */
+/*
+ * The J516M: a T6034 with the T6031 DCP layout, running the J516C image on the
+ * J516 panel. Admitted only on its own record, with its own SoC.
+ */
+static void v14_board_j516m(struct kunit *test)
+{
+	const struct dcp_v14_board *b;
+	bool known;
+
+	b = board_for("apple,t6031-dcp", j516m, &known);
+	KUNIT_ASSERT_NOT_NULL(test, b);
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_STREQ(test, b->name, "J516M");
+	KUNIT_EXPECT_STREQ(test, b->debugfs, "dcp-j516m");
+	KUNIT_EXPECT_STREQ(test, b->machine, "apple,j516m");
+	KUNIT_EXPECT_STREQ(test, b->soc, "apple,t6034");
+	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t6031-handoff");
+	KUNIT_EXPECT_STREQ(test, b->firmware_uuid, J516C_DCP_IMAGE);
+	KUNIT_EXPECT_EQ(test, b->panel_width, 3456);
+	KUNIT_EXPECT_EQ(test, b->panel_height, 2234);
+	KUNIT_EXPECT_TRUE(test, b->promotion);
+	KUNIT_EXPECT_TRUE(test, b->base_edid);
+	KUNIT_EXPECT_TRUE(test, b->panel_nits);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(b, false));
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
+	/* Neither the J516C record nor the J514M one. */
+	KUNIT_EXPECT_PTR_NE(test, b, board_for("apple,t6031-dcp", j516c, &known));
+	KUNIT_EXPECT_PTR_NE(test, b, board_for("apple,t6034-dcp", j514m, &known));
+	/* Its name on a T6031 root is not a J516M. */
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j516m_wrong_soc, &known));
+}
+
+/* A T6031 DCP on any other T6034, or on a J514M, has no record: refused. */
 static void v14_board_t6031_other_boards(struct kunit *test)
 {
 	bool known;
 
-	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j516m, &known));
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", t6034_other, &known));
+	KUNIT_EXPECT_TRUE(test, known);
+	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514m, &known));
 	KUNIT_EXPECT_TRUE(test, known);
 	/* Not a 14.x internal DCP at all. */
 	KUNIT_EXPECT_NULL(test, board_for("apple,t8112-dcp", j516c, &known));
@@ -318,6 +355,7 @@ static struct kunit_case v14_board_cases[] = {
 	KUNIT_CASE(v14_board_j516c),
 	KUNIT_CASE(v14_board_j514c),
 	KUNIT_CASE(v14_board_j514m),
+	KUNIT_CASE(v14_board_j516m),
 	KUNIT_CASE(v14_board_t6031_other_boards),
 	KUNIT_CASE(v14_board_j516c_image),
 	KUNIT_CASE(v14_board_unchanged),
