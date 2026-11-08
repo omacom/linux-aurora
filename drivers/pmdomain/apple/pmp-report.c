@@ -1217,7 +1217,26 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t6031 = {
 	.status = 0x10,
 	.starts_pmp = true,
 	.name = "T6031",
-	.fallback = "leave out apple_t6031_display.enable=1",
+	.fallback = "apple_t6031_display.enable=0",
+	.pwrstate = "apple,t6031-pmgr-pwrstate",
+	.devices_ordered = true,
+};
+
+/*
+ * J514M/T6034's selected ADT ptd-range has the same request (index 0x200),
+ * acknowledge (0x208) and status (0x1) apertures. Its 35 soc-device records
+ * are in ID order; DISP is ID 17 with ACK and ANS is ID 34 without ACK.
+ * The exact T6034 display gate supplies the halted PMP and validated values.
+ * The generic T6020 fallback only observes an already-running PMP.
+ */
+static const struct apple_pmp_report_offsets apple_pmp_offsets_t6034 = {
+	.tgt_read = 0x2000,
+	.tgt_write = 0x11000,
+	.actual = 0x2080,
+	.status = 0x10,
+	.starts_pmp = true,
+	.name = "T6034",
+	.fallback = "apple_t6034_display.enable=0",
 	.pwrstate = "apple,t6031-pmgr-pwrstate",
 	.devices_ordered = true,
 };
@@ -1238,6 +1257,7 @@ static const struct of_device_id apple_pmp_report_of_match[] = {
 	{ .compatible = "apple,t6020-pmp-v2-report", .data = &apple_pmp_offsets_t602x },
 	{ .compatible = "apple,t6030-pmp-v2-report", .data = &apple_pmp_offsets_t6030 },
 	{ .compatible = "apple,t6031-pmp-v2-report", .data = &apple_pmp_offsets_t6031 },
+	{ .compatible = "apple,t6034-pmp-v2-report", .data = &apple_pmp_offsets_t6034 },
 	{ .compatible = "apple,t8112-pmp-v2-report", .data = &apple_pmp_offsets_t8112 },
 	{ .compatible = "apple,t8122-pmp-v2-report", .data = &apple_pmp_offsets_t8122 },
 	{ .compatible = "apple,t8140-pmp-v2-report", .data = &apple_pmp_offsets_t8140 },
