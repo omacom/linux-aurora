@@ -168,15 +168,17 @@
 		apple,cil-active-high;
 
 		/*
-		 * The full IMX958 (firmware configuration 7, 3040x2880), cropped to
-		 * the centre: inside the lens circle and about the field of view
-		 * macOS shows. 1920x1080 and 1280x720 scale a 2400x1350 window;
-		 * 2560x1440 is the centre 1:1.
+		 * The full IMX958, cropped to the centre: inside the lens circle and
+		 * about the field of view macOS shows. 1920x1080 and 1280x720 scale
+		 * a 2400x1350 window; 2560x1440 is the centre 1:1. 1920x1080 and
+		 * 2560x1440 use firmware configuration 6, the one macOS streams (two
+		 * exposures, 3040x5760, merged to 3040x2880); 1280x720 uses
+		 * configuration 7 (3040x2880).
 		 */
 		sensor-presets {
 			/* 1920x1080 */
 			preset0 {
-				apple,config-index = <7>;
+				apple,config-index = <6>;
 				apple,input-size = <3040 2880>;
 				apple,output-size = <1920 1080>;
 				apple,crop = <320 765 2400 1350>;
@@ -190,7 +192,7 @@
 			};
 			/* 2560x1440 */
 			preset2 {
-				apple,config-index = <7>;
+				apple,config-index = <6>;
 				apple,input-size = <3040 2880>;
 				apple,output-size = <2560 1440>;
 				apple,crop = <240 720 2560 1440>;
