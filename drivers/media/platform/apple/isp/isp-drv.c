@@ -255,6 +255,7 @@ static int apple_isp_map_dapf(struct apple_isp *isp)
 int apple_isp_program_dapf(struct apple_isp *isp)
 {
 	const struct apple_isp_hw *hw = isp->hw;
+	u32 ctrl2 = hw->dapf_ctrl2 ?: DAPF_CTRL2_ISP;
 	void __iomem *w;
 	unsigned int i;
 
@@ -264,7 +265,7 @@ int apple_isp_program_dapf(struct apple_isp *isp)
 		writeq(hw->dapf[i].start, w + DAPF_START);
 		writeq(hw->dapf[i].end, w + DAPF_END);
 		writel(DAPF_CTRL0_ISP, w + DAPF_CTRL0);
-		writel(DAPF_CTRL2_ISP, w + DAPF_CTRL2);
+		writel(ctrl2, w + DAPF_CTRL2);
 	}
 
 	/* Only bits 7:0 of CTRL0 and bits 63:2 of END read back. */
@@ -274,7 +275,7 @@ int apple_isp_program_dapf(struct apple_isp *isp)
 		    readq(w + DAPF_START) != hw->dapf[i].start ||
 		    (readq(w + DAPF_END) | 3) != (hw->dapf[i].end | 3) ||
 		    (readl(w + DAPF_CTRL0) & 0xff) != DAPF_CTRL0_ISP ||
-		    readl(w + DAPF_CTRL2) != DAPF_CTRL2_ISP) {
+		    readl(w + DAPF_CTRL2) != ctrl2) {
 			dev_err(isp->dev, "DAPF window %u (0x%llx-0x%llx) failed readback\n",
 				i, hw->dapf[i].start, hw->dapf[i].end);
 			return -EIO;
@@ -1195,6 +1196,25 @@ static const struct isp_mmio_window apple_isp_fw_mmio_t6050[] = {
 	{ 0x509660000, 0x4000 },
 };
 
+/* The J714c ADT's dart-isp0 address filter windows, in its order and with its ends */
+static const struct isp_dapf_window apple_isp_dapf_t6050[] = {
+	{ 0x2809003b0, 0x2809003f3 },	/* PMGR, ISP power states */
+	{ 0x280680000, 0x280687fff },
+	{ 0x284e3c000, 0x284e3c003 },
+	{ 0x29062c000, 0x290648003 },
+	{ 0x509660000, 0x509660003 },
+	{ 0x286724000, 0x286724004 },	/* PMP bandwidth scratch */
+	{ 0x284240000, 0x284264000 },	/* PMGR, as T8140's PMP clock scratch window */
+	{ 0x2220004000, 0x22200162fc },	/* DSID broadcast-clear windows */
+	{ 0x2222004000, 0x22220162fc },
+	{ 0x2224004000, 0x22240162fc },
+	{ 0x2226004000, 0x22260162fc },
+	{ 0x2228004000, 0x22280162fc },
+	{ 0x222a004000, 0x222a0162fc },
+	{ 0x222c004000, 0x222c0162fc },
+	{ 0x222e004000, 0x222e0162fc },
+};
+
 /*
  * T6050 (M5 Max, J714c) boots as T6040: the same isp0 and dart-isp0
  * addresses, mailbox at +0x2924000, and 32 MiB of firmware main memory at
@@ -1221,6 +1241,9 @@ static const struct apple_isp_hw apple_isp_hw_t6050 = {
 	.meta_size = ISP_META_SIZE_T8140,
 	.fw_mmio = apple_isp_fw_mmio_t6050,
 	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t6050),
+	.dapf = apple_isp_dapf_t6050,
+	.num_dapf = ARRAY_SIZE(apple_isp_dapf_t6050),
+	.dapf_ctrl2 = 0xcc3,
 
 	.coproc_control = ISP_COPROC_CONTROL_T8140,
 	.boot_mode = 1,

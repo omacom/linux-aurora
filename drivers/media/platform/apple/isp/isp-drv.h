@@ -216,6 +216,8 @@ struct apple_isp_hw {
 	 */
 	const struct isp_dapf_window *dapf;
 	unsigned int num_dapf;
+	/* The ADT's DAPF r20 word, if not DAPF_CTRL2_ISP */
+	u32 dapf_ctrl2;
 
 	/* ISP_GPIO_6 boot mode */
 	u32 boot_mode;
