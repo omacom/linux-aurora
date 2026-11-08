@@ -689,7 +689,13 @@ pub(crate) fn start(
         && glue::machine(kernel::c_str!("apple,j516m"))
         && !hw::j516m::identity_matches(id.version, id.counts, id.cores)
     {
-        dev_err!(d, "J516M powered identity differs from the measured bin\n");
+        dev_err!(
+            d,
+            "J516M powered identity is not the 30-core G15C: version {:#x} counts {:#x} core-mask {:#x}\n",
+            id.version,
+            id.counts,
+            id.cores
+        );
         return Err(eproto());
     }
     // Binning: any non-empty enabled set in each cluster, nothing above the core slots.
