@@ -198,6 +198,21 @@ static bool __init gate_t6034_wanted(int sw)
 	return gate_t6034_default_board() && gate_t6031_wanted(sw, true);
 }
 
+/*
+ * J516M: the T6031 display layout on a T6034, with J514M's owner switch
+ * (apple_t6034_display.enable) and the same default: on unless it is 0.
+ */
+static bool __init gate_j516m_default_board(void)
+{
+	return of_machine_is_compatible("apple,t6034") &&
+	       of_machine_is_compatible("apple,j516m");
+}
+
+static bool __init gate_j516m_wanted(int sw)
+{
+	return gate_j516m_default_board() && gate_t6031_wanted(sw, true);
+}
+
 /* One SoC's internal display handoff, as the gate checks and completes it */
 struct gate_soc {
 	const char *machine;		/* root compatible */
@@ -366,7 +381,6 @@ static const struct gate_soc gate_j516m __initconst = {
 	.pmp_compat = "apple,t6031-pmp-v2",
 	.ans_entry = "report@21",
 	.requested = &gate_j516m_requested,
-	.opt_in = "apple_t6034_display.enable=1",
 	.ps_chain = { PMP_PS_DISP_FE, PMP_PS_DISP_CPU, PMP_PS_DISP_SYS },
 	.pmp_ps_any_pmgr = true,
 	.describe = true,
@@ -2082,8 +2096,15 @@ static void __init gate_run(void)
 				  board);
 	}
 
-	if (gate_soc == &gate_j516m)
-		gate_j516m_requested = gate_t6034_switch > 0;
+	if (gate_soc == &gate_j516m) {
+		if (!gate_j516m_default_board()) {
+			gate_info("unsupported board; native display stays disabled\n");
+			return;
+		}
+		gate_j516m_requested = gate_j516m_wanted(gate_t6034_switch);
+		if (gate_t6034_switch < 0)
+			gate_info("native display on by default on J516M; apple_t6034_display.enable=0 keeps the boot framebuffer\n");
+	}
 
 	if (gate_soc == &gate_t6034) {
 		if (!gate_t6034_default_board()) {
@@ -2096,7 +2117,11 @@ static void __init gate_run(void)
 	}
 
 	if (!*gate_soc->requested) {
-		if (gate_soc->opt_in && gate_t6031_switch < 0)
+		/* Each opt-in SoC's own switch: T6031's is not T6034's */
+		int sw = gate_soc == &gate_t6034 || gate_soc == &gate_j516m ?
+			 gate_t6034_switch : gate_t6031_switch;
+
+		if (gate_soc->opt_in && sw < 0)
 			gate_info("native display not requested (%s is not on the command line), display stays on the boot framebuffer\n",
 				  gate_soc->opt_in);
 		else
