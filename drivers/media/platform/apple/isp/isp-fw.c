@@ -1171,8 +1171,8 @@ void apple_isp_firmware_halt(struct apple_isp *isp)
 		return;
 
 	isp_firmware_shutdown(isp);
-	apple_isp_light_off(isp);
 	pm_runtime_put_sync(isp->dev);
+	apple_isp_light_force_off(isp);
 	isp->ipc_stale = NULL;
 	isp->fw_state = isp->hw->resident_fw ? ISP_FW_DEAD : ISP_FW_OFF;
 }

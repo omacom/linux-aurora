@@ -23,6 +23,7 @@ void apple_isp_stop_capture(struct apple_isp *isp);
 
 void apple_isp_wdt_init(struct apple_isp *isp);
 void apple_isp_light_off(struct apple_isp *isp);
+void apple_isp_light_force_off(struct apple_isp *isp);
 void apple_isp_wdt_stop(struct apple_isp *isp);
 
 #endif /* __ISP_CAM_H__ */

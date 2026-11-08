@@ -1113,8 +1113,6 @@ static int apple_isp_light_on(struct apple_isp *isp)
 
 	if (!isp->hw->camera_light)
 		return 0;
-	if (!isp->cil_lit)
-		isp->cil_saved = readl(isp->cil);
 	val = (isp->cil_config & ~ISP_GPIO_DATA) | ISP_GPIO_INPUT_ENABLE | on;
 	writel(val, isp->cil);
 	usleep_range(10, 20);
@@ -1128,7 +1126,10 @@ static int apple_isp_light_on(struct apple_isp *isp)
 	return 0;
 }
 
-/* Only once the sensor has stopped streaming. */
+/*
+ * Only once the sensor has stopped streaming. The pin goes back to how the
+ * boot loader left it, where a powered sensor still lights the light.
+ */
 void apple_isp_light_off(struct apple_isp *isp)
 {
 	if (!isp->hw->camera_light || !isp->cil_lit)
@@ -1136,6 +1137,20 @@ void apple_isp_light_off(struct apple_isp *isp)
 	apple_isp_wdt_stop(isp);
 	isp->cil_lit = false;
 	writel(isp->cil_saved, isp->cil);
+}
+
+/*
+ * Once the firmware is halted no frame can reach the host, but a sensor
+ * the dead firmware left powered would keep the light on until reset:
+ * drive it off. A halted resident firmware does not start again.
+ */
+void apple_isp_light_force_off(struct apple_isp *isp)
+{
+	if (!isp->hw->camera_light)
+		return;
+	apple_isp_light_off(isp);
+	writel((isp->cil_config & ~ISP_GPIO_DATA) | (isp->cil_on_high ? 0 : ISP_GPIO_DATA),
+	       isp->cil);
 }
 
 int apple_isp_start_capture(struct apple_isp *isp)

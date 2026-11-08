@@ -666,6 +666,7 @@ static int apple_isp_probe(struct platform_device *pdev)
 		}
 		isp->cil_on_high = of_property_read_bool(dev->of_node,
 							 "apple,cil-active-high");
+		isp->cil_saved = readl(isp->cil);
 	}
 
 	isp->irq = platform_get_irq(pdev, 0);
