@@ -74,6 +74,10 @@ struct avd_h264_ctx {
 		struct v4l2_h264_reference b1[V4L2_H264_REF_LIST_LEN];
 	} reflists;
 
+	/* slice header and weights parsed in-kernel in frame-based mode */
+	struct v4l2_ctrl_h264_slice_params fb_slice;
+	struct v4l2_ctrl_h264_pred_weights fb_weights;
+
 	struct avd_buf *slices;
 	struct avd_buf *active_slice;
 	size_t slice_num;
@@ -874,6 +878,76 @@ VISIBLE_IF_KUNIT bool avd_h264_slice_fits(const struct v4l2_ctrl_h264_sps *sps,
 }
 
 /*
+ * Frame-based decoding: the client queues every slice of a picture in one
+ * OUTPUT buffer and sets no slice parameters, so find the slice NAL units in
+ * the buffer and parse their headers here (ITU-T H.264 7.3.3).
+ */
+
+/* Reads RBSP bits from a NAL unit, skipping emulation prevention bytes. */
+struct avd_h264_bits {
+	const u8 *data;
+	u32 len;
+	u32 pos;
+	u32 zeros;
+	u32 consumed;
+	u8 cur;
+	u8 left;
+	bool err;
+};
+
+static u32 avd_h264_bit(struct avd_h264_bits *br)
+{
+	if (!br->left) {
+		if (br->pos < br->len && br->zeros >= 2 &&
+		    br->data[br->pos] == 0x03) {
+			br->pos++;
+			br->zeros = 0;
+		}
+		if (br->pos >= br->len) {
+			br->err = true;
+			return 0;
+		}
+		br->cur = br->data[br->pos++];
+		br->zeros = br->cur ? 0 : br->zeros + 1;
+		br->left = 8;
+	}
+
+	br->left--;
+	br->consumed++;
+	return (br->cur >> br->left) & 1;
+}
+
+static u32 avd_h264_bits(struct avd_h264_bits *br, unsigned int n)
+{
+	u32 v = 0;
+
+	while (n--)
+		v = (v << 1) | avd_h264_bit(br);
+	return v;
+}
+
+static u32 avd_h264_ue(struct avd_h264_bits *br)
+{
+	unsigned int lz = 0;
+
+	while (!avd_h264_bit(br)) {
+		if (br->err || ++lz > 31) {
+			br->err = true;
+			return 0;
+		}
+	}
+
+	return lz ? (u32)((1ULL << lz) - 1) + avd_h264_bits(br, lz) : 0;
+}
+
+static s32 avd_h264_se(struct avd_h264_bits *br)
+{
+	u32 k = avd_h264_ue(br);
+
+	return (k & 1) ? (s32)((k >> 1) + 1) : -(s32)(k >> 1);
+}
+
+/*
  * Find the next NAL unit at or after *pos. With Annex B start codes the NAL
  * unit runs up to the next start code, without the trailing zero bytes that
  * belong to a four-byte start code: a NAL unit never ends in a zero byte, and
@@ -904,13 +978,447 @@ static bool avd_h264_next_nal(const u8 *data, u32 len, u32 *pos, u32 *nal_off,
 	return true;
 }
 
+static bool avd_h264_is_slice_nal(const u8 *data, u32 len)
+{
+	u8 type = len ? data[0] & 0x1f : 0;
+
+	return type == 1 || type == 5;
+}
+
+/* PicNum (8-28) of a short-term reference, or LongTermPicNum (8-29). */
+static s32 avd_h264_pic_num(const struct avd_h264_run *run, unsigned int i)
+{
+	const struct v4l2_h264_dpb_entry *e = &run->decode_params->dpb[i];
+	u32 max_frame_num = 1 << (run->sps->log2_max_frame_num_minus4 + 4);
+
+	if (e->flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM)
+		return e->pic_num;
+	if (e->frame_num > run->decode_params->frame_num)
+		return (s32)e->frame_num - max_frame_num;
+	return e->frame_num;
+}
+
+static u8 avd_h264_find_ref(const struct avd_h264_run *run, s32 pic_num,
+			    bool long_term)
+{
+	const struct v4l2_h264_dpb_entry *dpb = run->decode_params->dpb;
+
+	for (unsigned int i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		if (!(dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE) ||
+		    !(dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM) !=
+			    !long_term)
+			continue;
+		if (avd_h264_pic_num(run, i) == pic_num)
+			return i;
+	}
+
+	return AVD_H264_NO_REF;
+}
+
+/*
+ * Build one reference picture list of a frame: the initial list (8.2.4.2)
+ * cut to the active size, then ref_pic_list_modification() applied as in
+ * 8.2.4.3.
+ */
+static void avd_h264_ref_list(struct avd_h264_bits *br,
+			      const struct avd_h264_run *run,
+			      const struct v4l2_h264_reference *init,
+			      unsigned int num_init,
+			      struct v4l2_h264_reference *list,
+			      unsigned int num_active)
+{
+	struct v4l2_h264_reference tmp[V4L2_H264_REF_LIST_LEN + 1];
+	u32 max_pic_num = 1 << (run->sps->log2_max_frame_num_minus4 + 4);
+	s32 cur_pic_num = run->decode_params->frame_num;
+	s32 pred = cur_pic_num;
+	unsigned int ref_idx = 0, ops = 0;
+
+	for (unsigned int i = 0; i <= num_active; i++) {
+		if (i < num_init && i < num_active) {
+			tmp[i] = init[i];
+		} else {
+			tmp[i].index = AVD_H264_NO_REF;
+			tmp[i].fields = V4L2_H264_FRAME_REF;
+		}
+	}
+
+	if (avd_h264_bit(br)) {
+		for (;;) {
+			u32 idc = avd_h264_ue(br);
+			struct v4l2_h264_reference ref = {
+				.fields = V4L2_H264_FRAME_REF,
+			};
+			unsigned int n;
+
+			if (idc == 3 || br->err)
+				break;
+			if (idc > 3 || ++ops > num_active + 1) {
+				br->err = true;
+				break;
+			}
+
+			if (idc < 2) {
+				u32 abs_diff = avd_h264_ue(br) + 1;
+				s32 pic_num;
+
+				if (abs_diff > max_pic_num) {
+					br->err = true;
+					break;
+				}
+				if (idc == 0) {
+					pred -= abs_diff;
+					if (pred < 0)
+						pred += max_pic_num;
+				} else {
+					pred += abs_diff;
+					if (pred >= max_pic_num)
+						pred -= max_pic_num;
+				}
+				pic_num = pred > cur_pic_num ? pred - max_pic_num : pred;
+				ref.index = avd_h264_find_ref(run, pic_num, false);
+			} else {
+				ref.index = avd_h264_find_ref(run, avd_h264_ue(br),
+							      true);
+			}
+
+			/* insert at ref_idx, then drop the later duplicate */
+			for (unsigned int c = num_active; c > ref_idx; c--)
+				tmp[c] = tmp[c - 1];
+			tmp[ref_idx++] = ref;
+			n = ref_idx;
+			for (unsigned int c = ref_idx; c <= num_active; c++)
+				if (ref.index == AVD_H264_NO_REF ||
+				    tmp[c].index != ref.index)
+					tmp[n++] = tmp[c];
+		}
+	}
+
+	/*
+	 * A conforming slice uses no entry without a picture; point any such
+	 * entry at the first reference so that the VP is never handed an
+	 * unset DPB slot.
+	 */
+	for (unsigned int i = 0; i < num_active; i++) {
+		list[i] = tmp[i];
+		if (list[i].index == AVD_H264_NO_REF)
+			list[i].index = tmp[0].index;
+	}
+}
+
+/* pred_weight_table(), 7.3.3.2, with the inferred default factors filled in */
+static void avd_h264_pred_weights(struct avd_h264_bits *br,
+				  const struct avd_h264_run *run,
+				  const struct v4l2_ctrl_h264_slice_params *sl,
+				  struct v4l2_ctrl_h264_pred_weights *pw)
+{
+	const struct v4l2_ctrl_h264_sps *sps = run->sps;
+	bool chroma = sps->chroma_format_idc &&
+		      !(sps->flags & V4L2_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE);
+	int lists = sl->slice_type == V4L2_H264_SLICE_TYPE_B ? 2 : 1;
+
+	pw->luma_log2_weight_denom = avd_h264_ue(br);
+	if (chroma)
+		pw->chroma_log2_weight_denom = avd_h264_ue(br);
+	if (pw->luma_log2_weight_denom > 7 || pw->chroma_log2_weight_denom > 7) {
+		br->err = true;
+		return;
+	}
+
+	for (int l = 0; l < lists; l++) {
+		struct v4l2_h264_weight_factors *f = &pw->weight_factors[l];
+		unsigned int n = (l ? sl->num_ref_idx_l1_active_minus1 :
+				      sl->num_ref_idx_l0_active_minus1) + 1;
+
+		for (unsigned int i = 0; i < n; i++) {
+			f->luma_weight[i] = 1 << pw->luma_log2_weight_denom;
+			f->luma_offset[i] = 0;
+			if (avd_h264_bit(br)) {
+				f->luma_weight[i] = avd_h264_se(br);
+				f->luma_offset[i] = avd_h264_se(br);
+			}
+
+			for (int j = 0; j < 2; j++) {
+				f->chroma_weight[i][j] =
+					1 << pw->chroma_log2_weight_denom;
+				f->chroma_offset[i][j] = 0;
+			}
+			if (chroma && avd_h264_bit(br)) {
+				for (int j = 0; j < 2; j++) {
+					f->chroma_weight[i][j] = avd_h264_se(br);
+					f->chroma_offset[i][j] = avd_h264_se(br);
+				}
+			}
+		}
+	}
+}
+
+/* dec_ref_pic_marking(), 7.3.3.3: nothing in it is needed, only its size */
+static void avd_h264_skip_ref_pic_marking(struct avd_h264_bits *br, bool idr)
+{
+	unsigned int ops = 0;
+
+	if (idr) {
+		avd_h264_bits(br, 2);
+		return;
+	}
+
+	if (!avd_h264_bit(br))
+		return;
+
+	for (;;) {
+		u32 op = avd_h264_ue(br);
+
+		if (!op || br->err)
+			return;
+		if (op > 6 || ++ops > 2 * V4L2_H264_NUM_DPB_ENTRIES + 2) {
+			br->err = true;
+			return;
+		}
+		if (op == 1 || op == 3)
+			avd_h264_ue(br);	/* difference_of_pic_nums_minus1 */
+		if (op == 2)
+			avd_h264_ue(br);	/* long_term_pic_num */
+		if (op == 3 || op == 6)
+			avd_h264_ue(br);	/* long_term_frame_idx */
+		if (op == 4)
+			avd_h264_ue(br);	/* max_long_term_frame_idx_plus1 */
+	}
+}
+
+/*
+ * Parse the header of one slice NAL unit into the slice parameters and
+ * prediction weights the client would set in slice-based mode. Returns 1 for
+ * a redundant slice, which the decoder may drop.
+ */
+static int avd_h264_parse_slice(const struct avd_h264_run *run,
+				const struct avd_h264_reflists *init,
+				const u8 *nal, u32 len,
+				struct v4l2_ctrl_h264_slice_params *sl,
+				struct v4l2_ctrl_h264_pred_weights *pw)
+{
+	const struct v4l2_ctrl_h264_sps *sps = run->sps;
+	const struct v4l2_ctrl_h264_pps *pps = run->pps;
+	u32 mbs = (sps->pic_width_in_mbs_minus1 + 1) *
+		  (sps->pic_height_in_map_units_minus1 + 1);
+	struct avd_h264_bits br = { .data = nal, .len = len };
+	u32 nal_ref_idc, slice_type, num_l0, num_l1, v;
+	bool idr, field_pic = false;
+	s32 qp_delta, alpha = 0, beta = 0;
+
+	memset(sl, 0, sizeof(*sl));
+	memset(pw, 0, sizeof(*pw));
+
+	avd_h264_bit(&br);			/* forbidden_zero_bit */
+	nal_ref_idc = avd_h264_bits(&br, 2);
+	idr = avd_h264_bits(&br, 5) == 5;
+
+	sl->first_mb_in_slice = avd_h264_ue(&br);
+	slice_type = avd_h264_ue(&br);
+	if (sl->first_mb_in_slice >= mbs || slice_type > 9)
+		return -EINVAL;
+	sl->slice_type = slice_type % 5;
+	if (sl->slice_type == V4L2_H264_SLICE_TYPE_SP ||
+	    sl->slice_type == V4L2_H264_SLICE_TYPE_SI)
+		return -EOPNOTSUPP;
+	if (idr && sl->slice_type != V4L2_H264_SLICE_TYPE_I)
+		return -EINVAL;
+
+	avd_h264_ue(&br);			/* pic_parameter_set_id */
+	if (sps->flags & V4L2_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE)
+		sl->colour_plane_id = avd_h264_bits(&br, 2);
+	avd_h264_bits(&br, sps->log2_max_frame_num_minus4 + 4);
+	if (!(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY)) {
+		field_pic = avd_h264_bit(&br);
+		if (field_pic)
+			return -EOPNOTSUPP;
+	}
+	if (idr)
+		avd_h264_ue(&br);		/* idr_pic_id */
+
+	if (sps->pic_order_cnt_type == 0) {
+		avd_h264_bits(&br, sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
+		if ((pps->flags &
+		     V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT) &&
+		    !field_pic)
+			avd_h264_se(&br);	/* delta_pic_order_cnt_bottom */
+	} else if (sps->pic_order_cnt_type == 1 &&
+		   !(sps->flags & V4L2_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO)) {
+		avd_h264_se(&br);		/* delta_pic_order_cnt[0] */
+		if ((pps->flags &
+		     V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT) &&
+		    !field_pic)
+			avd_h264_se(&br);	/* delta_pic_order_cnt[1] */
+	}
+
+	if (pps->flags & V4L2_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT) {
+		v = avd_h264_ue(&br);
+		if (v > 127)
+			return -EINVAL;
+		sl->redundant_pic_cnt = v;
+	}
+
+	if (sl->slice_type == V4L2_H264_SLICE_TYPE_B && avd_h264_bit(&br))
+		sl->flags |= V4L2_H264_SLICE_FLAG_DIRECT_SPATIAL_MV_PRED;
+
+	if (sl->slice_type != V4L2_H264_SLICE_TYPE_I) {
+		num_l0 = pps->num_ref_idx_l0_default_active_minus1;
+		num_l1 = pps->num_ref_idx_l1_default_active_minus1;
+		if (avd_h264_bit(&br)) {	/* num_ref_idx_active_override */
+			num_l0 = avd_h264_ue(&br);
+			if (sl->slice_type == V4L2_H264_SLICE_TYPE_B)
+				num_l1 = avd_h264_ue(&br);
+		}
+		if (sl->slice_type != V4L2_H264_SLICE_TYPE_B)
+			num_l1 = 0;
+		/* the VP takes 16 entries a list, all a frame may use */
+		if (num_l0 > 15 || num_l1 > 15)
+			return -EINVAL;
+		sl->num_ref_idx_l0_active_minus1 = num_l0;
+		sl->num_ref_idx_l1_active_minus1 = num_l1;
+
+		if (sl->slice_type == V4L2_H264_SLICE_TYPE_P) {
+			avd_h264_ref_list(&br, run, init->p, run->num_valid,
+					  sl->ref_pic_list0, num_l0 + 1);
+		} else {
+			avd_h264_ref_list(&br, run, init->b0, run->num_valid,
+					  sl->ref_pic_list0, num_l0 + 1);
+			avd_h264_ref_list(&br, run, init->b1, run->num_valid,
+					  sl->ref_pic_list1, num_l1 + 1);
+		}
+
+		if (V4L2_H264_CTRL_PRED_WEIGHTS_REQUIRED(pps, sl))
+			avd_h264_pred_weights(&br, run, sl, pw);
+	}
+
+	if (nal_ref_idc)
+		avd_h264_skip_ref_pic_marking(&br, idr);
+
+	if ((pps->flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE) &&
+	    sl->slice_type != V4L2_H264_SLICE_TYPE_I) {
+		v = avd_h264_ue(&br);
+		if (v > 2)
+			return -EINVAL;
+		sl->cabac_init_idc = v;
+	}
+
+	qp_delta = avd_h264_se(&br);
+	if (qp_delta < -87 || qp_delta > 77)
+		return -EINVAL;
+	sl->slice_qp_delta = qp_delta;
+
+	if (pps->flags & V4L2_H264_PPS_FLAG_DEBLOCKING_FILTER_CONTROL_PRESENT) {
+		v = avd_h264_ue(&br);
+		if (v > 2)
+			return -EINVAL;
+		sl->disable_deblocking_filter_idc = v;
+		if (v != 1) {
+			alpha = avd_h264_se(&br);
+			beta = avd_h264_se(&br);
+			if (alpha < -6 || alpha > 6 || beta < -6 || beta > 6)
+				return -EINVAL;
+		}
+	}
+	sl->slice_alpha_c0_offset_div2 = alpha;
+	sl->slice_beta_offset_div2 = beta;
+
+	if (br.err)
+		return -EINVAL;
+
+	sl->header_bit_size = br.consumed;
+	return sl->redundant_pic_cnt ? 1 : 0;
+}
+
+static int avd_h264_run_frame(struct avd_ctx *ctx, struct avd_h264_run *run,
+			      const u8 *data, u32 len)
+{
+	struct avd_h264_ctx *h264_ctx = ctx->priv;
+	struct v4l2_ctrl_h264_slice_params *sl = &h264_ctx->fb_slice;
+	u32 pos = 0, nal_off, nal_len, off;
+	size_t num = 0;
+	bool first = true, starts_picture;
+	int ret;
+
+	while (avd_h264_next_nal(data, len, &pos, &nal_off, &nal_len))
+		if (avd_h264_is_slice_nal(data + nal_off, nal_len))
+			num++;
+
+	if (!num || num > avd_h264_max_slices(run->sps)) {
+		dev_dbg_ratelimited(ctx->dev->dev,
+				    "frame has %zu slices, dropping it\n", num);
+		return -EINVAL;
+	}
+
+	/* the header segment plus one per slice */
+	ret = avd_init_job(ctx, AVD_CODEC_H264, num + 1);
+	if (ret)
+		return ret;
+
+	run->slice_params = sl;
+	run->pred_weights = &h264_ctx->fb_weights;
+
+	pos = 0;
+	while (avd_h264_next_nal(data, len, &pos, &nal_off, &nal_len)) {
+		if (!avd_h264_is_slice_nal(data + nal_off, nal_len))
+			continue;
+
+		ret = avd_h264_parse_slice(run, &h264_ctx->reflists,
+					   data + nal_off, nal_len, sl,
+					   &h264_ctx->fb_weights);
+		if (ret == 1)
+			continue;
+		if (ret)
+			goto err_drop;
+
+		/*
+		 * The picture starts at its first macroblock: the dimensions
+		 * go with that slice, and only with it.
+		 */
+		starts_picture = !sl->first_mb_in_slice;
+		if (first != starts_picture) {
+			ret = -EINVAL;
+			goto err_drop;
+		}
+
+		if (!avd_h264_refs_valid(run) ||
+		    !avd_h264_find_slice_data(data + nal_off, nal_len,
+					      avd_h264_header_len(run), &off)) {
+			ret = -EINVAL;
+			goto err_drop;
+		}
+
+		/* The OUTPUT buffer stays queued until the picture completes. */
+		run->slice_addr = run->base.coded_in + nal_off + off;
+		run->slice_len = nal_len - off;
+
+		if (first)
+			stream_hdr(ctx, run);
+		first = false;
+
+		ctx->job.num++;
+		stream_slice(ctx, run);
+	}
+
+	if (first) {
+		ret = -EINVAL;
+		goto err_drop;
+	}
+
+	return avd_submit_job(ctx);
+
+err_drop:
+	dev_dbg_ratelimited(ctx->dev->dev, "bad slice in frame: %d\n", ret);
+	kvfree(ctx->job.segments);
+	ctx->job.segments = NULL;
+	return ret;
+}
+
 static int avd_h264_run(struct avd_ctx *ctx)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
 	struct v4l2_h264_reflist_builder reflist_builder;
 	struct avd_h264_run run;
 	struct v4l2_ctrl *ctrl;
-	bool annexb;
+	bool frame_based, annexb;
 	u32 nal_off, nal_len, pos = 0;
 	int ret;
 
@@ -929,6 +1437,9 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		return -EINVAL;
 	}
 
+	ctrl = v4l2_ctrl_find(&ctx->ctrl_hdl, V4L2_CID_STATELESS_H264_DECODE_MODE);
+	frame_based = ctrl && ctrl->cur.val ==
+			      V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED;
 	ctrl = v4l2_ctrl_find(&ctx->ctrl_hdl, V4L2_CID_STATELESS_H264_START_CODE);
 	annexb = ctrl && ctrl->cur.val == V4L2_STATELESS_H264_START_CODE_ANNEX_B;
 
@@ -945,6 +1456,38 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	    (data[2] == 1 || (payload_len >= 4 && !data[2] && data[3] == 1)))
 		annexb = true;
 
+	if (frame_based) {
+		avd_run_postamble(ctx, &run.base);
+		if (!data)
+			return -EINVAL;
+		/*
+		 * Without start codes nothing marks where one slice ends and
+		 * the next begins, so a multi-slice picture cannot be split.
+		 */
+		if (!annexb) {
+			dev_dbg_ratelimited(ctx->dev->dev,
+					    "frame-based decoding needs Annex B start codes\n");
+			return -EINVAL;
+		}
+
+		h264_ctx->monochrome = run.sps->chroma_format_idc == 0;
+
+		/* Build the P/B{0,1} ref lists. */
+		v4l2_h264_init_reflist_builder(&reflist_builder,
+					       run.decode_params, run.sps,
+					       run.decode_params->dpb);
+		run.num_valid = reflist_builder.num_valid;
+		run.cur_poc = reflist_builder.cur_pic_order_count;
+		avd_h264_assign_slots(&run);
+		v4l2_h264_build_p_ref_list(&reflist_builder,
+					   h264_ctx->reflists.p);
+		v4l2_h264_build_b_ref_lists(&reflist_builder,
+					    h264_ctx->reflists.b0,
+					    h264_ctx->reflists.b1);
+
+		return avd_h264_run_frame(ctx, &run, data, payload_len);
+	}
+
 	/* A slice with a start code: skip to its NAL unit. */
 	if (data && annexb) {
 		if (!avd_h264_next_nal(data, payload_len, &pos, &nal_off, &nal_len)) {
@@ -955,7 +1498,8 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		payload_len = nal_len;
 	}
 
-	if (!data || !avd_h264_find_slice_data(data, payload_len,
+	if (!run.slice_params ||
+	    !data || !avd_h264_find_slice_data(data, payload_len,
 					       avd_h264_header_len(&run),
 					       &nal_off)) {
 		dev_dbg_ratelimited(ctx->dev->dev,

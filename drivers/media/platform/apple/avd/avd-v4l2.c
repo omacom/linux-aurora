@@ -283,7 +283,7 @@ static const struct avd_ctrl_desc avd_h264_ctrl_descs[] = {
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_DECODE_MODE,
 		.cfg.min = V4L2_STATELESS_H264_DECODE_MODE_SLICE_BASED,
-		.cfg.max = V4L2_STATELESS_H264_DECODE_MODE_SLICE_BASED,
+		.cfg.max = V4L2_STATELESS_H264_DECODE_MODE_FRAME_BASED,
 		.cfg.def = V4L2_STATELESS_H264_DECODE_MODE_SLICE_BASED,
 	},
 	{
