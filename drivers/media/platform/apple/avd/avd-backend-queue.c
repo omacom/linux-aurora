@@ -268,7 +268,7 @@ static void avd_qfw_fail_all(struct avd_dev *avd)
 	for (i = 0; i < AVD_MAX_FRAMES; i++)
 		if (avd->frames[i].state == AVD_FRAME_SUBMITTED)
 			avd->frames[i].deadline = jiffies;
-	mod_delayed_work(system_wq, &avd->queue_work, 0);
+	mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 }
 
 static int avd_qfw_stream(struct avd_dev *avd, const u32 *words, u32 count)

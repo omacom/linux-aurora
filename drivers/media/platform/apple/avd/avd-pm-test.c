@@ -354,6 +354,28 @@ static void avd_pm_recovery_boot_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fixture->resubmit_step, 0U);
 }
 
+static void avd_pm_parked_resume_test(struct kunit *test)
+{
+	struct avd_pm_test *fixture = test->priv;
+	struct avd_dev *avd = &fixture->avd;
+
+	/* Autosuspend/resume must not boot or reopen a resting/retired engine. */
+	avd->pm.dma_parked = true;
+	avd->rest_until = jiffies + msecs_to_jiffies(60000);
+	KUNIT_EXPECT_EQ(test, avd_pm_power_on(avd), 0);
+	KUNIT_EXPECT_EQ(test, fixture->boot_step, 0U);
+	KUNIT_EXPECT_EQ(test, fixture->resubmit_step, 0U);
+	KUNIT_EXPECT_FALSE(test, avd->pm.irq_enabled);
+	KUNIT_EXPECT_EQ(test, avd_pm_power_off(avd), 0);
+	KUNIT_EXPECT_TRUE(test, avd->pm.dma_parked);
+	avd->rest_until = 0;
+	avd->faulted = true;
+	KUNIT_EXPECT_EQ(test, avd_pm_power_on(avd), 0);
+	KUNIT_EXPECT_EQ(test, fixture->boot_step, 0U);
+	KUNIT_EXPECT_EQ(test, fixture->resubmit_step, 0U);
+	KUNIT_EXPECT_FALSE(test, avd->pm.irq_enabled);
+}
+
 static void avd_pm_test_exit(struct kunit *test)
 {
 	struct avd_pm_test *fixture = test->priv;
@@ -373,6 +395,7 @@ static struct kunit_case avd_pm_test_cases[] = {
 	KUNIT_CASE(avd_pm_open_boot_replay_test),
 	KUNIT_CASE(avd_pm_recovery_dart_gate_test),
 	KUNIT_CASE(avd_pm_recovery_boot_test),
+	KUNIT_CASE(avd_pm_parked_resume_test),
 	{}
 };
 

@@ -261,12 +261,14 @@ struct avd_dev {
 	u64 frame_seq;
 	unsigned int inflight;
 	bool stopping;
-	/* Retired after a failed or too frequent recovery, until module reload. */
+	/* Retired after a failed recovery, until module reload. */
 	bool faulted;
 	/* Recovery pacing: when the last one ran, and a sliding storm count. */
 	unsigned long last_recover;
 	unsigned long storm_start;
 	unsigned int storm_count;
+	/* Out of recovery budget: keep DMA parked until the window ends. */
+	unsigned long rest_until;
 	u64 fw_generation;
 	const struct avd_backend_ops *backend;
 	void *backend_priv;

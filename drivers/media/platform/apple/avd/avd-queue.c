@@ -14,7 +14,7 @@
 #define AVD_CTX_MAX_HW_ERRORS 1
 /* Never reset the decoder more often than this. */
 #define AVD_RECOVER_GAP_MS 20
-/* A third recovery within AVD_STORM_WINDOW is refused: the decoder is retired. */
+/* A third recovery parks the decoder until AVD_STORM_WINDOW ends. */
 #define AVD_STORM_MAX 2
 #define AVD_STORM_WINDOW msecs_to_jiffies(60000)
 #define AVD_RETRY_DELAY msecs_to_jiffies(1)
@@ -127,9 +127,9 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 	 * Every decoder reset is a risk to the whole machine (three hard hangs
 	 * on the J616s followed timeouts and resets), so recover sparingly:
 	 * at least AVD_RECOVER_GAP_MS apart, at most AVD_STORM_MAX times in
-	 * AVD_STORM_WINDOW, and never again after a recovery fails. A retired
-	 * decoder fails every frame without touching the hardware until the
-	 * module is reloaded.
+	 * AVD_STORM_WINDOW, and never again after a recovery fails. Exhausting
+	 * the budget parks DMA until the window ends; only a failed recovery
+	 * retires the decoder until the module is reloaded.
 	 */
 	if (avd->faulted) {
 		ret = -ENODEV;
@@ -140,7 +140,13 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 			avd->storm_count = 0;
 		}
 		if (++avd->storm_count > AVD_STORM_MAX) {
-			ret = -EBUSY;
+			ret = avd_pm_park(avd);
+			if (!ret) {
+				avd->rest_until = avd->storm_start + AVD_STORM_WINDOW;
+				dev_warn(avd->dev, "decoder resting after repeated resets, new frames fail for up to %u s\n",
+					 jiffies_to_msecs(avd->rest_until - jiffies) / 1000 + 1);
+				ret = -EBUSY;
+			}
 		} else {
 			if (avd->last_recover &&
 			    time_before(jiffies, avd->last_recover +
@@ -149,10 +155,10 @@ static void avd_reset_queue(struct avd_dev *avd, int status)
 			ret = avd_pm_recover(avd);
 			avd->last_recover = jiffies ?: 1;
 		}
-		if (ret) {
+		if (ret && !avd->rest_until) {
 			WRITE_ONCE(avd->faulted, true);
-			dev_err(avd->dev, "decoder retired after %s (%d): reload the module to use it again\n",
-				ret == -EBUSY ? "repeated resets" : "a failed reset", ret);
+			dev_err(avd->dev, "decoder retired after a failed reset (%d): reload the module to use it again\n",
+				ret);
 		}
 	}
 	avd->compat_active = NULL;
@@ -273,7 +279,7 @@ static void avd_queue_worker(struct work_struct *work)
 	}
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	if (pending)
-		mod_delayed_work(system_wq, &avd->queue_work, delay);
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, delay);
  unlock:
 	mutex_unlock(&avd->queue_mutex);
 }
@@ -288,7 +294,7 @@ void avd_frame_complete(struct avd_dev *avd, u32 tag, int status)
 	accepted = avd_slot_complete(f, tag, status);
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	if (accepted)
-		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 }
 
 /* No buffer, FIFO or descriptor ownership is released by a VP event. */
@@ -363,7 +369,8 @@ static void avd_queue_submit_work(struct work_struct *work)
 	spin_lock_irqsave(&avd->queue_lock, flags);
 	if (avd->deferred_ctx == ctx)
 		avd->deferred_ctx = NULL;
-	if (avd->stopping || ctx->draining || READ_ONCE(avd->faulted) || ctx->broken) {
+	if (avd->stopping || ctx->draining || READ_ONCE(avd->faulted) || ctx->broken ||
+	    (avd->rest_until && time_before(jiffies, avd->rest_until))) {
 		struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 
 		spin_unlock_irqrestore(&avd->queue_lock, flags);
@@ -386,7 +393,7 @@ static void avd_queue_submit_work(struct work_struct *work)
 		/* Keep the m2m job; the worker restarts it when a slot frees. */
 		avd->deferred_ctx = ctx;
 		spin_unlock_irqrestore(&avd->queue_lock, flags);
-		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 		goto unlock;
 	}
 	ret = avd_slot_reserve(f, ctx, ++avd->frame_seq);
@@ -413,6 +420,23 @@ static void avd_queue_submit_work(struct work_struct *work)
 			    (f->src->flags & V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF);
 	f->frame_num = f->tag;
 	f->deadline = jiffies + AVD_FRAME_TIMEOUT;
+	if (avd->rest_until) {
+		/* Reset while still parked; retain the recovery pacing at expiry. */
+		if (avd->last_recover &&
+		    time_before(jiffies, avd->last_recover +
+				msecs_to_jiffies(AVD_RECOVER_GAP_MS)))
+			msleep(AVD_RECOVER_GAP_MS);
+		ret = avd_pm_recover(avd);
+		avd->last_recover = jiffies ?: 1;
+		if (ret) {
+			WRITE_ONCE(avd->faulted, true);
+			dev_err(avd->dev, "decoder retired after a failed wake (%d)\n", ret);
+			goto fail;
+		}
+		avd->rest_until = 0;
+		avd->storm_count = 0;
+		avd_pm_enable_irq(avd);
+	}
 	memset(f->cmd, 0, sizeof(f->cmd));
 	if (ops) {
 		if (!f->prog->cpu) {
@@ -486,7 +510,7 @@ static void avd_queue_submit_work(struct work_struct *work)
 	/* Atomically detach both buffers to the slot and release dispatch. */
 	if (!f->scheduler_held)
 		v4l2_m2m_job_finish_detach(avd->m2m_dev, ctx->fh.m2m_ctx);
-	mod_delayed_work(system_wq, &avd->queue_work, 0);
+	mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 	goto unlock;
  fail:
 	/* Failed preparation still transfers its buffers before retirement. */
@@ -496,7 +520,7 @@ static void avd_queue_submit_work(struct work_struct *work)
 	spin_unlock_irqrestore(&avd->queue_lock, flags);
 	if (!f->scheduler_held)
 		v4l2_m2m_job_finish_detach(avd->m2m_dev, ctx->fh.m2m_ctx);
-	mod_delayed_work(system_wq, &avd->queue_work, 0);
+	mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 	goto unlock;
  fail_no_pm:
 	spin_lock_irqsave(&avd->queue_lock, flags);
@@ -576,7 +600,7 @@ void avd_queue_drain(struct avd_ctx *ctx)
 	 * frames instead, without the queue mutex so the worker can retire them.
 	 */
 	if (ret >= 0 && !avd->stopping && avd_ctx_has_frames(avd, ctx)) {
-		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 		mutex_unlock(&avd->queue_mutex);
 		wait_event_timeout(avd->pm.idle_wait, !avd_ctx_has_frames(avd, ctx),
 				   AVD_FRAME_TIMEOUT + msecs_to_jiffies(1000));
@@ -599,7 +623,7 @@ void avd_queue_drain(struct avd_ctx *ctx)
 		avd->backend->session_stop(ctx);
 	ctx->session_started = false;
 	if (!avd->stopping)
-		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 	mutex_unlock(&avd->queue_mutex);
 	avd_pm_drain_end(avd);
 	if (ret >= 0) {

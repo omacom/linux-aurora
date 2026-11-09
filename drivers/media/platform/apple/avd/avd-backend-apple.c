@@ -296,7 +296,7 @@ static irqreturn_t avd_apple_irq(struct avd_dev *avd)
 			}
 		}
 	}
-	mod_delayed_work(system_wq, &avd->queue_work, 0);
+	mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 	return IRQ_HANDLED;
 }
 

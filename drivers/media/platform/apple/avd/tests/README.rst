@@ -9,6 +9,7 @@ compiler are required::
   sh tests/run-host.sh /tmp/avd-queue-host
   python3 tests/program-test.py /tmp/avd-program
   python3 tests/dispatch-test.py /tmp/avd-dispatch
+  python3 tests/recovery-test.py /tmp/avd-recovery
 
 The program test runs the H.264 header/slice emitters, open-program builder,
 t8112_configure_stream(), queued descriptor submit and SRAM streaming code.

@@ -172,7 +172,7 @@ static irqreturn_t avd_open_irq(struct avd_dev *avd)
 	} else {
 		dev_err_ratelimited(avd->dev, "open firmware error %#x\n", status);
 		f->deadline = jiffies;
-		mod_delayed_work(system_wq, &avd->queue_work, 0);
+		mod_delayed_work(system_dfl_wq, &avd->queue_work, 0);
 	}
 	return IRQ_HANDLED;
 }

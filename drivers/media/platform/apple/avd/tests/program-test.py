@@ -60,7 +60,7 @@ typedef uint64_t dma_addr_t;
 #define AVD_FRAME_SUBMITTED 2
 #define AVD_FRAME_DONE 3
 #define IRQ_HANDLED 1
-#define system_wq NULL
+#define system_dfl_wq NULL
 typedef int irqreturn_t;
 #define dev_info_once(d,...) ((void)(d))
 #define dev_warn_once(d,...) ((void)(d))

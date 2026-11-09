@@ -29,6 +29,8 @@ struct avd_pm {
 	struct mutex lock;
 	struct list_head deferred_unmaps;
 	bool dart_active;
+	/* Empty DART domain remains attached while resting or retired. */
+	bool dma_parked;
 	int irq;
 	bool irq_enabled;
 	/*
@@ -65,6 +67,8 @@ int avd_pm_power_on(struct avd_dev *avd);
 int avd_pm_power_off(struct avd_dev *avd);
 /* Caller holds a PM reference and queue_mutex; leaves the host IRQ closed. */
 int avd_pm_recover(struct avd_dev *avd);
+/* Stop firmware and leave DMA blocked; same caller/IRQ contract as recover. */
+int avd_pm_park(struct avd_dev *avd);
 /* After recovery has invalidated every previously firmware-owned slot. */
 void avd_pm_enable_irq(struct avd_dev *avd);
 irqreturn_t avd_pm_irq(struct avd_dev *avd, unsigned int gen);

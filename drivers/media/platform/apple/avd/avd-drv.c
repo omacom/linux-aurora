@@ -17,7 +17,6 @@
 #include <linux/iommu.h>
 #include <linux/reset.h>
 #include <linux/delay.h>
-#include <linux/iopoll.h>
 
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-v4l2.h>
@@ -25,8 +24,7 @@
 #include "avd.h"
 #include "avd-inst.h"
 #include "avd-regs.h"
-
-#define AVD_CODEC_INFO_MAX_SIZE	0x40
+#include "avd-apple-protocol.h"
 
 static void calc_tile_meta(u32 w, u32 h, u32 bpb, u32 tile_dim,
 			   u32 meta_hdr_bytes, u32 *tile, u32 *meta)
@@ -76,31 +74,6 @@ void fill_comp(struct avd_comp *comp, enum avd_image_fmt image_fmt, u32 width,
 	comp->size = y_meta + y + uv_meta + uv;
 }
 
-int avd_buf_alloc(struct avd_dev *avd, struct avd_buf *buf, size_t size)
-{
-	/* Keep size equal to the payload length used by the H.264 slice path. */
-	avd_buf_free(avd, buf);
-
-	if (size <= 0)
-		return -ENOMEM;
-
-	buf->size = size;
-	buf->cpu =
-		dma_alloc_coherent(avd->dev, buf->size, &buf->addr, GFP_KERNEL);
-	if (!buf->cpu) {
-		memset(buf, 0, sizeof(*buf));
-		return -ENOMEM;
-	}
-	return 0;
-}
-
-void avd_buf_free(struct avd_dev *avd, struct avd_buf *buf)
-{
-	if (buf->cpu)
-		dma_free_coherent(avd->dev, buf->size, buf->cpu, buf->addr);
-	memset(buf, 0, sizeof(*buf));
-}
-
 struct avd_decoded_buffer *
 avd_get_ref_buf(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
 {
@@ -117,28 +90,6 @@ avd_get_ref_buf(struct avd_ctx *ctx, struct vb2_v4l2_buffer *dst, u64 timestamp)
 		buf = &dst->vb2_buf;
 
 	return vb2_to_avd_decoded_buf(buf);
-}
-
-static int avd_wait_submission_queue(struct avd_ctx *ctx, int vp)
-{
-	struct avd_dev *avd = ctx->dev;
-	u32 max = readl_relaxed(avd->ctrl +
-				avd->variant->submit_queue_max_offset + vp * 4);
-	u32 cur = readl_relaxed(
-		avd->ctrl + avd->variant->submit_queue_status_offset + vp * 4);
-
-	if (cur == max) {
-		dev_err(avd->dev, "instruction que full! %d/%d", cur, max);
-		return 1;
-	}
-
-	if (cur >= max / 2) {
-		if (avd->variant->quirks & AVD_QUIRK_V5_QUEUE_PACING)
-			usleep_range(100, 150);
-		else
-			usleep_range(500, 650);
-	}
-	return 0;
 }
 
 int avd_init_job(struct avd_ctx *ctx, enum avd_codec codec, size_t segments)
@@ -158,467 +109,20 @@ int avd_init_job(struct avd_ctx *ctx, enum avd_codec codec, size_t segments)
 
 int avd_submit_job(struct avd_ctx *ctx)
 {
-	struct avd_dev *avd = ctx->dev;
-	struct avd_job *sub = &ctx->job;
-	struct avd_segment *segments, *seg;
-	unsigned long flags;
-	size_t num;
-	int i, idx = 0, vp = 0;
-	void __iomem *reg;
-	u32 exec_mask = sub->codec == AVD_CODEC_VP9 &&
-					avd->variant->revision == 3 ?
-				AVD_OP_EXEC_REV3_VP9_MASK :
-				0;
-	u32 exec_rev_flag =
-		AVD_OP_EXEC_FLAG_START_REV4(avd->variant->revision == 4) |
-		AVD_OP_EXEC_FLAG_START_REV3(avd->variant->revision == 3);
-
-	ctx->fifo_idx = 0;
-	for (i = 0; i < sub->codec; i++)
-		vp += avd->variant->vp_slots[i];
-	if (avd->variant->vp_slot_base[sub->codec])
-		vp = avd->variant->vp_slot_base[sub->codec];
-
-	/*
-	 * avd_device_run() keeps this job from being finished (and the next one
-	 * from starting) until it returns, and arms the watchdog itself once the
-	 * job belongs to the hardware. Still walk a local copy of the table.
-	 */
-	segments = sub->segments;
-	num = sub->num;
-	if (WARN_ON_ONCE(!segments))
-		return -EINVAL;
-
-	avd->variant->configure_stream(avd, ctx->inst.addr, ctx->fifo_idx, vp);
-	reg = avd->ctrl + avd->variant->vp_slot_offset + vp * 4;
-
-	/* the first segment is always the header (needs special handling) */
-
-	writel(AVD_OP_EXEC | exec_mask | exec_rev_flag |
-		       AVD_OP_EXEC_FIFO_IDX(ctx->fifo_idx),
-	       reg);
-	seg = &segments[idx++];
-	for (i = 0; i < seg->num; i++)
-		writel(seg->instructions[i], reg);
-	for (; idx <= num; idx++) {
-		seg = &segments[idx];
-		for (i = 0; i < seg->num; i++)
-			writel(seg->instructions[i], reg);
-		if ((!(avd->variant->quirks & AVD_QUIRK_V5_QUEUE_PACING) ||
-		     sub->codec == AVD_CODEC_HEVC) &&
-		    avd_wait_submission_queue(ctx, vp))
-			break;
-		if (idx == num) {
-			/* A completion from here on belongs to this job. */
-			spin_lock_irqsave(&avd->job_lock, flags);
-			avd->job_end_sent = true;
-			spin_unlock_irqrestore(&avd->job_lock, flags);
-		}
-		writel(AVD_OP_EXEC | exec_mask |
-			       AVD_OP_EXEC_FLAG_END(idx == num),
-		       reg);
-	}
-
-	if (sub->segments == segments)
-		sub->segments = NULL;
-	kvfree(segments);
-	return 0;
-}
-
-/* Recover at most twice a minute, never twice within this gap. */
-#define AVD_RECOVER_MAX		2
-#define AVD_RECOVER_WINDOW	msecs_to_jiffies(60000)
-#define AVD_RECOVER_GAP_MS	20
-
-/*
- * Reset the decoder after a timeout or a VP error. Every reset is a risk
- * to the whole machine (the J616s hung hard after timeouts and resets
- * three times in one night, and the Neo after a burst of one reset per
- * frame), so: stop the interrupt handler and the CM3 first, block the
- * decoder's DMA at its DART so a transfer still in flight faults instead
- * of reaching memory that may already be reused, give such transfers time
- * to drain, and only then assert the pmgr reset. Recover sparingly: a
- * third recovery within a minute parks the decoder (DMA blocked) until the
- * minute is over, and only a failed reset retires it.
- */
-/*
- * Parking (resting or retired): stop the CM3 and leave the decoder's DMA
- * blocked at its DART, so an engine that is still running (the frame timed
- * out, after all) can only fault, never write memory whose buffers are about
- * to go back to userspace.
- */
-static void avd_park(struct avd_dev *avd)
-{
-	if (pm_runtime_resume_and_get(avd->dev) < 0)
-		return;
-	disable_irq(avd->irq);
-	avd->irq_parked = true;
-	avd_shutdown(avd);
-	if (avd->empty_domain && !avd->dma_parked) {
-		if (iommu_attach_device(avd->empty_domain, avd->dev))
-			dev_err(avd->dev, "retire: could not block DMA\n");
-		else
-			avd->dma_parked = true;
-	}
-	pm_runtime_put_autosuspend(avd->dev);
-}
-
-static int avd_reset(struct avd_dev *avd)
-{
-	int ret = 0;
-
-	if (avd->retired)
-		return -ENODEV;
-	if (!avd->recoveries ||
-	    time_after(jiffies, avd->recover_window_start + AVD_RECOVER_WINDOW)) {
-		avd->recover_window_start = jiffies;
-		avd->recoveries = 0;
-	}
-	if (++avd->recoveries > AVD_RECOVER_MAX) {
-		/*
-		 * Out of budget: stop the decoder with its DMA blocked and let
-		 * it rest until the window ends. Frames fail without touching
-		 * the hardware meanwhile; the next frame after that recovers
-		 * it. Bad streams (or conformance vectors using features the
-		 * hardware lacks) must not cost the user the decoder until a
-		 * reboot.
-		 */
-		avd_park(avd);
-		avd->rest_until = avd->recover_window_start + AVD_RECOVER_WINDOW;
-		dev_warn(avd->dev, "decoder resting after repeated resets, new frames fail for up to %u s\n",
-			 jiffies_to_msecs(avd->rest_until - jiffies) / 1000 + 1);
-		return -EBUSY;
-	}
-	if (avd->last_recover &&
-	    time_before(jiffies, avd->last_recover + msecs_to_jiffies(AVD_RECOVER_GAP_MS)))
-		msleep(AVD_RECOVER_GAP_MS);
-
-	ret = pm_runtime_resume_and_get(avd->dev);
-	if (ret < 0)
-		goto retire;
-
-	/* No handler may touch the mailbox while the block is in reset. */
-	disable_irq(avd->irq);
-	dev_warn(avd->dev, "recover: stop firmware\n");
-	avd_shutdown(avd);
-	if (avd->empty_domain) {
-		dev_warn(avd->dev, "recover: block DMA\n");
-		ret = iommu_attach_device(avd->empty_domain, avd->dev);
-		if (ret) {
-			dev_err(avd->dev, "recover: DART empty attach failed: %d\n", ret);
-			goto put;
-		}
-		usleep_range(5000, 6000);
-	}
-	dev_warn(avd->dev, "recover: reset\n");
-	ret = reset_control_reset(avd->rstc);
-	if (ret)
-		dev_err(avd->dev, "recover: reset failed: %d\n", ret);
-	if (avd->empty_domain && ret) {
-		/* A decoder that failed its reset keeps its DMA blocked. */
-		avd->dma_parked = true;
-	} else if (avd->empty_domain) {
-		dev_warn(avd->dev, "recover: restore DMA\n");
-		iommu_detach_device(avd->empty_domain, avd->dev);
-		if (avd->domain && iommu_get_domain_for_dev(avd->dev) != avd->domain) {
-			dev_err(avd->dev, "recover: DART domain not restored\n");
-			ret = -EIO;
-		}
-	}
-	if (!ret) {
-		dev_warn(avd->dev, "recover: boot firmware\n");
-		ret = avd_boot(avd);
-		if (ret)
-			dev_err(avd->dev, "recover: boot failed: %d\n", ret);
-	}
-put:
-	avd->last_recover = jiffies ?: 1;
-	if (!ret) {
-		enable_irq(avd->irq);
-		dev_warn(avd->dev, "recover: done\n");
-	}
-	pm_runtime_put_autosuspend(avd->dev);
-	if (!ret)
-		return 0;
-retire:
-	avd->retired = true;
-	dev_err(avd->dev, "decoder retired after a failed reset (%d): reload the module to use it again\n",
-		ret);
-	return ret;
-}
-
-/* Bring a rested decoder back: reset with DMA still blocked, restore, boot. */
-static int avd_wake(struct avd_dev *avd)
-{
-	int ret;
-
-	ret = pm_runtime_resume_and_get(avd->dev);
-	if (ret < 0)
-		return ret;
-	dev_warn(avd->dev, "recover: wake after rest\n");
-	avd_shutdown(avd);
-	ret = reset_control_reset(avd->rstc);
-	if (!ret && avd->dma_parked) {
-		iommu_detach_device(avd->empty_domain, avd->dev);
-		if (avd->domain && iommu_get_domain_for_dev(avd->dev) != avd->domain)
-			ret = -EIO;
-		else
-			avd->dma_parked = false;
-	}
-	if (!ret)
-		ret = avd_boot(avd);
-	if (!ret) {
-		avd->recoveries = 0;
-		avd->last_recover = jiffies ?: 1;
-		if (avd->irq_parked)
-			enable_irq(avd->irq);
-		avd->irq_parked = false;
-		dev_warn(avd->dev, "recover: done\n");
-	} else {
-		avd->retired = true;
-		dev_err(avd->dev, "decoder retired after a failed wake (%d): reload the module to use it again\n",
-			ret);
-	}
-	pm_runtime_put_autosuspend(avd->dev);
-	return ret;
-}
-
-static void avd_watchdog_func(struct work_struct *work)
-{
-	struct avd_dev *avd;
-	struct avd_ctx *ctx;
-	unsigned long flags;
-	bool claimed;
-	int ret;
-	ctx = container_of(to_delayed_work(work), struct avd_ctx,
-			   watchdog_work);
-	if (!ctx)
-		return;
-
-	avd = ctx->dev;
-
-	/*
-	 * Time out only the job this watchdog was armed for, and only while the
-	 * hardware still owns it. Otherwise that job already finished, and
-	 * resetting the hardware would break whichever job is running now.
-	 */
-	spin_lock_irqsave(&avd->job_lock, flags);
-	claimed = avd->job_ctx == ctx && avd->job_seq == ctx->wd_seq &&
-		  avd->job_state == AVD_JOB_SUBMITTED;
-	if (claimed)
-		avd->job_state = AVD_JOB_FINISHING;
-	spin_unlock_irqrestore(&avd->job_lock, flags);
-	dev_dbg(avd->dev, "avd-job: watchdog seq %llu: %s\n", ctx->wd_seq,
-		claimed ? "timeout" : "stale, ignored");
-	if (!claimed)
-		return;
-
-	dev_err(avd->dev, "Frame processing timed out!");
-
-	writel(0, avd->mbox + AVD_REG_MBOX_IRQ_ENABLE);
-	ret = avd_reset(avd);
-	if (ret)
-		dev_err(avd->dev, "failed to reset: %d", ret);
-	/*
-	 * A stream whose frame failed in hardware usually fails the next one
-	 * too (a reset per frame took the Neo down), so stop it here.
-	 */
-	ctx->broken = true;
-	dev_err(avd->dev, "stream stopped after a failed frame; restart streaming to retry\n");
-
-	avd_job_finish(ctx, VB2_BUF_STATE_ERROR);
+	return avd_open_build_program(ctx);
 }
 
 static irqreturn_t avd_irq_handler(int irq, void *data)
 {
 	struct avd_dev *avd = data;
-	struct avd_ctx *ctx = v4l2_m2m_get_curr_priv(avd->m2m_dev);
+	/* An interrupt raised before a reset or power-off belongs to that instance. */
+	unsigned int gen = READ_ONCE(avd->pm.irq_gen);
+	irqreturn_t ret;
 
-	enum vb2_buffer_state state;
-	unsigned long flags;
-	bool finish = false, stale = false;
-	u32 status;
-	if (!ctx)
-		return IRQ_HANDLED;
-
-	/*
-	 * Reading RETRIEVE on an empty mailbox returns the previous message
-	 * again. A repeated PP DONE finishes the next frame before its PP has
-	 * run: userspace gets a wrong picture, the frame's own PP DONE never
-	 * comes, and the watchdog resets the decoder. Give a late message
-	 * 10 us, otherwise acknowledge and ignore the interrupt.
-	 */
-	if (readl_poll_timeout_atomic(avd->mbox + AVD_REG_MBOX1_STATUS, status,
-				      !(status & AVD_MBOX1_STATUS_EMPTY), 1, 10)) {
-		writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
-		dev_dbg_ratelimited(avd->dev, "spurious interrupt, mailbox empty\n");
-		return IRQ_HANDLED;
-	}
-	status = readl(avd->mbox + AVD_REG_MBOX1_RETRIEVE);
-
-	writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
-
-	if (status & 0x10000) { /* dbg */
-		dev_warn(avd->dev, "no handler for IRQ: %3d", status &~0x10000);
-		writel_relaxed(0, avd->mbox + AVD_REG_MBOX_IRQ_ENABLE);
-		return IRQ_HANDLED;
-	}
-
-	if (status & 0x1000) {
-		/* pp is done ! we are done */
-		state = VB2_BUF_STATE_DONE;
-	} else if (status & 0x100) {
-		/* a vp is done, kick the pp and hope for the best */
-		if(ctx->coded_fmt_desc->ops->submit)
-			ctx->coded_fmt_desc->ops->submit(ctx);
-		spin_lock_irqsave(&avd->job_lock, flags);
-		if (avd->job_ctx == ctx)
-			avd->job_vp_done = true;
-		spin_unlock_irqrestore(&avd->job_lock, flags);
-		goto done;
-	} else {
-		dev_err(avd->dev, "H%d error", status);
-		/*
-		 * avd-fw err(n): VP n raised its error interrupt and stopped,
-		 * and the PP only starts on a VP done, so the job cannot
-		 * complete any more. Run the watchdog now instead of after its
-		 * timeout: it resets the AVD and fails only this frame, and it
-		 * ignores a job the hardware does not own yet.
-		 */
-		mod_delayed_work(system_dfl_wq, &ctx->watchdog_work, 0);
-		goto done;
-	}
-
-	/*
-	 * Finish only a job the hardware owns. While avd_device_run() is still
-	 * setting up or submitting, a completion is left over from an older job
-	 * unless this job's END command already went out; then remember it and
-	 * let avd_device_run() finish the job when it returns.
-	 */
-	spin_lock_irqsave(&avd->job_lock, flags);
-	if (avd->job_ctx != ctx || !avd->job_vp_done) {
-		/*
-		 * Only the PP kicked for this job's VP can finish it. A surplus
-		 * PP DONE of a multi-kick picture used to finish the next job
-		 * early, so userspace reused its buffers while the decoder was
-		 * still writing them.
-		 */
-		stale = true;
-	} else if (avd->job_state == AVD_JOB_SUBMITTED) {
-		avd->job_state = AVD_JOB_FINISHING;
-		finish = true;
-	} else if (avd->job_state == AVD_JOB_RUNNING && avd->job_end_sent) {
-		avd->job_pending = true;
-		avd->job_pending_result = state;
-	} else {
-		stale = true;
-	}
-	spin_unlock_irqrestore(&avd->job_lock, flags);
-	dev_dbg(avd->dev, "avd-job: irq %#x: %s\n", status,
-		finish ? "finish" : stale ? "stale, ignored" : "pending");
-	if (stale)
-		dev_warn_ratelimited(avd->dev, "ignoring stale completion");
-	if (finish) {
-		cancel_delayed_work(&ctx->watchdog_work);
-		avd_job_finish(ctx, state);
-	}
-
-done:
-	return IRQ_HANDLED;
-}
-
-static void avd_device_run(void *priv)
-{
-	struct avd_ctx *ctx = priv;
-	struct avd_dev *avd = ctx->dev;
-	const struct avd_coded_fmt_desc *desc = ctx->coded_fmt_desc;
-	enum vb2_buffer_state result = VB2_BUF_STATE_ERROR;
-	const char *outcome = "already finished";
-	unsigned long flags;
-	bool finish = false, fail;
-	u64 seq;
-	int ret;
-
-	if (WARN_ON(!desc))
-		return;
-
-	fail = READ_ONCE(avd->retired) || ctx->broken;
-	/* A rested decoder stays parked until its window ends, then wakes. */
-	if (!fail && avd->rest_until) {
-		if (time_before(jiffies, avd->rest_until) || avd_wake(avd))
-			fail = true;
-		else
-			avd->rest_until = 0;
-	}
-	if (fail) {
-		struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
-
-		/* Complete the request's controls too, or its fd never signals. */
-		if (src && src->vb2_buf.req_obj.req)
-			v4l2_ctrl_request_complete(src->vb2_buf.req_obj.req, &ctx->ctrl_hdl);
-		avd_job_finish_no_pm(ctx, VB2_BUF_STATE_ERROR);
-		return;
-	}
-
-	/*
-	 * IRQ completion cannot wait for an already running watchdog. Drain it
-	 * here, before reusing wd_seq, so an old callback cannot time out this
-	 * context's next job. device_run is sleepable; hold no job_lock here.
-	 */
-	cancel_delayed_work_sync(&ctx->watchdog_work);
-
-	ret = pm_runtime_resume_and_get(avd->dev);
-	if (ret < 0) {
-		avd_job_finish_no_pm(ctx, VB2_BUF_STATE_ERROR);
-		return;
-	}
-
-	/*
-	 * While the job is RUNNING neither completion IRQs nor the watchdog may
-	 * finish it: v4l2-mem2mem would start the next job on a kworker while
-	 * this one still builds and submits ctx->job.
-	 */
-	spin_lock_irqsave(&avd->job_lock, flags);
-	seq = ++avd->job_seq;
-	avd->job_ctx = ctx;
-	avd->job_state = AVD_JOB_RUNNING;
-	avd->job_end_sent = false;
-	avd->job_vp_done = false;
-	avd->job_pending = false;
-	spin_unlock_irqrestore(&avd->job_lock, flags);
-	dev_dbg(avd->dev, "avd-job: run seq %llu\n", seq);
-
-	ret = desc->ops->run(ctx);
-	if (ret) {
-		dev_dbg(avd->dev, "avd-job: run seq %llu failed: %d\n", seq, ret);
-		avd_job_finish(ctx, VB2_BUF_STATE_ERROR);
-		return;
-	}
-
-	/*
-	 * The run either finished the job itself (held capture buffer) or handed
-	 * it to the hardware: arm the watchdog, or finish right away if the
-	 * completion already arrived.
-	 */
-	spin_lock_irqsave(&avd->job_lock, flags);
-	if (avd->job_seq == seq && avd->job_state == AVD_JOB_RUNNING) {
-		if (avd->job_pending) {
-			avd->job_state = AVD_JOB_FINISHING;
-			result = avd->job_pending_result;
-			finish = true;
-			outcome = "completed during submission";
-		} else {
-			avd->job_state = AVD_JOB_SUBMITTED;
-			ctx->wd_seq = seq;
-			queue_delayed_work(system_dfl_wq, &ctx->watchdog_work, msecs_to_jiffies(2000));
-			outcome = "submitted";
-		}
-	}
-	spin_unlock_irqrestore(&avd->job_lock, flags);
-	dev_dbg(avd->dev, "avd-job: run seq %llu: %s\n", seq, outcome);
-
-	if (finish)
-		avd_job_finish(ctx, result);
+	mutex_lock(&avd->queue_mutex);
+	ret = avd_pm_irq(avd, gen);
+	mutex_unlock(&avd->queue_mutex);
+	return ret;
 }
 
 /*
@@ -627,12 +131,7 @@ static void avd_device_run(void *priv)
  * userspace decode ahead to ride out bitrate spikes the hardware can't
  * decode in real time (e.g. 150+ Mbit/s 4K60 H.264).
  */
-static unsigned int max_capture_buffers = 128;
-module_param(max_capture_buffers, uint, 0444);
-MODULE_PARM_DESC(max_capture_buffers,
-		 "Maximum number of capture buffers per context (default 128)");
-
-static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
+static int avd_m2m_queue_init(void *priv, struct vb2_queue *src_vq,
 			  struct vb2_queue *dst_vq)
 {
 	struct avd_ctx *ctx = priv;
@@ -671,7 +170,7 @@ static int avd_queue_init(void *priv, struct vb2_queue *src_vq,
 	dst_vq->lock = &ctx->dev->vdev_lock;
 	dst_vq->dev = ctx->dev->v4l2_dev.dev;
 	dst_vq->allow_cache_hints = true;
-	dst_vq->max_num_buffers = max(max_capture_buffers, VB2_MAX_FRAME);
+	dst_vq->max_num_buffers = max(128U, VB2_MAX_FRAME);
 
 	return vb2_queue_init(dst_vq);
 }
@@ -692,14 +191,15 @@ static int avd_open(struct file *filp)
 	if (ret)
 		goto err_free_ctx;
 
-	INIT_DELAYED_WORK(&ctx->watchdog_work, avd_watchdog_func);
+	INIT_LIST_HEAD(&ctx->queue_node);
+	ctx->next_dep = AVD_DEP_PREV_DONE;
 
 	avd_reset_coded_fmt(ctx);
 	avd_reset_decoded_fmt(ctx);
 
 	v4l2_fh_init(&ctx->fh, video_devdata(filp));
 
-	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(avd->m2m_dev, ctx, avd_queue_init);
+	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(avd->m2m_dev, ctx, avd_m2m_queue_init);
 	if (IS_ERR(ctx->fh.m2m_ctx)) {
 		ret = PTR_ERR(ctx->fh.m2m_ctx);
 		goto err_free_ctx;
@@ -709,6 +209,7 @@ static int avd_open(struct file *filp)
 	if (ret)
 		goto err_cleanup_m2m_ctx;
 
+	avd_queue_add_ctx(ctx);
 	v4l2_fh_add(&ctx->fh, filp);
 
 	return 0;
@@ -727,9 +228,9 @@ static int avd_release(struct file *filp)
 	struct avd_ctx *ctx = file_to_ctx(filp);
 
 	v4l2_fh_del(&ctx->fh, filp);
+	avd_queue_del_ctx(ctx);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
-	/* The job has finished; its watchdog must not run on the freed ctx. */
-	cancel_delayed_work_sync(&ctx->watchdog_work);
+	cancel_work_sync(&ctx->submit_work);
 	v4l2_ctrl_handler_free(&ctx->ctrl_hdl);
 	v4l2_fh_exit(&ctx->fh);
 	avd_buf_free(ctx->dev, &ctx->inst);
@@ -749,7 +250,9 @@ static const struct v4l2_file_operations avd_fops = {
 };
 
 static const struct v4l2_m2m_ops avd_m2m_ops = {
-	.device_run = avd_device_run,
+	.device_run = avd_queue_run,
+	.job_ready = avd_queue_ready,
+	.job_abort = avd_queue_abort,
 };
 
 static const struct media_device_ops avd_media_ops = {
@@ -992,10 +495,12 @@ static const struct avd_variant avd_t8132_variant = {
  * T6040 (M4 Pro): the T8132 decoder. Its first HEVC job stalled the VP when
  * it was sent the pre-v5 header (no DMA configuration words, no reserved
  * scratch slot); T6040 runs the same v5 firmware generation as T8140, so it
- * gets the v5 header. HEVC stays hidden from V4L2 clients until that is
- * verified on the hardware.
+ * gets the v5 header. HEVC is advertised only when the loaded firmware
+ * names h265 in its CODECS trailer.
  */
 static const struct avd_variant avd_t6040_variant = {
+	.apple = &avd_borage_hw,
+	.fp_size = 0x1130d0,
 	.vp_slots = {
 		[AVD_CODEC_HEVC] = 4,
 		[AVD_CODEC_H264] = 4,
@@ -1004,10 +509,15 @@ static const struct avd_variant avd_t6040_variant = {
 	},
 	.fifo_slots = 15,
 	.configure_stream = t8122_configure_stream,
-	.capabilities = AVD_CAPABILITY_H264 |
+	.capabilities = AVD_CAPABILITY_HEVC |
+			AVD_CAPABILITY_H264 |
 			AVD_CAPABILITY_VP9 |
 			AVD_CAPABILITY_AV1,
-	.fw_name = "apple/avd-fw-v5-t1.bin",
+	/* HEVC only with firmware whose CODECS trailer lists h265. */
+	.fw_caps_required = AVD_CAPABILITY_HEVC,
+	/* v5-t2 matches T6040's SRAM aperture, which the queued transport needs. */
+	.fw_name = "apple/avd-fw-v5-t2.bin",
+	.fw_name_fallback = "apple/avd-fw-v5-t1.bin",
 	.revision = 4,
 	.vp_slot_offset = 0xc,
 	.submit_offset = 0x40,
@@ -1120,11 +630,17 @@ static const struct of_device_id avd_of_match[] = {
 
 MODULE_DEVICE_TABLE(of, avd_of_match);
 
+static void avd_release_open_firmware(void *data)
+{
+	struct avd_dev *avd = data;
+
+	release_firmware(avd->fw);
+}
+
 static int avd_probe(struct platform_device *pdev)
 {
 	struct avd_dev *avd;
 	const struct of_device_id *match;
-	const char *codec_info = NULL;
 	int ret, irq;
 
 	avd = devm_kzalloc(&pdev->dev, sizeof(*avd), GFP_KERNEL);
@@ -1136,12 +652,17 @@ static int avd_probe(struct platform_device *pdev)
 	avd->pdev = pdev;
 
 	mutex_init(&avd->vdev_lock);
-	spin_lock_init(&avd->job_lock);
+	avd_pm_init(avd, NULL, &avd_pm_queue_ops);
+	ret = avd_queue_init(avd);
+	if (ret)
+		return ret;
 
 	match = of_match_node(avd_of_match, pdev->dev.of_node);
 	avd->variant = match->data;
 
 	avd->rstc = devm_reset_control_get_exclusive(avd->dev, NULL);
+	if (IS_ERR(avd->rstc))
+		return PTR_ERR(avd->rstc);
 
 	/*
 	 * A node may list a second power domain, "perf": the PMC floor that
@@ -1172,6 +693,9 @@ static int avd_probe(struct platform_device *pdev)
 	avd->ctrl = devm_platform_ioremap_resource_byname(pdev, "ctrl");
 	if (IS_ERR(avd->ctrl))
 		return PTR_ERR(avd->ctrl);
+	ret = avd_pm_map_piodma(avd);
+	if (ret)
+		return ret;
 
 	avd->domain = iommu_get_domain_for_dev(avd->dev);
 	if (avd->domain) {
@@ -1182,39 +706,16 @@ static int avd_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = request_firmware(&avd->fw, avd->variant->fw_name, avd->dev);
-
-	if (ret) {
-		dev_err(avd->dev, "failed to load firmware: %d", ret);
+	ret = avd_backend_select(avd);
+	if (ret)
 		return ret;
-	}
-
-	/* Determine firmware and HW variant capabilities */
-	if (avd->fw->size >= AVD_CODEC_INFO_MAX_SIZE)
-		codec_info = avd->fw->data + avd->fw->size - AVD_CODEC_INFO_MAX_SIZE;
-	if (codec_info && strncmp(codec_info, "CODECS:", 7) == 0) {
-		unsigned int caps = 0;
-		unsigned int variant_caps = avd->variant->capabilities;
-
-		if (strnstr(codec_info, "av1", AVD_CODEC_INFO_MAX_SIZE))
-			caps |= variant_caps & AVD_CAPABILITY_AV1;
-		if (strnstr(codec_info, "h264", AVD_CODEC_INFO_MAX_SIZE))
-			caps |= variant_caps & AVD_CAPABILITY_H264;
-		if (strnstr(codec_info, "h265", AVD_CODEC_INFO_MAX_SIZE))
-			caps |= variant_caps & AVD_CAPABILITY_HEVC;
-		if (strnstr(codec_info, "vp9", AVD_CODEC_INFO_MAX_SIZE))
-			caps |= variant_caps & AVD_CAPABILITY_VP9;
-
-		dev_info(avd->dev, "Firmware codecs: %.27s\n", codec_info + 7);
-
-		avd->capabilities = caps;
-	} else {
-		/* Backward compatibility to old firmware, do not upstream. */
-		avd->capabilities = avd->variant->capabilities;
-	}
+	ret = devm_add_action_or_reset(avd->dev, avd_release_open_firmware, avd);
+	if (ret)
+		return ret;
 
 	ret = dma_set_mask_and_coherent(avd->dev,
-			DMA_BIT_MASK((avd->variant->quirks & AVD_QUIRK_LSR) ? 38 : 64));
+			DMA_BIT_MASK(avd_backend_is_apple(avd) ? 42 :
+			     (avd->variant->quirks & AVD_QUIRK_LSR) ? 38 : 64));
 
 	if (ret) {
 		dev_err(avd->dev, "Failed to set DMA mask");
@@ -1224,9 +725,9 @@ static int avd_probe(struct platform_device *pdev)
 	irq = platform_get_irq(pdev, 1);
 	if (irq < 0)
 		return irq;
-	avd->irq = irq;
+	avd->pm.irq = irq;
 	ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
-			avd_irq_handler, IRQF_ONESHOT,
+			avd_irq_handler, IRQF_ONESHOT | IRQF_NO_AUTOEN,
 			dev_name(&pdev->dev), avd);
 	if (ret) {
 		dev_err(avd->dev, "Could not request IRQ 1");
@@ -1243,9 +744,18 @@ static int avd_probe(struct platform_device *pdev)
 		if (ret)
 			return ret;
 	}
-	pm_runtime_set_autosuspend_delay(avd->dev, 100);
-	pm_runtime_use_autosuspend(avd->dev);
-	pm_runtime_enable(avd->dev);
+	avd_pm_enable(avd);
+
+	/*
+	 * Boot the firmware once now: the transport and the codec list depend
+	 * on what the loaded image reports, and clients enumerate formats and
+	 * size their contexts before the first decode would power it up.
+	 */
+	ret = pm_runtime_resume_and_get(avd->dev);
+	if (ret < 0)
+		dev_warn(avd->dev, "firmware probe boot failed: %d\n", ret);
+	else
+		pm_runtime_put_autosuspend(avd->dev);
 
 	ret = avd_v4l2_init(avd);
 	if (ret)
@@ -1262,43 +772,20 @@ err_disable_runtime_pm:
 static void avd_remove(struct platform_device *pdev)
 {
 	struct avd_dev *avd = platform_get_drvdata(pdev);
+	int ret;
 
-	release_firmware(avd->fw);
-
+	v4l2_m2m_suspend(avd->m2m_dev);
+	ret = avd->pm.queue->drain(avd);
+	if (ret)
+		dev_warn(avd->dev, "queue drain failed, resetting before teardown: %d\n", ret);
+	avd_queue_cleanup(avd);
+	avd_pm_disable(avd);
 	avd_v4l2_cleanup(avd);
-
-	if (avd->dma_parked)
+	if (avd->pm.dma_parked)
 		iommu_detach_device(avd->empty_domain, avd->dev);
 	if (avd->empty_domain)
 		iommu_domain_free(avd->empty_domain);
-
-	pm_runtime_disable(avd->dev);
-	pm_runtime_dont_use_autosuspend(avd->dev);
 }
-
-static __maybe_unused int avd_runtime_resume(struct device *dev)
-{
-	int ret;
-	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
-
-	ret = avd_boot(avd);
-	if (ret)
-		dev_err(dev, "failed to boot");
-	return ret;
-}
-
-static __maybe_unused int avd_runtime_suspend(struct device *dev)
-{
-	struct avd_dev *avd = platform_get_drvdata(to_platform_device(dev));
-
-	avd_shutdown(avd);
-	return 0;
-}
-
-static const struct dev_pm_ops avd_pm_ops = { SET_SYSTEM_SLEEP_PM_OPS(
-	pm_runtime_force_suspend,
-	pm_runtime_force_resume) SET_RUNTIME_PM_OPS(avd_runtime_suspend,
-						    avd_runtime_resume, NULL) };
 
 static struct platform_driver avd_driver = {
 	.probe = avd_probe,
