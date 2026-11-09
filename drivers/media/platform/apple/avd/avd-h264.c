@@ -613,9 +613,6 @@ static int avd_h264_validate_sps(struct avd_ctx *ctx,
 	if (sps->chroma_format_idc == 2 && sps->bit_depth_luma_minus8 == 2)
 		/* 4:2:2 10 bit would need P210; P010 is too small for its chroma */
 		return -EINVAL;
-	if (!(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY))
-		/* no interlaced support */
-		return -EINVAL;
 
 	return 0;
 }
@@ -861,6 +858,19 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	int ret;
 
 	avd_h264_run_preamble(ctx, &run);
+
+	/*
+	 * No interlaced support. This is checked per picture rather than when
+	 * the SPS is set: Chromium sets a placeholder SPS without
+	 * frame_mbs_only_flag to learn the decoded formats before it has
+	 * parsed the stream, and the stream's own SPS comes later.
+	 */
+	if (!(run.sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY)) {
+		dev_dbg_ratelimited(ctx->dev->dev,
+				    "interlaced H.264 is not supported\n");
+		avd_run_postamble(ctx, &run.base);
+		return -EINVAL;
+	}
 
 	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	u32 payload_len = vb2_get_plane_payload(&src->vb2_buf, 0);
