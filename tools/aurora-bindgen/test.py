@@ -39,7 +39,7 @@ for fixture,language,extra in [('aligned-empty.h','c',[]),('aligned-empty.hpp','
   if fixture == 'bitfields.h' and label == 'baseline':continue
   cmd=[tool,str(header),'--rust-target','1.85','--no-doc-comments','--use-core','--no-derive-debug','--ctypes-prefix','core::ffi','--','-target',ct,'-x',language,*extra]
   g=run(cmd);assert g.returncode==0,(fixture,g.stderr)
-  assert 'const _: ()' in g.stdout and '#[test]' not in g.stdout,'generator did not emit unconditional const layout checks'
+  assert re.search(r'\bconst\s+_\s*:\s*\(\s*\)\s*=',g.stdout) and not re.search(r'#\s*\[\s*test\s*\]',g.stdout),'generator did not emit unconditional const layout checks'
   rs=O/(fixture+'.'+label+'.rs');rs.write_text('#![no_std]\n'+g.stdout+(access if fixture=='anonymous-members.h' and label=='fixed' else ''))
   rcmd=rust+[str(rs),'-o',str(O/(fixture+'.'+label+'.o'))];r=run(rcmd);(O/(fixture+'.'+label+'.log')).write_text(r.stdout+r.stderr)
   expected=label=='fixed' or fixture=='tag-only.h';assert (r.returncode==0)==expected,(fixture,label,r.stderr)
