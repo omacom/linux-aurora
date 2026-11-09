@@ -123,6 +123,35 @@ static int avd_try_ctrl(struct v4l2_ctrl *ctrl)
 	return 0;
 }
 
+/*
+ * A client may pick the decoded format with S_FMT and allocate capture
+ * buffers before it sets any stream control (Chromium does). The first
+ * stream control then resolves the image format from ANY. The layout was
+ * sized for ANY (8-bit 4:2:0 compressed planes), so recompute it for the
+ * stream and keep the buffers only if they still fit.
+ */
+static int avd_resolve_busy_image_fmt(struct avd_ctx *ctx,
+				      enum avd_image_fmt image_fmt)
+{
+	struct v4l2_pix_format_mplane pix_mp = ctx->decoded_fmt.fmt.pix_mp;
+	struct avd_comp comp = ctx->comp;
+
+	if (ctx->image_fmt != AVD_IMG_FMT_ANY ||
+	    !avd_is_valid_fmt(ctx, pix_mp.pixelformat, image_fmt))
+		return -EBUSY;
+
+	ctx->image_fmt = image_fmt;
+	avd_fill_decoded_pixfmt(ctx, &pix_mp);
+	if (pix_mp.plane_fmt[0].sizeimage >
+	    ctx->decoded_fmt.fmt.pix_mp.plane_fmt[0].sizeimage) {
+		ctx->image_fmt = AVD_IMG_FMT_ANY;
+		ctx->comp = comp;
+		return -EBUSY;
+	}
+	ctx->decoded_fmt.fmt.pix_mp = pix_mp;
+	return 0;
+}
+
 static int avd_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct avd_ctx *ctx =
@@ -140,7 +169,7 @@ static int avd_s_ctrl(struct v4l2_ctrl *ctrl)
 		vq = v4l2_m2m_get_vq(ctx->fh.m2m_ctx,
 				     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 		if (vb2_is_busy(vq))
-			return -EBUSY;
+			return avd_resolve_busy_image_fmt(ctx, image_fmt);
 
 		ctx->image_fmt = image_fmt;
 		avd_reset_decoded_fmt(ctx);
