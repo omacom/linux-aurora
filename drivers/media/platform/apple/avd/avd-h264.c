@@ -37,6 +37,9 @@
  */
 #define MAX_SLICES	4096
 
+/* no picture, or a DPB entry without a VP reference slot */
+#define AVD_H264_NO_REF	V4L2_H264_NUM_DPB_ENTRIES
+
 struct avd_h264_run {
 	struct avd_run base;
 
@@ -54,6 +57,9 @@ struct avd_h264_run {
 
 	s32 cur_poc;
 	u8 num_valid;
+	/* VP reference slot of each DPB entry, see avd_h264_assign_slots() */
+	u8 slot[V4L2_H264_NUM_DPB_ENTRIES];
+	u8 num_slots;
 	u32 slice_data_off;
 };
 
@@ -127,7 +133,7 @@ static void stream_refs(struct avd_ctx *ctx, struct avd_h264_run *run)
 	push(0, "");
 
 	for (int i = 0; i < ARRAY_SIZE(decode->dpb); i++) {
-		if (!(dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_VALID))
+		if (run->slot[i] == AVD_H264_NO_REF)
 			continue;
 
 		ref = avd_get_ref_buf(ctx, &dst->base.vb, dpb[i].reference_ts);
@@ -135,7 +141,7 @@ static void stream_refs(struct avd_ctx *ctx, struct avd_h264_run *run)
 		addr = vb2_dma_contig_plane_dma_addr(&ref->base.vb.vb2_buf, 0) +
 		       ref->comp.start_offset;
 
-		push(AVD_REF_NUM(run->num_valid - 1) | AVD_REF_FLAG_CONST |
+		push(AVD_REF_NUM(run->num_slots - 1) | AVD_REF_FLAG_CONST |
 			     AVD_REF_FLAG_LONG(
 				     dpb[i].flags &
 				     V4L2_H264_DPB_ENTRY_FLAG_LONG_TERM) |
@@ -481,7 +487,7 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 			push(AVD_OP_REF | AVD_OP_REF_LIST_IDX(0) |
 				     AVD_OP_REF_LOOP_IDX(i) |
 				     AVD_OP_REF_DBP_IDX(
-					     sl->ref_pic_list0[i].index),
+					     run->slot[sl->ref_pic_list0[i].index]),
 			     "slc_6e8_cmd_ref_list_0");
 
 		if (sl->slice_type == V4L2_H264_SLICE_TYPE_B) {
@@ -491,7 +497,7 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 				push(AVD_OP_REF | AVD_OP_REF_LIST_IDX(1) |
 					     AVD_OP_REF_LOOP_IDX(i) |
 					     AVD_OP_REF_DBP_IDX(
-						     sl->ref_pic_list1[i].index),
+						     run->slot[sl->ref_pic_list1[i].index]),
 				     "slc_6e8_cmd_ref_list_0");
 		}
 		stream_weights(ctx, run);
@@ -767,10 +773,31 @@ static int avd_h264_realloc_slices(struct avd_ctx *ctx, size_t max_slices)
 }
 
 /*
+ * The VP holds the reference pictures in slots, numbered in the order that
+ * stream_refs() pushes them, and the slice's reference lists address those
+ * slots. Give a slot to every DPB entry that is a reference picture (VALID
+ * and ACTIVE), and to nothing else: Chromium also lists the pictures that
+ * only wait for output, and pushing those as well left the reference count
+ * in the header short of the references pushed, which stalled the VP on
+ * some P pictures.
+ */
+static void avd_h264_assign_slots(struct avd_h264_run *run)
+{
+	const struct v4l2_h264_dpb_entry *dpb = run->decode_params->dpb;
+	const u32 ref = V4L2_H264_DPB_ENTRY_FLAG_VALID |
+			V4L2_H264_DPB_ENTRY_FLAG_ACTIVE;
+
+	run->num_slots = 0;
+	for (int i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++)
+		run->slot[i] = (dpb[i].flags & ref) == ref ? run->num_slots++ :
+							      AVD_H264_NO_REF;
+}
+
+/*
  * Check that every reference in the slice's ref lists points at a DPB entry
- * that is VALID. stream_refs() only pushes a reference header (and its RVRA
- * addresses) for VALID entries and the slice command indexes those by DPB
- * index, so a reference to any other entry makes the VP dereference an
+ * with a VP slot. stream_refs() only pushes a reference header (and its RVRA
+ * addresses) for those entries, so a reference to any other entry makes the
+ * VP dereference an
  * uninitialised reference slot: that ends in a DART translation fault, a
  * frame that never completes and a watchdog reset of the VP, which also
  * disturbs the other contexts. It happens whenever a client starts decoding
@@ -782,7 +809,6 @@ static int avd_h264_realloc_slices(struct avd_ctx *ctx, size_t max_slices)
 static bool avd_h264_refs_valid(const struct avd_h264_run *run)
 {
 	const struct v4l2_ctrl_h264_slice_params *sl = run->slice_params;
-	const struct v4l2_h264_dpb_entry *dpb = run->decode_params->dpb;
 	const struct v4l2_h264_reference *lists[2] = {
 		sl->ref_pic_list0, sl->ref_pic_list1
 	};
@@ -806,7 +832,7 @@ static bool avd_h264_refs_valid(const struct avd_h264_run *run)
 			u8 idx = lists[l][i].index;
 
 			if (idx >= V4L2_H264_NUM_DPB_ENTRIES ||
-			    !(dpb[idx].flags & V4L2_H264_DPB_ENTRY_FLAG_VALID))
+			    run->slot[idx] == AVD_H264_NO_REF)
 				return false;
 		}
 	}
@@ -917,6 +943,7 @@ static int avd_h264_run(struct avd_ctx *ctx)
 
 	run.num_valid = reflist_builder.num_valid;
 	run.cur_poc = reflist_builder.cur_pic_order_count;
+	avd_h264_assign_slots(&run);
 
 	v4l2_h264_build_p_ref_list(&reflist_builder, h264_ctx->reflists.p);
 	v4l2_h264_build_b_ref_lists(&reflist_builder, h264_ctx->reflists.b0,
