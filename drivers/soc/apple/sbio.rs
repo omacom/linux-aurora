@@ -1995,7 +1995,13 @@ impl SepData {
                 Some(done.payload)
             }
             Ok(done) => {
-                dev_warn!(self.dev, "sensor: {} refused with status {}\n", op.name(), done.status);
+                dev_warn!(
+                    self.dev,
+                    "sensor: {} refused with status {}{}\n",
+                    op.name(),
+                    done.status,
+                    done.status.answered().map(crate::sbio::sbio_status_note).unwrap_or("")
+                );
                 self.sensor_step_failed(op.name());
                 None
             }
@@ -2112,7 +2118,13 @@ impl SepData {
         match self.sbio_transfer_raw(opcode, name, bytes) {
             Ok(reply) if reply.status.is_ok() => true,
             Ok(reply) => {
-                dev_err!(self.dev, "sensor: {} refused with status {}\n", name, reply.status);
+                dev_err!(
+                    self.dev,
+                    "sensor: {} refused with status {}{}\n",
+                    name,
+                    reply.status,
+                    reply.status.answered().map(crate::sbio::sbio_status_note).unwrap_or("")
+                );
                 false
             }
             Err(error) => {
@@ -2526,7 +2538,12 @@ impl SepData {
             return false;
         }
 
-        let reply = match sensor::read_session_reply() {
+        let reply = sensor::read_session_reply();
+        // Attribute any re-read/discarded frame to this step, the one
+        // that actually saw it, rather than whichever later step happens
+        // to fail first (sensor_step_failed() would otherwise blame it).
+        self.note_sensor_recoveries();
+        let reply = match reply {
             Ok(r) => r,
             Err(e) => {
                 dev_warn!(self.dev, "sensor: session reply read failed: {:?}\n", e);
@@ -2578,7 +2595,9 @@ impl SepData {
             return false;
         }
 
-        let reply = match sensor::read_challenge_reply() {
+        let reply = sensor::read_challenge_reply();
+        self.note_sensor_recoveries();
+        let reply = match reply {
             Ok(r) => r,
             Err(_) => {
                 dev_warn!(self.dev, "sequence counter: the sensor did not answer the challenge\n");
@@ -4032,9 +4051,10 @@ impl registration::Authentication for SensorAuthentication<'_> {
             Ok(done) => {
                 dev_warn!(
                     self.sep.dev,
-                    "sensor: {} refused with status {}\n",
+                    "sensor: {} refused with status {}{}\n",
                     op.name(),
-                    done.status
+                    done.status,
+                    done.status.answered().map(crate::sbio::sbio_status_note).unwrap_or("")
                 );
                 self.sep.sensor_step_failed(op.name());
                 registration::SerialAnswer::Failed
@@ -4999,6 +5019,22 @@ pub(crate) const SBIO_SESSION_SHARE_LEN: usize = 40;
 pub(crate) const SBIO_STATUS_OK: u16 = 0x00;
 pub(crate) const SBIO_STATUS_PREREQUISITE: u16 = 0x01;
 pub(crate) const SBIO_STATUS_16: u16 = 0x16;
+
+/// A short note for a status word this driver already gives meaning to
+/// elsewhere, so a refusal log can say more than the bare hex. Empty for
+/// any other value — including `0xfffffffe` — because this driver does
+/// not yet know what the enclave means by it; inventing a meaning here
+/// would be worse than printing the raw hex and asking the enclave side.
+pub(crate) fn sbio_status_note(err: u32) -> &'static str {
+    match err as u16 {
+        SBIO_STATUS_PREREQUISITE => " (a prior step is missing; see registration::plan)",
+        SBIO_STATUS_16 => {
+            " (the enclave may already hold this registration from an earlier, \
+interrupted attempt; see registration::authenticate)"
+        }
+        _ => "",
+    }
+}
 static_assert!(SBIO_STATUS_PREREQUISITE != SBIO_STATUS_16);
 pub(crate) const SBIO_SESSION_MODE: u32 = 1;
 static_assert!(SBIO_SESSION_SHARE_LEN <= SBIO_MAX_PAYLOAD);
