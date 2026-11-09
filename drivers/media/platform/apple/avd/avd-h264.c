@@ -60,7 +60,9 @@ struct avd_h264_run {
 	/* VP reference slot of each DPB entry, see avd_h264_assign_slots() */
 	u8 slot[V4L2_H264_NUM_DPB_ENTRIES];
 	u8 num_slots;
-	u32 slice_data_off;
+	/* coded slice data after the slice header */
+	dma_addr_t slice_addr;
+	u32 slice_len;
 };
 
 /* state */
@@ -442,13 +444,9 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 	const struct v4l2_ctrl_h264_pps *pps = run->pps;
 	const struct v4l2_ctrl_h264_sps *sps = run->sps;
 	const struct v4l2_ctrl_h264_slice_params *sl = run->slice_params;
-	struct avd_h264_ctx *h264_ctx = ctx->priv;
-	u32 payload_len = h264_ctx->active_slice->size;
 	bool en_mode = (pps->flags & V4L2_H264_PPS_FLAG_ENTROPY_CODING_MODE) ==
 		       0;
-	u32 off = run->slice_data_off;
-
-	dma_addr_t slc_a84 = h264_ctx->active_slice->addr + off;
+	dma_addr_t slc_a84 = run->slice_addr;
 
 	push(AVD_OP_CODED_DATA |
 		     AVD_OP_CODED_DATA_BIT_OFF(
@@ -457,8 +455,7 @@ static void stream_slice(struct avd_ctx *ctx, struct avd_h264_run *run)
 	     "slc_a7c_cmd_set_coded_slice");
 	push((u32)(slc_a84 & 0xffffffff), "slc_a84_slice_addr_low");
 
-	/* should not include trailing 0? */
-	push(payload_len - off, "slc_a88_slice_hdr_size");
+	push(run->slice_len, "slc_a88_slice_hdr_size");
 
 	push(AVD_OP_SL_LOC |
 		     AVD_OP_SL_LOC_Y(sl->first_mb_in_slice /
@@ -881,6 +878,7 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
 	struct v4l2_h264_reflist_builder reflist_builder;
 	struct avd_h264_run run;
+	u32 off;
 	int ret;
 
 	avd_h264_run_preamble(ctx, &run);
@@ -904,7 +902,7 @@ static int avd_h264_run(struct avd_ctx *ctx)
 
 	if (!data || !avd_h264_find_slice_data(data, payload_len,
 					       avd_h264_header_len(&run),
-					       &run.slice_data_off)) {
+					       &off)) {
 		dev_dbg_ratelimited(ctx->dev->dev,
 				    "slice has no data after its header\n");
 		avd_run_postamble(ctx, &run.base);
@@ -936,6 +934,8 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	h264_ctx->slice_num++;
 	h264_ctx->slice_bytes += PAGE_ALIGN((size_t)payload_len);
 	h264_ctx->monochrome = run.sps->chroma_format_idc == 0;
+	run.slice_addr = h264_ctx->active_slice->addr + off;
+	run.slice_len = payload_len - off;
 
 	/* Build the P/B{0,1} ref lists. */
 	v4l2_h264_init_reflist_builder(&reflist_builder, run.decode_params,
