@@ -268,11 +268,14 @@ impl<T: DriverGpuVm> GpuVm<T> {
         let mut vm_exec = KBox::init(
             init!(bindings::drm_gpuvm_exec {
                 vm: self.as_raw(),
-                flags: if interruptible {
-                    bindings::DRM_EXEC_INTERRUPTIBLE_WAIT
-                } else {
-                    0
-                },
+                // Two GEM objects can share one reservation (a dma-buf imported again while
+                // the closed object still has mappings); lock it once, as C drm_exec users do.
+                flags: bindings::DRM_EXEC_IGNORE_DUPLICATES
+                    | if interruptible {
+                        bindings::DRM_EXEC_INTERRUPTIBLE_WAIT
+                    } else {
+                        0
+                    },
                 exec: Default::default(),
                 extra: match (is_ext, obj) {
                     (true, Some(obj)) => bindings::drm_gpuvm_exec__bindgen_ty_1 {
