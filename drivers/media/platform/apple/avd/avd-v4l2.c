@@ -289,7 +289,7 @@ static const struct avd_ctrl_desc avd_h264_ctrl_descs[] = {
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_START_CODE,
 		.cfg.min = V4L2_STATELESS_H264_START_CODE_NONE,
-		.cfg.max = V4L2_STATELESS_H264_START_CODE_NONE,
+		.cfg.max = V4L2_STATELESS_H264_START_CODE_ANNEX_B,
 		.cfg.def = V4L2_STATELESS_H264_START_CODE_NONE,
 	},
 	{

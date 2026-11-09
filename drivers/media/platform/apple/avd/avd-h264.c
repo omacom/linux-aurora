@@ -873,12 +873,45 @@ VISIBLE_IF_KUNIT bool avd_h264_slice_fits(const struct v4l2_ctrl_h264_sps *sps,
 	       avd_h264_slice_budget(decoded_size);
 }
 
+/*
+ * Find the next NAL unit at or after *pos. With Annex B start codes the NAL
+ * unit runs up to the next start code, without the trailing zero bytes that
+ * belong to a four-byte start code: a NAL unit never ends in a zero byte, and
+ * the AVD never completes a CAVLC picture whose slice data has such a tail.
+ */
+static bool avd_h264_next_nal(const u8 *data, u32 len, u32 *pos, u32 *nal_off,
+			      u32 *nal_len)
+{
+	u32 i = *pos, start, end;
+
+	for (; i + 3 <= len; i++)
+		if (!data[i] && !data[i + 1] && data[i + 2] == 1)
+			break;
+	if (i + 3 > len)
+		return false;
+
+	start = i + 3;
+	for (i = start; i + 3 <= len; i++)
+		if (!data[i] && !data[i + 1] && data[i + 2] == 1)
+			break;
+	end = i + 3 <= len ? i : len;
+	*pos = end;
+
+	while (end > start && data[end - 1] == 0)
+		end--;
+	*nal_off = start;
+	*nal_len = end - start;
+	return true;
+}
+
 static int avd_h264_run(struct avd_ctx *ctx)
 {
 	struct avd_h264_ctx *h264_ctx = ctx->priv;
 	struct v4l2_h264_reflist_builder reflist_builder;
 	struct avd_h264_run run;
-	u32 off;
+	struct v4l2_ctrl *ctrl;
+	bool annexb;
+	u32 nal_off, nal_len, pos = 0;
 	int ret;
 
 	avd_h264_run_preamble(ctx, &run);
@@ -896,13 +929,35 @@ static int avd_h264_run(struct avd_ctx *ctx)
 		return -EINVAL;
 	}
 
+	ctrl = v4l2_ctrl_find(&ctx->ctrl_hdl, V4L2_CID_STATELESS_H264_START_CODE);
+	annexb = ctrl && ctrl->cur.val == V4L2_STATELESS_H264_START_CODE_ANNEX_B;
+
 	struct vb2_v4l2_buffer *src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
 	u32 payload_len = vb2_get_plane_payload(&src->vb2_buf, 0);
 	const u8 *data = vb2_plane_vaddr(&src->vb2_buf, 0);
 
+	/*
+	 * A client may send Annex B start codes and leave the start code
+	 * control at its default (Chromium does). A NAL unit never begins
+	 * with a zero byte, so a leading start code is unambiguous.
+	 */
+	if (data && payload_len >= 3 && !data[0] && !data[1] &&
+	    (data[2] == 1 || (payload_len >= 4 && !data[2] && data[3] == 1)))
+		annexb = true;
+
+	/* A slice with a start code: skip to its NAL unit. */
+	if (data && annexb) {
+		if (!avd_h264_next_nal(data, payload_len, &pos, &nal_off, &nal_len)) {
+			avd_run_postamble(ctx, &run.base);
+			return -EINVAL;
+		}
+		data += nal_off;
+		payload_len = nal_len;
+	}
+
 	if (!data || !avd_h264_find_slice_data(data, payload_len,
 					       avd_h264_header_len(&run),
-					       &off)) {
+					       &nal_off)) {
 		dev_dbg_ratelimited(ctx->dev->dev,
 				    "slice has no data after its header\n");
 		avd_run_postamble(ctx, &run.base);
@@ -934,8 +989,8 @@ static int avd_h264_run(struct avd_ctx *ctx)
 	h264_ctx->slice_num++;
 	h264_ctx->slice_bytes += PAGE_ALIGN((size_t)payload_len);
 	h264_ctx->monochrome = run.sps->chroma_format_idc == 0;
-	run.slice_addr = h264_ctx->active_slice->addr + off;
-	run.slice_len = payload_len - off;
+	run.slice_addr = h264_ctx->active_slice->addr + nal_off;
+	run.slice_len = payload_len - nal_off;
 
 	/* Build the P/B{0,1} ref lists. */
 	v4l2_h264_init_reflist_builder(&reflist_builder, run.decode_params,
