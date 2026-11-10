@@ -42,6 +42,7 @@
 #include "iomfb_v14_7.h"
 #include "iomfb_v14_7_backlight.h"
 #include "iomfb_v14_7_board.h"
+#include "iomfb_v14_7_plane.h"
 #include "iomfb_v14_7_link.h"
 #include "iomfb_v14_7_swap.h"
 #include "av.h"
@@ -197,6 +198,26 @@ static const struct dcp_v14_board dcp_v14_board_j516c = {
 	.panel_nits = true,
 };
 
+/* J516M uses the J516C image; its first boot offered only a 120 Hz panel timing. */
+static const struct dcp_v14_board dcp_v14_board_j516m = {
+	.name = "J516M",
+	.debugfs = "dcp-j516m",
+	.dcp_compatible = "apple,t6031-dcp",
+	.machine = "apple,j516m",
+	.soc = "apple,t6034",
+	.firmware_uuid = DCP_V14_J516C_FIRMWARE_UUID,
+	.handoff = "apple,t6031-handoff",
+	.panel_width = 3456,
+	.panel_height = 2234,
+	.promotion = true,
+	.log_bringup = true,
+	.base_edid = true,
+	/* Same pinned DCP image as J516C: zero stamps cap this panel at 60 fps. */
+	.swap_timestamps = true,
+	/* J516C's 14.7 image uses the bounded nits block for the J516 panel. */
+	.panel_nits = true,
+};
+
 /*
  * J514C (MacBook Pro 14", M3 Max): the T6031 DCP running the J516C image
  * (the DCP image is the SoC's; its UUID is checked at probe), in the J514S
@@ -236,6 +257,7 @@ static const struct dcp_v14_board *const dcp_v14_boards[] = {
 	&dcp_v14_board_j516c,
 	&dcp_v14_board_j514c,
 	&dcp_v14_board_j514m,
+	&dcp_v14_board_j516m,
 };
 
 struct dcp_v14_property {
@@ -365,7 +387,7 @@ static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_siz
 
 static void dcp_v14_backlight_work(struct work_struct *work);
 
-/* The internal panel of a board whose swap level block was validated (T6030). */
+/* The internal panel of a board admitted to the bounded swap level path. */
 static bool dcp_v14_board_nits(const struct apple_dcp_v14 *v14)
 {
 	return !v14->external && v14->panel_nits && v14->board && v14->board->panel_nits;
@@ -1740,7 +1762,7 @@ static bool dcp_v14_panel_nits_admit(const struct dcp_v14_board *board,
 	return board && board->panel_nits &&
 		(machine_is(ctx, "apple,j514s") || machine_is(ctx, "apple,j516s") ||
 		 machine_is(ctx, "apple,j516c") || machine_is(ctx, "apple,j613") ||
-		 machine_is(ctx, "apple,j504"));
+		 machine_is(ctx, "apple,j504") || machine_is(ctx, "apple,j516m"));
 }
 
 const char *iomfb_v14_7_board_name(const struct dcp_v14_board *board)
@@ -3124,12 +3146,7 @@ int iomfb_v14_7_atomic_check(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	if (fb->modifier != DRM_FORMAT_MOD_LINEAR || fb->offsets[0] ||
 	    fb->pitches[0] < width * 4 || (fb->pitches[0] & 63))
 		return -EINVAL;
-	/* An external pipe may show the top-left of a larger framebuffer. */
-	if (p->src_x || p->src_y || p->crtc_x || p->crtc_y ||
-	    p->src_w != width << 16 || p->src_h != height << 16 ||
-	    p->crtc_w != width || p->crtc_h != height ||
-	    (dcp->external ? fb->width < width || fb->height < height :
-			     fb->width != width || fb->height != height))
+	if (!dcp_v14_plane_fits_mode(p, width, height, dcp->external))
 		return -EINVAL;
 	obj = drm_fb_dma_get_gem_obj(fb, 0);
 	if (!obj || !obj->dma_addr || (u64)fb->pitches[0] * height > obj->base.size)
@@ -3383,12 +3400,15 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	struct drm_plane_state *p = drm_atomic_get_new_plane_state(state, crtc->primary);
 	struct drm_crtc_state *cs = drm_atomic_get_new_crtc_state(state, crtc);
 	struct drm_framebuffer *fb;
+	u32 width = 0, height = 0;
 
 	if (!p)
 		p = crtc->primary->state;
 	if (!cs)
 		cs = crtc->state;
 	fb = p && p->visible ? p->fb : NULL;
+	if (fb)
+		dcp_v14_plane_scanout_size(p, dcp->external, &width, &height);
 	/*
 	 * No swaps while an external display is off, unset, unplugged, or
 	 * being described again.
@@ -3403,10 +3423,7 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	if (!dcp->external)
 		dcp_v14_configure_backlight(dcp);
 	dcp->swap_start = ktime_get();
-	if (dcp->v14 && dcp_v14_present(dcp->v14, fb,
-					 fb ? (dcp->external ? p->src_w >> 16 : fb->width) : 0,
-					 fb ? (dcp->external ? p->src_h >> 16 : fb->height) : 0,
-					 dcp->notch_height, cs)) {
+	if (dcp->v14 && dcp_v14_present(dcp->v14, fb, width, height, dcp->notch_height, cs)) {
 		dcp_drm_crtc_page_flip(dcp, ktime_get());
 		/*
 		 * The swap completed: the framebuffers this commit and earlier

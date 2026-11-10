@@ -19,6 +19,7 @@ static inline int
 mt7932_connect_auth(const struct cfg80211_connect_params *p)
 {
 	u32 versions = p->crypto.wpa_versions;
+	bool tkip_group = p->crypto.cipher_group == WLAN_CIPHER_SUITE_TKIP;
 
 	/* SAE offload clients use VERSION_3; older clients use VERSION_2.
 	 * A transition request can carry both. The selected AKM still owns
@@ -28,8 +29,15 @@ mt7932_connect_auth(const struct cfg80211_connect_params *p)
 	    (versions & ~(NL80211_WPA_VERSION_2 | NL80211_WPA_VERSION_3)) ||
 	    p->crypto.n_ciphers_pairwise != 1 ||
 	    p->crypto.ciphers_pairwise[0] != WLAN_CIPHER_SUITE_CCMP ||
-	    p->crypto.cipher_group != WLAN_CIPHER_SUITE_CCMP ||
+	    (p->crypto.cipher_group != WLAN_CIPHER_SUITE_CCMP && !tkip_group) ||
 	    p->crypto.n_akm_suites < 1)
+		return -EOPNOTSUPP;
+
+	/* WPA/WPA2 mixed-mode APs pair a CCMP unicast key with a TKIP group
+	 * key. The firmware owns the handshake and both keys. Only plain
+	 * WPA2-PSK may do this; pairwise TKIP stays refused.
+	 */
+	if (tkip_group && p->crypto.akm_suites[0] != WLAN_AKM_SUITE_PSK)
 		return -EOPNOTSUPP;
 
 	switch (p->crypto.akm_suites[0]) {

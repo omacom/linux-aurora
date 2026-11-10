@@ -225,6 +225,7 @@ def main():
         if name == 'hw.rs':
             # New SoC module wiring does not alter the golden T6030 profile.
             data = data.replace(b'#[cfg(CONFIG_DRM_ASAHI_G15)]\npub(crate) mod t6034;\n', b'')
+            data = data.replace(b'#[cfg(CONFIG_DRM_ASAHI_G15)]\npub(crate) mod j516m;\n', b'')
         actual = sha(data)
         if actual != expected:
             raise SystemExit("T6030 golden file changed: " + name)

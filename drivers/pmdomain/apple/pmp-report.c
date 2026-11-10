@@ -699,10 +699,18 @@ static void apple_pmp_start_finish(struct apple_pmp_start *st, int result)
 			st->result = result;
 		complete_all(&st->started);
 	}
-	if (result && READ_ONCE(st->enabled))
+	if (result && READ_ONCE(st->enabled)) {
+		const char *fallback = st->rep->offsets->fallback;
+
+		/* J516M shares the T6031 report layout, but has its own display gate. */
+		if (of_machine_is_compatible("apple,t6034") &&
+		    of_machine_is_compatible("apple,j516m"))
+			fallback = "apple_t6034_display.enable=0";
+
 		dev_err(st->rep->dev,
 			"%s PMP start failed (%d) after the PMP was enabled: it may keep running until the next reboot. Reboot to stop it; to boot without starting it: %s, or nomodeset\n",
-			st->rep->offsets->name, result, st->rep->offsets->fallback);
+			st->rep->offsets->name, result, fallback);
+	}
 }
 
 /* Teardown has begun: a start still in progress gives up early. */
