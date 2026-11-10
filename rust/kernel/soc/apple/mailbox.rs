@@ -18,6 +18,7 @@ use crate::{
         ScopeGuard, //
     }, //
 };
+use core::mem::MaybeUninit;
 
 use core::marker::PhantomData;
 

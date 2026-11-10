@@ -1986,7 +1986,7 @@ static void dcpep_cb_hotplug(struct apple_dcp *dcp, u64 *connected)
 	    READ_ONCE(dcp->typec_cable_connected)) {
 		dev_dbg(dcp->dev, "cb_hotplug() ignoring unplug of powered-off Type-C output\n");
 		dcp->valid_mode = false;
-		schedule_work(&dcp->vblank_wq);
+		schedule_delayed_work(&dcp->vblank_wq, 0);
 		return;
 	}
 
@@ -2504,6 +2504,8 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	 * already running at its native 2408x1506, so skip the modeset and let
 	 * that timing stand.
 	 */
+static bool dcp_send_modeset;
+
 	if (!dcp_send_modeset &&
 	    dcp->connector_type == DRM_MODE_CONNECTOR_eDP) {
 		dev_info(dcp->dev, "inheriting the bootloader's display mode\n");
@@ -2709,7 +2711,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 	if (!has_surface) {
 		dev_warn_once(dcp->dev,
 			      "refusing a surface-less swap on H17P; keeping the last surface\n");
-		schedule_work(&dcp->vblank_wq);
+		schedule_delayed_work(&dcp->vblank_wq, 0);
 		return;
 	}
 #endif

@@ -141,6 +141,7 @@ struct dcp_channel {
 
 	/* Current depth of the call stack. Less than DCP_MAX_CALL_DEPTH */
 	u8 depth;
+	bool warned_busy;
 };
 
 struct dcp_fb_reference {

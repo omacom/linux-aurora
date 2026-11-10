@@ -21,7 +21,8 @@
 /// One direct dispatch plus terminator: the M5 profile and the default limit.
 pub(crate) const BASE_STREAM_BYTES: u64 = 48;
 /// Hard ceiling for the module parameter. A larger value is refused at probe.
-pub(crate) const MAX_STREAM_BYTES: u64 = 4096;
+/// Raised to k24's 64 KiB rule (w7Y cell 329a9ebe, Main directive 2026-11-10).
+pub(crate) const MAX_STREAM_BYTES: u64 = 65536;
 
 /// Validate the module parameter. `None` means refuse to bind: below the
 /// base profile would silently tighten what is admitted today, above the ceiling

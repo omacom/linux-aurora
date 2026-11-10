@@ -2496,7 +2496,7 @@ static int dcp_comp_bind(struct device *dev, struct device *main, void *data)
 		dcp->connector_type = DRM_MODE_CONNECTOR_eDP;
 		INIT_WORK(&dcp->bl_register_wq, dcp_work_register_backlight);
 		mutex_init(&dcp->bl_register_mutex);
-		INIT_WORK(&dcp->bl_update_wq, dcp_work_update_backlight);
+		INIT_DELAYED_WORK(&dcp->bl_update_wq, dcp_work_update_backlight);
 	}
 
 	ret = dcp_create_piodma_iommu_dev(dcp);
@@ -2720,7 +2720,7 @@ static void dcp_comp_unbind(struct device *dev, struct device *main, void *data)
 	}
 	cancel_delayed_work_sync(&dcp->typec_reconnect_wq);
 	cancel_delayed_work_sync(&dcp->typec_fabric_retrain_wq);
-	cancel_work_sync(&dcp->vblank_wq);
+	cancel_delayed_work_sync(&dcp->vblank_wq);
 
 	/* The component framework releases the bind's devres group after
 	 * unbind, including optional clocks whose managed value can be NULL.

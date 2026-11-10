@@ -983,7 +983,7 @@ static void dcp_dispatch_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	 * firmware has reported the display back.
 	 */
 	if (!dcp->valid_mode || !dcp->connector || !dcp->connector->connected) {
-		schedule_work(&dcp->vblank_wq);
+		schedule_delayed_work(&dcp->vblank_wq, 0);
 		return;
 	}
 	if (dcp_channel_busy(&dcp->ch_cmd))
@@ -1002,7 +1002,7 @@ static void dcp_dispatch_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 		/* HACK: issue a delayed vblank event to avoid timeouts in
 		 * drm_atomic_helper_wait_for_vblanks().
 		 */
-		schedule_work(&dcp->vblank_wq);
+		schedule_delayed_work(&dcp->vblank_wq, 0);
 		return;
 	} else if (dcp->ch_cmd.warned_busy) {
 		dcp->ch_cmd.warned_busy = false;
