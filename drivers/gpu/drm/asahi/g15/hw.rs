@@ -196,6 +196,54 @@ pub(crate) mod t6030 {
                 0x54, 0xf9, 0xf0, 0x6e, 0x0a, 0x61, 0x36, 0x3e,
             ],
           },
+          // Some J516S units on the same 14.7 boot chain load a different B0
+          // TEXT image with identical sizes and marker. Pin its complete
+          // measured digest for the J516S only.
+          FirmwareBuild {
+            name: "J516S cd05 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j516s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0xcd, 0x05, 0xaf, 0x6a, 0x82, 0x8b, 0x52, 0xe4,
+                0xc2, 0xfe, 0xd2, 0x00, 0x86, 0xd3, 0xd1, 0x8a,
+                0x7d, 0xb4, 0x2e, 0x03, 0xa8, 0xfd, 0x6f, 0x83,
+                0x54, 0xf9, 0xf0, 0x6e, 0x0a, 0x61, 0x36, 0x3e,
+            ],
+          },
+          // J514S (14-inch) firmware measured on the 14.7 boot chain with
+          // system firmware 26.6.2; the GPU reached READY with the bring-up
+          // prefix override (issue #247).
+          FirmwareBuild {
+            name: "J514S 4118 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j514s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0x41, 0x18, 0x33, 0xa7, 0xde, 0xd7, 0x73, 0xfe,
+                0xea, 0xc4, 0xa1, 0x81, 0x55, 0x2e, 0x3f, 0xf5,
+                0x58, 0x2e, 0xaf, 0x44, 0x35, 0xf2, 0xdd, 0x8f,
+                0x62, 0x0c, 0x1e, 0xd0, 0xb3, 0x1d, 0xf1, 0xb0,
+            ],
+          },
+          // J516S (16-inch) firmware measured on the 14.7 boot chain with
+          // system firmware 26.6.2; the GPU reached READY with the bring-up
+          // prefix override (issue #247).
+          FirmwareBuild {
+            name: "J516S 4118 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j516s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0x41, 0x18, 0x33, 0xa7, 0xde, 0xd7, 0x73, 0xfe,
+                0xea, 0xc4, 0xa1, 0x81, 0x55, 0x2e, 0x3f, 0xf5,
+                0x58, 0x2e, 0xaf, 0x44, 0x35, 0xf2, 0xdd, 0x8f,
+                0x62, 0x0c, 0x1e, 0xd0, 0xb3, 0x1d, 0xf1, 0xb0,
+            ],
+          },
         ],
         machine: kernel::c_str!("apple,t6030"),
         platform: super::Platform::AdtWithPmp,
