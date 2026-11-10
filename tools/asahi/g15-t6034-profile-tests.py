@@ -3,7 +3,7 @@
 """Compile actual G15C profiles and test T6034 shape and exact firmware admission.
 
 The diagnostic profile has no firmware row. Once a measured row is present,
-exercise its complete public identity and J514M binding without reading an image.
+exercise the complete public identities and J514M/J516M bindings without reading an image.
 """
 from pathlib import Path
 import subprocess
@@ -47,6 +47,7 @@ mod g15 {
    @TYPES@
   #[path="@T6031@"] pub(crate) mod t6031;
   #[path="@T6034@"] pub(crate) mod t6034;
+  #[path="@J516M@"] pub(crate) mod j516m;
  }
 }
 fn main() {
@@ -107,7 +108,7 @@ fn main() {
  assert_eq!(t6031::IOMAPS.iter().find(|m|m.slot==11).unwrap().map_bytes,8*0xd8000);
 }
 '''
-for token,replacement in {'@CONFIG@':config,'@REFERENCE@':reference,'@VALUE@':value,'@TYPES@':types,'@T6031@':str(G15/'hw/t6031.rs'),'@T6034@':str(G15/'hw/t6034.rs'),'@MATCHING@':str(G15/'identity/matching.rs'),'@LOOKUP@':str(G15/'identity/lookup.rs')}.items():source=source.replace(token,replacement)
+for token,replacement in {'@CONFIG@':config,'@REFERENCE@':reference,'@VALUE@':value,'@TYPES@':types,'@T6031@':str(G15/'hw/t6031.rs'),'@T6034@':str(G15/'hw/t6034.rs'),'@J516M@':str(G15/'hw/j516m.rs'),'@MATCHING@':str(G15/'identity/matching.rs'),'@LOOKUP@':str(G15/'identity/lookup.rs')}.items():source=source.replace(token,replacement)
 identity=(G15/'identity.rs').read_text()
 # Run the production firmware admission against synthetic public identity bytes.
 firmware=item(identity,'pub(crate) fn firmware(')
@@ -156,8 +157,15 @@ fn main() {
 }
 '''
 for token,replacement in {'FIRMWARE':firmware,'MATCHING':str(G15/'identity/matching.rs'),'LOOKUP':str(G15/'identity/lookup.rs')}.items():identity_source=identity_source.replace(token,replacement)
+j516m_source = source.replace('let c=&t6034::CONFIG;', 'let c=&j516m::CONFIG;')
+j516m_source = j516m_source.replace('use g15::hw::{t6031,t6034};', 'use g15::hw::{t6031,j516m};')
+j516m_source = j516m_source.replace('apple,j514m', 'apple,j516m')
+j516m_source = j516m_source.replace('b"apple,j516m",b"apple,j514s"', 'b"apple,j514m",b"apple,j514s"')
+j516m_source = j516m_source.replace('0x7b5fc7f5fd', '0x7b5ed7f5fd')
+j516m_source = j516m_source.replace('[0x1fd,0x1fd,0x1fc,0x1ed]', '[0x1fd,0x1fd,0x1ed,0x1ed]')
+j516m_source = j516m_source.replace(' assert_eq!((c.hw_ids', ' assert!(j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041200,0x0021040a,0x7b5ed7f5fd));\n assert!(!j516m::identity_matches(0x07041100,0x0001040a,0x7b5ed7f5fd));\n assert!(j516m::identity_matches(0x07041100,0x0021040a,0x7b5fc7f5fd));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5fc));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0x7b5ed7f5ff));\n assert!(!j516m::identity_matches(0x07041100,0x0021040a,0));\n' + ' assert_eq!((c.hw_ids', 1)
 with tempfile.TemporaryDirectory(prefix='t6034-profile-') as temp:
- for name,code in [('profile',source),('measurement-refusal',identity_source)]:
+ for name,code in [('profile-j514m',source),('profile-j516m',j516m_source),('measurement-refusal',identity_source)]:
   p=Path(temp)/name;p.with_suffix('.rs').write_text(code)
   subprocess.run(['rustc','--edition=2021','--cfg','CONFIG_DRM_ASAHI_G15','-o',str(p),str(p.with_suffix('.rs'))],check=True)
   subprocess.run([str(p)],check=True)

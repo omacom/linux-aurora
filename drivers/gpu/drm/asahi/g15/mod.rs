@@ -203,6 +203,11 @@ impl platform::Driver for Driver<'_> {
                     return Err(EPROBE_DEFER);
                 }
                 let cfg = *info.ok_or(ENODEV)?;
+                let cfg = if cfg.chip_id == 0x6034 && boot::glue::machine(c_str!("apple,j516m")) {
+                    &hw::j516m::CONFIG
+                } else {
+                    cfg
+                };
                 dev_info!(pdev.as_ref(), "G15: probing ({})\n", cfg.name);
                 match crate::driver::AsahiPlatformDriver::probe_g15(pdev, cfg) {
                     Ok(driver) => Some(driver),

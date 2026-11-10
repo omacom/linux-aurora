@@ -221,9 +221,13 @@ int main(int argc, char **argv)
 		CHECK(publish(&d34) == 0 && d34.refs == 1);
 		CHECK(prepare(&g34) == 0 && links_made == 1 && last_link.supplier == &d34);
 		machine("apple,t6034", "apple,j516m");
-		CHECK(prepare(&g34) == -ENODEV && links_made == 1);
+		CHECK(prepare(&g34) == 0 && links_made == 2 && last_link.supplier == &d31);
+		withdraw(&d31);
+		CHECK(prepare(&g34) == -EPROBE_DEFER && links_made == 2);
+		machine("apple,t6034", "apple,j999");
+		CHECK(prepare(&g34) == -ENODEV && links_made == 2);
 		machine("apple,t6031", "apple,j514m");
-		CHECK(prepare(&g34) == -ENODEV && links_made == 1);
+		CHECK(prepare(&g34) == -ENODEV && links_made == 2);
 		machine("apple,t6034", "apple,j514m");
 		withdraw(&d34);
 		CHECK(!d34.refs && prepare(&g34) == -EPROBE_DEFER);
@@ -328,7 +332,7 @@ mod regs {
 mod glue {
     use super::{call, STATE};
     pub fn board() -> bool { call("board"); STATE.with(|s| s.borrow().board) }
-    pub fn machine(name: &str) -> bool { if !["apple,j514c", "apple,t6031", "apple,j514m", "apple,t6034"].contains(&name) { call("machine"); } STATE.with(|s| { let s=s.borrow(); match name { "apple,j514c" => s.j514c, "apple,t6031" => s.t6031, "apple,j514m" => s.j514m, "apple,t6034" => s.t6034, _ => s.machine } }) }
+    pub fn machine(name: &str) -> bool { if !["apple,j514c", "apple,t6031", "apple,j514m", "apple,j516m", "apple,t6034"].contains(&name) { call("machine"); } STATE.with(|s| { let s=s.borrow(); match name { "apple,j514c" => s.j514c, "apple,t6031" => s.t6031, "apple,j514m" => s.j514m, "apple,j516m" => false, "apple,t6034" => s.t6034, _ => s.machine } }) }
     pub unsafe fn asahi_g15_pmp_prepare(_: *mut core::ffi::c_void) -> core::ffi::c_int { call("pmp"); STATE.with(|s| s.borrow().pmp) }
     pub unsafe fn asahi_g15_display_prepare(_: *mut core::ffi::c_void) -> core::ffi::c_int { call("display"); STATE.with(|s| s.borrow().display) }
     pub fn dma_coherent(_: &super::device::Device) -> bool { call("coherent"); false }

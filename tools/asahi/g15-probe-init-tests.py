@@ -126,7 +126,10 @@ mod platform {
         ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound;
     }
 }
-struct Config { name: &'static str }
+struct Config { name: &'static str, chip_id: u32 }
+macro_rules! c_str { ($s:literal) => { $s } }
+// The J516M probe swaps in its own profile; this fixture's device is never a J516M.
+mod hw { pub mod j516m { pub static CONFIG: crate::Config = crate::Config { name: "j516m", chip_id: 0x6034 }; } }
 pub struct ThisModule;
 pub trait ModuleMetadata { const NAME: &'static std::ffi::CStr; }
 pub trait InPlaceModule: Sized {
@@ -173,6 +176,7 @@ mod driver {
 }
 mod boot { pub mod glue {
     pub fn retained() -> bool { crate::RETAINED.with(core::cell::Cell::get) }
+    pub fn machine(_compatible: &str) -> bool { false }
     pub unsafe fn asahi_g15_reprobe() { crate::activation_reprobe(); }
     // Reads the device tree and logs; no driver state.
     pub unsafe fn asahi_g15_report_loader_gpu() {}
@@ -191,7 +195,7 @@ fn reset(fail_alloc: bool, touch: bool, error: i32) {
     FAIL_ALLOC.set(fail_alloc); TOUCH.set(touch); PROBE_ERROR.set(error);
     RETAINED.set(false); ALLOCS.set(0); PROBES.set(0);
 }
-static CFG: Config = Config { name: "test" };
+static CFG: Config = Config { name: "test", chip_id: 0x6034 };
 static PDEV: platform::Device<Core<'static>> = platform::Device {
     base: Device { data: Cell::new(core::ptr::null_mut()) }, ctx: PhantomData,
 };
