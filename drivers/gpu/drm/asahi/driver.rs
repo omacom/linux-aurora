@@ -411,6 +411,9 @@ impl AsahiPlatformDriver {
         unsafe { pdev.dma_set_mask_and_coherent(DmaMask::try_new(42)?)? };
         let resources = regs::Resources::new(pdev)?;
         let drm = drm::UnregisteredDevice::<AsahiDrmDriver>::new(pdev, Ok(()))?;
+        // SAFETY: Every adapter calls close_binding in unbind before devres;
+        // probe errors drop this local owner while the bound callback is live.
+        let binding = unsafe { crate::binding::Owner::new(pdev.as_ref(), &drm)? };
         let backend = crate::m3::m3_drm::Backend::start(pdev, &drm, soc)?;
         let gpu = backend.clone() as Arc<dyn gpu::Gpu>;
         let data = try_pin_init!(AsahiDrmRegistrationData { gpu, resources });
@@ -425,6 +428,7 @@ impl AsahiPlatformDriver {
         };
         dev_info!(pdev.as_ref(), "M3: firmware ready; common DRM GEM/VM frontend registered\n");
         Ok(AsahiPlatformDriverData {
+            binding,
             _device: reg.device().into(),
             _reg: reg,
             g17: None,
@@ -489,7 +493,7 @@ impl AsahiPlatformDriver {
         let raw_stats = match crate::sysfs_exports::register_g17(
             raw_dev,
             snapshot,
-            module_parameters::stats_export.value() != 0,
+            *module_parameters::stats_export.value() != 0,
         ) {
             Ok(handle) => handle,
             Err(error) => {

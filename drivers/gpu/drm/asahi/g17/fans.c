@@ -20,5 +20,6 @@ int asahi_zone_temp(const char *name, int *temp)
 
 int asahi_fans_request(struct device *dev, unsigned int permille, unsigned int min_step_rpm)
 {
-	return macsmc_hwmon_fans_request(dev, permille, min_step_rpm);
+	/* The SMC hwmon cell has no kernel fan request here: the SMC keeps the fans. */
+	return -EOPNOTSUPP;
 }

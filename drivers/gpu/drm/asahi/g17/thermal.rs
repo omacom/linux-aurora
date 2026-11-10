@@ -126,7 +126,7 @@ pub(super) fn requested() -> bool {
     enabled()
 }
 fn target_mc() -> i32 {
-    let parameter = crate::module_parameters::m5_thermal_target_mc.value();
+    let parameter = *crate::module_parameters::m5_thermal_target_mc.value();
     i32::try_from(parameter).unwrap_or(90_000).clamp(70_000, 104_000)
 }
 
@@ -419,7 +419,14 @@ impl CpuCeiling {
         (u64::from(max_khz) * u64::from(share) / 100).min(i32::MAX as u64) as i32
     }
 
+    /// Without cpufreq there is no policy to limit.
+    #[cfg(not(CONFIG_CPU_FREQ))]
+    fn acquire(&mut self) -> bool {
+        false
+    }
+
     /// Takes a request on every policy (each policy once, through its first CPU).
+    #[cfg(CONFIG_CPU_FREQ)]
     fn acquire(&mut self) -> bool {
         if !self.requests.is_empty() {
             return true;
@@ -474,6 +481,7 @@ impl CpuCeiling {
             // SAFETY: the request was added in acquire and the policy reference is still held.
             unsafe {
                 bindings::freq_qos_remove_request(&mut *entry.request);
+                #[cfg(CONFIG_CPU_FREQ)]
                 bindings::cpufreq_cpu_put(entry.policy);
             }
         }

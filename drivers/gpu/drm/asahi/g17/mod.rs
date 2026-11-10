@@ -2178,7 +2178,7 @@ impl gpu::Gpu for Gpu {
                 params.features |= crate::file::DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION
                     | crate::file::DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION;
             }
-            if crate::module_parameters::m5_mesh_storage_chunks.value() != 0 {
+            if *crate::module_parameters::m5_mesh_storage_chunks.value() != 0 {
                 params.features |= crate::file::DRM_ASAHI_FEATURE_TASK_MESH_STORAGE;
             }
         }

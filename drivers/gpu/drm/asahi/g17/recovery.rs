@@ -519,7 +519,6 @@ mod tests {
         fn settle_cancelled_renders(&mut self, _qids: u128) {}
         fn rescan_compute(&mut self) -> Result { Ok(()) }
         fn release_retired_compute(&mut self) {}
-        fn announce_withheld(&mut self) {}
     }
 
     impl Host for Halted {

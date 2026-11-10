@@ -658,7 +658,7 @@ impl Memory {
     /// A zero chunk parameter disables the binding.
     pub(super) fn mesh_storage_register(&mut self, alloc: &Allocator<'_>) -> Result<u64> {
         if self.mesh_storage.is_none() {
-            let chunks = crate::module_parameters::m5_mesh_storage_chunks.value();
+            let chunks = *crate::module_parameters::m5_mesh_storage_chunks.value();
             if chunks == 0 { return Ok(0); }
             if chunks > 0xffff { return Err(EINVAL); }
             let bytes = (chunks as usize).checked_mul(MESH_STORAGE_CHUNK).ok_or(EOVERFLOW)?;

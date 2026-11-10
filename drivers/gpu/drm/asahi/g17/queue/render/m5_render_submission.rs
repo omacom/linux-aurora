@@ -8,7 +8,7 @@ use crate::g17::{buffer::target, command::Validated, fw::render::{RenderArgs, Re
 /// Compressed single-layer MSAA ZLS admission: D32 depth with optional plain
 /// stencil, and the compressed Z/S form.
 pub(crate) fn depth_msaa_compression_enabled() -> bool {
-    crate::module_parameters::m5_depth_msaa_compression.value() == 1
+    *crate::module_parameters::m5_depth_msaa_compression.value() == 1
 }
 
 pub(crate) fn validate(pass: &RenderPass) -> Result {
