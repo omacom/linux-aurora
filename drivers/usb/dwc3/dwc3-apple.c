@@ -246,6 +246,16 @@ static int dwc3_apple_core_probe(struct dwc3_apple *appledwc)
 	}
 	devres_remove_group(appledwc->dev, group);
 
+	/*
+	 * The USB2 port does not come back from L1. With hardware LPM enabled, a
+	 * high-speed device on the root port works until the bus has been idle for
+	 * a few tens of milliseconds; the next transfer then raises a port error
+	 * (PEC) and it and every later one fail with a transaction error, and a
+	 * port reset does not recover the device. Seen on t6001 (j375c) with a
+	 * BESL-capable UVC camera. Keep xHCI from enabling USB2 hardware LPM.
+	 */
+	appledwc->dwc.usb2_lpm_disable = true;
+
 	appledwc->state = DWC3_APPLE_NO_CABLE;
 	return 0;
 }
