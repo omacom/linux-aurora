@@ -271,8 +271,8 @@
  *
  * fbdma is the display DART stream the dcpext scans framebuffers through,
  * with the display subsystem's DVA window: on the J615 the gate must not add
- * dispext0_dart to the display subsystem (apple_t8122_display.dcpext_disp_dart=0),
- * so appledrm mirrors framebuffers there instead.
+ * dispext0_dart to the display subsystem (apple,no-shared-display-dart), so
+ * appledrm mirrors framebuffers there instead.
  */
 / {
 	aliases {
@@ -290,6 +290,7 @@
 	apple,typec-dptx-phys = <0 1>;
 	/* RTKit quirks of AsahiLinux/linux#607 (syslog/ioreport acks, kdebug). */
 	apple,sync-syslog-ack;
+	apple,no-shared-display-dart;
 
 	fbdma {
 		iommus = <&dispext0_dart 0>;
