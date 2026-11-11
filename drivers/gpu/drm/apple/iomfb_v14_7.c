@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
 #include <linux/clk.h>
+#include <linux/delay.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
@@ -373,7 +374,56 @@ struct apple_dcp_v14 {
 	enum dcp_v14_bl_gate bl_gate;
 	u32 nits_sent;
 	u64 nits_presents, brightness_presents, nits_refused;
+
+	/*
+	 * Experimental (split_modeset): one display driven by two external
+	 * pipes, as macOS 14 does for modes above one pipe's pixel rate.
+	 * MAIN owns the link and the connector; HELPER drives the right half.
+	 * split_peer is set on both while the split is live (under MAIN's lock,
+	 * then HELPER's).
+	 */
+	enum { DCP_V14_SPLIT_NONE, DCP_V14_SPLIT_MAIN, DCP_V14_SPLIT_HELPER } split_role;
+	struct apple_dcp_v14 *split_peer;
+	struct device *split_peer_dev;	/* reference held by MAIN */
+	u32 split_x;			/* this pipe's slice origin in the framebuffer */
+	/* D116 tiling state as stored by this pipe's firmware (para 0..15). */
+	u32 tiling_state[16];
+	/* MAIN, during its split A411: the relay to HELPER and HELPER's A411. */
+	struct work_struct split_work;
+	struct completion split_done;
+	int split_helper_ret;
+	bool split_relay_queued;
+	bool split_relay_pending;	/* MAIN stored para 10 = 2 */
+	u32 split_color, split_timing;	/* the +10000 IDs */
+	u8 split_dsc_caps[0x20];	/* A364 reply -> A365 */
+	u8 split_dsc_bpp[8];		/* A367 reply -> A368 (first 4 bytes) */
+	u8 split_dsc_slice[12];		/* A369 reply -> A370 */
+	u32 split_w;			/* slice width (hdisplay / 2) */
+	/* MAIN: framebuffers MAIN may still read (completion not seen yet). */
+	struct drm_framebuffer *split_stale[4];
+	unsigned int split_nstale;
+	/* MAIN, while leaving the split: HELPER's power-down runs alongside MAIN's. */
+	struct work_struct split_off_work;
+	struct completion split_off_done;
+	int split_off_ret;
+	bool split_off_after_main;	/* HELPER waits until MAIN's A472(0) is pending */
 };
+
+/* split_modeset: the tiling tables of both pipes are read by either callback path. */
+static DEFINE_SPINLOCK(dcp_v14_split_table_lock);
+
+static bool split_modeset;
+module_param(split_modeset, bool, 0644);
+MODULE_PARM_DESC(split_modeset,
+		 "EXPERIMENT: drive modes above one pipe's pixel rate on two T6030 dcpext pipes (needs dptxep split_alloc)");
+
+static bool split_flip_index;
+module_param(split_flip_index, bool, 0644);
+MODULE_PARM_DESC(split_flip_index,
+		 "EXPERIMENT: answer D115 para 4 (pipe index) the other way round (roles are reversed vs macOS on J514S)");
+
+/* One pipe's active pixel rate (the 0x4bf00000 per-pipe default in the firmware). */
+#define DCP_V14_SPLIT_PIPE_RATE	1274019840ULL
 
 /*
  * The panel's DCP session; one per boot, RTKit is never started twice. The
@@ -1155,6 +1205,99 @@ property_reply:
 }
 
 /* Runs on the thread that owns the RPC stream; the lock is held. */
+/*
+ * split_modeset: MAIN's firmware stored "mode set done, waiting for the
+ * peer" (D116 para 10 = 2) inside MAIN's A411. Read the DSC setup MAIN
+ * negotiated (nested calls: MAIN's outer slot holds the A411), then let a
+ * worker give it to HELPER and set HELPER's mode while this thread keeps
+ * answering MAIN's callbacks. Values are copied as macOS 14 does.
+ */
+static void dcp_v14_split_relay(struct apple_dcp_v14 *v14)
+{
+	u8 z36[0x24] = {}, z4[4] = {}, z12[12] = {};
+	__le32 dsc_on = 0;
+	int ret;
+
+	ret = dcp_v14_call(v14, A(366), NULL, 0, &dsc_on, sizeof(dsc_on), 0);
+	if (!ret)
+		ret = dcp_v14_call(v14, A(364), z36, sizeof(z36), v14->split_dsc_caps,
+				   sizeof(v14->split_dsc_caps), 0);
+	if (!ret)
+		ret = dcp_v14_call(v14, A(367), z4, sizeof(z4), v14->split_dsc_bpp,
+				   sizeof(v14->split_dsc_bpp), 0);
+	if (!ret)
+		ret = dcp_v14_call(v14, A(369), z12, sizeof(z12), v14->split_dsc_slice,
+				   sizeof(v14->split_dsc_slice), 0);
+	dev_info(v14->dev, "split: DSC relay from main: %d (dsc %u, bpp %*phN, slice %*phN)\n",
+		 ret, le32_to_cpu(dsc_on), 4, v14->split_dsc_bpp, 12, v14->split_dsc_slice);
+	if (ret) {
+		v14->split_helper_ret = ret;
+		complete(&v14->split_done);
+		return;
+	}
+	queue_work(system_unbound_wq, &v14->split_work);
+}
+
+/*
+ * split_modeset: D115 reads a tiling entry (event 1: this pipe's own,
+ * event 2: the peer's), D116 stores this pipe's entry. Answers as macOS 14:
+ * para 1 dual pipe on, 4 pipe index, 5 slice x origin, 8 VFTG merge on,
+ * 9 primary (owns the link), 11 zero; firmware-set paras are shared.
+ */
+static int dcp_v14_split_tiling(struct apple_dcp_v14 *v14, u32 tag, const u8 *in, u8 *out)
+{
+	bool is_main = READ_ONCE(v14->split_role) == DCP_V14_SPLIT_MAIN;
+	struct apple_dcp_v14 *peer = READ_ONCE(v14->split_peer);
+	u32 ev = get_unaligned_le32(in), para = get_unaligned_le32(in + 4);
+	u32 val = get_unaligned_le32(in + 8), value = 0;
+	unsigned long flags;
+
+	if (tag == D(116)) {
+		if (para < ARRAY_SIZE(v14->tiling_state)) {
+			spin_lock_irqsave(&dcp_v14_split_table_lock, flags);
+			v14->tiling_state[para] = val;
+			spin_unlock_irqrestore(&dcp_v14_split_table_lock, flags);
+		}
+		out[0] = 1;
+		/* As macOS: the relay follows the acknowledged D116, at MAIN's next poll. */
+		if (is_main && para == 10 && val == 2)
+			v14->split_relay_pending = true;
+		return 0;
+	}
+	if (is_main && ev == 2 && para == 10 && v14->split_relay_pending &&
+	    !v14->split_relay_queued) {
+		v14->split_relay_queued = true;
+		v14->split_relay_pending = false;
+		dcp_v14_split_relay(v14);
+	}
+	if (ev == 1) {
+		switch (para) {
+		case 1: value = 1; break;
+		case 4: value = (is_main ^ READ_ONCE(split_flip_index)) ? 0 : 1; break;
+		case 5: value = is_main ? 0 : v14->split_w; break;
+		case 8: value = 1; break;
+		case 9: value = is_main ? 1 : 0; break;
+		case 11: value = 0; break;
+		default:
+			if (para < ARRAY_SIZE(v14->tiling_state)) {
+				spin_lock_irqsave(&dcp_v14_split_table_lock, flags);
+				value = v14->tiling_state[para];
+				spin_unlock_irqrestore(&dcp_v14_split_table_lock, flags);
+			}
+			break;
+		}
+	} else if (para == 4) {
+		value = (is_main ^ READ_ONCE(split_flip_index)) ? 1 : 0;
+	} else if (peer && para < ARRAY_SIZE(peer->tiling_state)) {
+		spin_lock_irqsave(&dcp_v14_split_table_lock, flags);
+		value = peer->tiling_state[para];
+		spin_unlock_irqrestore(&dcp_v14_split_table_lock, flags);
+	}
+	put_unaligned_le32(value, out);
+	out[4] = 1;
+	return 0;
+}
+
 static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_size,
 			    void *output, u32 out_size)
 {
@@ -1195,6 +1338,8 @@ static int dcp_v14_callback(void *cookie, u32 tag, const void *input, u32 in_siz
 	 * byte. Like the M1/M2 hosts: no tiled display, no setter.
 	 */
 	if ((tag == D(115) && SHAPE(16, 8)) || (tag == D(116) && SHAPE(16, 4))) {
+		if (READ_ONCE(v14->split_role) != DCP_V14_SPLIT_NONE)
+			return dcp_v14_split_tiling(v14, tag, in, out);
 		if (in[12] > 1)
 			return -EINVAL;
 		if (tag == D(115))
@@ -2176,6 +2321,14 @@ const char *iomfb_v14_7_external_busy(struct apple_dcp *dcp)
 	}
 }
 
+/* Experimental (split_modeset): this pipe drives half of another display. */
+bool iomfb_v14_7_split_helper(struct apple_dcp *dcp)
+{
+	struct apple_dcp_v14 *v14 = READ_ONCE(dcp->v14);
+
+	return v14 && READ_ONCE(v14->split_role) == DCP_V14_SPLIT_HELPER;
+}
+
 bool iomfb_v14_7_external_failed(struct apple_dcp *dcp)
 {
 	return smp_load_acquire(&dcp->external_phase) == DCPEXT_FAILED ||
@@ -2814,6 +2967,17 @@ static bool dcp_v14_swap_admit(void *cookie)
 
 	if (!v14->external)
 		return true;
+	/* split_modeset HELPER: no display of its own; follows MAIN's. */
+	if (READ_ONCE(v14->split_role) == DCP_V14_SPLIT_HELPER) {
+		struct apple_dcp_v14 *mv14 = READ_ONCE(v14->split_peer);
+		struct apple_dcp *mdcp = mv14 ? READ_ONCE(mv14->dcp) : NULL;
+
+		if (READ_ONCE(v14->failed) || !READ_ONCE(v14->powered) ||
+		    !READ_ONCE(v14->mode_live) || !mdcp)
+			return false;
+		connector = READ_ONCE(mdcp->connector);
+		return connector && READ_ONCE(connector->connected);
+	}
 	if (!dcp || READ_ONCE(v14->failed) || !READ_ONCE(v14->powered) ||
 	    !READ_ONCE(v14->mode_live) ||
 	    admission->generation != v14->description_generation ||
@@ -2999,6 +3163,172 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 	if (swaps <= 3)
 		dev_info(v14->dev, "swap %llu complete: surface %d, imported %d, %llu us\n",
 			 swaps, !!fb, fb && fb->obj[0]->import_attach, elapsed / NSEC_PER_USEC);
+	return true;
+}
+
+/* split_modeset: keep @fb pinned while MAIN may still read it (MAIN's lock held). */
+static void dcp_v14_split_stash(struct apple_dcp_v14 *v14, struct drm_framebuffer *fb)
+{
+	if (!fb)
+		return;
+	if (v14->split_nstale < ARRAY_SIZE(v14->split_stale)) {
+		v14->split_stale[v14->split_nstale++] = fb;
+		return;
+	}
+	/* Never unmap what may be scanned out: keep the reference. */
+	dev_warn_ratelimited(v14->dev, "split: framebuffer kept pinned until reboot\n");
+}
+
+/* split_modeset: MAIN completed a later swap or is off: release what was kept. */
+static void dcp_v14_split_unstash(struct apple_dcp_v14 *v14)
+{
+	while (v14->split_nstale)
+		drm_framebuffer_put(v14->split_stale[--v14->split_nstale]);
+}
+
+/*
+ * split_modeset: one frame on both pipes, as macOS 14 does it: A406 on MAIN,
+ * A406 on HELPER with MAIN's swap ID, A407 on MAIN, A407 on HELPER. Both
+ * records describe the whole framebuffer at the same IOVA (the display
+ * subsystem's DMA domain spans both display DARTs); only the source rect
+ * differs: MAIN (0, 0, w, h), HELPER (w, 0, w, h), dst (0, 0, w, h) on both.
+ * Both locks held (MAIN outer). Returns true when both swaps were taken.
+ */
+static bool dcp_v14_split_present_locked(struct apple_dcp_v14 *mv14, struct apple_dcp_v14 *hv14,
+					 struct drm_framebuffer *fb, u32 w, u32 h,
+					 const struct drm_crtc_state *ctm_state,
+					 struct drm_framebuffer **r0, struct drm_framebuffer **r1)
+{
+	struct dcp_v14_swap_admission ma = { .v14 = mv14 }, ha = { .v14 = hv14 };
+	bool m_taken = false, h_taken = false, m_done = false;
+	__le32 start[4] = {}, started[2] = {}, result[3];
+	u8 surface[DCP_V14_SURFACE_SIZE] = {};
+	u8 *mswap = NULL, *hswap = NULL;
+	u64 iova = 0;
+	u32 id, hid;
+	int ret;
+
+	lockdep_assert_held(&mv14->lock);
+	lockdep_assert_held(&hv14->lock);
+	if (READ_ONCE(mv14->failed) || READ_ONCE(hv14->failed))
+		return false;
+	if (fb && (!w || !h || 2 * w > fb->width || h > fb->height ||
+		   w > mv14->panel_width || w > hv14->panel_width ||
+		   h > mv14->panel_height || h > hv14->panel_height))
+		return false;
+	mswap = kmalloc(DCP_V14_SWAP_SIZE, GFP_KERNEL);
+	hswap = kmalloc(DCP_V14_SWAP_SIZE, GFP_KERNEL);
+	if (!mswap || !hswap) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	if (fb) {
+		dcp_v14_encode_surface(surface, fb->pitches[0], fb->width, fb->height,
+				       fb->format->format == DRM_FORMAT_XRGB8888);
+		iova = drm_fb_dma_get_gem_obj(fb, 0)->dma_addr;
+	}
+	ma.generation = mv14->description_generation;
+	ha.generation = hv14->description_generation;
+	dcp_v14_ctm_locked(mv14, ctm_state);
+	dcp_v14_ctm_locked(hv14, ctm_state);
+
+	ret = dcp_v14_call_guarded(mv14, A(406), start, sizeof(start), started, sizeof(started),
+				   0, dcp_v14_swap_admit, &ma);
+	if (!ret && le32_to_cpu(started[1]))
+		ret = -EIO;
+	id = le32_to_cpu(started[0]);
+	if (!ret && !id)
+		ret = -EPROTO;
+	if (ret)
+		goto out;
+	start[0] = cpu_to_le32(id);
+	started[0] = started[1] = 0;
+	ret = dcp_v14_call_guarded(hv14, A(406), start, sizeof(start), started, sizeof(started),
+				   0, dcp_v14_swap_admit, &ha);
+	if (!ret && le32_to_cpu(started[1]))
+		ret = -EIO;
+	hid = le32_to_cpu(started[0]);
+	if (!ret && hid != id) {
+		dev_warn_ratelimited(hv14->dev, "split: helper swap id %u, main %u\n", hid, id);
+		ret = -EPROTO;
+	}
+	if (ret)
+		goto out;
+
+	dcp_v14_encode_swap(mswap, id, DCP_V14_BLACK, fb ? surface : NULL, iova, w, h, 0,
+			    DCP_V14_LAYER);
+	dcp_v14_encode_swap(hswap, id, DCP_V14_BLACK, fb ? surface : NULL, iova, w, h, 0,
+			    DCP_V14_LAYER);
+	if (fb)
+		dcp_v14_put_rect(hswap + DCP_V14_SWAP_SRC(DCP_V14_LAYER), w, 0, w, h);
+	/* MAIN's submit is answered at once; its completion may wait for HELPER's. */
+	ret = dcp_v14_call_guarded(mv14, A(407), mswap, DCP_V14_SWAP_SIZE, result, sizeof(result),
+				   0, dcp_v14_swap_admit, &ma);
+	if (!ret && get_unaligned_le32((u8 *)result + 5))
+		ret = -EIO;
+	m_taken = !ret;
+	if (m_taken) {
+		ret = dcp_v14_call_guarded(hv14, A(407), hswap, DCP_V14_SWAP_SIZE, result,
+					   sizeof(result), id, dcp_v14_swap_admit, &ha);
+		if (!ret && get_unaligned_le32((u8 *)result + 5))
+			ret = -EIO;
+		h_taken = !ret;
+	}
+	/* MAIN's completion follows HELPER's submit: take it before reporting the flip. */
+	if (m_taken) {
+		int wret = dcp_v14_link_wait_swap(&mv14->link, id, HZ / 2, dcp_v14_callback, mv14);
+
+		if (!wret) {
+			m_done = true;
+		} else if (wret == -ETIMEDOUT) {
+			dev_warn_ratelimited(mv14->dev, "split: main swap %u not complete in 500 ms\n", id);
+		} else {
+			mv14->failed = true;
+			dev_err(mv14->dev, "split: main link failed waiting for swap %u: %d\n", id, wret);
+			dcp_v14_external_stopped(mv14);
+			if (!ret)
+				ret = wret;
+		}
+	}
+out:
+	kfree(mswap);
+	kfree(hswap);
+	/*
+	 * A pipe that took the swap may scan the new framebuffer out: pin it
+	 * there. MAIN's previous one is released only once MAIN's completion
+	 * was seen; otherwise it stays pinned until a later completed swap.
+	 * HELPER's A407 waited for its own completion.
+	 */
+	if (m_taken) {
+		struct drm_framebuffer *old;
+
+		if (fb)
+			drm_framebuffer_get(fb);
+		old = dcp_v14_publish_surface(mv14, fb, surface, iova, w, h, 0);
+		if (m_done)
+			*r0 = old;
+		else
+			dcp_v14_split_stash(mv14, old);
+	}
+	if (h_taken) {
+		if (fb)
+			drm_framebuffer_get(fb);
+		*r1 = dcp_v14_publish_surface(hv14, fb, surface, iova, w, h, 0);
+	}
+	if (!m_taken || !h_taken || !m_done) {
+		dev_warn_ratelimited(mv14->dev,
+				     "split: swap incomplete (main %d/%d, helper %d): %d\n",
+				     m_taken, m_done, h_taken, ret);
+		return false;
+	}
+	dcp_v14_split_unstash(mv14);
+	mv14->swaps++;
+	if (++hv14->swaps <= 3)
+		dev_info(hv14->dev, "split: swap %u shown on both pipes\n", id);
+	if (fb) {
+		mv14->mode_swaps++;
+		hv14->mode_swaps++;
+	}
 	return true;
 }
 
@@ -3288,6 +3618,426 @@ static void dcp_v14_audio_on(struct apple_dcp *dcp)
 }
 
 /* An external display: power down, set the new mode, power up. */
+/*
+ * split_modeset: the other T6030 external processor, running, opened by
+ * nobody else and with no display of its own. Returns it with a reference
+ * on its device in *devp, or NULL.
+ */
+static struct apple_dcp *dcp_v14_split_find_helper(struct apple_dcp *dcp, struct device **devp)
+{
+	struct device_node *np;
+
+	for_each_compatible_node(np, NULL, "apple,t6030-dcpext") {
+		struct platform_device *pdev;
+		struct apple_dcp *h;
+
+		if (np == dcp->dev->of_node)
+			continue;
+		pdev = of_find_device_by_node(np);
+		if (!pdev)
+			continue;
+		h = platform_get_drvdata(pdev);
+		if (h && h != dcp && h->external_native && h->v14 &&
+		    smp_load_acquire(&h->external_phase) == DCPEXT_RUNNING &&
+		    !(h->connector && READ_ONCE(h->connector->connected)) &&
+		    h->v14->split_role == DCP_V14_SPLIT_NONE && !READ_ONCE(h->v14->failed)) {
+			of_node_put(np);
+			*devp = &pdev->dev;
+			return h;
+		}
+		put_device(&pdev->dev);
+	}
+
+	/*
+	 * No running one: start an idle processor's firmware, as a display
+	 * attach would (only an attach starts it otherwise), and wait for it.
+	 */
+	for_each_compatible_node(np, NULL, "apple,t6030-dcpext") {
+		struct platform_device *pdev;
+		struct apple_dcp *h;
+		int i;
+
+		if (np == dcp->dev->of_node)
+			continue;
+		pdev = of_find_device_by_node(np);
+		if (!pdev)
+			continue;
+		h = platform_get_drvdata(pdev);
+		/* An idle processor has no v14 session yet: dcpext_boot() makes it. */
+		if (!h || h == dcp || !h->external_native ||
+		    smp_load_acquire(&h->external_phase) != DCPEXT_IDLE ||
+		    (h->connector && READ_ONCE(h->connector->connected))) {
+			put_device(&pdev->dev);
+			continue;
+		}
+		dev_info(dcp->dev, "split: starting %s to help\n", dev_name(&pdev->dev));
+		iomfb_v14_7_external_ready(h);
+		for (i = 0; i < 200; i++) {
+			unsigned int phase = smp_load_acquire(&h->external_phase);
+
+			if (phase == DCPEXT_RUNNING || phase == DCPEXT_FAILED)
+				break;
+			msleep(50);
+		}
+		if (smp_load_acquire(&h->external_phase) == DCPEXT_RUNNING && h->v14 &&
+		    h->v14->split_role == DCP_V14_SPLIT_NONE && !READ_ONCE(h->v14->failed)) {
+			dev_info(dcp->dev, "split: %s running after %d ms\n",
+				 dev_name(&pdev->dev), i * 50);
+			of_node_put(np);
+			*devp = &pdev->dev;
+			return h;
+		}
+		dev_warn(dcp->dev, "split: %s did not start\n", dev_name(&pdev->dev));
+		put_device(&pdev->dev);
+	}
+	return NULL;
+}
+
+/*
+ * split_modeset: MAIN's lock held. Leaves the split as macOS 14 does:
+ * MAIN powered down first, then HELPER, both still answering tiling state
+ * as a split; only then are the roles cleared. Safe on a failed MAIN.
+ */
+/*
+ * split_modeset: HELPER's A472(0), sent while MAIN's is pending. In dual
+ * pipe mode MAIN's power-down waits for HELPER's (trace 396149-396660):
+ * the two run-mode changes complete together.
+ */
+static void dcp_v14_split_off_work(struct work_struct *work)
+{
+	struct apple_dcp_v14 *v14 = container_of(work, struct apple_dcp_v14, split_off_work);
+	struct apple_dcp_v14 *hv14 = READ_ONCE(v14->split_peer);
+	int ret = 0;
+
+	/* As macOS: MAIN's request goes first. Wait until it is on the link. */
+	if (READ_ONCE(v14->split_off_after_main)) {
+		unsigned long until = jiffies + HZ;
+
+		while (!dcp_v14_link_outer_pending(&v14->link) &&
+		       !READ_ONCE(v14->failed) && time_before(jiffies, until))
+			usleep_range(1000, 2000);
+	}
+	if (hv14) {
+		mutex_lock(&hv14->lock);
+		if (hv14->powered && !READ_ONCE(hv14->failed)) {
+			WRITE_ONCE(hv14->link.long_calls, true);
+			ret = dcp_v14_set_power(hv14, false);
+			WRITE_ONCE(hv14->link.long_calls, false);
+		}
+		mutex_unlock(&hv14->lock);
+	}
+	v14->split_off_ret = ret;
+	complete(&v14->split_off_done);
+}
+
+static void dcp_v14_split_teardown_locked(struct apple_dcp_v14 *v14)
+{
+	struct apple_dcp_v14 *hv14 = v14->split_peer;
+	struct drm_framebuffer *old = NULL;
+	bool helper_off = false;
+	int ret = 0;
+
+	lockdep_assert_held(&v14->lock);
+	if (v14->split_role != DCP_V14_SPLIT_MAIN || !hv14)
+		return;
+	/* Both pipes power down together, still answering as a split. */
+	if (READ_ONCE(hv14->powered) && !READ_ONCE(hv14->failed)) {
+		v14->split_off_after_main = v14->powered && !READ_ONCE(v14->failed);
+		init_completion(&v14->split_off_done);
+		INIT_WORK(&v14->split_off_work, dcp_v14_split_off_work);
+		queue_work(system_unbound_wq, &v14->split_off_work);
+		helper_off = true;
+	}
+	if (v14->powered && !READ_ONCE(v14->failed)) {
+		WRITE_ONCE(v14->link.long_calls, true);
+		ret = dcp_v14_set_power(v14, false);
+		WRITE_ONCE(v14->link.long_calls, false);
+		if (ret)
+			dev_warn(v14->dev, "split: main did not power down: %d\n", ret);
+	}
+	if (helper_off) {
+		if (!wait_for_completion_timeout(&v14->split_off_done, 25 * HZ))
+			dev_err(v14->dev, "split: helper power-down did not finish\n");
+		flush_work(&v14->split_off_work);
+		if (v14->split_off_ret)
+			dev_warn(hv14->dev, "split: helper did not power down: %d\n",
+				 v14->split_off_ret);
+	}
+	dev_info(v14->dev, "split: both pipes powered down (main %d, helper %d)\n",
+		 ret, helper_off ? v14->split_off_ret : 0);
+	/* MAIN no longer scans anything out once it is off. */
+	if (!v14->powered && !READ_ONCE(v14->failed))
+		dcp_v14_split_unstash(v14);
+	mutex_lock_nested(&hv14->lock, SINGLE_DEPTH_NESTING);
+	hv14->mode_live = false;
+	/* Only a helper known to be off releases its framebuffer. */
+	if (!hv14->powered && !READ_ONCE(hv14->failed)) {
+		old = hv14->active_fb;
+		hv14->active_fb = NULL;
+	}
+	WRITE_ONCE(hv14->split_peer, NULL);
+	WRITE_ONCE(hv14->split_role, DCP_V14_SPLIT_NONE);
+	mutex_unlock(&hv14->lock);
+	WRITE_ONCE(v14->split_peer, NULL);
+	WRITE_ONCE(v14->split_role, DCP_V14_SPLIT_NONE);
+	v14->mode_live = false;
+	put_device(v14->split_peer_dev);
+	v14->split_peer_dev = NULL;
+	dev_info(v14->dev, "split: helper released\n");
+	if (old)
+		drm_framebuffer_put(old);
+}
+
+/*
+ * split_modeset: HELPER's half of the mode set, on a worker while MAIN's
+ * A411 is still pending on the modeset thread: the DSC setup MAIN
+ * negotiated (A365, A368, A370), then HELPER's own A411.
+ */
+static void dcp_v14_split_work(struct work_struct *work)
+{
+	struct apple_dcp_v14 *v14 = container_of(work, struct apple_dcp_v14, split_work);
+	struct apple_dcp_v14 *hv14 = READ_ONCE(v14->split_peer);
+	u8 in365[0x24] = {}, out365[0x20], out368[8], out370[12];
+	int ret = -ENODEV;
+
+	if (!hv14)
+		goto done;
+	memcpy(in365, v14->split_dsc_caps, sizeof(v14->split_dsc_caps));
+	mutex_lock(&hv14->lock);
+	ret = dcp_v14_call(hv14, A(365), in365, sizeof(in365), out365, sizeof(out365), 0);
+	if (!ret)
+		ret = dcp_v14_call(hv14, A(368), v14->split_dsc_bpp, 4, out368, sizeof(out368), 0);
+	if (!ret)
+		ret = dcp_v14_call(hv14, A(370), v14->split_dsc_slice, sizeof(v14->split_dsc_slice),
+				   out370, sizeof(out370), 0);
+	if (!ret) {
+		WRITE_ONCE(hv14->link.long_calls, true);
+		ret = dcp_v14_set_mode(hv14, v14->split_color, v14->split_timing);
+		WRITE_ONCE(hv14->link.long_calls, false);
+	}
+	mutex_unlock(&hv14->lock);
+	dev_info(hv14->dev, "split: helper mode (color %u, timing %u): %d\n",
+		 v14->split_color, v14->split_timing, ret);
+done:
+	v14->split_helper_ret = ret;
+	complete(&v14->split_done);
+}
+
+/*
+ * split_modeset: the macOS 14 mode set of one display over two pipes, as
+ * traced on a J514S (omacom/linux-aurora#434). MAIN's lock held.
+ * On success both pipes run the split timing (@mode IDs + 10000) at half
+ * width; on failure the split is torn down and split_modeset switched off.
+ */
+static int dcp_v14_split_modeset_locked(struct apple_dcp *dcp, struct apple_dcp_v14 *v14,
+					struct dcp_display_mode *mode)
+{
+	u8 in361[0x7c] = {}, out361[0x74] = {}, in362[0x7c], out362[0x74];
+	u32 w = mode->mode.hdisplay / 2, i, color, timing;
+	__le32 two = cpu_to_le32(2), zero = 0, one = cpu_to_le32(1), mctr = 0, hctr = 0;
+	__le32 r409 = 0;
+	struct apple_dcp_v14 *hv14 = NULL;
+	struct device *hdev = NULL;
+	struct apple_dcp *h;
+	unsigned long flags;
+	int ret;
+
+	lockdep_assert_held(&v14->lock);
+	/*
+	 * The merge works only with the hybrid (HDMI) pipeline, ADT dcpext0, as
+	 * the pipe that owns the link: with the roles reversed every call
+	 * succeeds and the display stays dark. Touch nothing then.
+	 */
+	if (!dcp->fixed_phy) {
+		dev_warn(dcp->dev, "split: only the HDMI pipeline can own a split display (a dock needs split_dock_main)\n");
+		return -EOPNOTSUPP;
+	}
+	color = mode->color_mode_id;
+	timing = mode->timing_mode_id;
+
+	/* The full timing, read while MAIN still runs its current mode (as macOS). */
+	ret = dcp_v14_call(v14, A(409), &two, sizeof(two), &r409, sizeof(r409), 0);
+	put_unaligned_le32(timing, in361 + 0x70);
+	put_unaligned_le32(color, in361 + 0x74);
+	if (!ret)
+		ret = dcp_v14_call(v14, A(361), in361, sizeof(in361), out361, sizeof(out361), 0);
+	if (!ret && (out361[0x70] != 1 ||
+		     get_unaligned_le32(out361 + 0x08) != mode->mode.hdisplay ||
+		     get_unaligned_le32(out361 + 0x28) != mode->mode.vdisplay ||
+		     !get_unaligned_le32(out361 + 0x44)))
+		ret = -ENODATA;
+	dev_info(dcp->dev, "split: A361 (timing %u, color %u): %d, timing %*phN %*phN\n",
+		 timing, color, ret, 0x40, out361, 0x34, out361 + 0x40);
+	if (ret)
+		goto fail_off;
+
+	dcp_v14_split_teardown_locked(v14);
+	h = dcp_v14_split_find_helper(dcp, &hdev);
+	if (!h) {
+		dev_warn(dcp->dev, "split: no free external pipe to help\n");
+		ret = -ENODEV;
+		goto fail_off;
+	}
+	hv14 = h->v14;
+	ret = iomfb_v14_7_external_open(h);
+	/* A harmless getter: a dead helper fails here, before MAIN goes dark. */
+	if (!ret) {
+		mutex_lock_nested(&hv14->lock, SINGLE_DEPTH_NESTING);
+		ret = dcp_v14_call(hv14, A(357), NULL, 0, &hctr, sizeof(hctr), 0);
+		mutex_unlock(&hv14->lock);
+	}
+	if (ret) {
+		dev_warn(dcp->dev, "split: helper %s not usable: %d\n", dev_name(hdev), ret);
+		goto fail_unlinked;
+	}
+	dev_info(dcp->dev, "split: %ux%u on this pipe and %s, %u px each\n",
+		 mode->mode.hdisplay, mode->mode.vdisplay, dev_name(hdev), w);
+
+	mutex_lock_nested(&hv14->lock, SINGLE_DEPTH_NESTING);
+	if (v14->powered && dcp_v14_set_power(v14, false))
+		dev_warn(dcp->dev, "split: main did not power down\n");
+	if (hv14->powered && dcp_v14_set_power(hv14, false))
+		dev_warn(hv14->dev, "split: helper did not power down\n");
+	ret = dcp_v14_call(v14, A(359), &zero, sizeof(zero), NULL, 0, 0);
+	if (!ret)
+		ret = dcp_v14_call(hv14, A(359), &zero, sizeof(zero), NULL, 0, 0);
+	if (!ret)
+		ret = dcp_v14_call(hv14, A(363), &one, sizeof(one), NULL, 0, 0);
+	if (ret)
+		goto fail_locked_unlinked;
+
+	/* The relay's work item exists before any callback could ask for it. */
+	v14->split_color = color + 10000;
+	v14->split_timing = timing + 10000;
+	v14->split_helper_ret = -EINPROGRESS;
+	v14->split_relay_queued = true;		/* not before MAIN's A411 */
+	v14->split_relay_pending = false;
+	init_completion(&v14->split_done);
+	INIT_WORK(&v14->split_work, dcp_v14_split_work);
+
+	/* Arm the split: the firmware asks tiling state from A362 on. */
+	spin_lock_irqsave(&dcp_v14_split_table_lock, flags);
+	memset(v14->tiling_state, 0, sizeof(v14->tiling_state));
+	memset(hv14->tiling_state, 0, sizeof(hv14->tiling_state));
+	v14->tiling_state[10] = 1;
+	hv14->tiling_state[10] = 1;
+	spin_unlock_irqrestore(&dcp_v14_split_table_lock, flags);
+	v14->split_w = hv14->split_w = w;
+	v14->split_peer_dev = hdev;
+	WRITE_ONCE(hv14->split_peer, v14);
+	WRITE_ONCE(hv14->split_role, DCP_V14_SPLIT_HELPER);
+	WRITE_ONCE(v14->split_peer, hv14);
+	WRITE_ONCE(v14->split_role, DCP_V14_SPLIT_MAIN);
+	hdev = NULL;	/* owned by the split now; teardown puts it */
+
+	/* Half timing: the eight horizontal u32 and the pixel clock halved. */
+	memcpy(in362, out361, 0x70);
+	for (i = 0; i < 8; i++)
+		put_unaligned_le32(get_unaligned_le32(out361 + 4 * i) / 2, in362 + 4 * i);
+	put_unaligned_le32(get_unaligned_le32(out361 + 0x44) / 2, in362 + 0x44);
+	put_unaligned_le32(timing + 10000, in362 + 0x70);
+	put_unaligned_le32(color + 10000, in362 + 0x74);
+	put_unaligned_le32(0, in362 + 0x78);
+	dev_info(dcp->dev, "split: half timing %*phN %*phN\n", 0x40, in362, 0x3c, in362 + 0x40);
+	ret = dcp_v14_call(v14, A(362), in362, sizeof(in362), out362, sizeof(out362), 0);
+	dev_info(dcp->dev, "split: A362 main: %d (%*phN)\n", ret, 4, out362 + 0x70);
+	if (!ret) {
+		ret = dcp_v14_call(hv14, A(362), in362, sizeof(in362), out362, sizeof(out362), 0);
+		dev_info(hv14->dev, "split: A362 helper: %d (%*phN)\n", ret, 4, out362 + 0x70);
+	}
+	if (!ret)
+		ret = dcp_v14_set_power(v14, true);
+	if (!ret)
+		ret = dcp_v14_set_power(hv14, true);
+	if (!ret)
+		ret = dcp_v14_call(v14, A(357), NULL, 0, &mctr, sizeof(mctr), 0);
+	if (!ret)
+		ret = dcp_v14_call(hv14, A(357), NULL, 0, &hctr, sizeof(hctr), 0);
+	if (!ret && mctr != hctr)
+		ret = dcp_v14_call(hv14, A(358), &mctr, sizeof(mctr), NULL, 0, 0);
+	dev_info(dcp->dev, "split: prepared (swap counters %u/%u): %d\n",
+		 le32_to_cpu(mctr), le32_to_cpu(hctr), ret);
+	if (ret)
+		goto fail_locked;
+	/* HELPER's calls run on the worker, which takes HELPER's lock. */
+	mutex_unlock(&hv14->lock);
+
+	v14->split_relay_queued = false;
+	WRITE_ONCE(v14->link.long_calls, true);
+	ret = dcp_v14_set_mode(v14, v14->split_color, v14->split_timing);
+	WRITE_ONCE(v14->link.long_calls, false);
+	if (v14->split_relay_queued) {
+		if (!wait_for_completion_timeout(&v14->split_done, 25 * HZ))
+			dev_err(dcp->dev, "split: helper mode set did not finish\n");
+		flush_work(&v14->split_work);
+		if (!ret)
+			ret = v14->split_helper_ret;
+	} else {
+		v14->split_relay_queued = true;	/* no late relay from now on */
+		if (!ret) {
+			dev_err(dcp->dev, "split: main mode set ended without asking for its peer\n");
+			ret = -EPROTO;
+		}
+	}
+	dev_info(dcp->dev, "split: mode (color %u, timing %u) on both pipes: %d\n",
+		 v14->split_color, v14->split_timing, ret);
+	if (ret)
+		goto fail;
+
+	mutex_lock_nested(&hv14->lock, SINGLE_DEPTH_NESTING);
+	hv14->panel_width = w;
+	hv14->panel_height = mode->mode.vdisplay;
+	hv14->mode_timing = v14->split_timing;
+	hv14->mode_color = v14->split_color;
+	hv14->mode_swaps = 0;
+	hv14->mode_live = true;
+	mutex_unlock(&hv14->lock);
+	v14->panel_width = w;
+	v14->panel_height = mode->mode.vdisplay;
+	return 0;
+
+fail_locked_unlinked:
+	mutex_unlock(&hv14->lock);
+fail_unlinked:
+	put_device(hdev);
+	goto fail_off;
+fail_locked:
+	mutex_unlock(&hv14->lock);
+fail:
+	dcp_v14_split_teardown_locked(v14);
+fail_off:
+	/*
+	 * A pipe that died stays dead until reboot: switch the split off so
+	 * retries do not touch it again. Anything else (a link not up yet after
+	 * a wake, a missing helper) is left to the normal retries.
+	 */
+	if (READ_ONCE(v14->failed) || (hv14 && READ_ONCE(hv14->failed))) {
+		WRITE_ONCE(split_modeset, false);
+		dev_warn(dcp->dev, "split: mode set failed: %d; a pipe died, split_modeset switched off\n",
+			 ret);
+	} else {
+		dev_warn(dcp->dev, "split: mode set failed: %d; will retry\n", ret);
+	}
+	return ret;
+}
+
+/* Does @mode need two pipes? (active pixel rate above one pipe's) */
+static bool dcp_v14_split_needed(const struct drm_display_mode *mode)
+{
+	u64 total = (u64)mode->htotal * mode->vtotal, hz, rate;
+
+	/*
+	 * As the firmware's filter: active pixels times the whole-Hz refresh
+	 * ("5120 x 2160 @ 119, bw 1316044800" for 119.88 Hz), from the pixel
+	 * clock, not drm_mode_vrefresh(), which rounds to the nearest Hz.
+	 */
+	if (!total || mode->clock <= 0 || (mode->flags & DRM_MODE_FLAG_INTERLACE))
+		return false;
+	hz = div64_u64((u64)mode->clock * 1000, total);
+	rate = (u64)mode->hdisplay * mode->vdisplay * hz;
+	return rate > DCP_V14_SPLIT_PIPE_RATE && !(mode->hdisplay & 1);
+}
+
 static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state)
 {
 	struct apple_dcp_v14 *v14 = dcp->v14;
@@ -3297,6 +4047,11 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
 
 	if (!v14 || READ_ONCE(v14->failed) || !v14->opened)
 		return -EIO;
+	/* split_modeset: a pipe lent to another display takes no mode of its own. */
+	if (READ_ONCE(v14->split_role) == DCP_V14_SPLIT_HELPER) {
+		dev_warn(dcp->dev, "split: this pipe helps another display; mode set refused\n");
+		return -EBUSY;
+	}
 	/*
 	 * The sink's audio stops before the display is powered down for the
 	 * mode change (as dcp_poweroff() has it), outside the RPC lock; it is
@@ -3330,6 +4085,27 @@ static int dcp_v14_external_modeset(struct apple_dcp *dcp, struct drm_crtc_state
 			dcp_v14_audio_on(dcp);
 		return 0;
 	}
+	/* Experimental (split_modeset): a mode above one pipe's rate on two pipes. */
+	if (READ_ONCE(split_modeset) && dcp_v14_split_needed(&mode.mode)) {
+		ret = dcp_v14_split_modeset_locked(dcp, v14, &mode);
+		if (!ret) {
+			v14->mode_timing = mode.timing_mode_id;
+			v14->mode_color = mode.color_mode_id;
+			v14->mode_swaps = 0;
+			v14->mode_live = true;
+		}
+		mutex_unlock(&v14->lock);
+		goto out;
+	}
+	/* One pipe cannot drive it: refuse rather than leave the display dark. */
+	if (dcp_v14_split_needed(&mode.mode)) {
+		mutex_unlock(&v14->lock);
+		dev_warn(dcp->dev, "split: " DRM_MODE_FMT " needs two pipes; split_modeset is off\n",
+			 DRM_MODE_ARG(&mode.mode));
+		ret = -EINVAL;
+		goto out;
+	}
+	dcp_v14_split_teardown_locked(v14);
 	if (v14->powered && dcp_v14_set_power(v14, false))
 		dev_warn(dcp->dev, "display did not power down before the mode change\n");
 	if (READ_ONCE(v14->failed))
@@ -3423,6 +4199,47 @@ void iomfb_v14_7_flush(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	if (!dcp->external)
 		dcp_v14_configure_backlight(dcp);
 	dcp->swap_start = ktime_get();
+	/* split_modeset: MAIN shows the left half, then HELPER the right half. */
+	if (dcp->v14 && READ_ONCE(dcp->v14->split_role) == DCP_V14_SPLIT_MAIN &&
+	    READ_ONCE(dcp->v14->split_peer)) {
+		struct apple_dcp_v14 *v14 = dcp->v14, *hv14;
+		struct drm_framebuffer *r0 = NULL, *r1 = NULL;
+		u32 w = fb ? width / 2 : 0, h = fb ? height : 0;
+		bool shown = false, stopped = false;
+
+		mutex_lock(&v14->lock);
+		/* Teardown clears the link under this lock: read it again here. */
+		hv14 = v14->split_role == DCP_V14_SPLIT_MAIN ? v14->split_peer : NULL;
+		if (hv14) {
+			mutex_lock_nested(&hv14->lock, SINGLE_DEPTH_NESTING);
+			shown = dcp_v14_split_present_locked(v14, hv14, fb, w, h, cs, &r0, &r1);
+			mutex_unlock(&hv14->lock);
+		}
+		/* A pipe that died ends the split: the mode is not live any more. */
+		if (!shown && hv14 && (READ_ONCE(hv14->failed) || READ_ONCE(v14->failed)) &&
+		    READ_ONCE(v14->mode_live)) {
+			WRITE_ONCE(split_modeset, false);
+			WRITE_ONCE(v14->mode_live, false);
+			dcp_mode_invalidate(&dcp->mode_state);
+			dev_err(dcp->dev, "split: a pipe stopped; split_modeset switched off\n");
+			stopped = true;
+		}
+		mutex_unlock(&v14->lock);
+		if (r0)
+			drm_framebuffer_put(r0);
+		if (r1)
+			drm_framebuffer_put(r1);
+		/* Let the compositor pick a mode one pipe can drive. */
+		if (stopped && dcp->connector)
+			dcp_queue_hotplug(dcp->connector);
+		if (shown) {
+			dcp_drm_crtc_page_flip(dcp, ktime_get());
+			dcp_release_all_retained_framebuffers(dcp);
+		} else {
+			dcp_v14_cancel_event(dcp);
+		}
+		return;
+	}
 	if (dcp->v14 && dcp_v14_present(dcp->v14, fb, width, height, dcp->notch_height, cs)) {
 		dcp_drm_crtc_page_flip(dcp, ktime_get());
 		/*
@@ -3452,9 +4269,14 @@ void iomfb_v14_7_poweroff(struct apple_dcp *dcp)
 		/* Audio stops with the display, as dcp_poweroff() has it. */
 		if (dcp->avep)
 			av_service_disconnect(dcp);
-		if (v14 && v14->opened && !READ_ONCE(v14->failed)) {
+		/* split_modeset: the helper stays on while it shows MAIN's right half. */
+		if (v14 && READ_ONCE(v14->split_role) == DCP_V14_SPLIT_HELPER)
+			return;
+		if (v14 && v14->opened) {
 			mutex_lock(&v14->lock);
-			if (v14->powered && dcp_v14_set_power(v14, false))
+			dcp_v14_split_teardown_locked(v14);
+			if (!READ_ONCE(v14->failed) && v14->powered &&
+			    dcp_v14_set_power(v14, false))
 				dev_warn(dcp->dev, "display did not power down\n");
 			mutex_unlock(&v14->lock);
 		}
