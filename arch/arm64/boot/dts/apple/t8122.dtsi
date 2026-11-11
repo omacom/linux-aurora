@@ -591,13 +591,13 @@
 			status = "disabled";
 		};
 
-		/* Touch ID: pads muxed by iBoot, native chip select, 200 MHz. */
+		/* Touch ID: pads muxed by iBoot, native chip select. */
 		spi2: spi@2a1108000 {
 			compatible = "apple,t8122-spi", "apple,t8103-spi";
 			reg = <0x2 0xa1108000 0x0 0x4000>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 767 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_200m>;
+			clocks = <&clkref>;
 			power-domains = <&ps_spi2>;
 			#address-cells = <1>;
 			#size-cells = <0>;
