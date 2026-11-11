@@ -127,7 +127,9 @@ static void v14_board_j514m(struct kunit *test)
 	KUNIT_EXPECT_STREQ(test, b->handoff, "apple,t6034-handoff");
 	KUNIT_EXPECT_TRUE(test, dcp_v14_board_admits(b, J516C_DCP_IMAGE));
 	KUNIT_EXPECT_FALSE(test, dcp_v14_board_admits(b, T6030_DCP_IMAGE));
-	KUNIT_EXPECT_FALSE(test, b->panel_nits);
+	KUNIT_EXPECT_TRUE(test, b->panel_nits);
+	KUNIT_EXPECT_TRUE(test, dcp_v14_board_stamps_swaps(b, false));
+	KUNIT_EXPECT_FALSE(test, dcp_v14_board_stamps_swaps(b, true));
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j514m_wrong_soc, &known));
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6034-dcp", j516m, &known));
 	KUNIT_EXPECT_NULL(test, board_for("apple,t6031-dcp", j514m, &known));
