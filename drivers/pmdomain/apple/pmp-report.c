@@ -86,7 +86,7 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t600x;
 
 /* T6001 AGX request (see the engine below set_state): AGX is soc-device record 9 on the T6001. */
 #define APPLE_PMP_T6001_AGX_ID 9
-static bool agx_vote;
+static bool agx_vote = true;
 static struct agx_vote apple_pmp_agx_vote_state = {.idle_ms = AGX_VOTE_IDLE_MS_DEFAULT};
 static DEFINE_SPINLOCK(apple_pmp_agx_vote_lock);
 /* Serializes the vote work, the unbind release and the report's removal. */
@@ -1325,7 +1325,7 @@ static int apple_pmp_report_set_state(struct apple_pmp_report *rep, u32 id,
  * leaves memory at its idle floor for a GPU that is busy but has not asked. The GPU driver reports operations in flight
  * (apple_pmp_agx_activity_begin/end); the request is set while any operation runs and cleared agx_vote_idle_ms after the last one ends, at
  * GPU unbind and when this report goes away. The decisions are in pmp-agx-vote.h (unit tested); this is the glue.
- * Off by default (pmp_report.agx_vote): with it off nothing is written.
+ * On by default (pmp_report.agx_vote=0 turns it off): with it off nothing is written.
  */
 static unsigned int agx_vote_idle_ms = AGX_VOTE_IDLE_MS_DEFAULT;
 
@@ -1362,9 +1362,15 @@ static const struct kernel_param_ops apple_pmp_agx_vote_ops = {
 	.get = param_get_bool,
 };
 module_param_cb(agx_vote, &apple_pmp_agx_vote_ops, &agx_vote, 0644);
-MODULE_PARM_DESC(agx_vote, "T6001: set the AGX power request in the PMP report while the GPU has work in flight (default: off)");
+MODULE_PARM_DESC(agx_vote, "T6001: set the AGX power request in the PMP report while the GPU has work in flight (default: on)");
 module_param(agx_vote_idle_ms, uint, 0644);
 MODULE_PARM_DESC(agx_vote_idle_ms, "Keep the AGX request this many ms after the last GPU operation ends (default: 250)");
+
+/* The parameter is on by default but only the T6001 has an AGX request: any other chip never votes, so it never counts a failed write. */
+static bool apple_pmp_agx_enabled(void)
+{
+	return READ_ONCE(agx_vote) && of_machine_is_compatible("apple,t6001");
+}
 
 /* Write the AGX request of the bound T6001 report: -ENODEV without one, -EAGAIN (nothing written) when the PMP does not run. */
 static int apple_pmp_agx_write(bool enable, bool no_ack)
@@ -1421,7 +1427,7 @@ static void apple_pmp_agx_vote_fn(struct work_struct *work)
 
 	guard(mutex)(&apple_pmp_agx_vote_mutex);
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
-	v->enabled = READ_ONCE(agx_vote);
+	v->enabled = apple_pmp_agx_enabled();
 	v->idle_ms = READ_ONCE(agx_vote_idle_ms);
 	now = apple_pmp_agx_now_ms();
 	act = agx_vote_decide(v, now);
@@ -1460,7 +1466,7 @@ void apple_pmp_agx_activity_begin(void)
 	agx_ms_t delay;
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
-	v->enabled = READ_ONCE(agx_vote);
+	v->enabled = apple_pmp_agx_enabled();
 	delay = agx_vote_begin(v, apple_pmp_agx_now_ms());
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 	if (delay)
@@ -1475,7 +1481,7 @@ void apple_pmp_agx_activity_end(void)
 	agx_ms_t delay;
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
-	v->enabled = READ_ONCE(agx_vote);
+	v->enabled = apple_pmp_agx_enabled();
 	v->idle_ms = READ_ONCE(agx_vote_idle_ms);
 	delay = agx_vote_end(v, apple_pmp_agx_now_ms());
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
@@ -1506,7 +1512,7 @@ void apple_pmp_agx_activity_resume(void)
 	bool kick;
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
-	v->enabled = READ_ONCE(agx_vote);
+	v->enabled = apple_pmp_agx_enabled();
 	kick = agx_vote_resume(v);
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 	if (kick)
