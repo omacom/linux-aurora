@@ -1411,7 +1411,7 @@ fn adopt_uat(drm: &driver::AsahiDrmDevice, soc: &'static crate::m3::m3_soc::Soc,
     let range = |r: crate::m3::agx_resources::Region| r.base..r.base + r.size;
     let geometry = mmu::UatGeometry { ias: cfg.uat_ias.into(), oas: cfg.uat_oas };
     let regions = mmu::AdoptedRegions { handoff: range(handoff), ttbs: range(ttbs), kernel_root: tables.base };
-    let uat = mmu::Uat::new_adopted_with_user_upper(drm, geometry, &regions,
+    let uat = mmu::Uat::new_adopted_ram_with_user_upper(drm, geometry, &regions,
         profile == super::m3_profile::Profile::Legacy)?;
     let mut window = crate::g15::uat::Window::from_regions(handoff.base, ttbs.base, tables.base, shared_l2.base)?;
     window.bootstrap(drm.as_ref().as_ref(), &uat)?;

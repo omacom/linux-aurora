@@ -3571,7 +3571,7 @@ impl Uat {
     /// Creates the same owned-RAM adopted UAT, choosing whether application contexts also
     /// name the firmware upper root. M4 qualifies only context 0 for firmware-upper access;
     /// its application TTBAT upper words stay zero. G15 preserves its existing shared upper.
-    #[cfg(any(CONFIG_DRM_ASAHI_G16, CONFIG_DRM_ASAHI_M3_T8122))]
+    #[cfg(CONFIG_DRM_ASAHI_G16)]
     pub(crate) fn new_adopted_with_user_upper(
         dev: &driver::AsahiDrmDevice,
         geometry: UatGeometry,
@@ -3579,6 +3579,20 @@ impl Uat {
         map_kernel_to_user: bool,
     ) -> Result<Self> {
         Self::new_adopted_inner(dev, geometry, regions, map_kernel_to_user, false)
+    }
+
+    /// As [`Self::new_adopted_with_user_upper`], for regions that may be reserved System RAM:
+    /// each is mapped write-back when it is RAM and write-combined when it is a carveout, as
+    /// [`Self::new_adopted`] does. The M3 boot loaders leave the handoff and TTBAT regions in
+    /// the kernel's memory map as reserved RAM, which a write-combined mapping is refused for.
+    #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+    pub(crate) fn new_adopted_ram_with_user_upper(
+        dev: &driver::AsahiDrmDevice,
+        geometry: UatGeometry,
+        regions: &AdoptedRegions,
+        map_kernel_to_user: bool,
+    ) -> Result<Self> {
+        Self::new_adopted_inner(dev, geometry, regions, map_kernel_to_user, true)
     }
 
     #[cfg(any(CONFIG_DRM_ASAHI_G15, CONFIG_DRM_ASAHI_G16))]
