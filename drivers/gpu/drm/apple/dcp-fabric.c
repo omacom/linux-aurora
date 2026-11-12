@@ -1971,10 +1971,29 @@ static int dcp_tb_candidate(void *data)
 		struct apple_dcp_typec_route *r;
 
 		list_for_each_entry(r, &port->routes, port_link) {
-			if (r == best || !r->dcp->fixed_phy ||
-			    !dcp_typec_route_available(r) ||
-			    dcp_hdmi_presence(r->dcp) != DCP_FABRIC_ABSENT ||
-			    !dcp_typec_tunnel_ctl(r, dpin))
+			struct apple_dcp *h = r->dcp;
+			bool hdmi_empty;
+
+			if (r == best || !h->fixed_phy || !dcp_typec_tunnel_ctl(r, dpin))
+				continue;
+			/*
+			 * HDMI presence stays SETTLING for DCP_HDMI_HOLD_MS after
+			 * any edge, including the first sample at boot, which is
+			 * when a dock's tunnel comes up. Read the HPD line then.
+			 */
+			switch (dcp_hdmi_presence(h)) {
+			case DCP_FABRIC_ABSENT:
+				hdmi_empty = true;
+				break;
+			case DCP_FABRIC_SETTLING:
+				hdmi_empty = h->hdmi_hpd && !gpiod_get_value_cansleep(h->hdmi_hpd);
+				break;
+			default:
+				hdmi_empty = false;
+				break;
+			}
+			if (!hdmi_empty || h->active_typec_route || dcp_typec_safe_held(h) ||
+			    dcp_typec_route_busy(r))
 				continue;
 			dev_info(r->dcp->dev, "split_dock_main: tunnel dpin%u takes this pipeline instead of %s\n",
 				 dpin, dev_name(best->dcp->dev));
