@@ -236,7 +236,7 @@ static const struct dcp_v14_board dcp_v14_board_j514c = {
 	.log_bringup = true,
 };
 
-/* J514M's 14.7 DCP image and panel geometry; the root SoC is required too. */
+/* J514M's 14.7 DCP image; the root SoC is required too. */
 static const struct dcp_v14_board dcp_v14_board_j514m = {
 	.name = "J514M",
 	.debugfs = "dcp-j514m",

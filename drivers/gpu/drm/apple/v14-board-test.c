@@ -4,8 +4,9 @@
  * and which DCP firmware image a record admits. The J516C (T6031) record
  * admits only the T6030 image, whose IOMFB layouts were validated, and
  * refuses every other; the existing records are unchanged. Which DCPs stamp
- * their swaps: the internal panel of a T6031 record; the T6030 and T8122
- * panels and external processors keep zero timestamps, byte for byte.
+ * their swaps: the internal panel of a record with swap_timestamps set
+ * (J516C, J516M, J514M); the J514C, T6030 and T8122 panels and external
+ * processors keep zero timestamps, byte for byte.
  */
 #include <kunit/test.h>
 #include <linux/string.h>
@@ -245,7 +246,10 @@ static void v14_board_unchanged(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, known);
 }
 
-/* Only the internal panel of the J516C record stamps its swaps. */
+/*
+ * Only the internal panel of a record with swap_timestamps set (J516C, J516M,
+ * J514M) stamps its swaps; J516M and J514M are checked in their own cases.
+ */
 static void v14_board_swap_timestamps(struct kunit *test)
 {
 	const struct dcp_v14_board *j516c_b, *j514c_b, *t6030_b, *j613_b;
