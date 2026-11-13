@@ -199,8 +199,11 @@ impl platform::Driver for Driver<'_> {
         // after probe_g15 started firmware would return an unbound device.
         try_pin_init!(Driver {
             _driver: {
+                // Not EPROBE_DEFER: a deferred device stays listed in devices_deferred until the
+                // deferred-probe work runs, even after activate()'s probe fails for good. Activation
+                // reprobes every unbound device; a device added later sees MODULE_READY set.
                 if !MODULE_READY.load(Ordering::Acquire) {
-                    return Err(EPROBE_DEFER);
+                    return Err(ENODEV);
                 }
                 let cfg = *info.ok_or(ENODEV)?;
                 let cfg = if cfg.chip_id == 0x6034 && boot::glue::machine(c_str!("apple,j516m")) {
