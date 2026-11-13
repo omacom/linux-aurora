@@ -483,12 +483,15 @@ static void apple_rtkit_crashlog_rx(struct apple_rtkit *rtk, u64 msg)
 		if (rtk->crashlog_buffer.size < sizeof(probe) ||
 		    (!rtk->crashlog_buffer.buffer && !rtk->crashlog_buffer.iomem))
 			return;
-		apple_rtkit_memcpy(rtk, &probe, &rtk->crashlog_buffer, 0,
-				   sizeof(probe));
-		if (!apple_rtkit_crashlog_present(probe.bytes, sizeof(probe)))
-			return;
-		dev_err(rtk->dev,
-			"RTKit: crash log delivered with the buffer request\n");
+	}
+	if (reports_crash) {
+		if (rtk->crashlog_buffer.size <
+		    sizeof(struct apple_rtkit_crashlog_header))
+			goto no_buffer;
+		/* A firmware-owned buffer has no CPU mapping to read a header from. */
+		if ((rtk->crashlog_buffer.buffer || rtk->crashlog_buffer.iomem) &&
+		    !apple_rtkit_crashlog_header_valid(rtk))
+			goto no_log;
 	}
 
 	dev_err(rtk->dev, "RTKit: co-processor has crashed\n");
