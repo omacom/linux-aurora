@@ -29,7 +29,7 @@ for match in re.finditer(
     }
     machine = re.search(r'machine:\s*Some\(kernel::c_str!\("([^"]+)"\)\)', body)
     rows.append((fields, digest, machine.group(1) if machine else None))
-assert sum(machine == "apple,j514c" for _, _, machine in rows) == 1
+assert sum(machine == "apple,j514c" for _, _, machine in rows) == 2
 assert any(machine == "apple,j516c" for _, _, machine in rows)
 assert all(machine == "apple,j516c" for _, _, machine in rows if machine != "apple,j514c")
 measurements = []
@@ -51,13 +51,24 @@ fn rows(board: &str) -> Vec<(Measured, bool)> {
         (m, b.map_or(true, |b| b == board))
     }).collect()
 }
+// A digest may be bound to more than one board (one row per board); the expected
+// verdict on `board` is the first row with that digest bound to it or to no board.
+fn expected(sha256: &[u8; 32], board: &str) -> Verdict {
+    let all = rows(board);
+    match all.iter().zip(MACHINES).position(|((m, _), b)| {
+        &m.sha256 == sha256 && b.map_or(true, |b| b == board)
+    }) {
+        Some(i) => Verdict::Pinned(i),
+        None => Verdict::Refused,
+    }
+}
 #[test]
 fn j514c_exact_candidate() {
-    let index = MACHINES.iter().position(|b| *b == Some("apple,j514c")).unwrap();
+  for index in (0..MACHINES.len()).filter(|&i| MACHINES[i] == Some("apple,j514c")) {
     let exact = rows("apple,j514c")[index].0;
     assert_eq!(lookup::verdict(&exact, rows("apple,j514c"), 0), Verdict::Pinned(index));
     for board in ["apple,j516c", "apple,j514m", "apple,j516m"] {
-        assert_eq!(lookup::verdict(&exact, rows(board), 0), Verdict::Refused);
+        assert_eq!(lookup::verdict(&exact, rows(board), 0), expected(&exact.sha256, board));
     }
     let mut bad = exact; bad.sha256[31] ^= 1;
     assert_eq!(lookup::verdict(&bad, rows("apple,j514c"), 0), Verdict::Refused);
@@ -67,6 +78,7 @@ fn j514c_exact_candidate() {
     assert_eq!(lookup::verdict(&bad, rows("apple,j514c"), 0), Verdict::Refused);
     let mut bad = exact; bad.marker += 8;
     assert_eq!(lookup::verdict(&bad, rows("apple,j514c"), 0), Verdict::Refused);
+  }
 }
 #[test]
 fn existing_rows_unchanged() {
@@ -76,7 +88,7 @@ fn existing_rows_unchanged() {
             assert_eq!(lookup::verdict(&measured, rows("apple,j516c"), 0), Verdict::Pinned(index));
             if board.is_some() {
                 for other in ["apple,j514c", "apple,j514m", "apple,j516m"] {
-                    assert_eq!(lookup::verdict(&measured, rows(other), 0), Verdict::Refused);
+                    assert_eq!(lookup::verdict(&measured, rows(other), 0), expected(&measured.sha256, other));
                 }
             }
         }
