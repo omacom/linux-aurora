@@ -193,6 +193,21 @@ pub(crate) const CONFIG: Config = Config {
                 0x70, 0xc6, 0x6d, 0x2b, 0x0a, 0x1e, 0x87, 0x86,
             ],
         },
+        // The same TEXT as the J516C row above, on J514C: two 14-inch M3 Max owners load it
+        // with OS firmware 14.7 and bring the GPU up with `g15_accept_text_prefix`. Exact
+        // board identity is required; power/thermal qualification remains open.
+        FirmwareBuild {
+            name: "J514C stub firmware, TEXT 125f0497",
+            machine: Some(kernel::c_str!("apple,j514c")),
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x12, 0x5f, 0x04, 0x97, 0xc7, 0x90, 0x4f, 0xde, 0x87, 0xb0, 0x5a, 0x92, 0x64,
+                0xa8, 0x8c, 0xf0, 0x3b, 0xdb, 0x35, 0x72, 0xa1, 0x71, 0x5c, 0xec, 0x91, 0xbd,
+                0x0f, 0x9b, 0x78, 0x24, 0x55, 0x44,
+            ],
+        },
     ],
     // This is the reference board. The exact J514C/T6031 pair also uses this
     // configuration through normal admission, with the unmeasured reference
