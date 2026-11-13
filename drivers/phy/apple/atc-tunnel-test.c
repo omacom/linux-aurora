@@ -12,7 +12,7 @@ static void atc_tunnel_soc_qualification(struct kunit *test)
 	} cases[] = {
 		{ "apple,t6020", true },
 		{ "apple,t6021", true },
-		{ "apple,t6022", false },
+		{ "apple,t6022", true },
 		{ "apple,t8103", false },
 		{ "apple,t6000", false },
 		{ "apple,t6001", false },
@@ -47,7 +47,7 @@ static void atc_tunnel_core_qualification(struct kunit *test)
 		{ "apple,t6020-atcphy", 0xb03000000ULL, 0x7048, true },
 		{ "apple,t6020-atcphy", 0xf03000000ULL, 0x7048, true },
 		{ "apple,t6020-atcphy", 0x703000000ULL, 0x7047, false },
-		{ "apple,t6020-atcphy", 0x1303000000ULL, 0x4c000, false },
+		{ "apple,t6020-atcphy", 0x1303000000ULL, 0x4c000, true },
 		{ "apple,t6020-atcphy", 0x2703000000ULL, 0x4c000, false },
 		{ "apple,t8103-atcphy", 0x703000000ULL, 0x4c000, false },
 	};
