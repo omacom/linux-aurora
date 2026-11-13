@@ -194,6 +194,8 @@ u32 dcp_fabric_connector_mask(bool dual_stream, bool bound, bool routed,
 			      unsigned int index, u32 candidates);
 u32 dcp_fabric_port_crtc_mask(bool secondary, bool ordered_dual, bool typec_only,
 			    u32 mask, u32 candidate);
+u32 dcp_fabric_secondary_crtc(const u32 *candidates, const bool *typec_only,
+			      unsigned int count);
 enum dcp_fabric_attach_action dcp_fabric_attach_action(bool external);
 bool dcp_fabric_t6030_link(bool tunnel, bool has_xbar, bool t6030_dpin);
 
