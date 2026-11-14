@@ -502,10 +502,10 @@ static void appledrm_connector_cleanup(struct drm_connector *connector)
 	cancel_work_sync(&apple_connector->bl_commit_wq);
 	mutex_destroy(&apple_connector->bl_lock);
 	drm_connector_cleanup(connector);
-	kfree(apple_connector->color_elements.data);
-	kfree(apple_connector->timing_elements.data);
-	kfree(apple_connector->display_attributes.data);
-	kfree(apple_connector->transport.data);
+	kvfree(apple_connector->color_elements.data);
+	kvfree(apple_connector->timing_elements.data);
+	kvfree(apple_connector->display_attributes.data);
+	kvfree(apple_connector->transport.data);
 	kfree(apple_connector);
 }
 
