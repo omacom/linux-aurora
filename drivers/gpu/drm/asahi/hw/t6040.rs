@@ -106,6 +106,18 @@ pub(crate) const CONFIG: Config = Config {
                     0x37, 0xee, 0x5d, 0x6e, 0x5e, 0x98,
                 ],
             },
+            crate::fwid::FirmwareBuild {
+                name: "Apple GFX 25G83 for T6040 (normalized loaded image, third alternate J616s fill)",
+                text_size: 0x60000,
+                data_size: 0x138000,
+                entropy: &[[0x59839, 0x5991c]],
+                boot_filled: &[],
+                text_sha256: [
+                    0x19, 0xd9, 0x97, 0x49, 0x3e, 0x00, 0x76, 0x3d, 0xe3, 0x1f, 0x40, 0x0a, 0x59,
+                    0x2d, 0x8a, 0xea, 0xe6, 0xbd, 0x11, 0x72, 0xc5, 0x85, 0x96, 0x61, 0x78, 0x1b,
+                    0x42, 0x15, 0xde, 0xbc, 0x87, 0x0b,
+                ],
+            },
         ],
         variant: &fw::variant::V25G83,
         config: None,
