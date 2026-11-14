@@ -30,18 +30,21 @@ properties:
               - apple,t6031-usb4-nhi
               - apple,t8112-usb4-nhi
               - apple,t8122-usb4-nhi
+              - apple,t8152-usb4-nhi
           - const: apple,t8103-usb4-nhi
 
   reg:
     minItems: 1
+    maxItems: 2
     items:
       - description: NHI registers with the transmit and receive rings
       - description:
           Protocol Defined Field (PDF) bitmasks selecting which frames are
-          accepted by each receive ring
+          accepted by each receive ring; absent on T8152
 
   reg-names:
     minItems: 1
+    maxItems: 2
     items:
       - const: nhi
       - const: pdf
@@ -123,7 +126,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: apple,t8142-usb4-nhi
+            enum:
+              - apple,t8142-usb4-nhi
+              - apple,t8152-usb4-nhi
     then:
       properties:
         reg:
@@ -145,6 +150,7 @@ allOf:
               - apple,t6031-usb4-nhi
               - apple,t8122-usb4-nhi
               - apple,t8142-usb4-nhi
+              - apple,t8152-usb4-nhi
     then:
       properties:
         iommus:
