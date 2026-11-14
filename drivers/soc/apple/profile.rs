@@ -425,6 +425,26 @@ pub(crate) const T8122: PlatformProfile = PlatformProfile {
     ..T8112
 };
 
+/// MacBook Pro 14" M3 Pro (J514s). The J514s ADT (system firmware 27.0) records
+/// a pre-booted SEP (`sepfw-load-at-boot`), an `iop-sep,ascwrap-v6` SEP and
+/// its DART at the same addresses as T8122's, with the same BIT(40) aperture
+/// (`vm-base` 0x10000004000, `vm-size` 0xffff0000). The Mesa sensor is the
+/// `0x3352` part T8122 carries, on spi2 at `0x289108000`, 8 MHz, chip select
+/// 0. Its power is NUB GPIO 33 and its data-ready line AP GPIO 200.
+/// `/defaults` carries `cpx-encryption-mode = 2`.
+///
+/// Otherwise T8122's warm-registration profile. J514s on system firmware 27.0
+/// attaches, provisions the keybag, enrols, matches, and still matches after a
+/// reboot and after suspend; macOS Touch ID keeps working alongside it.
+pub(crate) const T6030: PlatformProfile = PlatformProfile {
+    name: "T6030/J514s",
+    sensor: SensorProfile {
+        controller_base: 0x2_8910_8000,
+        ..T8122.sensor
+    },
+    ..T8122
+};
+
 static_assert!(T8103.shmem_capacity == 0x30000);
 static_assert!(T6020.shmem_capacity == 0x40000);
 static_assert!(T8140.shmem_capacity == 0x40000);
@@ -440,6 +460,9 @@ static_assert!(T8112.sensor.controller_base == T8103.sensor.controller_base);
 static_assert!(T8122.shmem_capacity == T8112.shmem_capacity);
 static_assert!(T8122.sensor.controller_base == 0x2a1108000);
 static_assert!(T8122.wide_dma_mask);
+static_assert!(T6030.sensor.controller_base == 0x289108000);
+static_assert!(T6030.sensor.expected_id == T8122.sensor.expected_id);
+static_assert!(T6030.wide_dma_mask);
 
 /// Whether the machine root declares `compatible`.
 ///
@@ -585,6 +608,11 @@ pub(crate) fn detect() -> Result<&'static PlatformProfile> {
     // J504) share the SoC but their sensor wiring is unchecked.
     if machine_has(b"apple,t8122") && (machine_has(b"apple,j613") || machine_has(b"apple,j615")) {
         return Ok(&T8122);
+    }
+    // Only the board whose ADT was read: J514s. The 16" M3 Pro (J516s)
+    // shares the SoC but its sensor wiring is unchecked.
+    if machine_has(b"apple,t6030") && machine_has(b"apple,j514s") {
+        return Ok(&T6030);
     }
     Err(ENODEV)
 }
