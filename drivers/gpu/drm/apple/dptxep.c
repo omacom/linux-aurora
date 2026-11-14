@@ -100,6 +100,21 @@ struct dptxport_apcall_set_tiled {
 #define DPTX_TILE_HINT_MIN_SIZE	0x40
 
 /*
+ * Experimental (split_alloc): macOS 14 on J514S answers this call
+ * with a pipe allocation at +0x64..+0x77 (seen in a hypervisor trace:
+ * 1, 1, 6144, 1438000000, 1274019840). The DCP then offers 5K@120/180 as
+ * split timings (ID + 10000). Off by default; can be flipped at runtime and
+ * takes effect on the next hotplug.
+ */
+static bool split_alloc;
+module_param(split_alloc, bool, 0644);
+MODULE_PARM_DESC(split_alloc,
+		 "EXPERIMENT: offer a dcpext peer pipe in SetTiledDisplayHints replies like macOS 14");
+
+#define DPTX_SPLIT_ALLOC_OFF	0x64
+#define DPTX_SPLIT_ALLOC_END	0x78
+
+/*
  * A Thunderbolt DP tunnel uses the same CORE|ATC|DIE|CONNECTED target as a
  * direct alt-mode PHY: CORE is the DFP port (0 = dpphy, 1/2 = dpin0/dpin1)
  * and ATC the route's own ATC index.
@@ -661,6 +676,30 @@ static int dptxport_call_set_tiled_display_hint(struct apple_epic_service *servi
 	}
 
 	reply->retcode = cpu_to_le32(1);
+
+	/* Only for a single-stream sink that reports its size (not a 2-tile LG). */
+	if (READ_ONCE(split_alloc) && data_size >= DPTX_SPLIT_ALLOC_END &&
+	    reply_size >= DPTX_SPLIT_ALLOC_END &&
+	    get_unaligned_le32(hint + DPTX_TILE_HINT_TILES_H) <= 1 &&
+	    get_unaligned_le32(hint + DPTX_TILE_HINT_WIDTH) &&
+	    get_unaligned_le32(hint + DPTX_TILE_HINT_HEIGHT)) {
+		u8 *r = reply_;
+
+		put_unaligned_le32(1, r + DPTX_SPLIT_ALLOC_OFF + 0x00);
+		put_unaligned_le32(1, r + DPTX_SPLIT_ALLOC_OFF + 0x04);
+		put_unaligned_le32(0x1800, r + DPTX_SPLIT_ALLOC_OFF + 0x08);
+		put_unaligned_le32(0x55b62380, r + DPTX_SPLIT_ALLOC_OFF + 0x0c);
+		put_unaligned_le32(0x4bf00000, r + DPTX_SPLIT_ALLOC_OFF + 0x10);
+		dev_info(service->ep->dcp->dev,
+			 "DPTXPort: EXPERIMENT split_alloc: offered a peer pipe for %ux%u (data %zu, reply %zu)\n",
+			 get_unaligned_le32(hint + DPTX_TILE_HINT_WIDTH),
+			 get_unaligned_le32(hint + DPTX_TILE_HINT_HEIGHT),
+			 data_size, reply_size);
+	} else if (READ_ONCE(split_alloc)) {
+		dev_info(service->ep->dcp->dev,
+			 "DPTXPort: EXPERIMENT split_alloc: hint not used (data %zu, reply %zu)\n",
+			 data_size, reply_size);
+	}
 	return 0;
 }
 

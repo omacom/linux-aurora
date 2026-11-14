@@ -46,6 +46,8 @@ struct dcp_v14_link {
 	unsigned int callback_count;
 	/* Callback handlers running on the caller's stack. */
 	unsigned int callback_depth;
+	/* Experimental (split_modeset): outer calls may take 20 s instead of 5 s. */
+	bool long_calls;
 	bool failed;
 	bool enabled;
 	struct work_struct *idle_work;
@@ -92,6 +94,9 @@ int dcp_v14_link_call_guarded(struct dcp_v14_link *link, u32 tag, const void *in
 		      u32 input_size, void *output, u32 output_size,
 		      u32 completion_id, dcp_v14_callback_fn callback, void *cookie,
 		      dcp_v14_admit_fn admit, void *admit_cookie, bool *vetoed);
+bool dcp_v14_link_outer_pending(struct dcp_v14_link *link);
+int dcp_v14_link_wait_swap(struct dcp_v14_link *link, u32 id, unsigned long timeout,
+			   dcp_v14_callback_fn callback, void *cookie);
 int dcp_v14_link_pump(struct dcp_v14_link *link, unsigned long timeout,
 		      dcp_v14_callback_fn callback, void *cookie);
 
