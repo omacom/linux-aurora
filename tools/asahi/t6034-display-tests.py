@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 ROOT = Path(__file__).resolve().parents[2]
-gate = (ROOT / 'drivers/soc/apple/t6030-display-gate.c').read_text()
+gate = (ROOT / 'drivers/soc/apple/display-gate.c').read_text()
 driver = (ROOT / 'drivers/gpu/drm/apple/iomfb_v14_7.c').read_text()
 header = (ROOT / 'drivers/gpu/drm/apple/iomfb_v14_7_board.h').read_text()
 def item(s, marker):
@@ -178,6 +178,8 @@ static bool of_device_is_available(const struct device_node *n) {return n && n->
 static bool of_device_is_compatible(const struct device_node *n,const char *s) {return n && !strcmp(n->compatible,s);}
 static bool dcp_t6030_ext_native(struct device_node *n) {(void)n;return false;}
 static bool dcp_h17p_external_supported(struct device_node *n) {(void)n;return false;}
+static bool dcp_t6041_ext_enabled(void) {return true;}
+static void pm_vt_switch_required(struct device *d,bool required) {(void)d;(void)required;}
 static bool table_has(const struct of_device_id *table,const char *compatible)
 {for(;table->compatible;table++)if(!strcmp(table->compatible,compatible))return true;return false;}
 static struct device_node *next_node(struct device_node *previous,const struct of_device_id *table)
@@ -222,7 +224,7 @@ int main(void)
  return 0;
 }
 '''
-component_source='\n'.join([component_prefix,'\n'.join('static const char '+n+';' for n in data_names),component_table,master_table,dcp_table,component_functions,component_main])
+component_source='\n'.join([component_prefix,'\n'.join('static const char '+n+' __attribute__((unused));' for n in data_names),component_table,master_table,dcp_table,component_functions,component_main])
 component_mutants={
  'control':component_source,
  'missing-master-dcp':component_source.replace(component_table,component_table.replace('"apple,t6034-dcp"','"apple,missing-t6034-dcp"')),
