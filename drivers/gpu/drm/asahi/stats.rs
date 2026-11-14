@@ -11,7 +11,8 @@
 //! the versioned context where `StatsMsg` is nameable; `note_job()` is called
 //! from the `recv_message` rtkit callback (so the firmware mailbox IRQ
 //! context); the sysfs `show` callback runs in arbitrary process context. All
-//! fields use `AtomicU*` so neither side takes a lock.
+//! legacy fields use `AtomicU*`. G17 instead uses the optional reader under
+//! its device mutex and does not populate these legacy atomic fields.
 //!
 //! Field semantics (firmware units, late-validated):
 //! - `util1..util4`: raw `Utilization` u32s from the firmware. Meaning
@@ -58,6 +59,9 @@ pub(crate) struct StatsSnapshot {
     /// `JobFence::command_complete` when the last command of a submission
     /// completes.
     pub(crate) jobs: AtomicU64,
+    /// Optional qualified reader. The legacy C layout above remains a prefix;
+    /// C accesses this extension only through the registered Rust callbacks.
+    pub(crate) g17_reader: Option<crate::g17::stats::Reader>,
 }
 
 // Keep the Rust half of the C sysfs layout contract checked as well.
@@ -65,7 +69,7 @@ const _: () = {
     assert!(core::mem::offset_of!(StatsSnapshot, pstate) == 16);
     assert!(core::mem::offset_of!(StatsSnapshot, busy_ns) == 40);
     assert!(core::mem::offset_of!(StatsSnapshot, jobs) == 48);
-    assert!(core::mem::size_of::<StatsSnapshot>() == 56);
+    assert!(core::mem::offset_of!(StatsSnapshot, g17_reader) == 56);
 };
 
 impl StatsSnapshot {

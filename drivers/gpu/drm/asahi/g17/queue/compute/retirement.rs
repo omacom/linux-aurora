@@ -72,15 +72,16 @@ pub(crate) enum Recordless {
 }
 
 /// How long a command whose exact completion record is present waits for its completion stamp
-/// before it retires on the record alone.
+/// before it retires on the record alone, counted from when its ioctl's work-state node drained.
 ///
 /// The firmware stores the stamp after the cache maintenance that follows the record, so the
 /// stamp, not the record, proves that the command's writes are complete and that its mappings
-/// may be released. While other commands of the same submit ioctl are still running, the stamp
-/// routinely lands several milliseconds after the record (on J700 under games, up to about 3 ms
-/// after the 1 ms this used to wait). Only a stamp still missing well past that is treated as
-/// never stored. The bound stays far below the scheduler timeout, so such a command cannot fail
-/// its VM.
+/// may be released. It stores the stamps of an ioctl's commands only once every kick counted on
+/// the ioctl's work-state node has completed: while other commands of the same submit ioctl
+/// still run, the stamp is not late, however long they run (a command buffer of a dozen render
+/// passes, or a render waiting on another queue). [`stamp_wait`] restarts the bound until the
+/// node drains. Only a stamp still missing well past that is treated as never stored. The bound
+/// stays far below the scheduler timeout, so such a command cannot fail its VM.
 pub(crate) const STAMP_FALLBACK_NS: u64 = 50_000_000;
 
 // A command that waits out the fallback must still retire well inside the scheduler timeout.
@@ -92,7 +93,38 @@ pub(crate) fn record_aged(observed_at: Option<u64>, now: u64) -> bool {
     observed_at.is_some_and(|at| now.saturating_sub(at) >= STAMP_FALLBACK_NS)
 }
 
+/// Where a command's wait for its completion stamp stands; see [`stamp_wait`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StampWait {
+    /// Within [`STAMP_FALLBACK_NS`] of the record, or no record yet.
+    Waiting,
+    /// The bound passed while the ioctl's work-state node still runs kicks: the stamp is not
+    /// late, and the wait counts again from the given host time.
+    Restart(u64),
+    /// The node drained and the stamp is still missing after the bound: retire on the record.
+    Aged,
+}
+
+/// The stamp wait of a command whose exact record was latched at `observed_at` (host ns) and
+/// whose stamp is still missing, at `now`. `drained` reports whether every kick counted on the
+/// command's work-state node completed; it is asked only once the bound has passed.
+pub(crate) fn stamp_wait(observed_at: Option<u64>, now: u64, drained: impl FnOnce() -> bool)
+    -> StampWait
+{
+    if !record_aged(observed_at, now) {
+        StampWait::Waiting
+    } else if drained() {
+        StampWait::Aged
+    } else {
+        StampWait::Restart(now)
+    }
+}
+
 static STAMPLESS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn stampless_total() -> u64 {
+    STAMPLESS.load(core::sync::atomic::Ordering::Relaxed)
+}
 
 /// Counts a command that retired on its record because its completion stamp never arrived;
 /// logs the first and every 64th.
@@ -100,7 +132,7 @@ pub(crate) fn note_stampless(qid: u8, kick: u64) {
     let count = STAMPLESS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
     if count == 1 || count % 64 == 0 {
         pr_info!(
-            "G17: {} compute commands retired on their completion record after {} ms without a completion stamp (latest: queue {} kick {:#x})\n",
+            "G17: lifetime total {} compute commands retired on their completion record after {} ms without a completion stamp (latest: queue {} kick {:#x})\n",
             count,
             STAMP_FALLBACK_NS / 1_000_000,
             qid,
@@ -109,10 +141,25 @@ pub(crate) fn note_stampless(qid: u8, kick: u64) {
     }
 }
 
-/// A zero-duration record fails before visibility polling. It proves execution did not occur;
+/// Firmware retires the compute commands in flight at a restart without executing them and
+/// stores a record whose end is at most this many timer ticks after its start (0 or 1 tick
+/// observed). The shortest executed command record seen is 18 ticks.
+pub(crate) const CANCELLED_TICKS: u64 = 1;
+
+/// The record shows the command never executed: zero duration, or, for a command that was in
+/// flight across a recovery (`crossed`), the restart's cancellation record.
+pub(crate) fn unexecuted(record: Observation, crossed: bool) -> bool {
+    let [start, end] = record.timestamps;
+    start == end || (crossed && start != 0 && end >= start && end - start <= CANCELLED_TICKS)
+}
+
+/// A record showing the command never executed ([`unexecuted`]) fails before visibility
+/// polling. It proves execution did not occur;
 /// ownership still requires a separate retirement witness before mappings can be released.
 /// The command is complete when its stamp covers it, or when its exact completion record has
-/// been present for [`STAMP_FALLBACK_NS`] without one (`record_aged`); in both cases its items
+/// been present for [`STAMP_FALLBACK_NS`] without one (`record_aged`) in the same recovery
+/// generation. Recovery may consume items without completing their writes, so an old record
+/// and consumed items cannot replace the stamp across a restart. In both cases its items
 /// must be consumed.
 #[expect(
     clippy::too_many_arguments,
@@ -128,10 +175,13 @@ pub(crate) fn poll(
     next_end: Option<u64>,
     record_aged: bool,
 ) -> Result<Option<[u64; 2]>> {
-    if observed.is_some_and(|record| record.timestamps[0] == record.timestamps[1]) {
+    let crossed = matches!(recordless, Recordless::CrossedRecovery);
+    if observed.is_some_and(|record| unexecuted(record, crossed)) {
         return Err(ENODATA);
     }
-    let completed = stamp_covers(stamp, ticket.kick) || (observed.is_some() && record_aged);
+    let same_generation = !crossed;
+    let completed = stamp_covers(stamp, ticket.kick)
+        || (same_generation && observed.is_some() && record_aged);
     if !completed || !cursors.consumed(ticket.item_producer, ticket.item_count)? {
         return Ok(None);
     }
@@ -531,6 +581,22 @@ mod tests {
     }
 
     #[test]
+    fn a_stamp_waits_for_the_rest_of_its_ioctl() {
+        let at = 1_000_000;
+        let late = at + STAMP_FALLBACK_NS;
+        // The node is asked only once the bound passed.
+        assert_eq!(stamp_wait(Some(at), late - 1, || panic!("node read early")), StampWait::Waiting);
+        assert_eq!(stamp_wait(None, u64::MAX, || panic!("node read without a record")),
+            StampWait::Waiting);
+        // Other kicks of the ioctl still run: the stamp is not late, the bound restarts.
+        assert_eq!(stamp_wait(Some(at), late, || false), StampWait::Restart(late));
+        assert_eq!(stamp_wait(Some(late), late + STAMP_FALLBACK_NS - 1, || true), StampWait::Waiting);
+        // The node drained and the stamp is still missing after the bound.
+        assert_eq!(stamp_wait(Some(late), late + STAMP_FALLBACK_NS, || true), StampWait::Aged);
+        assert_eq!(stamp_wait(Some(at), late, || true), StampWait::Aged);
+    }
+
+    #[test]
     fn an_aged_record_still_waits_for_consumed_items() {
         let record = Some(Observation { timestamps: [10, 20] });
         let busy = Cursors {
@@ -540,6 +606,30 @@ mod tests {
         };
         let result = poll(&ticket(), record, busy, 0, Recordless::Allowed, 0, None, true);
         assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn recovery_cannot_turn_an_aged_record_into_a_release_witness() {
+        let record = Some(Observation { timestamps: [10, 20] });
+        // Recovery can advance the consumer without completing cache maintenance.
+        // Even a record observed before the restart and aged past the fallback
+        // must retain its command's mappings until a real stamp covers it.
+        for stamp in [0, own(KICK - 1)] {
+            assert_eq!(poll(&ticket(), record, consumed(), stamp,
+                Recordless::CrossedRecovery, 0, None, true), Ok(None));
+        }
+        // A real stamp restores the release witness; completion's interrupted
+        // classification independently prevents false successful fences.
+        for stamp in [own(KICK), own(KICK + 1)] {
+            assert_eq!(poll(&ticket(), record, consumed(), stamp,
+                Recordless::CrossedRecovery, 0, None, true), Ok(Some([10, 20])));
+        }
+        let busy = Cursors { producer: 4, consumer: 2, count: 64 };
+        assert_eq!(poll(&ticket(), record, busy, own(KICK),
+            Recordless::CrossedRecovery, 0, None, true), Ok(None));
+        // The existing same-generation fallback remains available.
+        assert_eq!(poll(&ticket(), record, consumed(), own(KICK - 1),
+            Recordless::Allowed, 0, None, true), Ok(Some([10, 20])));
     }
 
     #[test]

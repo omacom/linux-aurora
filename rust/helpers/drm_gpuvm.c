@@ -24,6 +24,12 @@ bool rust_helper_drm_gpuvm_is_extobj(struct drm_gpuvm *gpuvm,
 }
 
 __rust_helper
+bool rust_helper_drm_exec_is_contended(struct drm_exec *exec)
+{
+	return drm_exec_is_contended(exec);
+}
+
+__rust_helper
 void rust_helper_drm_gpuvm_exec_unlock(struct drm_gpuvm_exec *vm_exec)
 {
 	drm_gpuvm_exec_unlock(vm_exec);

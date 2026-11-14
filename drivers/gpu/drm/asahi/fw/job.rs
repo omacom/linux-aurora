@@ -139,10 +139,6 @@ pub(crate) struct UserTimestamps {
 }
 
 impl UserTimestamps {
-    pub(crate) fn any(&self) -> bool {
-        self.start.is_some() || self.end.is_some()
-    }
-
     pub(crate) fn pointers(&self) -> Result<raw::TimestampPointers<'_>> {
         Ok(raw::TimestampPointers {
             start_addr: self

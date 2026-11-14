@@ -185,6 +185,12 @@ impl platform::Driver for Driver<'_> {
     type Data<'bound> = Driver<'bound>;
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
 
+    fn unbind<'bound>(_pdev: &'bound platform::Device<Core<'_>>, this: Pin<&Self::Data<'bound>>) {
+        if let Some(driver) = &this._driver {
+            driver.close_binding();
+        }
+    }
+
     /// The firmware session cannot be stopped once started.
     fn suppress_bind_attrs() -> bool {
         true
@@ -227,7 +233,6 @@ impl platform::Driver for Driver<'_> {
             },
         })
     }
-
 }
 
 /// Firmware starts only after every fallible module/driver registration has succeeded.
@@ -678,9 +683,10 @@ impl gpu::Gpu for Gpu {
         _ualloc_priv: Arc<Mutex<alloc::DefaultAllocator>>,
         priority: u32,
         usc_exec_base: u64,
+        usage: Arc<crate::usage::Client>,
     ) -> Result<KBox<dyn crate::queue::Queue>> {
         Ok(KBox::new(
-            queue::Queue::new(self, vm, priority, usc_exec_base)?,
+            queue::Queue::new(self, vm, priority, usc_exec_base, usage)?,
             GFP_KERNEL,
         )?)
     }

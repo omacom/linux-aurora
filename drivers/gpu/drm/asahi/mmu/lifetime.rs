@@ -18,6 +18,7 @@ const ADMISSION_WAIT_MS: u32 = 1000;
 pub(super) struct DriverMappings {
     mappings: KVec<KernelMapping>,
     reserved: KVec<Range<u64>>,
+    metrics: Option<(u64, KernelMapping)>,
     compute: Option<PoolMappings>,
     render: [Option<PoolMappings>; crate::hw::t8140::queues::RENDER_SLOTS],
 }
@@ -28,11 +29,15 @@ struct PoolMappings {
     mappings: KVec<KernelMapping>,
 }
 
+/// A graph's pool mappings moved out of a VM slot (see
+/// Vm::take_render_pool_mappings). Dropping it unmaps them.
+pub(crate) struct RenderPoolMappings(PoolMappings);
+
 impl DriverMappings {
     fn ranges(&self) -> impl Iterator<Item = Range<u64>> + '_ {
         Iterator::chain(
             Iterator::chain(
-                self.mappings.iter(),
+                Iterator::chain(self.mappings.iter(), self.metrics.iter().map(|(_, mapping)| mapping)),
                 Iterator::chain(
                     self.compute.iter().flat_map(|pool| pool.mappings.iter()),
                     self.render
@@ -152,11 +157,47 @@ impl Vm {
         *driver = Some(DriverMappings {
             mappings,
             reserved,
+            metrics: None,
             compute: None,
             render: core::array::from_fn(|_| None),
         });
         Ok(())
     }
+
+    /// Cache a single metrics backing per VM. Mapping allocation runs outside
+    /// the driver lock; a racing equivalent installation reuses the winner.
+    pub(crate) fn metrics_alias(
+        &self,
+        key: u64,
+        make: impl FnOnce() -> Result<KernelMapping>,
+    ) -> Result<u64> {
+        let lifetime = self.lifetime.as_ref().ok_or(EINVAL)?;
+        {
+            let driver = lifetime.driver.lock();
+            if let Some((id, mapping)) = driver.as_ref().and_then(|d| d.metrics.as_ref()) {
+                return if *id == key { Ok(mapping.iova()) } else { Err(EINVAL) };
+            }
+        }
+        let mapping = make()?;
+        let mut driver = lifetime.driver.lock();
+        if let Some((id, existing)) = driver.as_ref().and_then(|d| d.metrics.as_ref()) {
+            let result = if *id == key { Ok(existing.iova()) } else { Err(EINVAL) };
+            drop(driver);
+            drop(mapping);
+            return result;
+        }
+        let driver = driver.get_or_insert_with(|| DriverMappings {
+            mappings: KVec::new(),
+            reserved: KVec::new(),
+            metrics: None,
+            compute: None,
+            render: core::array::from_fn(|_| None),
+        });
+        let address = mapping.iova();
+        driver.metrics = Some((key, mapping));
+        Ok(address)
+    }
+
 
     /// Reserves the complete append before moving aliases into VM ownership.
     pub(crate) fn append_driver_mappings(&self, mappings: KVec<KernelMapping>) -> Result {
@@ -168,6 +209,51 @@ impl Vm {
             driver.mappings.push(mapping, GFP_KERNEL)?;
         }
         Ok(())
+    }
+
+    /// Move a drained graph's pool mappings for `slot` out of this VM
+    /// (so another graph of the same VM can install there); `put` returns them
+    /// if that install fails. Only the exact owner identity is taken.
+    pub(crate) fn take_render_pool_mappings(&self, slot: u8, id: u64) -> Option<RenderPoolMappings> {
+        if id == 0 {
+            return None;
+        }
+        let lifetime = self.lifetime.as_ref()?;
+        let mut driver = lifetime.driver.lock();
+        Option::as_mut(&mut *driver)?
+            .render
+            .get_mut(usize::from(slot))?
+            .take_if(|pool| pool.id == id)
+            .map(RenderPoolMappings)
+    }
+    pub(crate) fn put_render_pool_mappings(&self, slot: u8, mappings: RenderPoolMappings) -> Result {
+        let lifetime = self.lifetime.as_ref().ok_or(EINVAL)?;
+        let mut driver = lifetime.driver.lock();
+        let driver = Option::as_mut(&mut *driver).ok_or(EINVAL)?;
+        let pool = driver.render.get_mut(usize::from(slot)).ok_or(EINVAL)?;
+        if pool.is_some() {
+            return Err(EBUSY);
+        }
+        *pool = Some(mappings.0);
+        Ok(())
+    }
+
+    /// The graph identity whose pool mappings occupy `slot` in this
+    /// VM (0 when free). A second graph cannot install there until it leaves.
+    pub(crate) fn render_pool_owner(&self, slot: u8) -> u64 {
+        self.lifetime
+            .as_ref()
+            .and_then(|lifetime| {
+                lifetime
+                    .driver
+                    .lock()
+                    .as_ref()?
+                    .render
+                    .get(usize::from(slot))?
+                    .as_ref()
+                    .map(|pool| pool.id)
+            })
+            .unwrap_or(0)
     }
 
     pub(crate) fn render_pool_tvb_blocks(&self, slot: u8, id: u64) -> Option<usize> {
@@ -650,6 +736,31 @@ impl Drop for VmJobGuard {
         let mut state = lifetime.state.lock();
         state.active -= 1;
         if state.active != 0 {
+            return;
+        }
+        // Healthy last-job release need not close mapping/job admission when
+        // there is no accepted cleanup to drain. Keep every recovery, close,
+        // in-progress commit and failed-cleanup path on the existing drain.
+        // M5 only: other G17 GPUs keep the drain on every last release.
+        if self.vm.m5
+            && !state.blocked
+            && !state.quarantined
+            && !state.draining
+            && !state.closed
+            && !state.cleanup_failed
+            && state.commits == 0
+            && state.close_ranges.is_none()
+            && state.unmaps.is_empty()
+            && state.objects.is_empty()
+            && self.vm.status.as_ref().is_some_and(|status| {
+                status.get() == 0 && status.reported_error() == 0
+            })
+        {
+            drop(state);
+            // The C deferred list is independent of the queues above. Its
+            // GEM puts may sleep/reenter; run after unlocking, while this
+            // job guard still retains the VM and its residency lease.
+            self.vm.bo_deferred_cleanup();
             return;
         }
         state.draining = true;

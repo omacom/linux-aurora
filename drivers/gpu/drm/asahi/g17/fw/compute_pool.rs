@@ -3,7 +3,7 @@
 
 use kernel::prelude::*;
 use super::initdata::{FREE_LIST_BLOCK_PAGES, FREE_LIST_BLOCK_SIZE};
-use super::freelist::{COMPUTE_BLOCKS, PAGE_LIST_SIZE};
+use super::freelist::PAGE_LIST_SIZE;
 
 pub(crate) fn extra_bytes(active_cores: u32, scs_pages: u16) -> Result<u64> {
     if active_cores == 0 { return Err(EINVAL); }
@@ -18,9 +18,10 @@ pub(crate) fn extra_bytes(active_cores: u32, scs_pages: u16) -> Result<u64> {
     Ok(extra)
 }
 
-pub(crate) fn required_blocks(active_cores: u32, scs_pages: u16) -> Result<usize> {
+pub(crate) fn required_blocks(base: usize, active_cores: u32, scs_pages: u16) -> Result<usize> {
     let extra = extra_bytes(active_cores, scs_pages)?;
-    let bytes = extra.checked_add((COMPUTE_BLOCKS * FREE_LIST_BLOCK_SIZE) as u64)
+    let bytes = extra
+        .checked_add((base * FREE_LIST_BLOCK_SIZE) as u64)
         .ok_or(EOVERFLOW)?;
     let blocks = usize::try_from(bytes.div_ceil(FREE_LIST_BLOCK_SIZE as u64))
         .map_err(|_| EOVERFLOW)?;

@@ -113,7 +113,8 @@ impl Support {
     }
 }
 
-/// The viewport words consumed from the deflake page at +0x900.
+/// Viewport words shared by the tiling engines; their location and control
+/// value are selected by the firmware profile.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub(crate) struct Viewport {
@@ -129,6 +130,11 @@ pub(crate) struct Viewport {
     scale_z: u32,
 }
 impl Viewport {
+    pub(crate) fn with_control(mut self, control: u32) -> Self {
+        self.unk_0 = control;
+        self
+    }
+
     /// Refresh only defined words; firmware-owned gaps retain their contents.
     pub(crate) fn apply(&self, destination: &mut Self) {
         destination.unk_0 = self.unk_0;

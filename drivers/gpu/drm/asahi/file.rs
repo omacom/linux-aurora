@@ -16,8 +16,8 @@ use crate::{
         AsahiDrmDevice, //
     },
     gem,
-    memacct,
     gpu,
+    memacct,
     mmu,
     queue,
     util::{
@@ -57,6 +57,69 @@ use kernel::{
     uapi,
     xarray, //
 };
+
+// The M5 runtime's UAPI numbers. The header's values are Mesa's; the M5 queue and
+// GET_PARAMS paths use these names.
+
+/// DRM_ASAHI_BIND_SPARSE_TILE: with SINGLE_PAGE, fill the range
+/// from kernel sparse tiles (read-only: global zero tile; writable: per-VM
+/// sink) instead of the GEM's first page. The GEM only anchors the GPUVA.
+pub(crate) const DRM_ASAHI_BIND_SPARSE_TILE: u32 = uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SPARSE_TILE;
+/// DRM_ASAHI_FEATURE_SPARSE_TILES: BIND_SPARSE_TILE accepted.
+pub(crate) const DRM_ASAHI_FEATURE_SPARSE_TILES: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_SPARSE_TILES as u64;
+pub(crate) const DRM_ASAHI_FEATURE_COMPUTE_MATRIX: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_MATRIX as u64;
+/// DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: render programs accept
+/// DRM_ASAHI_RENDER_PROGRAM_TASK and such task (object-stage) kicks get the
+/// TA mesh rendering buffer, which backs the object stage's payload address.
+/// Reported only while m5_mesh_storage_chunks != 0.
+pub(crate) const DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_TASK_MESH_STORAGE as u64;
+pub(crate) const DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES as u64;
+/// D32 2x/4x ZLS admission; no compressed stencil or resolve bits.
+pub(crate) const DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION as u64;
+/// DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: single-layer
+/// 2x/4x ZLS admission in the compressed Z/S form, stencil included.
+pub(crate) const DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION as u64;
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_RENDER_SHADER_WRITES: u32 =
+    uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_SHADER_WRITES;
+/// Renders may carry separate tiling prefixes of both subqueues
+/// (DRM_ASAHI_RENDER_STAGE_PREFIXES), as the full render command.
+pub(crate) const DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_RENDER_STAGE_PREFIXES_V2 as u64;
+/// The tiling half waits only on the render and compute prefixes of the command's stage-prefix
+/// fields, its fragment half on the whole ones.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_RENDER_STAGE_PREFIXES: u32 =
+    uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_STAGE_PREFIXES;
+/// Renders may declare that they write whole attachments only
+/// (DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS).
+pub(crate) const DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS: u64 =
+    uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_WHOLE_ATTACHMENT_RENDERS as u64;
+/// The render area covers every attachment's full extent, so its tile stores
+/// write no pixel outside it: an overlap with another such render without an
+/// ordering dependency is the application's own race.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS: u32 =
+    uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS;
+/// DRM_ASAHI_RENDER_PROGRAM_TASK, only with DRM_ASAHI_RENDER_PROGRAM_OBJECT: the object
+/// program is an API task stage.
+pub(crate) const DRM_ASAHI_RENDER_PROGRAM_TASK: u32 = uapi::DRM_ASAHI_RENDER_PROGRAM_TASK;
+/// Bit 16, as Mesa defines it.
+#[allow(dead_code)]
+pub(crate) const DRM_ASAHI_COMPUTE_USES_MATRIX: u32 =
+    uapi::drm_asahi_compute_flags_DRM_ASAHI_COMPUTE_USES_MATRIX as u32;
+/// The compute command neither copies nor resets queries, so it cannot observe
+/// timestamps the host publishes after earlier commands complete
+/// (DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS). Accepted; DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS
+/// is not reported: with it, top-of-pipe timestamps are read out of order.
+pub(crate) const DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS: u32 =
+    uapi::drm_asahi_compute_flags_DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS as u32;
 
 const DEBUG_CLASS: DebugFlags = DebugFlags::File;
 
@@ -132,11 +195,16 @@ pub(crate) struct SyncItem {
 }
 
 impl SyncItem {
-    fn parse_one(file: &DrmFile, mut data: uapi::drm_asahi_sync, out: bool,
-        bundled: bool) -> Result<SyncItem>
-    {
+    fn parse_one(
+        file: &DrmFile,
+        mut data: uapi::drm_asahi_sync,
+        out: bool,
+        bundled: bool,
+    ) -> Result<SyncItem> {
         if data.sync_type == crate::g17::sync_output::SYNC_CUMULATIVE {
-            if !out || !bundled || data.timeline_value == 0 { return Err(EINVAL); }
+            if !out || !bundled || data.timeline_value == 0 {
+                return Err(EINVAL);
+            }
             data.sync_type = uapi::drm_asahi_sync_type_DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ;
         }
         match data.sync_type {
@@ -210,15 +278,15 @@ impl SyncItem {
         let mut vec = KVec::with_capacity(count as usize, GFP_KERNEL)?;
         let mut anchor = None;
 
-        // SAFETY: We only read this once, so there are no TOCTOU issues.
-        let mut reader = UserSlice::new(UserPtr::from_addr(ptr as _), size).reader();
+        // Read each record once so validation and use see the same retained bytes.
+        let mut reader = UserSlice::new(UserPtr::from_addr(ptr as usize), size).reader();
 
         for i in 0..count {
             let mut sync: MaybeUninit<uapi::drm_asahi_sync> = MaybeUninit::uninit();
 
             // SAFETY: The size of `sync` is STRIDE
             reader.read_raw(unsafe {
-                core::slice::from_raw_parts_mut(sync.as_mut_ptr() as *mut MaybeUninit<u8>, STRIDE)
+                core::slice::from_raw_parts_mut(sync.as_mut_ptr().cast::<MaybeUninit<u8>>(), STRIDE)
             })?;
 
             // SAFETY: All bit patterns in the struct are valid
@@ -230,12 +298,16 @@ impl SyncItem {
                 }
                 anchor = Some(i as usize);
             }
-            vec.push(Self::parse_one(file, sync, i >= in_count,
-                allow_cumulative)?, GFP_KERNEL)?;
+            vec.push(
+                Self::parse_one(file, sync, i >= in_count, allow_cumulative)?,
+                GFP_KERNEL,
+            )?;
         }
         if let Some(anchor) = anchor {
             let bundle = crate::g17::sync_output::SignalBundle::new(
-                &vec[in_count as usize..], anchor - in_count as usize)?;
+                &vec[in_count as usize..],
+                anchor - in_count as usize,
+            )?;
             vec[anchor].cumulative = Some(bundle);
         } else {
             for sync in &mut vec[in_count as usize..] {
@@ -271,6 +343,8 @@ pub(crate) struct File {
     params_size: core::sync::atomic::AtomicU64,
     /// GPU memory this client created and holds.
     mem: Arc<memacct::Client>,
+    /// Completed engine time, retained by queues after handle destruction.
+    usage: Arc<crate::usage::Client>,
 }
 
 /// Convenience type alias for our DRM `File` type.
@@ -291,9 +365,10 @@ impl drm::file::DriverFile for File {
             let id = gpu.ids().file.next();
             let user_range = gpu.user_range();
             let mem = memacct::Client::new()?;
+            let usage = Arc::new(crate::usage::Client::new(), GFP_KERNEL)?;
 
             mod_dev_dbg!(device, "[File {}]: DRM device opened\n", id);
-            KBox::pin_init(File::new(id, user_range, mem), GFP_KERNEL)
+            KBox::pin_init(File::new(id, user_range, mem, usage), GFP_KERNEL)
         })
     }
 
@@ -305,6 +380,17 @@ impl drm::file::DriverFile for File {
             resident: Some(self.mem.resident()),
             ..Default::default()
         })
+    }
+
+    fn engine_stats(&self, mut emit: impl FnMut(&CStr, u64)) {
+        let names = [
+            kernel::c_str!("vertex"),
+            kernel::c_str!("fragment"),
+            kernel::c_str!("compute"),
+        ];
+        for (name, ns) in names.into_iter().zip(self.usage.snapshot()) {
+            emit(name, ns);
+        }
     }
 
     fn as_raw(&self) -> *mut bindings::drm_file {
@@ -320,7 +406,11 @@ impl File {
         id: u64,
         user_range: Range<u64>,
         mem: Arc<memacct::Client>,
+        usage: Arc<crate::usage::Client>,
     ) -> impl PinInit<Self, Error> {
+        // SAFETY: The initializer supplies aligned, pinned storage for Self.
+        // XArray::new is infallible; each pinned array is initialized in place,
+        // then every remaining field is written before returning success.
         unsafe {
             pin_init::pin_init_from_closure(move |slot: *mut Self| {
                 let raw_vms = addr_of_mut!((*slot).vms);
@@ -347,6 +437,7 @@ impl File {
                 (*slot).user_range = user_range;
                 addr_of_mut!((*slot).params_size).write(core::sync::atomic::AtomicU64::new(0));
                 addr_of_mut!((*slot).mem).write(mem);
+                addr_of_mut!((*slot).usage).write(usage);
                 Ok(())
             })
         }
@@ -441,13 +532,13 @@ impl File {
 
         let size = core::mem::size_of::<uapi::drm_asahi_params_global>().min(data.size.try_into()?);
 
-        // SAFETY: We only write to this userptr once, so there are no TOCTOU issues.
+        // Write the retained result to this user slice once.
         let mut params_writer =
             UserSlice::new(UserPtr::from_addr(data.pointer as usize), size).writer();
 
         // SAFETY: `size` is at most the sizeof of `params`
         params_writer.write_slice(unsafe {
-            core::slice::from_raw_parts(&params as *const _ as *const u8, size)
+            core::slice::from_raw_parts(core::ptr::from_ref(&params).cast::<u8>(), size)
         })?;
 
         file.inner()
@@ -555,7 +646,9 @@ impl File {
 
         let gpu = &reg_data.gpu;
         let file_id = file.inner().id;
-        let vm = gpu.new_vm_for_file(kernel_range.clone(), file_id)?;
+        let vm = gpu
+            .new_vm_for_file(kernel_range.clone(), file_id)?
+            .with_memory_client(file.inner().mem.clone());
         // G16 registers a retained backend owner before returning this VM. Any later
         // allocation can fail before file::Vm exists to run its normal close path.
         let failed_vm = ScopeGuard::new_with_data(
@@ -713,22 +806,28 @@ impl File {
         };
 
         let size = gem::checked_object_size(data.size.try_into()?)?;
-        let commit = memacct::LEDGER.admit(&file.inner().mem, size as u64).inspect_err(|_| {
-            cls_pr_debug!(
-                Errors,
-                "gem_create: {:#x} bytes refused by the GPU memory limits\n",
-                size
-            );
-        })?;
+        let commit = memacct::LEDGER
+            .admit(&file.inner().mem, size as u64)
+            .inspect_err(|_| {
+                cls_pr_debug!(
+                    Errors,
+                    "gem_create: {:#x} bytes refused by the GPU memory limits\n",
+                    size
+                );
+            })?;
         // Large G17 user objects are populated in full by the first VM_BIND.
         // Do not multiply direct reclaim/compaction latency by their folio
         // count. Userspace can evict its BO cache and retry after ENOMEM.
-        let pages_no_reclaim = gem::user_pages_no_reclaim(
-            size,
-            reg_data.gpu.as_any().is::<crate::g17::Gpu>(),
-        );
+        let pages_no_reclaim =
+            gem::user_pages_no_reclaim(size, reg_data.gpu.as_any().is::<crate::g17::Gpu>());
         let gem = gem::new_object(
-            device, size, data.flags, resv_obj, reclaim_cpu, pages_no_reclaim, commit,
+            device,
+            size,
+            data.flags,
+            resv_obj,
+            reclaim_cpu,
+            pages_no_reclaim,
+            commit,
         )?;
         if reg_data.gpu.prepare_new_objects() {
             gem::prepare_new_object(&gem)?;
@@ -891,11 +990,13 @@ impl File {
             if op.flags
                 & !(uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_READ
                     | uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_WRITE
-                    | uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SINGLE_PAGE)
+                    | uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_SINGLE_PAGE
+                    | DRM_ASAHI_BIND_SPARSE_TILE)
                 != 0
             {
                 return Err(EINVAL);
             }
+            let sparse_tile = op.flags & DRM_ASAHI_BIND_SPARSE_TILE != 0;
             let read = op.flags & uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_READ != 0;
             let write = op.flags & uapi::drm_asahi_bind_flags_DRM_ASAHI_BIND_WRITE != 0;
             let prot = match (read, write) {
@@ -922,6 +1023,7 @@ impl File {
                 op.offset,
                 prot,
                 single_page,
+                sparse_tile,
             )?)?;
         }
         vm.reserve_deferred_user_unmaps(unmaps)?;
@@ -1306,20 +1408,34 @@ impl File {
         if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
             && !reg_data.gpu.as_any().is::<crate::g17::Gpu>()
         {
-            cls_pr_debug!(Errors, "queue_create: HIGH priority is not supported on this GPU\n");
+            cls_pr_debug!(
+                Errors,
+                "queue_create: HIGH priority is not supported on this GPU\n"
+            );
             return Err(EINVAL);
         }
-        // SAFETY: capable() only reads the calling task's credentials (ioctl process context).
         if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
-            && !unsafe { bindings::capable(bindings::CAP_SYS_NICE as _) }
+            // SAFETY: capable() reads the current ioctl task's credentials.
+            && !unsafe { bindings::capable(bindings::CAP_SYS_NICE as i32) }
             && !file.is_current_master()
         {
-            cls_pr_debug!(Errors, "queue_create: HIGH priority needs CAP_SYS_NICE or DRM master\n");
+            cls_pr_debug!(
+                Errors,
+                "queue_create: HIGH priority needs CAP_SYS_NICE or DRM master\n"
+            );
             return Err(EACCES);
         }
 
+        // One client holds at most half of the device's independent queues, so it cannot
+        // take every execution context and leave other clients, the compositor included,
+        // unable to create one. The table hands out the lowest free ID, so bounding the IDs
+        // bounds the queues the file holds; a full table refuses with EBUSY.
+        let per_client = reg_data
+            .gpu
+            .queue_limits()
+            .map_or(u32::MAX, |limits| (limits.max_queues / 2).max(1));
         let queues_xa = file.inner().queues();
-        let resv = queues_xa.lock().reserve_limit(1..=u32::MAX, GFP_KERNEL)?;
+        let resv = queues_xa.lock().reserve_limit(1..=per_client, GFP_KERNEL)?;
         let vms_xa = file.inner().vms();
         let guard = vms_xa.lock();
         let file_vm = guard.get(data.vm_id.try_into()?).ok_or(ENOENT)?;
@@ -1337,6 +1453,7 @@ impl File {
             // TODO: Plumb deeper the enum
             uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME - data.priority,
             data.usc_exec_base,
+            file.inner().usage.clone(),
         )?;
 
         queue.reserve_render_scs(data.render_scs_layout)?;
@@ -1425,9 +1542,13 @@ impl File {
         if guarded {
             copy_commands(&mut vec)?;
         }
-        let syncs =
-            SyncItem::parse_array(file, data.syncs, data.in_sync_count, data.out_sync_count,
-                gpu.as_any().is::<crate::g17::Gpu>())?;
+        let syncs = SyncItem::parse_array(
+            file,
+            data.syncs,
+            data.in_sync_count,
+            data.out_sync_count,
+            gpu.as_any().is::<crate::g17::Gpu>(),
+        )?;
 
         mod_dev_dbg!(
             device,

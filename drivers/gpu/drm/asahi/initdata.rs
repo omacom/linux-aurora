@@ -137,11 +137,11 @@ impl<'a> InitDataBuilder::ver<'a> {
                     continue;
                 }
 
-                let f_khz = (ps.freq_hz / 1000) as u64;
-                let v_max = ps.max_volt_mv() as u64;
+                let f_khz = u64::from(ps.freq_hz / 1000);
+                let v_max = u64::from(ps.max_volt_mv());
 
                 t1.push(
-                    (1000000000 * (curve_cfg.t1_coef as u64) / (f_khz * v_max))
+                    (1000000000 * u64::from(curve_cfg.t1_coef) / (f_khz * v_max))
                         .try_into()
                         .unwrap(),
                     GFP_KERNEL,
@@ -149,7 +149,7 @@ impl<'a> InitDataBuilder::ver<'a> {
 
                 for (j, scale) in curve_cfg.t3_scales.iter().enumerate() {
                     t3[j].push(
-                        (t3_coef as u64 * 1000000100 * *scale as u64 / (f_khz * v_max * 6))
+                        (u64::from(t3_coef) * 1000000100 * u64::from(*scale) / (f_khz * v_max * 6))
                             .try_into()
                             .unwrap(),
                         GFP_KERNEL,
@@ -423,7 +423,7 @@ impl<'a> InitDataBuilder::ver<'a> {
                     #[ver(G >= G14X)]
                     fast_die1_sensor_mask_alt: U64(cfg.fast_sensor_mask_alt[1]),
                     #[ver(V < V13_0B4)]
-                    fast_die0_sensor_present: U64(cfg.fast_die0_sensor_present as u64),
+                    fast_die0_sensor_present: U64(u64::from(cfg.fast_die0_sensor_present)),
                     unk_163c: 1,
                     unk_3644: 0,
                     hws1 <- Self::hw_shared1(cfg),
@@ -487,10 +487,12 @@ impl<'a> InitDataBuilder::ver<'a> {
                     }
 
                     if !dyncfg.hw_data_b.is_empty() {
+                        // SAFETY: This closure owns the fully sized, initially zeroed
+                        // wire allocation; the byte view remains within that allocation.
                         unsafe {
                             let mut matches: bool = true;
                             let sla = core::slice::from_raw_parts(
-                                raw as *const raw::HwDataA::ver as *const u8,
+                                core::ptr::from_ref(raw).cast::<u8>(),
                                 core::mem::size_of::<raw::HwDataA::ver>(),
                             );
                             if sla.len() != dyncfg.hw_data_a.len() {
@@ -502,8 +504,10 @@ impl<'a> InitDataBuilder::ver<'a> {
                                     dyncfg.hw_data_a.len(),
                                 );
                             }
-                            for i in 0..core::cmp::min(sla.len(), dyncfg.hw_data_a.len()) {
-                                if sla[i] != dyncfg.hw_data_a[i] {
+                            for (i, (actual, expected)) in
+                                sla.iter().zip(&dyncfg.hw_data_a).enumerate()
+                            {
+                                if actual != expected {
                                     matches = false;
                                     dev_err!(self.dev.as_ref(), "!!! Hwdata A first mismatch: {i}");
                                     break;
@@ -670,10 +674,12 @@ impl<'a> InitDataBuilder::ver<'a> {
                     }
 
                     if !dyncfg.hw_data_b.is_empty() {
+                        // SAFETY: This closure owns the fully sized, initially zeroed
+                        // wire allocation; the byte view remains within that allocation.
                         unsafe {
                             let mut matches: bool = true;
                             let sla = core::slice::from_raw_parts(
-                                raw as *const raw::HwDataB::ver as *const u8,
+                                core::ptr::from_ref(raw).cast::<u8>(),
                                 core::mem::size_of::<raw::HwDataB::ver>(),
                             );
                             if sla.len() != dyncfg.hw_data_b.len() {
@@ -685,8 +691,10 @@ impl<'a> InitDataBuilder::ver<'a> {
                                     dyncfg.hw_data_b.len(),
                                 );
                             }
-                            for i in 0..core::cmp::min(sla.len(), dyncfg.hw_data_b.len()) {
-                                if sla[i] != dyncfg.hw_data_b[i] {
+                            for (i, (actual, expected)) in
+                                sla.iter().zip(&dyncfg.hw_data_b).enumerate()
+                            {
+                                if actual != expected {
                                     matches = false;
                                     dev_err!(self.dev.as_ref(), "!!! Hwdata B first mismatch: {i}");
                                     break;
@@ -824,10 +832,12 @@ impl<'a> InitDataBuilder::ver<'a> {
                     }
 
                     if !dyncfg.hw_globals.is_empty() {
+                        // SAFETY: This closure owns the fully sized, initially zeroed
+                        // wire allocation; the byte view remains within that allocation.
                         unsafe {
                             let mut matches: bool = true;
                             let sla = core::slice::from_raw_parts(
-                                raw as *const raw::Globals::ver as *const u8,
+                                core::ptr::from_ref(raw).cast::<u8>(),
                                 core::mem::size_of::<raw::Globals::ver>(),
                             );
                             if sla.len() != dyncfg.hw_globals.len() {
@@ -839,8 +849,10 @@ impl<'a> InitDataBuilder::ver<'a> {
                                     dyncfg.hw_globals.len(),
                                 );
                             }
-                            for i in 0..core::cmp::min(sla.len(), dyncfg.hw_globals.len()) {
-                                if sla[i] != dyncfg.hw_globals[i] {
+                            for (i, (actual, expected)) in
+                                sla.iter().zip(&dyncfg.hw_globals).enumerate()
+                            {
+                                if actual != expected {
                                     matches = false;
                                     dev_err!(self.dev.as_ref(), "!!! Globals first mismatch: {i}");
                                     break;
@@ -971,12 +983,12 @@ impl<'a> InitDataBuilder::ver<'a> {
         num_entries: usize,
     ) -> raw::UatLevelInfo {
         raw::UatLevelInfo {
-            index_shift: index_shift as _,
+            index_shift: index_shift as u8,
             unk_1: 14,
             unk_2: 14,
             unk_3: 8,
             unk_4: 0x4000,
-            num_entries: num_entries as _,
+            num_entries: num_entries as u16,
             unk_8: U64(1),
             unk_10: U64(((1u64 << cfg.uat_oas) - 1) & !(mmu::UAT_PGMSK as u64)),
             index_mask: U64(((num_entries - 1) << index_shift) as u64),

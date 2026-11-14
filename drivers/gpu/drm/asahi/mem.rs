@@ -71,7 +71,7 @@ pub(crate) fn tlbi_asid(asid: Asid) {
         asm!(
             ".arch armv8.4-a",
             "tlbi aside1os, {x}",
-            x = in(reg) ((asid as u64) << 48)
+            x = in(reg) (u64::from(asid) << 48)
         );
     }
 }
@@ -85,7 +85,7 @@ pub(crate) fn tlbi_page(asid: Asid, va: usize) {
         return;
     }
 
-    let val: u64 = ((asid as u64) << 48) | ((va as u64 >> 12) & 0xffffffffffc);
+    let val: u64 = (u64::from(asid) << 48) | ((va as u64 >> 12) & 0xffffffffffc);
     // SAFETY: tlbi is always safe by definition
     unsafe {
         asm!(
@@ -147,7 +147,7 @@ pub(crate) fn tlbi_range(asid: Asid, va: usize, len: usize) {
     let bits = 5 * exp;
     let mut base = (num + (1 << bits) - 1) >> bits;
 
-    val |= (exp as u64) << 44;
+    val |= u64::from(exp) << 44;
 
     while base > 32 {
         // SAFETY: tlbi is always safe by definition

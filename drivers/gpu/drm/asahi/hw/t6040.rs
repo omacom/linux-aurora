@@ -7,10 +7,11 @@
 
 use crate::g17::fw::{
     self,
-    initdata::{v25g83, PerfConfig, RegionCConfig, RegisterWindow, PERF_STATES},
+    initdata::{PerfConfig, RegionCConfig, RegisterWindow},
 };
 use crate::g17::{Config, CoreLayout, CrashBuffers, FixedBuffer, Identity};
 use crate::hw::{GpuGen, GpuVariant};
+use super::t604x::{instances, window};
 use crate::mmu::UatQuirks;
 
 /// Static configuration of the T6040 GPU.
@@ -32,13 +33,14 @@ pub(crate) const CONFIG: Config = Config {
     crash_buffers: CrashBuffers::FirmwareData,
     // Read by the firmware through the kernel lower root, whose top-level entries it only
     // samples when it starts.
-    pm_metrics: FixedBuffer {
+    profile: crate::g17::FirmwareProfile::PublishedRoots,
+    pm_metrics: Some(FixedBuffer {
         va: 0x10_0008_0000,
         size: 0x8000,
-    },
+    }),
     windows: &REGISTER_WINDOWS,
     reserved_slots: &[],
-    perf: &PERF,
+    perf: Some(&PERF),
     opps: OPPS,
     // The no-map tables are needed until the boot loader adds the UAT ranges to /memory. The
     // rest is the policy the M4 Pro has run with; none of it was tested otherwise.
@@ -48,9 +50,12 @@ pub(crate) const CONFIG: Config = Config {
         page_tlbi: true,
         handoff_lock: false,
         handoff_slot: 0xffff_ffff,
+        handoff_unk2: 0,
         native_gpu_permissions: true,
     },
-    region_c: &REGION_C,
+    region_c: Some(&REGION_C),
+    chip: None,
+    m5: None,
     adopt_root_entries: false,
     fabric_bridge: false,
     // The firmware's per-slot recovery keys are not known for this build; recovery relies on
@@ -62,56 +67,70 @@ pub(crate) const CONFIG: Config = Config {
     firmware: fw::variant::Firmware::Identified(&[fw::variant::Build {
         os_version: [26, 6, 2],
         name: "macOS 26.6.2 (25G83, iBoot mBoot-18000.161.10)",
+        images: &[
+            crate::fwid::FirmwareBuild {
+                name: "Apple GFX 25G83 for T6040 (normalized loaded image)",
+                text_size: 0x60000,
+                data_size: 0x138000,
+                entropy: &[[0x59839, 0x5991c]],
+                boot_filled: &[],
+                text_sha256: [
+                    0x03, 0xdf, 0x75, 0x48, 0x4a, 0x7f, 0xdd, 0x6e, 0x4b, 0x47, 0x7f, 0x95, 0x6c,
+                    0xaa, 0x5b, 0x44, 0x06, 0xdf, 0xff, 0x4d, 0x19, 0x17, 0x28, 0x62, 0x7f, 0x53,
+                    0x10, 0xe0, 0x63, 0x87, 0x6d, 0xcd,
+                ],
+            },
+            crate::fwid::FirmwareBuild {
+                name: "Apple GFX 25G83 for T6040 (normalized loaded image, alternate J616s fill)",
+                text_size: 0x60000,
+                data_size: 0x138000,
+                entropy: &[[0x59839, 0x5991c]],
+                boot_filled: &[],
+                text_sha256: [
+                    0x19, 0x0c, 0xef, 0x19, 0x46, 0xa2, 0x3d, 0xfb, 0xde, 0x18, 0x05, 0x92, 0x62,
+                    0x96, 0x31, 0xc3, 0xb2, 0x8d, 0x05, 0x09, 0xa1, 0x7e, 0xb7, 0x61, 0x08, 0xb7,
+                    0xc9, 0xa5, 0x2a, 0xcc, 0xd9, 0xac,
+                ],
+            },
+            crate::fwid::FirmwareBuild {
+                name: "Apple GFX 25G83 for T6040 (normalized loaded image, second alternate J616s fill)",
+                text_size: 0x60000,
+                data_size: 0x138000,
+                entropy: &[[0x59839, 0x5991c]],
+                boot_filled: &[],
+                text_sha256: [
+                    0xd7, 0x25, 0x26, 0x4d, 0x48, 0x31, 0xb9, 0x5a, 0x5b, 0x8a, 0x37, 0x5a, 0xbf,
+                    0x2f, 0xb5, 0xcd, 0xfb, 0xd6, 0xd7, 0xcb, 0xc7, 0xf1, 0xba, 0xa2, 0xcc, 0x8b,
+                    0x37, 0xee, 0x5d, 0x6e, 0x5e, 0x98,
+                ],
+            },
+        ],
         variant: &fw::variant::V25G83,
     }]),
-    // Measured on the 20-core M4 Pro; other core counts are refused at probe.
+    // Measured on the 20-core M4 Pro; the alternative below remains experimental.
     core_layout: CoreLayout {
         cores: Some((2, 20)),
+        // Admit two clusters of ten slots with eight enabled cores in each cluster.
+        // Reusing the measured 20-core buffers on it remains experimental.
+        alternate_core_masks: Some((10, 8)),
         operand_state: fw::compute::OperandState::TWO_BY_TEN,
         deflake: fw::render::Deflake::TWO_CLUSTERS,
+        compute_blocks: fw::freelist::COMPUTE_BLOCKS,
     },
 };
 
 /// Chip identifier written to the hardware data.
 pub(crate) const CHIP_ID: u32 = 0x6040;
 
-/// Base of the firmware MMIO aperture in the kernel window.
-const MMIO_APERTURE: u64 = 0xffff_fc21_8000_0000;
-
-const fn window(
-    slot: usize,
-    phys: u64,
-    offset: u64,
-    size: u32,
-    unk_18: u64,
-    unk_20: u32,
-) -> RegisterWindow {
-    RegisterWindow {
-        slot,
-        phys,
-        va: MMIO_APERTURE + offset,
-        size,
-        unk_18,
-        unk_20,
-        instances: 1,
-        phys_stride: 0,
-    }
-}
-
-/// `window` repeated `instances` times, `phys_stride` apart in physical memory.
-const fn instances(window: RegisterWindow, instances: u32, phys_stride: u64) -> RegisterWindow {
-    RegisterWindow {
-        instances,
-        phys_stride,
-        ..window
-    }
-}
-
 /// Register windows the firmware maps, by register-map slot. Slot 3 holds the four memory
 /// controllers (ADT /arm-io/mcc), slot 20 the four AFR blocks.
 pub(crate) const REGISTER_WINDOWS: [RegisterWindow; 25] = [
     window(0, 0x5_0241_4000, 0x20_0000, 0x4000, 0, 2),
-    instances(window(3, 0x2_201c_4000, 0x20_8000, 0x1_8000, 0, 2), 4, 0x200_0000),
+    instances(
+        window(3, 0x2_201c_4000, 0x20_8000, 0x1_8000, 0, 2),
+        4,
+        0x200_0000,
+    ),
     window(4, 0x5_0244_c000, 0x26_c000, 0x4000, 0, 0),
     window(9, 0x5_003d_0000, 0x27_4000, 0x4000, 0, 2),
     window(10, 0x5_003c_0000, 0x27_c000, 0x4000, 0, 0),
@@ -120,7 +139,11 @@ pub(crate) const REGISTER_WINDOWS: [RegisterWindow; 25] = [
     window(14, 0x5_0040_0000, 0x29_4000, 0x1_0000, 0, 0),
     window(15, 0x5_0cdc_0000, 0x2a_8000, 0x4000, 0, 0),
     window(17, 0x2_8800_0000, 0x2b_0000, 0x2_1400, 0, 2),
-    instances(window(20, 0x2_8b00_0000, 0x2d_8000, 0x4_0000, 0, 2), 4, 0x20_0000),
+    instances(
+        window(20, 0x2_8b00_0000, 0x2d_8000, 0x4_0000, 0, 2),
+        4,
+        0x20_0000,
+    ),
     window(22, 0x2_8900_0000, 0x3d_c000, 0x8000, 0, 2),
     window(26, 0x2_88d0_4000, 0x3e_8000, 0x8000, 0xd0_4000, 2),
     window(28, 0x2_88d5_8000, 0x3f_4000, 0x8000, 0xd5_8000, 2),
@@ -137,33 +160,23 @@ pub(crate) const REGISTER_WINDOWS: [RegisterWindow; 25] = [
     window(43, 0x2_88e6_0000, 0x47_4000, 0x58, 0xe6_0000, 2),
 ];
 
-/// Performance-table configuration. The device tree lists the sixteen operating points in
-/// performance-state order, with one voltage per cluster.
+/// Inert defaults. The 25G83 builder requires the loader's per-chip performance maps.
 pub(crate) const PERF: PerfConfig = PerfConfig {
-    states_a: [0, 1, 2, 3, 4, 6, 8, 10, 12, 14, 15],
-    states_b: [0, 1, 2, 3, 4, 6, 7, 9, 11, 13, 15],
-    relative_a: [0, 9, 16, 23, 29, 38, 49, 60, 69, 79, 100],
-    relative_b: [0, 0, 22, 36, 47, 57, 68, 78, 84, 91, 100],
+    states_a: [0; 11],
+    states_b: [0; 11],
+    relative_a: [0; 11],
+    relative_b: [0; 11],
     sram_min_mv: 810,
 };
 
 /// Operating points the performance tables reference.
 pub(crate) const OPPS: usize = 16;
 
-const _: () = {
-    let mut index = 0;
-    while index < PERF_STATES {
-        assert!((PERF.states_a[index] as usize) < OPPS);
-        assert!((PERF.states_b[index] as usize) < OPPS);
-        index += 1;
-    }
-};
-
 /// Region C.
 const REGION_C: RegionCConfig = RegionCConfig {
     unk_54: 0x0fa0,
     unk_78: [1, 0, 0],
-    max_power_mw: v25g83::MAX_POWER_MW,
+    max_power_mw: 0,
     unk_9c: 0,
     unk_a0: 0,
     unk_7c4: 1500,

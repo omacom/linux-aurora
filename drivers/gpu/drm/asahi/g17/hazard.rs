@@ -32,10 +32,13 @@ pub(crate) struct Footprint {
     spans: [Span; MAX_SPANS],
     count: usize,
     shared: bool,
+    /// The render writes whole attachments: its tile stores reach no pixel
+    /// outside its own render area.
+    whole: bool,
 }
 
 impl Footprint {
-    pub(crate) fn new(vm: u64) -> Self {
+    pub(crate) fn new(vm: u64, whole: bool) -> Self {
         Self {
             vm,
             spans: [Span {
@@ -45,6 +48,7 @@ impl Footprint {
             }; MAX_SPANS],
             count: 0,
             shared: false,
+            whole,
         }
     }
 
@@ -73,6 +77,12 @@ impl Footprint {
 
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
         if self.vm != other.vm && !(self.shared && other.shared) {
+            return false;
+        }
+        // Tile-granular stores of two whole-attachment renders write only
+        // pixels both renders own; unordered, they race as the application
+        // asked.
+        if self.whole && other.whole {
             return false;
         }
         self.spans[..self.count].iter().any(|a| {

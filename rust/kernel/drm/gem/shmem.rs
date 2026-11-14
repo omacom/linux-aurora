@@ -604,8 +604,19 @@ impl<T: DriverObject> driver::AllocImpl for Object<T> {
         prime_handle_to_fd: None,
         prime_fd_to_handle: None,
         gem_prime_import: None,
-        gem_prime_import_sg_table: Some(bindings::drm_gem_shmem_prime_import_sg_table),
-        dumb_create: Some(bindings::drm_gem_shmem_dumb_create),
+        // The core creates imported and dumb objects through `gem_create_object`. Without it they
+        // would be bare `drm_gem_shmem_object`s, which every handle lookup still treats as an
+        // `Object<T>`: offer them only to drivers that can allocate the whole object.
+        gem_prime_import_sg_table: if T::HAS_CORE_OBJECT_ARGS {
+            Some(bindings::drm_gem_shmem_prime_import_sg_table)
+        } else {
+            None
+        },
+        dumb_create: if T::HAS_CORE_OBJECT_ARGS {
+            Some(bindings::drm_gem_shmem_dumb_create)
+        } else {
+            None
+        },
         dumb_map_offset: None,
     };
 }

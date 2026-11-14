@@ -2,10 +2,9 @@
 
 //! Installed kick storage retained after a logical scheduler release is acknowledged.
 
-use super::{install_memory, memory, target, Pair, RetiredBinding, Tracker};
+use super::{install_memory, memory, Pair, RetiredBinding, Tracker};
 use crate::g17::{
     buffer,
-    command::Validated,
     context::Context,
     freelist::RenderPool,
     job::Packet,
@@ -20,7 +19,7 @@ use kernel::{prelude::*, sync::Arc};
 /// context awaiting an executed replacement keeps its separate retirement owner.
 pub(crate) struct ParkedPair {
     kicks: Option<[kick::Queue; 2]>,
-    _scheduler: Arc<KernelObject>,
+    _scheduler: Arc<crate::g17::context::SchedulerStorage>,
     ids: [kick::Id; 2],
     slot: u8,
     ordinal: u64,
@@ -28,6 +27,7 @@ pub(crate) struct ParkedPair {
     deflake: crate::g17::fw::render::Deflake,
     descriptor_flags: [u32; 2],
     variant: &'static crate::g17::fw::Variant,
+    board: Option<&'static crate::g17::fw::m5::initdata::Board>,
     installed: [bool; 2],
     recovery_generation: u64,
     registered: Option<u8>,
@@ -38,10 +38,13 @@ pub(crate) struct ParkedPair {
     /// owner) keeps it, so its next owner change still waits while that
     /// scheduler is released.
     executed: u64,
+    /// The VM of the context that last ran on these rings.
+    vm: u64,
 }
 
 /// All new graph ownership stays separate from the installed kick storage until commit.
 pub(crate) struct Prepared {
+    pool_pin: Option<crate::g17::freelist::PoolPin>,
     memory: Option<KBox<memory::Memory>>,
     pool: Arc<RenderPool>,
     aliases: Option<KVec<mmu::KernelMapping>>,
@@ -83,6 +86,7 @@ impl Pair {
     /// under the same device mutex. Moving these owners performs no firmware operation.
     pub(crate) fn park(self) -> (ParkedPair, RetiredBinding) {
         let context = self.memory.context.clone();
+        let vm = context.vm().id();
         let scheduler = context.scheduler_owner();
         let buffer_id = self.buffer_id();
         let parked = ParkedPair {
@@ -95,12 +99,14 @@ impl Pair {
             deflake: self.deflake,
             descriptor_flags: self.descriptor_flags,
             variant: self.variant,
+            board: self.board,
             installed: self.installed,
             recovery_generation: self.recovery_generation,
             registered: self.registered,
             outer_started: self.outer_started,
             previous: self.previous,
             executed: self.executed,
+            vm,
         };
         let retired = RetiredBinding {
             memory: Some(self.memory),
@@ -109,12 +115,27 @@ impl Pair {
             buffer_id,
             publication: None,
             ready: true,
+            wait_for_pool_release: false,
         };
         (parked, retired)
     }
 }
 
 impl ParkedPair {
+    /// Clears both kick rings when the pair goes to a context of another VM than the one
+    /// that last ran on it, so the new owner cannot read the entries the previous owner's
+    /// commands left. The pair is parked, so the firmware consumed every entry.
+    pub(crate) fn clear_for_vm(&mut self, vm: u64) -> Result {
+        if self.vm == vm {
+            return Ok(());
+        }
+        for queue in self.kicks.as_mut().ok_or(EBUSY)?.iter_mut() {
+            queue.clear_render_ring()?;
+        }
+        self.vm = vm;
+        Ok(())
+    }
+
     /// The release of `scheduler` has been consumed: a later owner change no
     /// longer has to wait for it.
     pub(crate) fn release_consumed(&mut self, scheduler: u64) {
@@ -143,19 +164,24 @@ impl ParkedPair {
         pm_generation: u64,
         first: &Arc<Packet>,
     ) -> Result<Prepared> {
+        let pool_pin = free_list.pin_id()?;
+        if alloc.uat.is_m5() {
+            free_list.ensure_backing(alloc, context.vm(), context.vm())?;
+        }
         if owner == 0 || !Arc::ptr_eq(&context, &first.context) || !context.is_current() {
             return Err(EINVAL);
         }
         let kicks = self.kicks.as_ref().ok_or(EBUSY)?;
-        let Validated::Render { pass, .. } = &first.command else {
-            return Err(EINVAL);
-        };
         let word = first.completion.work_state()?.word();
         if word == u32::MAX {
             return Err(EINVAL);
         }
         alloc.uat.vm_context_mask(context.vm())?;
-        let layout = target::Layout::new(pass, self.clusters, self.variant.programs)?;
+        let layout = super::m5_render_submission::layout(
+            &first.command,
+            self.clusters,
+            self.variant.programs,
+        )?;
         let aliases = [
             kicks[0].prepare_client_alias(context.vm())?,
             kicks[1].prepare_client_alias(context.vm())?,
@@ -172,8 +198,10 @@ impl ParkedPair {
             self.ordinal,
             word,
             self.variant,
+            self.board,
         )?;
         Ok(Prepared {
+            pool_pin,
             memory: Some(memory),
             pool: free_list,
             aliases: Some(persistent),
@@ -221,6 +249,7 @@ impl ParkedPair {
             return Err(EIO);
         };
         storage.write_init(kernel::try_init!(Pair {
+            pool_pin: next.pool_pin.take(),
             graph_started: false,
             kick_aliases: None,
             memory,
@@ -237,6 +266,7 @@ impl ParkedPair {
             deflake: self.deflake,
             descriptor_flags: self.descriptor_flags,
             variant: self.variant,
+            board: self.board,
             installed: self.installed,
             configs: [None; 2],
             cursors: [0; 2],
@@ -248,11 +278,16 @@ impl ParkedPair {
             previous: self.previous.take(),
             displaced: None,
             replay: Tracker::new(),
+            executed_generation: None,
             replay_since: None,
             context_update: true,
             executed: self.executed,
             switch: None,
             published_completions: None,
+            identity_update: true,
+            configuration: None,
+            configured_context: None,
+            configured_qos: None,
         }))
     }
 }

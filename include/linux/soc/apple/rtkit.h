@@ -247,6 +247,12 @@ void apple_rtkit_hold_rx(struct apple_rtkit *rtk);
 void apple_rtkit_resume_rx(struct apple_rtkit *rtk);
 
 /*
+ * Set the minimum utilization (0..1024, or -1 for the scheduler's default) of
+ * the coprocessor's receive thread; see apple_mbox_set_rx_util_min().
+ */
+int apple_rtkit_set_rx_util_min(struct apple_rtkit *rtk, int util_min);
+
+/*
  * Wait until the messages already received have been handled, including the
  * recv_message, crashed and shmem_setup callbacks the worker thread ran for
  * them. Must not be called from one of those callbacks.

@@ -781,6 +781,15 @@ impl PerfGroup {
             }
         }
     }
+
+    pub(crate) fn replicate_first_lane(&mut self, lanes: usize) {
+        for index in 0..PERF_STATES {
+            for lane in lanes.max(1)..PERF_LANES {
+                self.core_mv[index][lane] = self.core_mv[index][0];
+                self.sram_mv[index][lane] = self.sram_mv[index][0];
+            }
+        }
+    }
 }
 
 /// Returns the performance states selected by `map` from `opps`.

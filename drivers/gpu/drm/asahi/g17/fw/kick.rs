@@ -369,8 +369,16 @@ pub(crate) struct KickArgs<'a> {
     /// queue. A queue's first kick names `timestamp.prev()` on render queues
     /// and [`KickTimestamp::ZERO`] on compute queues.
     pub(crate) parent: KickTimestamp,
+    /// The parent's own predecessor on the same queue, a further implicit dependency after the
+    /// parent: with the G17D forms a fragment kick names it while its queue remembers a previous
+    /// kick ([`super::super::kick::Queue::ancestor`]); `None` elsewhere.
+    pub(crate) ancestor: Option<KickTimestamp>,
     /// Kicks of other queues this kick must wait for.
     pub(crate) barriers: &'a [KickDependency],
+    /// Two-bit completion classes for each explicit dependency followed by
+    /// the implicit parent and the ancestor if any. Interfaces without typed
+    /// dependencies use `None`.
+    pub(crate) dependency_types: Option<&'a [u8]>,
     /// GPU address of the work descriptor (firmware alias).
     pub(crate) descriptor_va: u64,
     /// GPU address of the queue record.
@@ -383,10 +391,21 @@ pub(crate) struct KickArgs<'a> {
     pub(crate) event_mask: [u64; 4],
     /// Register arrays bound to the kick.
     pub(crate) register_arrays: [Option<RegisterArrayBinding>; 4],
-    /// The compute register program includes a shader-context scratch request.
+    /// The stage's register program includes a shader-context scratch (SCS)
+    /// bracket (header bit 61; compute, TA and 3D alike).
     pub(crate) scs_enabled: bool,
+    /// The stage's register program includes a matrix bracket (bit 63).
+    pub(crate) compute_matrix: bool,
     /// Priority class of the queue.
     pub(crate) priority: u8,
+}
+
+/// Per-stage (TA, 3D) kick header flags of a render, derived from the same
+/// state that emits the SCS and matrix register brackets.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StageKickFlags {
+    pub(crate) scratch: [bool; 2],
+    pub(crate) matrix: [bool; 2],
 }
 
 /// One kick ring entry.
@@ -397,7 +416,8 @@ pub(crate) struct KickArgs<'a> {
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct KickEntry {
     /// Timestamp in bits 41:2, QID in bits 48:42, MCache table present in bit
-    /// 58, queue priority in bits 60:59 and compute scratch enabled in bit 61.
+    /// 58, queue priority in bits 60:59, SCS bracket in the stage's register
+    /// program in bit 61 and matrix bracket in bit 63.
     pub(crate) header: u64,
     /// MCache table: address >> 5 in bits 43:6, count - 1 in bits 59:54.
     pub(crate) mcache: u64,
@@ -418,7 +438,10 @@ pub(crate) struct KickEntry {
     pub(crate) register_arrays: [u64; 4],
     pub(crate) unk_170: u64,
     pub(crate) unk_178: u64,
-    pub(crate) pad_180: [u8; KICK_ENTRY_STRIDE - 0x180],
+    /// Two bits per valid dependency, in the same order as `dependencies`.
+    /// Zero on interfaces without typed dependencies.
+    pub(crate) dependency_types: u64,
+    pub(crate) pad_188: [u8; KICK_ENTRY_STRIDE - 0x188],
 }
 
 static_assert!(size_of::<KickEntry>() == KICK_ENTRY_STRIDE);
@@ -426,6 +449,7 @@ static_assert!(core::mem::offset_of!(KickEntry, dependency_control) == 0x20);
 static_assert!(core::mem::offset_of!(KickEntry, event_mask) == 0x128);
 static_assert!(core::mem::offset_of!(KickEntry, register_arrays) == 0x150);
 static_assert!(core::mem::offset_of!(KickEntry, unk_178) == 0x178);
+static_assert!(core::mem::offset_of!(KickEntry, dependency_types) == 0x180);
 static_assert!(size_of::<RegisterWrite>() == 0xc);
 static_assert!(size_of::<McacheRange>() == 0x10);
 static_assert!(size_of::<RegisterArray>() == 0x720);
@@ -438,6 +462,7 @@ impl KickEntry {
     const MCACHE_PRESENT: u64 = 1 << 58;
     const PRIORITY_SHIFT: u32 = 59;
     const SCS_ENABLED: u64 = 1 << 61;
+    const COMPUTE_MATRIX: u64 = 1 << 63;
     const QOS_SLOT_SHIFT: u32 = 32;
     const QOS_CLASS_SHIFT: u32 = 40;
     const QOS_CLASS_MAX: u8 = 0x1f;
@@ -449,8 +474,10 @@ impl KickEntry {
     /// Builds the entry described by `args`.
     pub(crate) fn new(args: &KickArgs<'_>) -> Result<Self> {
         let barriers = args.barriers.len();
+        let count = barriers + 1 + usize::from(args.ancestor.is_some());
         if args.qid > QID_MAX
             || barriers > KICK_BARRIERS_MAX
+            || count > KICK_DEPENDENCIES
             || args.qos.class > Self::QOS_CLASS_MAX
             || args.priority >= Policy::PRIORITIES
         {
@@ -462,6 +489,9 @@ impl KickEntry {
             | u64::from(args.priority) << Self::PRIORITY_SHIFT;
         if args.scs_enabled {
             header |= Self::SCS_ENABLED;
+        }
+        if args.compute_matrix {
+            header |= Self::COMPUTE_MATRIX;
         }
         let mcache = match args.mcache {
             Some(table) => {
@@ -475,12 +505,21 @@ impl KickEntry {
         for (slot, barrier) in dependencies.iter_mut().zip(args.barriers) {
             *slot = barrier.word();
         }
-        dependencies[barriers] = KickDependency {
-            qid: args.qid,
-            timestamp: args.parent,
+        // The implicit dependencies on this queue follow the barriers: the parent, then the
+        // ancestor if any (`count` fits the array).
+        let implicit = [Some(args.parent), args.ancestor].into_iter().flatten();
+        for (slot, timestamp) in dependencies[barriers..].iter_mut().zip(implicit) {
+            *slot = KickDependency { qid: args.qid, timestamp }.word();
         }
-        .word();
-        let count = barriers + 1;
+        let mut dependency_types = 0;
+        if let Some(types) = args.dependency_types {
+            if types.len() != count || types.iter().any(|kind| *kind > 3) {
+                return Err(EINVAL);
+            }
+            for (index, kind) in types.iter().enumerate() {
+                dependency_types |= u64::from(*kind) << (2 * index);
+            }
+        }
         let mask = if count == KICK_DEPENDENCIES {
             u32::MAX
         } else {
@@ -502,7 +541,43 @@ impl KickEntry {
             register_arrays: args.register_arrays.map(RegisterArrayBinding::word),
             unk_170: 0,
             unk_178: Self::UNK_178,
-            pad_180: [0; KICK_ENTRY_STRIDE - 0x180],
+            dependency_types,
+            pad_188: [0; KICK_ENTRY_STRIDE - 0x188],
+        })
+    }
+}
+
+pub(crate) fn ksm_slot_descriptor(
+    ring_va: u64,
+    data_master: super::queue::DataMaster,
+    priority: u8,
+) -> Result<u64> {
+    if ring_va & !RenderRegistration::ADDRESS_MASK != 0 || priority >= Policy::PRIORITIES {
+        return Err(EINVAL);
+    }
+    let term = (3 * (4 - u64::from(priority)) + 0x3fe).wrapping_shl(54);
+    Ok(((data_master as u64 + 1) << 60) | ring_va | term)
+}
+
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct KsmQueue {
+    pub(crate) qid: u8,
+    pub(crate) descriptor: u64,
+}
+
+impl KsmQueue {
+    pub(crate) fn new(
+        qid: u8,
+        ring_va: u64,
+        data_master: super::queue::DataMaster,
+        priority: u8,
+    ) -> Result<Self> {
+        if qid > QID_MAX {
+            return Err(EINVAL);
+        }
+        Ok(Self {
+            qid,
+            descriptor: ksm_slot_descriptor(ring_va, data_master, priority)?,
         })
     }
 }
@@ -511,6 +586,7 @@ impl KickEntry {
 /// Firmware must see both queues configured before either outer command.
 pub(crate) struct RenderRegistration {
     writes: [(usize, u64); 8],
+    queues: [KsmQueue; 2],
 }
 
 impl RenderRegistration {
@@ -540,8 +616,7 @@ impl RenderRegistration {
             if qid > QID_MAX || va & !Self::ADDRESS_MASK != 0 {
                 return Err(EINVAL);
             }
-            let completion = (3 * (4 - u64::from(priority)) + 0x3fe).wrapping_shl(54);
-            let payload = ((engine as u64 + 1) << 60) | va | completion;
+            let payload = ksm_slot_descriptor(va, engine, priority)?;
             let (low, high) = if qid < 64 {
                 (1u64 << qid, 0)
             } else {
@@ -554,10 +629,30 @@ impl RenderRegistration {
                 (Self::VALID_LOW, low),
             ]);
         }
-        Ok(Self { writes })
+        Ok(Self {
+            writes,
+            queues: [
+                KsmQueue::new(
+                    fragment.0,
+                    fragment.1,
+                    super::queue::DataMaster::Fragment,
+                    priority,
+                )?,
+                KsmQueue::new(
+                    tiling.0,
+                    tiling.1,
+                    super::queue::DataMaster::Tiling,
+                    priority,
+                )?,
+            ],
+        })
     }
 
     pub(crate) fn writes(&self) -> &[(usize, u64); 8] {
         &self.writes
+    }
+
+    pub(crate) fn queues(&self) -> &[KsmQueue; 2] {
+        &self.queues
     }
 }

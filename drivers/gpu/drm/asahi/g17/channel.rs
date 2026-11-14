@@ -23,19 +23,20 @@ enum ReportRing {
 }
 
 impl ReportRing {
-    fn geometry(self) -> (usize, usize, u32, u32) {
+    /// State and entry offsets, capacity and the record tags the family allows.
+    fn geometry(self, init: &InitData) -> (usize, usize, u32, u64) {
         match self {
             Self::Trace => (
                 status::TRACE_STATE as usize,
                 status::TRACE_RING as usize,
                 TRACE_SLOTS,
-                TRACE_TYPES,
+                u64::from(TRACE_TYPES),
             ),
             Self::Statistics => (
                 status::STATS_STATE as usize,
                 status::STATS_RING as usize,
                 STATISTICS_SLOTS,
-                STATISTICS_TYPES,
+                init.statistics_types(),
             ),
         }
     }
@@ -43,16 +44,62 @@ impl ReportRing {
 
 /// Host-side receive-ring state. A quarantined ring stays stopped until the
 /// device is destroyed; firmware restart does not clear it.
-#[derive(Debug)]
 pub(crate) struct Rings {
     quarantined: [[bool; 2]; 2],
+    reports: super::reports::Reports,
+    telemetry: super::telemetry::Telemetry,
+    max_age_ns: u64,
+    suspended: bool,
+    discard_statistics: [bool; 2],
+    statistics_epoch: u64,
 }
 
 impl Rings {
-    pub(crate) const fn new() -> Self {
-        Self {
+    pub(crate) fn new(graph: super::fw::variant::InitGraph) -> Result<Self> {
+        Ok(Self {
             quarantined: [[false; 2]; 2],
+            reports: super::reports::Reports::new()?,
+            telemetry: super::telemetry::Telemetry::default(),
+            max_age_ns: super::stats::max_age_ns(graph),
+            suspended: false,
+            discard_statistics: [false; 2],
+            statistics_epoch: 0,
+        })
+    }
+
+    pub(super) fn invalidate_statistics(&mut self) {
+        self.telemetry.invalidate();
+        // The packets have no epoch marker. Discard each role's already
+        // queued records before accepting a new baseline after the boundary.
+        self.discard_statistics = [true; 2];
+    }
+
+    pub(super) fn suspend_statistics(&mut self, suspended: bool) {
+        self.suspended = suspended;
+        self.invalidate_statistics();
+    }
+
+    pub(super) fn statistics_suspended(&self) -> bool {
+        self.suspended
+    }
+
+    pub(super) fn observe_statistics_power(&mut self, powered: bool, epoch: u64) {
+        if !powered || epoch != self.statistics_epoch {
+            self.invalidate_statistics();
         }
+        self.statistics_epoch = epoch;
+    }
+
+    pub(super) fn read_statistics(&self, now_ns: u64) -> super::telemetry::Readout {
+        self.telemetry.read(now_ns, self.max_age_ns)
+    }
+
+    pub(super) fn write_reports(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        self.reports.write(f)?;
+        let view = self.read_statistics(super::now_ns());
+        writeln!(f, "qualified max_age_ns={} util_status={} util_host_ns={} util_samples={} pstate_status={} pstate_host_ns={} pstate_timestamp={} delta_ticks={:?}",
+            self.max_age_ns, view.util_status, view.util_host_ns, view.util_samples,
+            view.pstate_status, view.pstate_host_ns, view.pstate_timestamp, self.telemetry.delta_ticks)
     }
 
     pub(crate) fn drain_trace(&mut self, dev: &Device, init: &InitData, role: Role) {
@@ -64,12 +111,29 @@ impl Rings {
     }
 
     fn drain_report(&mut self, dev: &Device, init: &InitData, role: Role, ring: ReportRing) {
-        let quarantined = &mut self.quarantined[role as usize][ring as usize];
-        if *quarantined {
+        if self.quarantined[role as usize][ring as usize] {
             return;
         }
-        if let Err(error) = Self::consume_report(init, role, ring) {
-            *quarantined = true;
+        let statistics = matches!(ring, ReportRing::Statistics);
+        let accept = !self.suspended
+            && !self.discard_statistics[role as usize]
+            && !self
+                .quarantined
+                .iter()
+                .any(|rings| rings[ReportRing::Statistics as usize]);
+        if let Err(error) = Self::consume_report(
+            init,
+            role,
+            ring,
+            &mut self.reports,
+            &mut self.telemetry,
+            self.max_age_ns,
+            accept,
+        ) {
+            self.quarantined[role as usize][ring as usize] = true;
+            if statistics {
+                self.invalidate_statistics();
+            }
             dev_err!(
                 dev.as_ref(),
                 "G17 {:?} {:?} ring stopped: {:?}\n",
@@ -77,11 +141,21 @@ impl Rings {
                 ring,
                 error
             );
+        } else if statistics && !self.suspended {
+            self.discard_statistics[role as usize] = false;
         }
     }
 
-    fn consume_report(init: &InitData, role: Role, ring: ReportRing) -> Result {
-        let (state, entries, capacity, allowed_types) = ring.geometry();
+    fn consume_report(
+        init: &InitData,
+        role: Role,
+        ring: ReportRing,
+        reports: &mut super::reports::Reports,
+        telemetry: &mut super::telemetry::Telemetry,
+        max_age_ns: u64,
+        accept_statistics: bool,
+    ) -> Result {
+        let (state, entries, capacity, allowed_types) = ring.geometry(init);
         let consumer_word = init.status_word(role, state)?;
         let producer_word = init.status_word(role, state + RX_PRODUCER_OFFSET)?;
         fence(Ordering::Acquire);
@@ -94,13 +168,20 @@ impl Rings {
         }
         while consumer != producer {
             let offset = entries + consumer as usize * EVENT_RECORD_SIZE;
-            let tag = match ring {
-                // Copy the entire trace entry before returning its slot.
-                ReportRing::Trace => init.status_read_words::<EVENT_WORDS>(role, offset)?[0],
-                ReportRing::Statistics => init.status_read_words::<1>(role, offset)?[0],
-            };
-            if tag >= u32::BITS || allowed_types & (1 << tag) == 0 {
+            // Decode only the complete copy, before returning the slot.
+            // Statistics never affect scheduling or power control.
+            let words = init.status_read_words::<EVENT_WORDS>(role, offset)?;
+            super::trace::report(role as u8, ring as u8, &words);
+            let tag = words[0];
+            if tag >= u64::BITS || allowed_types & (1u64 << tag) == 0 {
                 return Err(EIO);
+            }
+            if matches!(ring, ReportRing::Statistics) {
+                let host_ns = super::now_ns();
+                reports.record(role, words, host_ns, allowed_types);
+                if accept_statistics {
+                    telemetry.record(&words, host_ns, max_age_ns);
+                }
             }
             consumer = (consumer + 1) & (capacity - 1);
             fence(Ordering::SeqCst);
@@ -135,7 +216,7 @@ impl Rings {
         init.publish_control(
             producer,
             record.bytes(),
-            record.opcode().asserts_gpu_power(),
+            init.control_asserts_gpu_power(record.opcode()),
             next,
         )?;
         super::trace::message(super::trace::CONTROL, record.opcode() as u64);
@@ -147,6 +228,7 @@ impl Rings {
 /// the caller can service the copied event using the complete device owner.
 pub(crate) struct Events {
     role: Role,
+    graph: super::fw::variant::InitGraph,
     remaining: u32,
     unknown_reported: bool,
 }
@@ -167,9 +249,10 @@ impl Events {
         Ok(consumer != producer)
     }
 
-    pub(crate) fn new(role: Role) -> Self {
+    pub(crate) fn new(role: Role, graph: super::fw::variant::InitGraph) -> Self {
         Self {
             role,
+            graph,
             remaining: EVENT_SLOTS,
             unknown_reported: false,
         }
@@ -195,8 +278,10 @@ impl Events {
             // Observe the producer before reading the record it publishes.
             fence(Ordering::Acquire);
             let offset = status::EVENT_RING as usize + consumer as usize * EVENT_RECORD_SIZE;
-            let record = EventRecord::from_words(init.status_read_words(role, offset)?);
-            let event = record.decode();
+            let words = init.status_read_words(role, offset)?;
+            super::trace::report(role as u8, 2, &words);
+            let record = EventRecord::from_words(words);
+            let event = record.decode_for(self.graph, init.is_m5());
             fence(Ordering::SeqCst);
             consumer_word.store((consumer + 1) & (EVENT_SLOTS - 1), Ordering::Relaxed);
             fence(Ordering::SeqCst);
