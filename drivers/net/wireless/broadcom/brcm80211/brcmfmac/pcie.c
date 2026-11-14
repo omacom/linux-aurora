@@ -1080,7 +1080,10 @@ static irqreturn_t brcmf_pcie_quick_check_isr(int irq, void *arg)
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)arg;
 
 	if (brcmf_pcie_read_pcie32(devinfo, devinfo->reginfo->mailboxint)) {
-		brcmf_pcie_intr_disable(devinfo);
+		/* Mask the dongle only: irq_ready gates ring servicing while the
+		 * rings are not set up or are being torn down, not this IRQ.
+		 */
+		brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxmask, 0);
 		brcmf_dbg(PCIE, "Enter\n");
 		return IRQ_WAKE_THREAD;
 	}
@@ -1113,8 +1116,13 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 	}
 
 	brcmf_pcie_bus_console_read(devinfo, false);
-	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
-		brcmf_pcie_intr_enable(devinfo);
+	/* Unmask, but leave irq_ready to the code that sets the rings up and
+	 * tears them down.
+	 */
+	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && READ_ONCE(devinfo->irq_ready))
+		brcmf_pcie_write_pcie32(devinfo, devinfo->reginfo->mailboxmask,
+					devinfo->reginfo->int_d2h_db |
+					devinfo->reginfo->int_fn0);
 	devinfo->in_irq = false;
 	return IRQ_HANDLED;
 }
