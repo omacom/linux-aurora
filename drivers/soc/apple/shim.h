@@ -53,6 +53,7 @@ long sep_store_write(void *handle, long long off, const void *buf,
 			    size_t len);
 int sep_store_sync(void *handle);
 int sep_store_sync_parent(void *handle);
+int sep_store_unlink(const char *path);
 
 /* -- sha_shim.c --------------------------------------------------------- */
 
@@ -189,6 +190,7 @@ void sep_diag_set_bio_published(void);
 void sep_diag_set_touchid(bool started);
 void sep_diag_set_sensor_attach(int state);
 void sep_diag_set_restore(int state);
+void sep_diag_set_xart(bool xart);
 void sep_diag_set_xart_guard(unsigned int level, bool list_loaded,
 			     int matching);
 void sep_diag_xart_guard_refused(int matching);
