@@ -1626,6 +1626,19 @@ static int __init apple_soc_cpufreq_module_init(void)
 
 	if (!of_machine_is_compatible("apple,arm-platform"))
 		return -ENODEV;
+
+	/*
+	 * Boost only means something with turbo-mode OPPs. Without any, no
+	 * policy supports it, and turning it on through the global "boost"
+	 * file fails with -EINVAL; power-profiles-daemon then cannot set its
+	 * profile. Offer no boost control on such SoCs.
+	 */
+	np = of_find_node_with_property(NULL, "turbo-mode");
+	if (np)
+		of_node_put(np);
+	else
+		apple_soc_cpufreq_driver.set_boost = NULL;
+
 	if (of_machine_is_compatible("apple,t8132")) {
 		apple_soc_cpufreq_driver.online = apple_soc_cpufreq_online;
 		apple_soc_cpufreq_driver.offline = apple_soc_cpufreq_offline;
