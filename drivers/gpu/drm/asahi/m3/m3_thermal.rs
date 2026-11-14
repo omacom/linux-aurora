@@ -7,9 +7,12 @@
 //! J516S) and nothing watches temperatures. The firmware's own die temperature controller is
 //! off in the InitData this driver builds. With device-tree InitData the default is `on`;
 //! `asahi.m3_thermal=off` restores the fixed cap exactly.
+//! On T8122 the fixed cap is state 2 (or a lower requested ceiling). A higher
+//! `asahi.t8122_pstate_cap` changes only the monitored ceiling, never this fallback.
 //!
-//! With it, the InitData gives the firmware the whole table as its highest state (the
-//! "ceiling"), and what bounds the firmware is the runtime cap: the Globals performance-state
+//! With it, the InitData gives the firmware the requested, table-clamped highest state (the
+//! "ceiling", also bounded by the T8122 experiment), and what bounds the firmware is the
+//! runtime cap: the Globals performance-state
 //! cap and power-interface state targets, which the firmware keeps reading while it runs (a
 //! host moves the cap with a single store, with no message). The runtime cap starts at the
 //! fixed cap of `off` (the "safe cap") and never goes below it, so at worst the GPU runs as it
@@ -59,8 +62,8 @@ use kernel::{
 
 use crate::{
     m3::m3_adt_config::PstatePolicy,
-    m3::m3_params::{self, ThermalMode},
-    m3::m3_thermal_policy::{Change, Policy, Reading, Source, Why, S},
+    m3::m3_params,
+    m3::m3_thermal_policy::{Change, Policy, Reading, Source, ThermalMode, Why, S},
 };
 
 /// The thermal zones read, each the hottest of a set of SoC die sensors: the SMC's die sensors
