@@ -138,6 +138,10 @@ module! {
             default: 1,
             description: "G15: answer firmware halts with the halt/resume handshake (0: fail-stop)",
         },
+        g15_sleep_hold: u32 {
+            default: 1,
+            description: "G15 (T6031): keep the GFX domain on through system sleep (0: genpd may power it off under the firmware)",
+        },
         g15_stream_gate: u32 {
             default: 1,
             description: "G15: admit only known CDM/VDM stream records (0: bring-up only)",
