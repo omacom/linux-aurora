@@ -646,6 +646,8 @@ struct apple_dcp {
 	struct delayed_work hdmi_recheck_wq;
 	/* T6030 HDMI converter service requests, see dcp-hdmi.c */
 	struct dcp_hdmi *hdmi;
+	/* DDC/CI through the firmware, see ddc.c */
+	struct dcp_ddc *ddc;
 };
 
 void dcp_firmware_metadata_connection(struct apple_dcp *dcp, u64 generation, bool connected);
