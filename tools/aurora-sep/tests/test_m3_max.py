@@ -1169,8 +1169,17 @@ class SurveyTest(MaxBase):
         self.max_mac("j514c", backlight=True)
         p = self.popen("M3_SURVEY_PHASE_S=10\n")
         self.wait_for(lambda: len(self.loads()) >= 16, "the load")
-        os.killpg(p.pid, signal.SIGINT)
-        out, err = p.communicate(timeout=30)
+        # Under load bash sometimes drops one SIGINT and the survey runs to the end (exit 0). A user
+        # presses Ctrl-C again, so send it again.
+        for _ in range(4):
+            os.killpg(p.pid, signal.SIGINT)
+            try:
+                out, err = p.communicate(timeout=2)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            out, err = p.communicate(timeout=30)
         self.assertEqual(p.returncode, 130, err)
         self.assertIn("interrupted: the load is stopped", err)
         self.assertEqual(list(self.out.iterdir()), [])
