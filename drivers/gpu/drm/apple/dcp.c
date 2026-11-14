@@ -36,6 +36,7 @@
 
 #include <drm/drm_edid.h>
 #include <drm/drm_fb_dma_helper.h>
+#include <drm/drm_gem_dma_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
@@ -3067,12 +3068,35 @@ static void dcp_work_backlight_fallback(struct work_struct *work)
 		dev_warn(dcp->dev, "backlight registration failed: %d\n", ret);
 }
 
+/* Drop every framebuffer mirror before the fbdma domain goes away. */
+static void dcp_fb_unmirror_all(struct apple_dcp *dcp)
+{
+	unsigned long index;
+	void *entry;
+
+	guard(mutex)(&dcp->fb_mirror_lock);
+	if (dcp->fb_dom) {
+		xa_for_each(&dcp->fb_mirrors, index, entry) {
+			/* An object stays in fb_mirrors only while it is alive. */
+			struct drm_gem_dma_object *obj = (void *)index;
+
+			iommu_unmap(dcp->fb_dom, obj->dma_addr, xa_to_value(entry));
+		}
+	}
+	xa_destroy(&dcp->fb_mirrors);
+	dcp->fb_dom = NULL;
+}
+
 static void dcp_release_piodma_iommu_dev(struct apple_dcp *dcp)
 {
 	if (dcp->retain_dma) {
 		WRITE_ONCE(dcp->quiescing, true);
 		return;
 	}
+	dcp_fb_unmirror_all(dcp);
+	if (dcp->fbdma)
+		of_platform_device_destroy(&dcp->fbdma->dev, NULL);
+	dcp->fbdma = NULL;
 	if (dcp->piodma) {
 		if (dcp->piodma_created)
 			of_platform_device_destroy(&dcp->piodma->dev, NULL);
@@ -3083,6 +3107,107 @@ static void dcp_release_piodma_iommu_dev(struct apple_dcp *dcp)
 	dcp->iommu_dom = NULL;
 	dcp->piodma_created = false;
 }
+
+/*
+ * J615 dcpext: the external pipe reads framebuffers through its
+ * own display DART, not the internal one the display subsystem's domain
+ * covers. An "fbdma" child, on that DART's stream 0 with the display
+ * subsystem's DVA window, gets a domain the framebuffers are mirrored into.
+ * Without the node nothing changes.
+ */
+static void dcp_create_fbdma_dev(struct apple_dcp *dcp)
+{
+	struct device_node *node;
+	struct iommu_domain *dom;
+	int ret;
+
+	if (!dcp->ext_failsafe || dcp->fbdma)
+		return;
+	node = of_get_child_by_name(dcp->dev->of_node, "fbdma");
+	if (!node)
+		return;
+	dcp->fbdma = of_platform_device_create(node, NULL, dcp->dev);
+	if (!dcp->fbdma) {
+		dev_warn(dcp->dev, "fbdma: could not create %pOF\n", node);
+		goto out;
+	}
+	ret = dma_set_mask_and_coherent(&dcp->fbdma->dev, DMA_BIT_MASK(42));
+	if (!ret)
+		ret = of_dma_configure(&dcp->fbdma->dev, node, true);
+	dom = ret ? NULL : iommu_get_domain_for_dev(&dcp->fbdma->dev);
+	if (IS_ERR_OR_NULL(dom)) {
+		dev_warn(dcp->dev, "fbdma: no IOMMU domain (%d)\n", ret);
+		of_platform_device_destroy(&dcp->fbdma->dev, NULL);
+		dcp->fbdma = NULL;
+		goto out;
+	}
+	scoped_guard(mutex, &dcp->fb_mirror_lock)
+		dcp->fb_dom = dom;
+	dev_info(dcp->dev, "fbdma: framebuffers mirrored through %pOF\n", node);
+out:
+	of_node_put(node);
+}
+
+/*
+ * Map @fb's GEM objects into the fbdma domain at their display DVAs. A
+ * mapping lasts as long as its object and its DVA do: dcp_fb_unmirror()
+ * removes it when the object is freed.
+ */
+void dcp_fb_mirror(struct apple_dcp *dcp, struct drm_framebuffer *fb)
+{
+	unsigned int i;
+
+	if (!fb || !READ_ONCE(dcp->fb_dom))
+		return;
+	guard(mutex)(&dcp->fb_mirror_lock);
+	if (!dcp->fb_dom)
+		return;
+	for (i = 0; i < fb->format->num_planes; i++) {
+		struct drm_gem_dma_object *obj = drm_fb_dma_get_gem_obj(fb, i);
+		unsigned long index = (unsigned long)obj;
+		struct sg_table *sgt;
+		ssize_t mapped;
+
+		if (!obj || xa_load(&dcp->fb_mirrors, index))
+			continue;
+		/* Imported (GPU) buffers carry their pages in obj->sgt. */
+		sgt = obj->sgt ? obj->sgt : drm_gem_dma_get_sg_table(obj);
+		if (IS_ERR_OR_NULL(sgt))
+			continue;
+		mapped = iommu_map_sgtable(dcp->fb_dom, obj->dma_addr, sgt,
+					   IOMMU_READ);
+		if (mapped > 0 &&
+		    xa_err(xa_store(&dcp->fb_mirrors, index, xa_mk_value(mapped),
+				    GFP_KERNEL))) {
+			iommu_unmap(dcp->fb_dom, obj->dma_addr, mapped);
+			mapped = -ENOMEM;
+		}
+		if (mapped <= 0)
+			dev_warn_ratelimited(dcp->dev,
+				"fbdma: %pad (%zu bytes, %s) not mirrored: %zd\n",
+				&obj->dma_addr, obj->base.size,
+				obj->sgt ? "imported" : "native", mapped);
+		if (sgt != obj->sgt) {
+			sg_free_table(sgt);
+			kfree(sgt);
+		}
+	}
+}
+
+/* @obj is being freed: the external pipe must not read its pages any more. */
+void dcp_fb_unmirror(struct platform_device *pdev, struct drm_gem_dma_object *obj)
+{
+	struct apple_dcp *dcp = platform_get_drvdata(pdev);
+	void *entry;
+
+	if (!dcp)
+		return;
+	guard(mutex)(&dcp->fb_mirror_lock);
+	entry = xa_erase(&dcp->fb_mirrors, (unsigned long)obj);
+	if (entry && dcp->fb_dom)
+		iommu_unmap(dcp->fb_dom, obj->dma_addr, xa_to_value(entry));
+}
+EXPORT_SYMBOL_GPL(dcp_fb_unmirror);
 
 void dcp_retain_framebuffer(struct platform_device *pdev,
 			    struct dcp_fb_reference *entry)
@@ -3918,6 +4043,8 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 	}
 
 	ret = dcp_create_piodma_iommu_dev(dcp);
+	if (!ret)
+		dcp_create_fbdma_dev(dcp);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "Failed to create PIODMA iommu child device\n");
@@ -4318,6 +4445,8 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 
 	INIT_LIST_HEAD(&dcp->swapped_out_fbs);
 	mutex_init(&dcp->swapped_out_fbs_lock);
+	xa_init(&dcp->fb_mirrors);
+	mutex_init(&dcp->fb_mirror_lock);
 	ret = dcp_backlight_init(dcp, dev);
 	if (ret)
 		return ret;

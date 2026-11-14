@@ -72,6 +72,9 @@ void dcp_retain_framebuffer(struct platform_device *pdev,
 			    struct dcp_fb_reference *entry);
 void dcp_arm_retained_framebuffers(struct apple_dcp *dcp, u32 swap_id);
 void dcp_unarm_retained_framebuffers(struct apple_dcp *dcp, u32 swap_id);
+void dcp_fb_mirror(struct apple_dcp *dcp, struct drm_framebuffer *fb);
+struct drm_gem_dma_object;
+void dcp_fb_unmirror(struct platform_device *pdev, struct drm_gem_dma_object *obj);
 void dcp_release_retained_framebuffers(struct apple_dcp *dcp, u32 swap_id);
 void dcp_release_all_retained_framebuffers(struct apple_dcp *dcp);
 bool dcp_is_initialized(struct platform_device *pdev);
