@@ -95,12 +95,18 @@
 };
 
 /*
- * Mesa fingerprint sensor on SPI2. The power line (pin 108, active high) comes
- * from the J313 platform device tree, which also lists an interrupt on pin 104. The
- * interrupt is left out on purpose: the driver polls, and the trigger flags in
- * the ADT (3) are not decoded with any certainty here. Pin 104 reads back as a
- * plain input with a pull-down, which rules out the two active-low readings of
- * that value but does not decide between the remaining ones.
+ * Mesa fingerprint sensor on SPI2. Power is pin 108, active high, from the
+ * J313 platform device tree. That tree also lists an interrupt on pin 104
+ * with trigger flags 3. Linux IRQ_TYPE_EDGE_BOTH is the value 3, and
+ * both-edges re-fires when the line falls and spins the capture loop. Apple
+ * GPIO mode 3 is level-low. The pin register saved on 2026-10-21 reads
+ * mode 0, pull-down, input enabled: iBoot left a plain input and programmed
+ * no trigger. Data-ready is the rising edge. The driver requests
+ * IRQF_TRIGGER_RISING, and J314s, J316s and J414 describe this line as
+ * IRQ_TYPE_EDGE_RISING. t8103.dtsi already includes irq.h.
+ *
+ * spi2 names the AIC as its interrupt parent. This node names pinctrl_ap,
+ * whose interrupt cells are <pin type>, so pin 104 is a GPIO interrupt.
  *
  * Do not add cs-gpios. The sensor needs the controller's native chip select,
  * otherwise the SPI core skips the hardware CS timing.
@@ -112,6 +118,8 @@
 &mesa {
 	status = "okay";
 	enable-gpios = <&pinctrl_ap 108 GPIO_ACTIVE_HIGH>;
+	interrupt-parent = <&pinctrl_ap>;
+	interrupts = <104 IRQ_TYPE_EDGE_RISING>;
 	spi-cs-setup-delay-ns = <20>;
 	spi-cs-hold-delay-ns = <20>;
 	/*
