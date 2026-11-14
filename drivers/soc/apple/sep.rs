@@ -11,6 +11,7 @@ compile_error!("apple_sep requires CONFIG_OF_DYNAMIC: the SEP and DART nodes shi
 
 mod bio;
 mod catacomb;
+mod capture;
 mod control;
 mod der;
 mod diag;
@@ -18,12 +19,16 @@ mod dt;
 mod fv;
 mod hwrng;
 mod image;
+mod keys;
+mod key_device;
+mod key_request;
 mod keybag;
 mod keybag_identity;
 mod pm;
 mod profile;
 mod proto;
 mod refkey;
+mod refkey_policy;
 mod refkey_seal;
 mod registration;
 mod rxring;
@@ -101,6 +106,10 @@ static_assert!(VERIFY_WORK_ID != 0);
 const LATE_ATTACH_WORK_ID: u64 = 4;
 static_assert!(LATE_ATTACH_WORK_ID != VERIFY_WORK_ID && LATE_ATTACH_WORK_ID != ENROL_WORK_ID);
 static_assert!(LATE_ATTACH_WORK_ID != SETTLE_WORK_ID && LATE_ATTACH_WORK_ID != 0);
+
+const KEY_WORK_ID: u64 = 5;
+static_assert!(KEY_WORK_ID != 0 && KEY_WORK_ID != SETTLE_WORK_ID && KEY_WORK_ID != ENROL_WORK_ID);
+static_assert!(KEY_WORK_ID != VERIFY_WORK_ID && KEY_WORK_ID != LATE_ATTACH_WORK_ID);
 
 // When an attach-time sensor bring-up falls short, one more round runs this
 // long after Touch ID was activated. A round that cannot run yet, because the
@@ -204,6 +213,7 @@ const RNG_SLEEP_DRAIN_MS: u32 = proto::CONTROL_TIMEOUT_MS + 1000;
 
 extern "C" {
     fn sep_cancel_work_sync(work: *mut c_void);
+    fn sep_flush_work(work: *mut c_void);
     fn sep_cancel_delayed_work_sync(work: *mut c_void);
 }
 
@@ -709,6 +719,12 @@ struct SepData {
 
     #[pin]
     bio_session: Mutex<bio::Session>,
+    key_api_failed: Atomic<bool>,
+
+    #[pin]
+    capture: Mutex<capture::State>,
+    #[pin]
+    key_dev: Mutex<Option<key_device::Registration>>,
 
     #[pin]
     bio_index: Mutex<bio::IdentityIndex>,
@@ -792,6 +808,9 @@ struct SepData {
     verify_work: Work<SepData, VERIFY_WORK_ID>,
 
     #[pin]
+    key_work: Work<SepData, KEY_WORK_ID>,
+
+    #[pin]
     late_attach_work: DelayedWork<SepData, LATE_ATTACH_WORK_ID>,
 }
 
@@ -799,6 +818,7 @@ impl_has_work! {
     impl HasWork<Self, 0> for SepData { self.rx_work }
     impl HasWork<Self, ENROL_WORK_ID> for SepData { self.enrol_work }
     impl HasWork<Self, VERIFY_WORK_ID> for SepData { self.verify_work }
+    impl HasWork<Self, KEY_WORK_ID> for SepData { self.key_work }
 }
 
 impl_has_delayed_work! {
@@ -953,6 +973,9 @@ impl SepData {
                 sbio_wq <- new_condvar!("SepData::sbio_wq"),
                 sbio_ready: Atomic::new(false),
                 bio_session <- new_mutex!(bio::Session::new()),
+                key_api_failed: Atomic::new(false),
+                capture <- new_mutex!(capture::State::new()),
+                key_dev <- new_mutex!(None),
                 bio_index <- new_mutex!(bio_index),
                 bio_dev <- new_mutex!(None),
                 store <- new_mutex!(store),
@@ -981,6 +1004,7 @@ impl SepData {
                 rx_work <- new_work!("SepData::rx_work"),
                 enrol_work <- new_work!("SepData::enrol_work"),
                 verify_work <- new_work!("SepData::verify_work"),
+                key_work <- new_work!("SepData::key_work"),
                 settle_work <- new_delayed_work!("SepData::settle_work"),
                 late_attach_work <- new_delayed_work!("SepData::late_attach_work"),
             }),
@@ -1954,6 +1978,7 @@ impl SepData {
         }
         let mut acm_handle = [0u8; crate::scrd::SCRD_ACM_HANDLE_LEN];
         acm_handle.copy_from_slice(&out[..crate::scrd::SCRD_ACM_HANDLE_LEN]);
+        let credential = keys::Credential::new(self, acm_handle);
 
         let Some((status, _)) = self.scrd_command(&crate::scrd::scrd_context_externalize(&acm_handle)) else {
             dev_err!(self.dev, "enrol: SCRD context externalize did not answer\n");
@@ -1984,7 +2009,7 @@ impl SepData {
             return None;
         }
 
-        Some(acm_handle)
+        Some(credential.into_handle())
     }
 
     fn establish_scrd_match_context(&self, user: crate::sbio::UserId) -> bool {
@@ -2353,6 +2378,7 @@ impl SepData {
 
     fn remove(&self) {
         self.shutting_down.store(true, Relaxed);
+        self.cancel_key(ENODEV);
         {
             let _guard = self.endpoints.lock();
             self.trusted_ready.notify_all();
@@ -2371,6 +2397,8 @@ impl SepData {
         trusted::unregister();
         self.unregister_fv_kernel();
 
+        let keys = self.key_dev.lock().take();
+        drop(keys);
         let dev = self.bio_dev.lock().take();
         drop(dev);
 
@@ -2385,12 +2413,15 @@ impl SepData {
 
         *self.mbox.lock() = None;
 
-        // SAFETY: all five pointers refer to pinned work fields in `self`.
+        // SAFETY: all six pointers refer to pinned work fields in `self`.
         // Shutdown blocks requeueing, and the mailbox can no longer add work.
         unsafe {
             sep_cancel_work_sync(Work::raw_get(core::ptr::addr_of!(self.rx_work)).cast());
             sep_cancel_work_sync(Work::raw_get(core::ptr::addr_of!(self.enrol_work)).cast());
             sep_cancel_work_sync(Work::raw_get(core::ptr::addr_of!(self.verify_work)).cast());
+            // A queued Rust work item owns an Arc reclaimed by its callback.
+            // Let the revoked key worker run its no-hardware exit and drain it.
+            sep_flush_work(Work::raw_get(core::ptr::addr_of!(self.key_work)).cast());
             sep_cancel_delayed_work_sync(
                 DelayedWork::raw_as_work(core::ptr::addr_of!(self.settle_work)).cast(),
             );
@@ -2602,6 +2633,28 @@ impl WorkItem<VERIFY_WORK_ID> for SepData {
     }
 }
 
+
+impl WorkItem<KEY_WORK_ID> for SepData {
+    type Pointer = Arc<SepData>;
+
+    fn run(this: Arc<SepData>) {
+        let Some(request) = this.capture.lock().key() else { return; };
+        let _writer = this.catacomb_writer.lock();
+        if !this.shutting_down.load(Relaxed) && this.capture_begin() {
+            if request.is_live() {
+                match this.prepare_bio_open() {
+                    Ok(()) => this.run_key_operation(&request),
+                    Err(error) => request.complete(Err(error)),
+                }
+            }
+            this.capture_end();
+        }
+        // A canceled caller may already have returned. Keep ownership until
+        // hardware cleanup finishes; an old worker never releases a new lease.
+        request.complete(Err(if this.shutting_down.load(Relaxed) { ENODEV } else { ECANCELED }));
+        this.capture.lock().finish_key(&request);
+    }
+}
 
 struct SepDriver(Arc<SepData>);
 

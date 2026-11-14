@@ -460,6 +460,10 @@ impl Session {
         Ok(())
     }
 
+    pub(crate) fn available(&self) -> bool {
+        self.worker_epoch.is_none() && self.op.may_start()
+    }
+
     pub(crate) fn ready(&self) -> bool {
         self.unseen
     }
@@ -953,6 +957,11 @@ pub(crate) fn abort_capture(session: &mut Session) -> bool {
     session.token = None;
     session.unseen = true;
     true
+}
+
+/// Firmware calls that must not interleave with another file's capture.
+pub(crate) fn uses_enclave(cmd: u32) -> bool {
+    starts_capture(cmd) || matches!(cmd, IOC_GET_INFO | IOC_DELETE | IOC_DELETE_ALL | IOC_ATTEST)
 }
 
 /// The ioctls that start a sensor capture.

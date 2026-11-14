@@ -1133,6 +1133,53 @@
    ]
   },
   {
+   "name": "tools/aurora-sep/tests/test_application_key_cleanup.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/aurora-sep/tests",
+    "-p",
+    "test_application_key_cleanup.py",
+    "-v"
+   ],
+   "rust": "1.85.0"
+  },
+  {
+   "name": "tools/aurora-sep/tests/test_application_keys.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/aurora-sep/tests",
+    "-p",
+    "test_application_keys.py",
+    "-v"
+   ]
+  },
+  {
+   "name": "tools/aurora-sep/tests/test_blocking_requests.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/aurora-sep/tests",
+    "-p",
+    "test_blocking_requests.py",
+    "-v"
+   ],
+   "rust": "1.85.0"
+  },
+  {
    "name": "tools/aurora-sep/tests/test_desktop_fixes.py",
    "group": "aurora-sep",
    "argv": [

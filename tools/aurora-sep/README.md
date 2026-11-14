@@ -317,6 +317,11 @@ systemctl enable aurora-sep-greeter-fingerprint.service
 
 Disabling it and rebooting returns the login screen to GNOME's behaviour.
 
+## Biometric application keys
+
+The separate `/dev/sep-keys` API supports biometric P-256 signing and ECIES item
+decryption. See [the reference client and broker contract](keys/README.md).
+
 ## Biometric userspace header
 
 The canonical ioctl ABI is `include/uapi/linux/apple-sep.h`. Export this

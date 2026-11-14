@@ -48,13 +48,13 @@ fn integer_bytes(v: u32) -> Result<KVec<u8>> {
 pub(crate) enum RefKeyValue<'a> {
     /// op mnemonic: `oc`/`ow`/`ouw`.
     Utf8(&'a [u8]),
+    Boolean(bool),
     Integer(u32),
     Octets(&'a [u8]),
     Der(&'a [u8]),
 }
 
-/// Canonical DER `SET OF SEQUENCE`, members sorted by key — the shape the
-/// enclave parser requires.
+/// Apple key-store `SET OF SEQUENCE`, sorted by complete encoded member.
 pub(crate) fn encode_refkey_set(items: &[(&[u8], RefKeyValue<'_>)]) -> Result<KVec<u8>> {
     let mut members: KVec<(&[u8], KVec<u8>)> = KVec::new();
     for (key, value) in items {
@@ -65,6 +65,10 @@ pub(crate) fn encode_refkey_set(items: &[(&[u8], RefKeyValue<'_>)]) -> Result<KV
         put_header(&mut inner, TAG_UTF8, key.len())?;
         inner.extend_from_slice(key, GFP_KERNEL)?;
         match value {
+            RefKeyValue::Boolean(v) => {
+                // Apple's access-control serializer uses 0x01 for true.
+                inner.extend_from_slice(&[0x01, 0x01, u8::from(*v)], GFP_KERNEL)?;
+            }
             RefKeyValue::Utf8(s) => {
                 if s.len() > MAX_ITEM {
                     return Err(EINVAL);
@@ -91,7 +95,7 @@ pub(crate) fn encode_refkey_set(items: &[(&[u8], RefKeyValue<'_>)]) -> Result<KV
         seq.extend_from_slice(&inner, GFP_KERNEL)?;
         members.push((key, seq), GFP_KERNEL)?;
     }
-    members.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    members.sort_unstable_by(|a, b| a.1.as_slice().cmp(b.1.as_slice()));
     let mut body = KVec::new();
     for (_, seq) in members.iter() {
         body.extend_from_slice(seq, GFP_KERNEL)?;
