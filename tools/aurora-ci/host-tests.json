@@ -2277,6 +2277,170 @@
    "note": "Compile J514S/J516S default and static PMP profiles; check supplier nodes and alias in the resulting DTBs."
   },
   {
+   "name": "tools/asahi/pmp-agx-vote-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--output",
+    "{output}"
+   ],
+   "note": "T6001 AGX vote policy host suite: fake clock, PMP bit and timer against the static inline header; --mutations self-checks the guards"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutations",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutations",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when every mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation owed-set-branch",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "owed-set-branch",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation owed-failures",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "owed-failures",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation stopped-in-begin",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "stopped-in-begin",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation stopped-in-decide",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "stopped-in-decide",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation wrap-reached",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "wrap-reached",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation set-write-ends",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "set-write-ends",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation begin-backoff-kick",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "begin-backoff-kick",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation retry-dropped-when-idle",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "retry-dropped-when-idle",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation begin-no-retry-arm",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "begin-no-retry-arm",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
+   "name": "tools/asahi/pmp-agx-vote-tests.py --mutation retry-revival",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/pmp-agx-vote-tests.py",
+    "--mutation",
+    "retry-revival",
+    "--output",
+    "{output}"
+   ],
+   "expect": "pass",
+   "note": "self-checking: exits 0 when the mutant aborts"
+  },
+  {
    "name": "tools/asahi/t6030-pmp-graph-tests.py",
    "group": "tools",
    "argv": [
@@ -2327,7 +2491,8 @@
   "tools/testing/selftests/drivers/gpu/asahi-g15/uat-owner.c": "compiled and executed by the registered asahi-g15/run.py actual reservation-owner fixture",
   "tools/testing/selftests/drivers/gpu/asahi-g15/pmp-bridge.c": "compiled and executed by the registered asahi-g15/run.py maintained PMP fixture",
   "tools/asahi/t6030-pmp-graph-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
-  "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite"
+  "tools/asahi/t6030-display-admission-tests.c": "compiled and executed by the corresponding registered Python actual-body host suite",
+  "tools/asahi/pmp-agx-vote-tests.c": "compiled and executed by the registered pmp-agx-vote-tests.py policy suite"
  },
  "excluded": {
   "tools/aurora-sep/tests/coordinator/runtime-check.sh": "Needs /dev/sep-bio, a running kernel booted with trusted.source=applesep, the hw_random sysfs interface and fprintd. Coordinator payload for an approved device.",
