@@ -62,7 +62,7 @@ impl super::QueueInner::ver {
         // but it's unclear *which* slot...
         let slot_client_seq: u8 = (self.id & 0xff) as u8;
 
-        let vm_bind = job.vm_bind.clone();
+        let vm_bind = job.vm_bind.as_ref().clone();
 
         mod_dev_dbg!(
             self.dev,

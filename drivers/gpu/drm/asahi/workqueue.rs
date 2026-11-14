@@ -29,6 +29,7 @@ use crate::{
     event,
     fw,
     gpu,
+    mmu,
     regs, //
 };
 use core::any::Any;
@@ -156,6 +157,8 @@ where
     vm_slot: u32,
     callback: Option<C>,
     fence: dma_fence::Fence,
+    _vm_job: Arc<mmu::VmJobGuard>,
+    _vm_bind: Arc<mmu::VmBind>,
 }
 
 pub(crate) trait GenSubmittedWork: Send + Sync {
@@ -163,6 +166,7 @@ pub(crate) trait GenSubmittedWork: Send + Sync {
     fn value(&self) -> event::EventValue;
     fn wptr(&self) -> u32;
     fn set_wptr(&mut self, wptr: u32);
+    fn quarantine_vm(&self);
     fn mark_error(&mut self, error: WorkError);
     fn complete(&mut self);
     fn get_fence(&self) -> dma_fence::Fence;
@@ -211,6 +215,10 @@ impl<O: OpaqueCommandObject, C: FnOnce(Option<WorkError>) + Send + Sync> GenSubm
 
     fn set_wptr(&mut self, wptr: u32) {
         self.wptr = wptr;
+    }
+
+    fn quarantine_vm(&self) {
+        self._vm_job.quarantine();
     }
 
     fn complete(&mut self) {
@@ -296,6 +304,8 @@ pub(crate) struct Job {
     submitted: bool,
     event_count: usize,
     fence: dma_fence::Fence,
+    vm_job: Arc<mmu::VmJobGuard>,
+    vm_bind: Arc<mmu::VmBind>,
 }
 
 #[versions(AGX)]
@@ -342,7 +352,8 @@ impl Job::ver {
 
         let fence = self.fence.clone();
         let value = self.event_info.value.next();
-
+        let vm_job = self.vm_job.clone();
+        let vm_bind = self.vm_bind.clone();
         self.pending.push(
             KBox::try_pin_init(
                 try_pin_init!(SubmittedWorkContainer {
@@ -355,6 +366,8 @@ impl Job::ver {
                         wptr: 0,
                         vm_slot,
                         fence,
+                        _vm_job: vm_job,
+                        _vm_bind: vm_bind,
                     }, GFP_KERNEL)?
                 }),
                 GFP_KERNEL,
@@ -596,6 +609,7 @@ impl<'a> Drop for JobSubmission::ver<'a> {
         mod_pr_debug!("WorkQueue({:?}): Dropping JobSubmission\n", inner.pipe_type);
 
         let new_len = inner.pending.len() - self.command_count;
+        // Job retains its guard until this submission drops the queue lock.
         inner.pending.truncate(new_len);
 
         let pipe_type = inner.pipe_type;
@@ -780,7 +794,12 @@ impl WorkQueue::ver {
         })
     }
 
-    pub(crate) fn new_job(self: &Arc<Self>, fence: dma_fence::Fence) -> Result<Job::ver> {
+    pub(crate) fn new_job(
+        self: &Arc<Self>,
+        fence: dma_fence::Fence,
+        vm_job: Arc<mmu::VmJobGuard>,
+        vm_bind: Arc<mmu::VmBind>,
+    ) -> Result<Job::ver> {
         let mut inner = self.inner.lock();
 
         if inner.event.is_none() {
@@ -826,6 +845,8 @@ impl WorkQueue::ver {
             committed: false,
             submitted: false,
             fence,
+            vm_job,
+            vm_bind,
         })
     }
 
@@ -1034,8 +1055,11 @@ impl WorkQueue for WorkQueue::ver {
         core::mem::drop(inner);
 
         for mut cmd in cmds {
+            cmd.as_mut().inner_mut().quarantine_vm();
             cmd.as_mut().inner_mut().mark_error(error);
             cmd.as_mut().inner_mut().complete();
+            // No confirmed GPU stop exists after a firmware crash; retain command resources until reboot.
+            core::mem::forget(cmd);
         }
     }
 }
