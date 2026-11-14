@@ -30,6 +30,8 @@ enum dptx_apcall {
 	DPTX_APCALL_DEVICE_NOT_RESPONDING = 22,
 	DPTX_APCALL_DEVICE_BUSY_TIMEOUT = 23,
 	DPTX_APCALL_DEVICE_NOT_STARTED = 24,
+	/* The port's controller became active or not (J613 lid close/open). */
+	DPTX_APCALL_SET_ACTIVE = 25,
 	DPTX_APCALL_GET_VIRTUAL_DEVICE_MODE = 26,
 };
 
