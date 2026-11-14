@@ -332,6 +332,22 @@ avd_av1_dec_get_shear_params(const u32 *params, s64 *alpha,
 		* (1 << WARP_PARAM_REDUCE_BITS);
 }
 
+/*
+ * Timestamp of the reference in slot @slot of ref_frame_idx[] (0 = LAST ... 6 = ALTREF). Userspace
+ * passes -1 for the references of intra frames, and indexing reference_frame_ts[] with it reads the
+ * bytes in front of the array. An invalid index gives U64_MAX, which matches no capture buffer, so
+ * avd_get_ref_buf() falls back to the destination, as for any unused reference; two invalid slots
+ * still compare equal, as before.
+ */
+static u64 avd_av1_ref_ts(const struct v4l2_ctrl_av1_frame *frame, int slot)
+{
+	s8 idx = frame->ref_frame_idx[slot];
+
+	if (idx < 0 || idx >= V4L2_AV1_TOTAL_REFS_PER_FRAME)
+		return U64_MAX;
+	return frame->reference_frame_ts[idx];
+}
+
 static void set_refs(struct avd_ctx *ctx, struct avd_av1_run *run)
 {
 	struct avd_av1_ctx *av1_ctx = ctx->priv;
@@ -358,10 +374,8 @@ static void set_refs(struct avd_ctx *ctx, struct avd_av1_run *run)
 			ref = dst;
 		} else {
 			ref_idx = i + V4L2_AV1_REF_LAST_FRAME;
-			ref = avd_get_ref_buf(
-				ctx, &dst->base.vb,
-				frame->reference_frame_ts
-					[frame->ref_frame_idx[i]]);
+			ref = avd_get_ref_buf(ctx, &dst->base.vb,
+					      avd_av1_ref_ts(frame, i));
 		}
 		addr = vb2_dma_contig_plane_dma_addr(&ref->base.vb.vb2_buf, 0) +
 		       ref->comp.start_offset;
@@ -448,9 +462,7 @@ static bool is_valid_ref_frame(struct avd_ctx *ctx, struct avd_av1_run *run,
 	const struct v4l2_ctrl_av1_frame *frame = run->frame;
 	struct avd_decoded_buffer *ref = avd_get_ref_buf(
 		ctx, &dst->base.vb,
-		frame->reference_frame_ts
-			[frame->ref_frame_idx[ref_frame -
-					      V4L2_AV1_REF_LAST_FRAME]]);
+		avd_av1_ref_ts(frame, ref_frame - V4L2_AV1_REF_LAST_FRAME));
 	int ref_mi_cols = DIV_ROUND_UP(ref->av1.width + 1, 8);
 	int ref_mi_rows = DIV_ROUND_UP(ref->av1.height + 1, 8);
 	bool intra_only = ((ref->av1.frame_type == V4L2_AV1_KEY_FRAME) ||
@@ -474,11 +486,10 @@ static int avd_select_refs(struct avd_ctx *ctx, struct avd_av1_run *run,
 	int mi_rows = DIV_ROUND_UP(frame->frame_height_minus_1 + 1, 8);
 	dst = vb2_to_avd_decoded_buf(&run->base.bufs.dst->vb2_buf);
 
-	int last_ref_idx = frame->ref_frame_idx[V4L2_AV1_REF_INTRA_FRAME];
 	if (seq->flags & (V4L2_AV1_SEQUENCE_FLAG_ENABLE_ORDER_HINT |
 			  V4L2_AV1_SEQUENCE_FLAG_ENABLE_REF_FRAME_MVS)) {
 		ref = avd_get_ref_buf(ctx, &dst->base.vb,
-				      frame->reference_frame_ts[last_ref_idx]);
+				      avd_av1_ref_ts(frame, 0));
 		if (dst != ref) {
 			use_last =
 				(ref->av1.order_hints[V4L2_AV1_REF_ALTREF_FRAME] !=
@@ -534,7 +545,7 @@ static void set_ref_hints(struct avd_ctx *ctx, struct avd_av1_run *run,
 			  u8 *selected_refs)
 {
 	const struct v4l2_ctrl_av1_frame *frame = run->frame;
-	int i, ref_idx;
+	int i;
 	struct avd_decoded_buffer *dst, *ref;
 	dst = vb2_to_avd_decoded_buf(&run->base.bufs.dst->vb2_buf);
 
@@ -543,11 +554,10 @@ static void set_ref_hints(struct avd_ctx *ctx, struct avd_av1_run *run,
 			push(0, "");
 			push(0, "");
 		} else {
-			ref_idx = frame->ref_frame_idx[selected_refs[i] -
-						       V4L2_AV1_REF_LAST_FRAME];
 			ref = avd_get_ref_buf(
 				ctx, &dst->base.vb,
-				frame->reference_frame_ts[ref_idx]);
+				avd_av1_ref_ts(frame, selected_refs[i] -
+							      V4L2_AV1_REF_LAST_FRAME));
 
 			push(AV1_ORDER_HINT0(ref->av1.order_hints[3]) |
 				     AV1_ORDER_HINT1(ref->av1.order_hints[2]) |
@@ -578,8 +588,7 @@ static void set_ref_hdr(struct avd_ctx *ctx, struct avd_av1_run *run)
 	/* point to the first index where the frames equal */
 	for (i = 0; i < 6; i++) {
 		for (j = i + 1; j < 7; j++) {
-			if (frame->reference_frame_ts[frame->ref_frame_idx[i]] ==
-			    frame->reference_frame_ts[frame->ref_frame_idx[j]]) {
+			if (avd_av1_ref_ts(frame, i) == avd_av1_ref_ts(frame, j)) {
 				ref_slots[j] = ref_slots[i];
 				break;
 			}
@@ -825,7 +834,8 @@ static void set_header(struct avd_ctx *ctx, struct avd_av1_run *run)
 						       V4L2_AV1_REF_LAST_FRAME];
 			ref = avd_get_ref_buf(
 				ctx, &dst->base.vb,
-				frame->reference_frame_ts[ref_idx]);
+				avd_av1_ref_ts(frame, selected_refs[i] -
+							      V4L2_AV1_REF_LAST_FRAME));
 			ref_addr =
 				vb2_dma_contig_plane_dma_addr(
 					&ref->base.vb.vb2_buf, 0) +
@@ -1069,9 +1079,8 @@ static void avd_av1_set_prob(struct avd_ctx *ctx, struct avd_av1_run *run)
 	} else {
 		ref = avd_get_ref_buf(
 			ctx, &dst->base.vb,
-			run->frame->reference_frame_ts
-				[run->frame->ref_frame_idx
-					 [run->frame->primary_ref_frame]]);
+			avd_av1_ref_ts(run->frame,
+				       run->frame->primary_ref_frame));
 		memcpy(av1_ctx->bufs.probs.cpu,
 		       vb2_plane_vaddr(&ref->base.vb.vb2_buf, 0) +
 			       AVD_AV1_CDFS_OFFSET(
