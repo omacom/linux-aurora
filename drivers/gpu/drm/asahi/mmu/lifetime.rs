@@ -74,6 +74,8 @@ pub(super) struct VmLifetime {
     changed: CondVar,
     #[pin]
     driver: Mutex<Option<DriverMappings>>,
+    #[pin]
+    retained: Mutex<KVec<KernelMapping>>,
 }
 
 impl VmLifetime {
@@ -97,6 +99,7 @@ impl VmLifetime {
                     unmaps:KVec::new(), objects:KVec::new() }, "VM job lifetime"),
                 changed <- new_condvar!("VM mapping admission"),
                 driver <- new_mutex!(None, "VM driver mappings"),
+                retained <- new_mutex!(KVec::new(), "VM retained mappings"),
             }),
             GFP_KERNEL,
         )
@@ -111,7 +114,8 @@ pub(crate) struct VmJobGuard {
 }
 
 impl VmJobGuard {
-    /// Blocks mapping commits before the error fence can become visible to userspace.
+    /// Blocks mapping commits until existing commits drain, before the error fence becomes visible.
+    /// May sleep; callers must run in sleepable context.
     pub(crate) fn quarantine(&self) {
         if let Some(lifetime) = self.vm.lifetime.as_ref() {
             let mut state = lifetime.state.lock();
@@ -168,6 +172,11 @@ impl Vm {
             driver.mappings.push(mapping, GFP_KERNEL)?;
         }
         Ok(())
+    }
+    /// Keeps fixed kernel aliases alive while accepted work can still reference them.
+    pub(crate) fn retain_mapping(&self, mapping: KernelMapping) -> Result {
+        let lifetime = self.lifetime.as_ref().ok_or(EINVAL)?;
+        Ok(lifetime.retained.lock().push(mapping, GFP_KERNEL)?)
     }
 
     pub(crate) fn render_pool_tvb_blocks(&self, slot: u8, id: u64) -> Option<usize> {
@@ -349,6 +358,14 @@ impl Vm {
         self.lifetime
             .as_ref()
             .is_some_and(|lifetime| lifetime.state.lock().closed)
+    }
+
+    /// Track accepted work on the legacy submission path.
+    pub(crate) fn with_job_lifetime(mut self) -> Result<Self> {
+        if self.lifetime.is_none() {
+            self.lifetime = Some(VmLifetime::new()?);
+        }
+        Ok(self)
     }
 
     /// Tests mappings and reservations which userspace must never replace.

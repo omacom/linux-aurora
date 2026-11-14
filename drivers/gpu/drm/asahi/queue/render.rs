@@ -294,7 +294,7 @@ impl super::QueueInner::ver {
 
         let scene = Arc::new(buffer.new_scene(kalloc, &tile_info)?, GFP_KERNEL)?;
 
-        let vm_bind = job.vm_bind.clone();
+        let vm_bind = job.vm_bind.as_ref().clone();
 
         mod_dev_dbg!(
             self.dev,

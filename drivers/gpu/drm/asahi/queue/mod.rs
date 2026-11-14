@@ -89,9 +89,16 @@ struct SubQueue {
 
 #[versions(AGX)]
 impl SubQueue::ver {
-    fn new_job(&mut self, fence: dma_fence::Fence) -> SubQueueJob::ver {
+    fn new_job(
+        &mut self,
+        fence: dma_fence::Fence,
+        vm_job: Arc<mmu::VmJobGuard>,
+        vm_bind: Arc<mmu::VmBind>,
+    ) -> SubQueueJob::ver {
         SubQueueJob::ver {
             wq: self.wq.clone(),
+            vm_job,
+            vm_bind,
             fence: Some(fence),
             job: None,
         }
@@ -101,6 +108,8 @@ impl SubQueue::ver {
 #[versions(AGX)]
 struct SubQueueJob {
     wq: Arc<workqueue::WorkQueue::ver>,
+    vm_job: Arc<mmu::VmJobGuard>,
+    vm_bind: Arc<mmu::VmBind>,
     job: Option<workqueue::Job::ver>,
     fence: Option<dma_fence::Fence>,
 }
@@ -110,8 +119,13 @@ impl SubQueueJob::ver {
     fn get(&mut self) -> Result<&mut workqueue::Job::ver> {
         if self.job.is_none() {
             mod_pr_debug!("SubQueueJob: Creating {:?} job\n", self.wq.pipe_type());
-            self.job
-                .replace(self.wq.new_job(self.fence.take().unwrap())?);
+            self.job.replace(
+                self.wq.new_job(
+                    self.fence.take().unwrap(),
+                    self.vm_job.clone(),
+                    self.vm_bind.clone(),
+                )?,
+            );
         }
         Ok(self.job.as_mut().expect("expected a Job"))
     }
@@ -201,7 +215,9 @@ impl dma_fence::FenceOps for JobFence::ver {
 #[versions(AGX)]
 pub(crate) struct QueueJob {
     dev: AsahiDevRef,
-    vm_bind: mmu::VmBind,
+    vm_bind: Arc<mmu::VmBind>,
+    // Retain the VM when no sub-queue job exists; otherwise child jobs hold clones.
+    _vm_job: Arc<mmu::VmJobGuard>,
     op_guard: Option<gpu::OpGuard>,
     sj_vtx: Option<SubQueueJob::ver>,
     sj_frag: Option<SubQueueJob::ver>,
@@ -715,7 +731,8 @@ impl Queue for Queue::ver {
             GFP_KERNEL,
         )?;
 
-        let vm_bind = gpu.bind_vm(&self.vm)?;
+        let vm_job = Arc::new(self.vm.retain_first_job()?, GFP_KERNEL)?;
+        let vm_bind = Arc::new(gpu.bind_vm(&self.vm)?, GFP_KERNEL)?;
         let vm_slot = vm_bind.slot();
 
         mod_dev_dbg!(self.dev, "[Submission {}] Creating job\n", id);
@@ -790,20 +807,21 @@ impl Queue for Queue::ver {
             1,
             QueueJob::ver {
                 dev: self.dev.clone(),
-                vm_bind,
+                vm_bind: vm_bind.clone(),
+                _vm_job: vm_job.clone(),
                 op_guard,
                 sj_vtx: self
                     .q_vtx
                     .as_mut()
-                    .map(|a| a.new_job(Fence::from_fence(&fence))),
+                    .map(|a| a.new_job(Fence::from_fence(&fence), vm_job.clone(), vm_bind.clone())),
                 sj_frag: self
                     .q_frag
                     .as_mut()
-                    .map(|a| a.new_job(Fence::from_fence(&fence))),
+                    .map(|a| a.new_job(Fence::from_fence(&fence), vm_job.clone(), vm_bind.clone())),
                 sj_comp: self
                     .q_comp
                     .as_mut()
-                    .map(|a| a.new_job(Fence::from_fence(&fence))),
+                    .map(|a| a.new_job(Fence::from_fence(&fence), vm_job.clone(), vm_bind.clone())),
                 fence,
                 notifier: self.inner.notifier.clone(),
 
