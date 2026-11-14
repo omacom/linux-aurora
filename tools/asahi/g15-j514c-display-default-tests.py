@@ -3,7 +3,7 @@
 """Check the real T6031 native-display default selector and owner opt-out."""
 import pathlib, subprocess, tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-s = (ROOT / 'drivers/soc/apple/t6030-display-gate.c').read_text()
+s = (ROOT / 'drivers/soc/apple/display-gate.c').read_text()
 def item(name):
  a=s.index(name);a=s.rfind('static ',0,a);b=s.index('\n}',a)+2;return s[a:b]
 compat=item('gate_t6031_is_compatible(const char *compat)')
