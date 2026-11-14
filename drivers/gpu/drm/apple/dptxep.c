@@ -25,6 +25,14 @@
 
 #include "dptx-j700-training.h"
 
+#include <linux/moduleparam.h>
+#include <linux/of.h>
+
+static bool t600x_tunnel_max_hbr2 = true;
+module_param(t600x_tunnel_max_hbr2, bool, 0644);
+MODULE_PARM_DESC(t600x_tunnel_max_hbr2,
+		 "Cap Thunderbolt DP tunnels on M1 Pro/Max at HBR2 so dual-stream docks share one tunnel pixel clock (default: true)");
+
 struct dcpdptx_connection_cmd {
 	__le32 unk;
 	__le32 target;
@@ -337,12 +345,28 @@ static int dptxport_call_get_max_link_rate(struct apple_epic_service *service,
 					   void *reply_, size_t reply_size)
 {
 	struct dptxport_apcall_link_rate *reply = reply_;
+	struct apple_dcp *dcp = service->ep->dcp;
+	u32 max_rate = LINK_RATE_HBR3;
 
 	if (reply_size < sizeof(*reply))
 		return -EINVAL;
 
+	/*
+	 * t600x feeds both Thunderbolt DP IN adapters of a port from one tunnel
+	 * pixel clock (atc_tunnel_start_t8103()). A second stream training at a
+	 * different link rate reselects that clock under the first one, which
+	 * then dies with a DPTX FIFO error. Cap tunnels at HBR2 so both streams
+	 * of a dual-stream dock run at the same rate.
+	 */
+	if (t600x_tunnel_max_hbr2 && READ_ONCE(dcp->dptx_tunnel) &&
+	    (of_machine_is_compatible("apple,t6000") ||
+	     of_machine_is_compatible("apple,t6001"))) {
+		max_rate = LINK_RATE_HBR2;
+		dev_dbg(dcp->dev, "DP tunnel: capping max link rate at HBR2 (t600x shared tunnel clock)\n");
+	}
+
 	reply->retcode = cpu_to_le32(0);
-	reply->link_rate = cpu_to_le32(LINK_RATE_HBR3);
+	reply->link_rate = cpu_to_le32(max_rate);
 
 	return 0;
 }
