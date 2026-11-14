@@ -78,6 +78,7 @@ thread_local! {
     static ACTIVATED: Cell<bool> = const { Cell::new(false) };
     static ATTACH_ERROR: Cell<bool> = const { Cell::new(false) };
     static PROBE_ERROR: Cell<i32> = const { Cell::new(0) };
+    static PRE_ACTIVATION: Cell<u32> = const { Cell::new(0) };
 }
 struct Core<'a>(PhantomData<&'a ()>);
 struct Device { data: Cell<*mut core::ffi::c_void> }
@@ -150,7 +151,16 @@ mod driver {
                     let stage = if name.to_bytes() == b"asahi-g15" { 1 } else { 2 };
                     // Model driver_attach and a late driver_add_groups failure. A deferred
                     // worker can also retry G15 while the other registration is in progress.
-                    let _ = callback::<Driver<'static>>(&PDEV, Some(&&CFG));
+                    let ready = MODULE_READY.load(Ordering::Acquire);
+                    let started = PROBES.get();
+                    let result = callback::<Driver<'static>>(&PDEV, Some(&&CFG));
+                    // A probe that started firmware here is the readiness-gate failure, checked below.
+                    if !ready && PROBES.get() == started {
+                        // A deferral would keep the GPU in devices_deferred after a later
+                        // terminal failure; before activation the probe must decline outright.
+                        assert_eq!(result, Err(ENODEV), "pre-activation probe deferred instead of ENODEV");
+                        PRE_ACTIVATION.set(PRE_ACTIVATION.get() + 1);
+                    }
                     if FAIL_REGISTRATION.get() == stage { return Err(-5); }
                     COMPLETED_REGISTRATION.set(stage);
                     stage
@@ -214,7 +224,7 @@ fn module_cases() {
         PDEV.base.data.set(core::ptr::null_mut());
         MODULE_READY.store(false, Ordering::Release);
         COMPLETED_REGISTRATION.set(0); FAIL_REGISTRATION.set(failure);
-        ACTIVATED.set(false); ATTACH_ERROR.set(failure == 0);
+        ACTIVATED.set(false); ATTACH_ERROR.set(failure == 0); PRE_ACTIVATION.set(0);
         let init = <DriverModule as InPlaceModule>::init(&MODULE);
         assert_eq!(PROBES.get(), 0, "module initializer eagerly started firmware");
         let result = KBox::pin_init(init, GFP_KERNEL);
@@ -231,6 +241,8 @@ fn module_cases() {
             assert!(!PDEV.base.data.get().is_null());
             unsafe { drop(Box::from_raw(PDEV.base.data.get().cast::<Driver<'_>>())); }
         }
+        // Every probe before activation declined: one per completed or failing registration.
+        assert_eq!(PRE_ACTIVATION.get(), if failure == 1 { 1 } else { 2 }, "pre-activation probes");
         println!("module-registration-{failure}: PASS");
     }
 }
@@ -373,9 +385,10 @@ int main(void) {
         needle = "                        None\n"
         assert probe.count(needle) == 1
         variants["retained-error-unbinds"] = (probe.replace(needle, "                        return Err(error);\n"), module_code)
-        gate = "                if !MODULE_READY.load(Ordering::Acquire) {\n                    return Err(EPROBE_DEFER);\n                }\n"
+        gate = "                if !MODULE_READY.load(Ordering::Acquire) {\n                    return Err(ENODEV);\n                }\n"
         assert probe.count(gate) == 1
         variants["no-registration-readiness-gate"] = (probe.replace(gate, ""), module_code)
+        variants["pre-activation-defers"] = (probe.replace(gate, gate.replace("ENODEV", "EPROBE_DEFER")), module_code)
         late = "            #[cfg(CONFIG_DRM_ASAHI_G15)]\n            _g15_ready: g15::activate(),\n"
         assert module_code.count(late) == 1
         early = module_code.replace(late, "").replace("            _driver <-", late + "            _driver <-", 1)
@@ -397,7 +410,7 @@ int main(void) {
         else:
             receipt["mutants"][name] = result
             if r.returncode == 0: raise SystemExit("SURVIVED: " + name)
-            intended = {"eager-probe-before-allocation": "allocation-before-start: firmware probe before drvdata allocation", "retained-error-unbinds": "retained-start-failure-binds: callback result", "no-registration-readiness-gate": "late registration failure started firmware", "activation-before-last-registration": "activation before all registrations completed"}[name]
+            intended = {"eager-probe-before-allocation": "allocation-before-start: firmware probe before drvdata allocation", "retained-error-unbinds": "retained-start-failure-binds: callback result", "no-registration-readiness-gate": "late registration failure started firmware", "activation-before-last-registration": "activation before all registrations completed", "pre-activation-defers": "pre-activation probe deferred instead of ENODEV"}[name]
             result["intended_failure"] = intended in r.stderr
             if not result["intended_failure"]: raise SystemExit("INVALID unrelated failure: " + name + "\n" + r.stderr)
     (out / "result.json").write_text(json.dumps(receipt, indent=2) + "\n")
