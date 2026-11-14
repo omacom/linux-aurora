@@ -1019,6 +1019,14 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
 		return;
 	addr = console->base_addr + BRCMF_CONSOLE_WRITEIDX_OFFSET;
 	newidx = brcmf_pcie_read_tcm32(devinfo, addr);
+	/* The loop wraps at bufsize: an index outside the ring never ends it. */
+	if (!console->bufsize || newidx >= console->bufsize ||
+	    console->read_idx >= console->bufsize) {
+		dev_err_ratelimited(&pdev->dev,
+				    "console index out of range (write %u, read %u, size %u)\n",
+				    newidx, console->read_idx, console->bufsize);
+		return;
+	}
 	while (newidx != console->read_idx) {
 		addr = console->buf_addr + console->read_idx;
 		ch = brcmf_pcie_read_tcm8(devinfo, addr);
