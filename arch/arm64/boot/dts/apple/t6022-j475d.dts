@@ -45,6 +45,217 @@
 	power-domains = <&ps_dispext0_cpu0_die1>, <&ps_dptx_phy_ps_die1>;
 };
 
+/*
+ * HDMI scans out through dispext0 on die 1, and the rear USB-C ports through
+ * dcpext1/dispext1 on die 0 (see t602x-j474-j475.dtsi).
+ */
+&display {
+	iommus = <&dispext0_dart_die1 0 0x100 0x0 0x10 0x0>,
+		 <&dispext0_dart 0 0x100 0x0 0x10 0x0>,
+		 <&dispext1_dart 0 0x100 0x0 0x10 0x0>;
+};
+
+/*
+ * Thunderbolt DP tunnels on M2 need two pipelines per port with named DPIN
+ * crossbar controls, as on the 14/16-inch boards. HDMI uses die 1 here, so
+ * die-0 dcpext0 is free to be the second rear-port pipeline (crossbar state
+ * 0, dcpext1 state 2).
+ */
+/ {
+	aliases {
+		/* m1n1 fills apple,firmware-compat through the ADT-indexed alias */
+		dcpext0 = &dcpext0;
+	};
+};
+
+&dispext0_dart {
+	status = "okay";
+};
+
+&dcpext0_dart {
+	status = "okay";
+};
+
+&dcpext0_mbox {
+	status = "okay";
+};
+
+&dpaudio1 {
+	status = "okay";
+};
+
+&dcpext0 {
+	status = "okay";
+	apple,connector-type = "USB-C";
+	phys = <&atcphy0 PHY_TYPE_DP>, <&atcphy1 PHY_TYPE_DP>,
+	       <&atcphy2 PHY_TYPE_DP>, <&atcphy3 PHY_TYPE_DP>;
+	phy-names = "typec0", "typec1", "typec2", "typec3";
+	mux-controls = <&atcphy0_xbar 0>,
+		       <&atcphy1_xbar 0>,
+		       <&atcphy2_xbar 0>,
+		       <&atcphy3_xbar 0>,
+		       <&atcphy0_xbar 1>,
+		       <&atcphy1_xbar 1>,
+		       <&atcphy2_xbar 1>,
+		       <&atcphy3_xbar 1>,
+		       <&atcphy0_xbar 2>,
+		       <&atcphy1_xbar 2>,
+		       <&atcphy2_xbar 2>,
+		       <&atcphy3_xbar 2>;
+	mux-control-names = "typec0", "typec1", "typec2", "typec3",
+			    "typec0-dpin0", "typec1-dpin0", "typec2-dpin0", "typec3-dpin0",
+			    "typec0-dpin1", "typec1-dpin1", "typec2-dpin1", "typec3-dpin1";
+	apple,typec-mux-indices = <0 0 0 0>;
+	apple,typec-dptx-phys = <0 1 2 3>;
+
+	typec-routes {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		route@0 {
+			reg = <0>;
+			mode-switch;
+
+			port {
+				dcpext0_typec0: endpoint {
+					remote-endpoint = <&typec0_dcpext0>;
+				};
+			};
+		};
+
+		route@1 {
+			reg = <1>;
+			mode-switch;
+
+			port {
+				dcpext0_typec1: endpoint {
+					remote-endpoint = <&typec1_dcpext0>;
+				};
+			};
+		};
+
+		route@2 {
+			reg = <2>;
+			mode-switch;
+
+			port {
+				dcpext0_typec2: endpoint {
+					remote-endpoint = <&typec2_dcpext0>;
+				};
+			};
+		};
+
+		route@3 {
+			reg = <3>;
+			mode-switch;
+
+			port {
+				dcpext0_typec3: endpoint {
+					remote-endpoint = <&typec3_dcpext0>;
+				};
+			};
+		};
+	};
+};
+
+&dcpext1 {
+	mux-controls = <&atcphy0_xbar 0>,
+		       <&atcphy1_xbar 0>,
+		       <&atcphy2_xbar 0>,
+		       <&atcphy3_xbar 0>,
+		       <&atcphy0_xbar 1>,
+		       <&atcphy1_xbar 1>,
+		       <&atcphy2_xbar 1>,
+		       <&atcphy3_xbar 1>,
+		       <&atcphy0_xbar 2>,
+		       <&atcphy1_xbar 2>,
+		       <&atcphy2_xbar 2>,
+		       <&atcphy3_xbar 2>;
+	mux-control-names = "typec0", "typec1", "typec2", "typec3",
+			    "typec0-dpin0", "typec1-dpin0", "typec2-dpin0", "typec3-dpin0",
+			    "typec0-dpin1", "typec1-dpin1", "typec2-dpin1", "typec3-dpin1";
+};
+
+&typec0 {
+	ports {
+		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			/delete-node/ endpoint;
+
+			typec0_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec0>;
+			};
+
+			typec0_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec0>;
+			};
+		};
+	};
+};
+
+&typec1 {
+	ports {
+		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			/delete-node/ endpoint;
+
+			typec1_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec1>;
+			};
+
+			typec1_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec1>;
+			};
+		};
+	};
+};
+
+&typec2 {
+	ports {
+		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			/delete-node/ endpoint;
+
+			typec2_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec2>;
+			};
+
+			typec2_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec2>;
+			};
+		};
+	};
+};
+
+&typec3 {
+	ports {
+		port@3 {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			/delete-node/ endpoint;
+
+			typec3_dcp: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext1_typec3>;
+			};
+
+			typec3_dcpext0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext0_typec3>;
+			};
+		};
+	};
+};
+
 &dcpext0_die1 {
 	// J180 misses "function-dp2hdmi_pwr_en"
 	dp2hdmi-pwren-gpios = <&smc_gpio 25 GPIO_ACTIVE_HIGH>;
