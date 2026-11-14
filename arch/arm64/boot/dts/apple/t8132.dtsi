@@ -354,6 +354,50 @@
 			};
 		};
 
+		/*
+		 * iBoot hands over a running SEP. Keep Linux off its DART at boot;
+		 * apple_sep enables it at module initialization. The SEP only
+		 * accepts IOVAs in this window, which carries the BIT(40) alias
+		 * the DART translates (ADT vm-base-0 0x10000004000).
+		 */
+		sep_dart: iommu@3a8c80000 {
+			compatible = "apple,t8132-dart", "apple,t8110-dart";
+			reg = <0x3 0xa8c80000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 399 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			apple,dma-offset = /bits/ 64 <0x0>;
+			status = "disabled";
+		};
+
+		sep: sep@3aa600000 {
+			compatible = "apple,sep";
+			reg = <0x3 0xaa600000 0x0 0x88000>;
+			mboxes = <&sep_mbox>;
+			mbox-names = "mbox";
+			iommus = <&sep_dart 0>;
+			status = "disabled";
+		};
+
+		/*
+		 * The ADT lists these interrupts as 390 389 392 391. In that order
+		 * the recv-not-empty slot holds the line that is asserted while the
+		 * receive FIFO is empty, and starting the channel never returns.
+		 */
+		sep_mbox: mbox@3aa608000 {
+			compatible = "apple,t8132-asc-mailbox", "apple,asc-mailbox-v4";
+			reg = <0x3 0xaa608000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 389 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 390 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 391 IRQ_TYPE_LEVEL_HIGH>,
+				<AIC_IRQ 392 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "send-empty", "send-not-empty",
+				"recv-empty", "recv-not-empty";
+			#mbox-cells = <0>;
+		};
+
 		i2c0: i2c@3ad010000 {
 			compatible = "apple,t8132-i2c", "apple,t8103-i2c";
 			reg = <0x3 0xad010000 0x0 0x4000>;
