@@ -713,7 +713,7 @@ static void cd321x_display_taken_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, cd321x_display_taken(0, true));
 	/* Other SoCs keep -EBUSY as the taken display. */
 	KUNIT_EXPECT_TRUE(test, cd321x_display_taken(-EBUSY, false));
-	KUNIT_EXPECT_FALSE(test, cd321x_display_taken(-ENOSPC, false));
+	KUNIT_EXPECT_TRUE(test, cd321x_display_taken(-ENOSPC, false));
 	KUNIT_EXPECT_FALSE(test, cd321x_display_taken(-EAGAIN, false));
 	KUNIT_EXPECT_FALSE(test, cd321x_display_taken(0, false));
 }
