@@ -122,7 +122,7 @@ static bool v14_bl_ctx_machine_is(const void *ctx, const char *compat)
 	return !strcmp(((const char *const *)ctx)[1], compat);
 }
 
-/* Only admitted T6030, J516C, J613 and J504 internal panels carry levels. */
+/* Only admitted T6030, J516C, J613, J504 and J514M internal panels carry levels. */
 static void v14_bl_boards(struct kunit *test)
 {
 	static const char *const t6030_j516s[] = { "apple,t6030-dcp", "apple,j516s" };
@@ -131,6 +131,7 @@ static void v14_bl_boards(struct kunit *test)
 	static const char *const j615[] = { "apple,t8122-dcp", "apple,j615" };
 	static const char *const j504[] = { "apple,t8122-dcp", "apple,j504" };
 	static const char *const j516c[] = { "apple,t6031-dcp", "apple,j516c" };
+	static const char *const j514m[] = { "apple,t6034-dcp", "apple,j514m" };
 	static const char *const other_t6030[] = { "apple,t6030-dcp", "apple,other" };
 	const struct dcp_v14_board *board;
 	bool known;
@@ -166,6 +167,8 @@ static void v14_bl_boards(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, board);
 	KUNIT_EXPECT_TRUE(test, board->panel_nits);
 	KUNIT_EXPECT_TRUE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j516c));
+	/* The J514M root is admitted too; its record's flag is in v14-board-test. */
+	KUNIT_EXPECT_TRUE(test, dcp_v14_panel_nits_admit(board, v14_bl_ctx_machine_is, j514m));
 }
 
 static void v14_bl_gate_transitions(struct kunit *test)
