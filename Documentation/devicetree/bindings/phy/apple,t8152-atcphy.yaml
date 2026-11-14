@@ -1,0 +1,129 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/apple,t8152-atcphy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Apple T8152 Type-C PHY (SuperSpeed and USB4 lanes)
+
+maintainers:
+  - Joshua Warren <816217+joshuaswarren@users.noreply.github.com>
+
+description: |
+  The SuperSpeed / USB4 side of one ATC port of the Apple M6 (T8152). The USB2
+  side of the same port is apple,t8152-usb2-phy. The PHY serves one transport
+  at a time: USB3 for the dwc3 controller of the port, or CIO (USB4 /
+  Thunderbolt) for the ACIO controller. Changing the transport shuts the PHY
+  down and brings it up again.
+
+  Firmware supplies the calibration. Every native tunable list of the ADT atc-phy
+  node that the bring-up applies is passed as apple,tunable-<name>, where <name>
+  is the ADT list name without the "tunable_" prefix, lower case, with "_"
+  replaced by "-" (for example tunable_LN0_SMGR_REGS_CIO becomes
+  apple,tunable-ln0-smgr-regs-cio). Offsets are relative to the register block
+  the list belongs to (the driver knows the blocks). A list the ADT does not
+  carry is left out. The two efuse lists apple,tunable-aciophy-cmn-dflt and
+  apple,tunable-ciopll-core-dflt carry the factory calibration; a PHY without
+  them is not calibrated.
+
+$defs:
+  tunable:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    items:
+      items:
+        - description: Aligned byte offset within the register block of the list
+        - description: Bits to clear
+        - description: Bits to set
+
+properties:
+  compatible:
+    const: apple,t8152-atcphy
+
+  reg:
+    items:
+      - description: PHY core window (ADT atc-phy reg[2], 0x84000 bytes)
+
+  reg-names:
+    items:
+      - const: core
+
+  apple,dwc3:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: |
+      The dwc3 node of the port. The PHY uses its "pipe-handler" window (usb-drd
+      reg[3], the PIPE mux it routes) and the PIPE_PHY_READY word (usb-drd reg[1],
+      0x10000 above the "dwc3-core" window, inside the node's "dwc3-apple"
+      window). They are not resources of this node because the dwc3 node already
+      owns those ranges and the platform bus rejects equal or partly overlapping
+      ranges.
+
+  '#phy-cells':
+    const: 1
+    description: |
+      0 selects the USB3 PHY (dwc3-apple, set_mode(HOST) routes the PIPE and
+      brings the PHY up), 1 the CIO PHY (thunderbolt_apple, power_on/power_off).
+
+  power-domains:
+    minItems: 2
+    maxItems: 2
+    description:
+      The USB AON domain (ps_atc*_usb_aon) and the ATC USB domain
+      (psd_atc*_usb) of the port, in this order.
+
+  power-domain-names:
+    items:
+      - const: usb-aon
+      - const: usb
+
+  orientation-switch:
+    type: boolean
+    description: Register a Type-C orientation switch (the connector node points at it).
+
+  apple,cio-lanes:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [1, 2, 3]
+    default: 3
+    description: Lane mask of the CIO bring-up, bit 0 lane 0 and bit 1 lane 1.
+
+patternProperties:
+  '^apple,tunable-[a-z0-9-]+$':
+    $ref: '#/$defs/tunable'
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - apple,dwc3
+  - '#phy-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    soc {
+        #address-cells = <2>;
+        #size-cells = <2>;
+
+        ps_atc2_usb_aon: power-controller-aon {
+            #power-domain-cells = <0>;
+        };
+
+        psd_atc2_usb: power-controller-usb {
+            #power-domain-cells = <0>;
+        };
+
+        usbdrd2: usb@382430000 {
+            reg = <0x3 0x82430000 0x0 0xcd00>;
+        };
+
+        phy@383000000 {
+            compatible = "apple,t8152-atcphy";
+            reg = <0x3 0x83000000 0x0 0x84000>;
+            reg-names = "core";
+            apple,dwc3 = <&usbdrd2>;
+            #phy-cells = <1>;
+            power-domains = <&ps_atc2_usb_aon>, <&psd_atc2_usb>;
+            power-domain-names = "usb-aon", "usb";
+            orientation-switch;
+        };
+    };
