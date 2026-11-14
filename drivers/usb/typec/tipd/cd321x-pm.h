@@ -358,9 +358,9 @@ static inline void cd321x_pm_remove(struct cd321x_pm_state *pm)
  * USB path is set up without the display and nothing is retried.  Any other
  * error, such as -EBUSY from a PHY in the middle of a transition, is retried.
  */
-static inline bool cd321x_display_taken(int ret, bool enospc)
+static inline bool cd321x_display_taken(int ret)
 {
-	return ret == (enospc ? -ENOSPC : -EBUSY);
+	return ret == -ENOSPC;
 }
 
 enum cd321x_dp_send {
