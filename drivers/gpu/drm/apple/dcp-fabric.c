@@ -759,14 +759,52 @@ static void dcp_hdmi_recheck_work(struct work_struct *work)
 	mod_delayed_work(system_freezable_wq, &dcp->hdmi_recheck_wq, 0);
 }
 
+/*
+ * System sleep releases the HDMI display link (dcp_platform_suspend() calls
+ * dcp_dptx_disconnect()), and resume only re-arms the edge-triggered HPD IRQ.
+ * A display that stays plugged in through the sleep produces no edge, so its
+ * link stayed down until the cable was replugged (M1 Pro/Max built-in HDMI
+ * through the DP2HDMI converter). Once the system has thawed, run the update
+ * an HPD edge would: it reads HPD, debounces it and connects the fixed HDMI
+ * output.
+ */
+#define DCP_HDMI_RESUME_CONNECT_MS	1000
+
+static void dcp_hdmi_resume_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work),
+					     struct apple_dcp, hdmi_resume_wq);
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+	if (!dcp->hdmi_hpd || dcp_is_typec_output(dcp) ||
+	    READ_ONCE(dcp->active_typec_route))
+		return;
+	if (dcp->connector && READ_ONCE(dcp->connector->connected))
+		return;	/* an HPD edge got there first */
+	if (gpiod_get_value_cansleep(dcp->hdmi_hpd) <= 0)
+		return;
+	dev_info(dcp->dev, "DP2HDMI: display still attached after system sleep, reconnecting\n");
+	dcp_hdmi_update_locked(dcp);
+}
+
+void dcp_fabric_hdmi_resume_connect(struct apple_dcp *dcp)
+{
+	if (!dcp->hdmi_hpd || dcp_is_typec_output(dcp))
+		return;
+	mod_delayed_work(system_freezable_wq, &dcp->hdmi_resume_wq,
+			 msecs_to_jiffies(DCP_HDMI_RESUME_CONNECT_MS));
+}
+
 void dcp_fabric_init(struct apple_dcp *dcp)
 {
 	spin_lock_init(&dcp->hdmi_presence_lock);
 	dcp->hdmi_presence.state = DCP_FABRIC_ABSENT;
 	INIT_DELAYED_WORK(&dcp->hdmi_settle_wq, dcp_hdmi_settle_work);
 	INIT_DELAYED_WORK(&dcp->hdmi_recheck_wq, dcp_hdmi_recheck_work);
+	INIT_DELAYED_WORK(&dcp->hdmi_resume_wq, dcp_hdmi_resume_work);
 	disable_delayed_work(&dcp->hdmi_settle_wq);
 	disable_delayed_work(&dcp->hdmi_recheck_wq);
+	disable_delayed_work(&dcp->hdmi_resume_wq);
 }
 
 /* Caller enables the HPD IRQ first; a later edge invalidates this sample. */
