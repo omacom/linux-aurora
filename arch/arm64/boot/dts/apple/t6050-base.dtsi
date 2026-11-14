@@ -1,0 +1,575 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Nodes common for T6050 family SoCs (M5 Max)
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	clk_200m: clock-200m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "clk_200m";
+	};
+
+	clkref: clock-ref {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+		clock-output-names = "clkref";
+	};
+
+	// This is a fabulated representation of the input clock
+	// to NCO since we don't know the true clock tree.
+	nco_clkref: clock-ref-nco {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-output-names = "nco_ref";
+	};
+
+	cpus {
+	// cpu reg is the MPIDR affinity. On T6050 the boot core reads
+	// MPIDR_EL1 0x80040000: Aff2 is 4, cluster in Aff1, core in Aff0.
+	// Clusters 1 and 2 follow that pattern; their cores do not start today.
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		cpu-map {
+			cluster0 {
+				core0 { cpu = <&cpu_m00>; };
+				core1 { cpu = <&cpu_m01>; };
+				core2 { cpu = <&cpu_m02>; };
+				core3 { cpu = <&cpu_m03>; };
+				core4 { cpu = <&cpu_m04>; };
+				core5 { cpu = <&cpu_m05>; };
+			};
+
+			cluster1 {
+				core0 { cpu = <&cpu_m10>; };
+				core1 { cpu = <&cpu_m11>; };
+				core2 { cpu = <&cpu_m12>; };
+				core3 { cpu = <&cpu_m13>; };
+				core4 { cpu = <&cpu_m14>; };
+				core5 { cpu = <&cpu_m15>; };
+			};
+
+			cluster2 {
+				core0 { cpu = <&cpu_p00>; };
+				core1 { cpu = <&cpu_p01>; };
+				core2 { cpu = <&cpu_p02>; };
+				core3 { cpu = <&cpu_p03>; };
+				core4 { cpu = <&cpu_p04>; };
+				core5 { cpu = <&cpu_p05>; };
+			};
+		};
+
+		// T6050 (J714c ADT): 18 CPUs, three 6-core clusters. Clusters 0
+		// and 1 are cluster-type "M", cluster 2 is cluster-type "P".
+		// reg encodes cluster << 8 | core. MIDR part 0x68 ("Sotra C"
+		// family).
+		cpu_m00: cpu@0 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40000>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_0>;
+			operating-points-v2 = <&mcluster0_opp>;
+			performance-domains = <&cpufreq_m0>;
+		};
+
+		cpu_m01: cpu@1 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40001>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_0>;
+			operating-points-v2 = <&mcluster0_opp>;
+			performance-domains = <&cpufreq_m0>;
+		};
+
+		cpu_m02: cpu@2 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40002>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_0>;
+			operating-points-v2 = <&mcluster0_opp>;
+			performance-domains = <&cpufreq_m0>;
+		};
+
+		cpu_m03: cpu@3 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40003>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_0>;
+			operating-points-v2 = <&mcluster0_opp>;
+			performance-domains = <&cpufreq_m0>;
+		};
+
+		cpu_m04: cpu@4 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40004>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_0>;
+			operating-points-v2 = <&mcluster0_opp>;
+			performance-domains = <&cpufreq_m0>;
+		};
+
+		cpu_m05: cpu@5 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40005>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_0>;
+			operating-points-v2 = <&mcluster0_opp>;
+			performance-domains = <&cpufreq_m0>;
+		};
+
+		cpu_m10: cpu@100 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40100>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_1>;
+			operating-points-v2 = <&mcluster1_opp>;
+			performance-domains = <&cpufreq_m1>;
+		};
+
+		cpu_m11: cpu@101 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40101>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_1>;
+			operating-points-v2 = <&mcluster1_opp>;
+			performance-domains = <&cpufreq_m1>;
+		};
+
+		cpu_m12: cpu@102 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40102>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_1>;
+			operating-points-v2 = <&mcluster1_opp>;
+			performance-domains = <&cpufreq_m1>;
+		};
+
+		cpu_m13: cpu@103 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40103>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_1>;
+			operating-points-v2 = <&mcluster1_opp>;
+			performance-domains = <&cpufreq_m1>;
+		};
+
+		cpu_m14: cpu@104 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40104>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_1>;
+			operating-points-v2 = <&mcluster1_opp>;
+			performance-domains = <&cpufreq_m1>;
+		};
+
+		cpu_m15: cpu@105 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x40105>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_1>;
+			operating-points-v2 = <&mcluster1_opp>;
+			performance-domains = <&cpufreq_m1>;
+		};
+
+		cpu_p00: cpu@200 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x10200>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_2>;
+			operating-points-v2 = <&pcluster0_opp>;
+			performance-domains = <&cpufreq_p0>;
+		};
+
+		cpu_p01: cpu@201 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x10201>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_2>;
+			operating-points-v2 = <&pcluster0_opp>;
+			performance-domains = <&cpufreq_p0>;
+		};
+
+		cpu_p02: cpu@202 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x10202>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_2>;
+			operating-points-v2 = <&pcluster0_opp>;
+			performance-domains = <&cpufreq_p0>;
+		};
+
+		cpu_p03: cpu@203 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x10203>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_2>;
+			operating-points-v2 = <&pcluster0_opp>;
+			performance-domains = <&cpufreq_p0>;
+		};
+
+		cpu_p04: cpu@204 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x10204>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_2>;
+			operating-points-v2 = <&pcluster0_opp>;
+			performance-domains = <&cpufreq_p0>;
+		};
+
+		cpu_p05: cpu@205 {
+			compatible = "apple,sotra";
+			reg = <0x0 0x10205>;
+			cpu-release-addr = <0 0>; /* to be filled by loader */
+			device_type = "cpu";
+			enable-method = "spin-table";
+			next-level-cache = <&l2_cache_2>;
+			operating-points-v2 = <&pcluster0_opp>;
+			performance-domains = <&cpufreq_p0>;
+		};
+
+		l2_cache_0: l2-cache-0 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-unified;
+		};
+
+		l2_cache_1: l2-cache-1 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-unified;
+		};
+
+		l2_cache_2: l2-cache-2 {
+			compatible = "cache";
+			cache-level = <2>;
+			cache-unified;
+		};
+	};
+
+	// Cluster P-states from the ADT: cluster 0 (M) voltage-states22-sram,
+	// cluster 1 (M) voltage-states23-sram, cluster 2 (P)
+	// voltage-states5-sram. The frequency in kHz per hardware P-state;
+	// opp-level is that P-state. No clock-latency-ns, not measured.
+	mcluster0_opp: opp-table-0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp01 {
+			opp-hz = /bits/ 64 <1344000000>;
+			opp-level = <1>;
+		};
+
+		opp02 {
+			opp-hz = /bits/ 64 <1644000000>;
+			opp-level = <2>;
+		};
+
+		opp03 {
+			opp-hz = /bits/ 64 <1992000000>;
+			opp-level = <3>;
+		};
+
+		opp04 {
+			opp-hz = /bits/ 64 <2304000000>;
+			opp-level = <4>;
+		};
+
+		opp05 {
+			opp-hz = /bits/ 64 <2652000000>;
+			opp-level = <5>;
+		};
+
+		opp06 {
+			opp-hz = /bits/ 64 <2964000000>;
+			opp-level = <6>;
+		};
+
+		opp07 {
+			opp-hz = /bits/ 64 <3240000000>;
+			opp-level = <7>;
+		};
+
+		opp08 {
+			opp-hz = /bits/ 64 <3504000000>;
+			opp-level = <8>;
+		};
+
+		opp09 {
+			opp-hz = /bits/ 64 <3696000000>;
+			opp-level = <9>;
+		};
+
+		opp10 {
+			opp-hz = /bits/ 64 <3876000000>;
+			opp-level = <10>;
+		};
+
+		opp11 {
+			opp-hz = /bits/ 64 <4044000000>;
+			opp-level = <11>;
+		};
+
+		opp12 {
+			opp-hz = /bits/ 64 <4176000000>;
+			opp-level = <12>;
+		};
+
+		opp13 {
+			opp-hz = /bits/ 64 <4284000000>;
+			opp-level = <13>;
+		};
+
+		opp14 {
+			opp-hz = /bits/ 64 <4308000000>;
+			opp-level = <14>;
+		};
+
+		opp15 {
+			opp-hz = /bits/ 64 <4380000000>;
+			opp-level = <15>;
+		};
+	};
+
+	mcluster1_opp: opp-table-1 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp01 {
+			opp-hz = /bits/ 64 <1344000000>;
+			opp-level = <1>;
+		};
+
+		opp02 {
+			opp-hz = /bits/ 64 <1644000000>;
+			opp-level = <2>;
+		};
+
+		opp03 {
+			opp-hz = /bits/ 64 <1992000000>;
+			opp-level = <3>;
+		};
+
+		opp04 {
+			opp-hz = /bits/ 64 <2304000000>;
+			opp-level = <4>;
+		};
+
+		opp05 {
+			opp-hz = /bits/ 64 <2652000000>;
+			opp-level = <5>;
+		};
+
+		opp06 {
+			opp-hz = /bits/ 64 <2964000000>;
+			opp-level = <6>;
+		};
+
+		opp07 {
+			opp-hz = /bits/ 64 <3240000000>;
+			opp-level = <7>;
+		};
+
+		opp08 {
+			opp-hz = /bits/ 64 <3504000000>;
+			opp-level = <8>;
+		};
+
+		opp09 {
+			opp-hz = /bits/ 64 <3696000000>;
+			opp-level = <9>;
+		};
+
+		opp10 {
+			opp-hz = /bits/ 64 <3876000000>;
+			opp-level = <10>;
+		};
+
+		opp11 {
+			opp-hz = /bits/ 64 <4044000000>;
+			opp-level = <11>;
+		};
+
+		opp12 {
+			opp-hz = /bits/ 64 <4176000000>;
+			opp-level = <12>;
+		};
+
+		opp13 {
+			opp-hz = /bits/ 64 <4284000000>;
+			opp-level = <13>;
+		};
+
+		opp14 {
+			opp-hz = /bits/ 64 <4308000000>;
+			opp-level = <14>;
+		};
+
+		opp15 {
+			opp-hz = /bits/ 64 <4380000000>;
+			opp-level = <15>;
+		};
+	};
+
+	pcluster0_opp: opp-table-2 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp01 {
+			opp-hz = /bits/ 64 <1308000000>;
+			opp-level = <1>;
+		};
+
+		opp02 {
+			opp-hz = /bits/ 64 <1620000000>;
+			opp-level = <2>;
+		};
+
+		opp03 {
+			opp-hz = /bits/ 64 <1980000000>;
+			opp-level = <3>;
+		};
+
+		opp04 {
+			opp-hz = /bits/ 64 <2292000000>;
+			opp-level = <4>;
+		};
+
+		opp05 {
+			opp-hz = /bits/ 64 <2580000000>;
+			opp-level = <5>;
+		};
+
+		opp06 {
+			opp-hz = /bits/ 64 <2880000000>;
+			opp-level = <6>;
+		};
+
+		opp07 {
+			opp-hz = /bits/ 64 <3180000000>;
+			opp-level = <7>;
+		};
+
+		opp08 {
+			opp-hz = /bits/ 64 <3432000000>;
+			opp-level = <8>;
+		};
+
+		opp09 {
+			opp-hz = /bits/ 64 <3648000000>;
+			opp-level = <9>;
+		};
+
+		opp10 {
+			opp-hz = /bits/ 64 <3828000000>;
+			opp-level = <10>;
+		};
+
+		opp11 {
+			opp-hz = /bits/ 64 <3984000000>;
+			opp-level = <11>;
+		};
+
+		opp12 {
+			opp-hz = /bits/ 64 <4104000000>;
+			opp-level = <12>;
+		};
+
+		opp13 {
+			opp-hz = /bits/ 64 <4188000000>;
+			opp-level = <13>;
+		};
+
+		opp14 {
+			opp-hz = /bits/ 64 <4236000000>;
+			opp-level = <14>;
+		};
+
+		opp15 {
+			opp-hz = /bits/ 64 <4284000000>;
+			opp-level = <15>;
+		};
+
+		opp16 {
+			opp-hz = /bits/ 64 <4308000000>;
+			opp-level = <16>;
+		};
+
+		opp17 {
+			opp-hz = /bits/ 64 <4332000000>;
+			opp-level = <17>;
+		};
+
+		opp18 {
+			opp-hz = /bits/ 64 <4428000000>;
+			opp-level = <18>;
+		};
+
+		opp19 {
+			opp-hz = /bits/ 64 <4512000000>;
+			opp-level = <19>;
+		};
+
+		opp20 {
+			opp-hz = /bits/ 64 <4608000000>;
+			opp-level = <20>;
+		};
+	};
+
+	reserved-memory {
+		ranges;
+		#address-cells = <2>;
+		#size-cells = <2>;
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_FIQ AIC_TMR_GUEST_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_GUEST_VIRT IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_HV_PHYS IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_FIQ AIC_TMR_HV_VIRT IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "phys", "virt", "hyp-phys", "hyp-virt";
+	};
+};

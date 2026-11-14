@@ -354,6 +354,11 @@ static const struct of_device_id apple_soc_cpufreq_of_match[] __maybe_unused = {
 		.data = &soc_t8142_info,
 	},
 	{
+		/* T6050: same command/readback model as T8142, CLPC/PMP keep the rest. */
+		.compatible = "apple,t6050-cluster-cpufreq",
+		.data = &soc_t8142_info,
+	},
+	{
 		.compatible = "apple,t8152-cluster-cpufreq",
 		.data = &soc_t8152_info,
 	},

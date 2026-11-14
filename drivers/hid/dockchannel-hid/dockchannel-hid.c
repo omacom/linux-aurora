@@ -436,7 +436,8 @@ static int dchid_reset_interface(struct dchid_iface *iface, int state)
 /*
  * Power method 2: announce the transition, drive the AFE reset line to the
  * new state and confirm the transition. The reset is asserted for a power-off
- * and held for 50 ms, and released for a power-on.
+ * and held for 50 ms, and released for a power-on and given 50 ms to settle
+ * before the transition is confirmed.
  */
 static int dchid_pm2_set_power(struct dchid_iface *iface, u8 state)
 {
@@ -454,12 +455,23 @@ static int dchid_pm2_set_power(struct dchid_iface *iface, u8 state)
 		if (state == DCHID_POWER_STATE_ON)
 			fsleep(50 * USEC_PER_MSEC);
 	} else {
-		ret = gpiod_set_value_cansleep(dchid->afe_reset,
-					       state == DCHID_POWER_STATE_OFF);
-		if (ret < 0)
+		bool off = state == DCHID_POWER_STATE_OFF;
+
+		ret = gpiod_set_value_cansleep(dchid->afe_reset, off);
+		if (ret < 0) {
+			dev_err(dchid->dev, "%s: failed to %s the AFE reset: %d\n",
+				iface->name, off ? "assert" : "release", ret);
 			return ret;
-		if (state == DCHID_POWER_STATE_OFF)
-			fsleep(50 * USEC_PER_MSEC);
+		}
+		dev_dbg(dchid->dev, "%s: AFE reset %s\n", iface->name,
+			off ? "asserted" : "released");
+		/*
+		 * The sequence validated on J716s (M5 Pro, MTP firmware
+		 * 6320.86.1, "Touch MT ready" on 3 of 3 boots) also waits
+		 * 50 ms after the release before HasChanged, as the
+		 * firmware-managed path above does.
+		 */
+		fsleep(50 * USEC_PER_MSEC);
 	}
 
 	dchid_pm2_command(iface->index, state, true, msg);
