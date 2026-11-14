@@ -11,6 +11,7 @@
 
 #include "t8132.dtsi"
 #include "t8132-jxxx.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/leds/common.h>
 
 / {
@@ -32,4 +33,24 @@
 
 &fpwm1 {
 	status = "okay";
+};
+
+/*
+ * Mesa fingerprint sensor on spi2 (J713 ADT /arm-io/spi2/mesa): power on
+ * NUB GPIO 28, active high. It answers in mode 2 (CPOL=1, CPHA=0). The
+ * data-ready line (AP GPIO 199) is left out, so the driver polls until its
+ * trigger is confirmed. Native chip select only.
+ */
+&spi2 {
+	status = "okay";
+};
+
+&mesa {
+	status = "okay";
+	enable-gpios = <&pinctrl_nub 28 GPIO_ACTIVE_HIGH>;
+	spi-cpol;
+	spi-cs-setup-delay-ns = <20>;
+	spi-cs-hold-delay-ns = <20>;
+	/* Per-device factory data from this Mac's own iBoot system container. */
+	firmware-name = "apple/mesacal-j713.bin";
 };
