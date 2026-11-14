@@ -21,6 +21,7 @@
 int ipc_chan_handle(struct apple_isp *isp, struct isp_channel *chan);
 int ipc_chan_send(struct apple_isp *isp, struct isp_channel *chan,
 		  unsigned long timeout);
+int isp_ipc_resync(struct apple_isp *isp);
 
 int ipc_tm_handle(struct apple_isp *isp, struct isp_channel *chan);
 int ipc_sm_handle(struct apple_isp *isp, struct isp_channel *chan);
