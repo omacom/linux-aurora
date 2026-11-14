@@ -684,4 +684,49 @@ static struct kunit_suite macsmc_charge_test_suite = {
 	.test_cases = macsmc_charge_test_cases,
 };
 
-kunit_test_suites(&macsmc_power_test_suite, &macsmc_charge_test_suite);
+static void macsmc_wake_insert_test(struct kunit *test)
+{
+	struct macsmc_power power = { .wakeup_mode = true };
+
+	/* Insertion on each J316C port: far-left, near-left, right */
+	KUNIT_EXPECT_TRUE(test, macsmc_power_event_wakes(&power, 0x71130005));
+	KUNIT_EXPECT_TRUE(test, macsmc_power_event_wakes(&power, 0x71130105));
+	KUNIT_EXPECT_TRUE(test, macsmc_power_event_wakes(&power, 0x71130205));
+}
+
+static void macsmc_wake_awake_test(struct kunit *test)
+{
+	struct macsmc_power power = { .wakeup_mode = false };
+
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x71130105));
+}
+
+static void macsmc_wake_other_events_test(struct kunit *test)
+{
+	struct macsmc_power power = { .wakeup_mode = true };
+
+	/* Removal and contract changes, seen alongside every plug */
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x71130102));
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x71130103));
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x71130104));
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x7113ff04));
+	/* Charger and port charge state, and the lid */
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x71010101));
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x71060005));
+	KUNIT_EXPECT_FALSE(test, macsmc_power_event_wakes(&power, 0x72030001));
+}
+
+static struct kunit_case macsmc_wake_test_cases[] = {
+	KUNIT_CASE(macsmc_wake_insert_test),
+	KUNIT_CASE(macsmc_wake_awake_test),
+	KUNIT_CASE(macsmc_wake_other_events_test),
+	{}
+};
+
+static struct kunit_suite macsmc_wake_test_suite = {
+	.name = "macsmc-power-wake",
+	.test_cases = macsmc_wake_test_cases,
+};
+
+kunit_test_suites(&macsmc_power_test_suite, &macsmc_charge_test_suite,
+		  &macsmc_wake_test_suite);
