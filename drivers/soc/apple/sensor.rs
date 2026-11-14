@@ -796,6 +796,11 @@ pub(crate) fn read_capture(length: u32) -> core::result::Result<Capture, Capture
     buf.resize(len, 0xff, GFP_KERNEL)
         .map_err(|_| CaptureError::NoMemory)?;
 
+    // Install the wiping owner before SPI can write image bytes. Both bus
+    // failures and rejected checksums must wipe the receive buffer too.
+    let mut capture = Capture(buf);
+    let buf = &mut capture.0;
+
     // SAFETY: `cmd` is `READ_CMD_LEN` bytes and `buf` is `len` bytes; both live
     // across the call, and the shim writes only into the receive buffer.
     let rc = unsafe {
@@ -821,5 +826,5 @@ pub(crate) fn read_capture(length: u32) -> core::result::Result<Capture, Capture
         });
     }
 
-    Ok(Capture(buf))
+    Ok(capture)
 }
