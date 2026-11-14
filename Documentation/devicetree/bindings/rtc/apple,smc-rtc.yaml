@@ -33,6 +33,11 @@ properties:
           PMU alarm compare value, a 32-bit count of whole seconds of the RTC
           counter without the offset.
       - description: PMU alarm mask byte.
+      - description:
+          PMU alarm event byte, write 1 to clear. Maverick PMUs, such as the
+          M1 Pro's and the M2 Pro's, latch a fired alarm here as well as in the
+          control byte, and keep the alarm interrupt silent until it is
+          cleared.
 
   nvmem-cell-names:
     oneOf:
@@ -43,11 +48,17 @@ properties:
           - const: rtc_ctrl
           - const: rtc_alarm
           - const: rtc_alarm_mask
+      - items:
+          - const: rtc_offset
+          - const: rtc_ctrl
+          - const: rtc_alarm
+          - const: rtc_alarm_mask
+          - const: rtc_alarm_event
 
   interrupts:
     maxItems: 1
     description:
-      The PMU's RTC alarm interrupt. Only used with the three alarm cells.
+      The PMU's RTC alarm interrupt. Only used with the alarm cells.
 
   wakeup-source: true
 
