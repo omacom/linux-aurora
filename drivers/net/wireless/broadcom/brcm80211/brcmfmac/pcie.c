@@ -418,6 +418,8 @@ struct brcmf_pciedev_info {
 	bool mbdata_completed;
 	bool irq_allocated;
 	bool irq_ready;
+	/* Set in preinit, after attach: the state is UP before the protocol exists. */
+	bool proto_ready;
 	bool have_msi;
 	bool wowl_enabled;
 	u8 dma_idx_sz;
@@ -1108,12 +1110,14 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 			brcmf_pcie_poll_mb_data(devinfo);
 	}
 	if (devinfo->have_msi || status & devinfo->reginfo->int_d2h_db) {
-		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && devinfo->irq_ready)
+		if (devinfo->state == BRCMFMAC_PCIE_STATE_UP && devinfo->irq_ready &&
+		    smp_load_acquire(&devinfo->proto_ready))
 			brcmf_proto_msgbuf_rx_trigger(&devinfo->pdev->dev);
 	}
 
 	brcmf_pcie_bus_console_read(devinfo, false);
-	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP)
+	if (devinfo->state == BRCMFMAC_PCIE_STATE_UP &&
+	    READ_ONCE(devinfo->proto_ready))
 		brcmf_pcie_intr_enable(devinfo);
 	devinfo->in_irq = false;
 	return IRQ_HANDLED;
@@ -1615,6 +1619,14 @@ static void brcmf_pcie_down(struct device *dev)
 	struct brcmf_pciedev_info *devinfo = pcie_bus_dev->devinfo;
 
 	brcmf_pcie_fwcon_timer(devinfo, false);
+
+	WRITE_ONCE(devinfo->proto_ready, false);
+	brcmf_pcie_intr_disable(devinfo);
+	if (devinfo->irq_allocated) {
+		synchronize_irq(devinfo->pdev->irq);
+		/* The thread may have re-armed before it saw proto_ready clear. */
+		brcmf_pcie_intr_disable(devinfo);
+	}
 }
 
 static int brcmf_pcie_preinit(struct device *dev)
@@ -1624,6 +1636,7 @@ static int brcmf_pcie_preinit(struct device *dev)
 
 	brcmf_dbg(PCIE, "Enter\n");
 
+	smp_store_release(&buspub->devinfo->proto_ready, true);
 	brcmf_pcie_intr_enable(buspub->devinfo);
 	brcmf_pcie_hostready(buspub->devinfo);
 
@@ -1716,7 +1729,13 @@ static int brcmf_pcie_reset(struct device *dev)
 	struct brcmf_fw_request *fwreq;
 	int err;
 
+	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
 	brcmf_pcie_intr_disable(devinfo);
+	if (devinfo->irq_allocated) {
+		synchronize_irq(devinfo->pdev->irq);
+		/* The thread may have re-armed before it saw DOWN. */
+		brcmf_pcie_intr_disable(devinfo);
+	}
 
 	brcmf_pcie_bus_console_read(devinfo, true);
 

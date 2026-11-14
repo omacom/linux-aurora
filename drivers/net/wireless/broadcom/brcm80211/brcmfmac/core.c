@@ -1628,8 +1628,10 @@ void brcmf_detach(struct device *dev)
 	brcmf_bus_change_state(bus_if, BRCMF_BUS_DOWN);
 	/* Stop event producers before draining their worker. */
 	brcmf_bus_stop(drvr->bus_if);
-	/* Drain IF events before their interfaces and protocol state go away. */
-	brcmf_fweh_detach(drvr);
+	/* Drain IF events before their interfaces and protocol state go away.
+	 * fweh itself stays allocated until the interfaces are removed below.
+	 */
+	brcmf_fweh_detach_events(drvr);
 	if (drvr->config)
 		brcmf_cfg80211_awdl_stop(drvr->config);
 	/* make sure primary interface removed last */
@@ -1639,20 +1641,20 @@ void brcmf_detach(struct device *dev)
 		if (!ifp)
 			continue;
 
-		if (ifp->ndev) {
+		if (i == 0) {
 			brcmf_remove_interface(ifp, false);
 			continue;
 		}
 
-		/* The P2P device interface has no netdev. Its removal can
-		 * race with NL80211_CMD_DEL_INTERFACE issued by a user space
-		 * process that is exiting (e.g. wpa_supplicant), which ends
-		 * in brcmf_p2p_del_vif() under RTNL and the wiphy mutex. If
-		 * both paths remove the interface, the wdev is unregistered
-		 * twice and the vif is used after being freed. Take the same
-		 * locks and re-read iflist, so only one path removes it.
+		/* Remove under RTNL and the wiphy lock, as brcmf_p2p_del_vif()
+		 * does, but close the netdev under RTNL alone first, as
+		 * nl80211_del_interface() does: cfg80211's down handlers take
+		 * the wiphy lock themselves.
 		 */
 		rtnl_lock();
+		ifp = drvr->iflist[i];
+		if (ifp && ifp->ndev)
+			dev_close(ifp->ndev);
 		wiphy_lock(drvr->wiphy);
 		ifp = drvr->iflist[i];
 		if (ifp)
@@ -1660,6 +1662,13 @@ void brcmf_detach(struct device *dev)
 		wiphy_unlock(drvr->wiphy);
 		rtnl_unlock();
 	}
+
+	/* Wait out any P2P create that passed its bus check: it uses fweh
+	 * until it drops the wiphy lock.
+	 */
+	wiphy_lock(drvr->wiphy);
+	wiphy_unlock(drvr->wiphy);
+	brcmf_fweh_detach(drvr);
 
 	brcmf_proto_detach(drvr);
 
