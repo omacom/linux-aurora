@@ -1,0 +1,84 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Boot NOR of the Apple Mac mini (M6), J873g, behind the QSPIMC controller.
+ *
+ * The register address is the CPU physical address: the device tree of the boot firmware lists the controller
+ * at 0x131118000 relative to /arm-io, and /arm-io is mapped at 0x200000000. The only part of the NOR the driver
+ * lets programs and erases through is the "nvram" partition (the boot variables). A read of the NOR through
+ * the controller at its offset (0x24000) returns the boot variables from the first byte, and the last used
+ * byte of the store lies inside its size (0xd0000).
+ *
+ * The controller sits behind a chain of power domains: qspi needs spi_p, and spi_p needs sio. At boot the
+ * firmware leaves sio on and spi_p and qspi off (power state registers 0xd40 and 0x1140 read target 0, actual
+ * 0). sio is therefore always-on, like the other domains in t8152-j873-pmgr.dtsi, so that gating it cannot take
+ * down anything else. spi_p and qspi are not always-on: attaching the controller to its power domain powers
+ * the chain before the driver probes. The driver makes no runtime PM call of its own.
+ */
+
+/ {
+	clk_200m: clock-200m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+		clock-output-names = "clk_200m";
+	};
+
+	soc {
+		qspi: spi@331118000 {
+			compatible = "apple,t8152-qspi", "apple,t8140-qspi";
+			reg = <0x3 0x31118000 0x0 0x4800>;
+			clocks = <&clk_200m>;
+			power-domains = <&ps_qspi>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1411 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			flash@0 {
+				compatible = "jedec,spi-nor";
+				reg = <0>;
+				spi-max-frequency = <25000000>;
+
+				partitions {
+					compatible = "fixed-partitions";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					partition@24000 {
+						label = "nvram";
+						reg = <0x24000 0xd0000>;
+					};
+				};
+			};
+		};
+	};
+};
+
+&pmgr0 {
+	ps_sio: power-controller@840 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x840 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "sio";
+		apple,always-on;
+	};
+
+	ps_spi_p: power-controller@d40 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xd40 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "spi_p";
+		power-domains = <&ps_sio>;
+	};
+
+	ps_qspi: power-controller@1140 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1140 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "qspi";
+		power-domains = <&ps_spi_p>;
+	};
+};
