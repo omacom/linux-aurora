@@ -25,6 +25,7 @@ properties:
           - apple,t6020-mtp
           - apple,t6030-mtp
           - apple,t6031-mtp
+          - apple,t6050-mtp
           - apple,t8112-mtp
           - apple,t8122-mtp
           - apple,t8140-mtp

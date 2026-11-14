@@ -70,6 +70,7 @@
 #define CISP_CMD_CH_ALS_DISABLE				     0x0a1d
 #define CISP_CMD_CH_CNR_START				     0x0a2f
 #define CISP_CMD_CH_MBNR_ENABLE				     0x0a3a
+#define CISP_CMD_CH_LSC_IDEAL_PERCENT_SET		     0x0a4e
 #define CISP_CMD_CH_OUTPUT_CONFIG_SET			     0x0b01
 #define CISP_CMD_CH_OUTPUT_CONFIG_SCL1_SET		     0x0b09
 #define CISP_CMD_CH_PREVIEW_STREAM_SET			     0x0b0d
@@ -97,6 +98,9 @@
 #define CISP_CMD_APPLE_CH_MOTION_HISTORY_STOP		     0xc103
 #define CISP_CMD_APPLE_CH_TEMPORAL_FILTER_ENABLE	     0xc113
 #define CISP_CMD_APPLE_CH_TEMPORAL_FILTER_DISABLE	     0xc114
+#define CISP_CMD_APPLE_CH_TEMPORAL_FILTER_BAND0_MODULATION   0xc11c
+#define CISP_CMD_APPLE_CH_TEMPORAL_FILTER_BAND0_THRESHOLD    0xc11d
+#define CISP_CMD_APPLE_CH_TEMPORAL_FILTER_HIGH_STRENGTH	     0xc120
 
 #define CISP_POOL_TYPE_META				     0x0
 #define CISP_POOL_TYPE_RENDERED				     0x1
@@ -124,6 +128,7 @@
 #define CISP_COLORSPACE_REC709				     0x1
 #define CISP_OUTPUT_FORMAT_YUV_2PLANE			     0x0
 #define CISP_OUTPUT_FORMAT_YUV_1PLANE			     0x1
+#define CISP_OUTPUT_FORMAT_P010				     0x12
 #define CISP_OUTPUT_FORMAT_RGB				     0x2
 #define CISP_BUFFER_RECYCLE_MODE_EMPTY_ONLY		     0x1
 
@@ -197,15 +202,20 @@ struct cmd_set_dsid_clr_req_base {
 } __packed;
 static_assert(sizeof(struct cmd_set_dsid_clr_req_base) == 0x14);
 
-/* H17: a count of broadcast-clear windows and the first window */
+/*
+ * H17: a count of broadcast-clear windows, their common range and the
+ * windows; the command carries only the @count windows.
+ */
+#define ISP_DSID_MULTI_BC_MAX 8
+
 struct cmd_set_dsid_clr_multi_bc_reg_base {
 	u64 opcode;
 	u8 count;
 	u8 pad_9[3];
 	u32 dsid_clr_range;
-	u64 dsid_clr_base;
+	u64 dsid_clr_base[ISP_DSID_MULTI_BC_MAX];
 } __packed;
-static_assert(sizeof(struct cmd_set_dsid_clr_multi_bc_reg_base) == 0x18);
+static_assert(sizeof(struct cmd_set_dsid_clr_multi_bc_reg_base) == 0x50);
 
 struct cmd_pmp_ctrl_set {
 	u64 opcode;
@@ -250,6 +260,8 @@ struct cmd_flicker_sensor_set {
 } __packed;
 static_assert(sizeof(struct cmd_flicker_sensor_set) == 0xc);
 
+int isp_cmd_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize,
+		 int timeout);
 int isp_cmd_start(struct apple_isp *isp, u32 mode);
 int isp_cmd_stop(struct apple_isp *isp, u32 mode);
 int isp_cmd_power_down(struct apple_isp *isp);
@@ -260,8 +272,8 @@ int isp_cmd_config_get(struct apple_isp *isp, struct cmd_config_get *args);
 int isp_cmd_set_isp_pmu_base(struct apple_isp *isp, u64 pmu_base);
 int isp_cmd_set_dsid_clr_req_base(struct apple_isp *isp, u64 dsid_clr_base,
 				  u32 dsid_clr_range);
-int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, u64 dsid_clr_base,
-				  u32 dsid_clr_range);
+int isp_cmd_set_dsid_clr_multi_bc(struct apple_isp *isp, const u64 *bases,
+				  unsigned int count, u32 dsid_clr_range);
 int isp_cmd_set_dsid_clr_req_base2(struct apple_isp *isp, u64 dsid_clr_base0,
 				   u64 dsid_clr_base1, u64 dsid_clr_base2,
 				   u64 dsid_clr_base3, u32 dsid_clr_range0,
@@ -374,6 +386,15 @@ struct cmd_ch_camera_config {
 	u32 out_height2;
 } __packed;
 static_assert(sizeof(struct cmd_ch_camera_config) == 0xdc);
+
+/* H17 appends 0x44 bytes to the common camera configuration record. */
+struct cmd_ch_camera_config_h17 {
+	struct cmd_ch_camera_config config;
+	u8 unknown[0x44];
+} __packed;
+static_assert(sizeof(struct cmd_ch_camera_config_h17) == 0x120);
+static_assert(offsetof(struct cmd_ch_camera_config, in_width) == 0x10);
+static_assert(offsetof(struct cmd_ch_camera_config, out_width2) == 0xd4);
 
 struct cmd_ch_camera_config_select {
 	u64 opcode;
@@ -511,6 +532,8 @@ int isp_cmd_ch_start(struct apple_isp *isp, u32 chan);
 int isp_cmd_ch_stop(struct apple_isp *isp, u32 chan);
 int isp_cmd_ch_info_get(struct apple_isp *isp, u32 chan,
 			struct cmd_ch_info *args);
+int isp_cmd_ch_camera_config_get(struct apple_isp *isp, u32 chan, u32 index,
+				 struct cmd_ch_camera_config_h17 *args);
 int isp_cmd_ch_camera_config_current_get(struct apple_isp *isp, u32 chan,
 					 struct cmd_ch_camera_config *args);
 int isp_cmd_ch_camera_config_select(struct apple_isp *isp, u32 chan,
@@ -624,6 +647,32 @@ struct cmd_apple_ch_temporal_filter_start {
 } __packed;
 static_assert(sizeof(struct cmd_apple_ch_temporal_filter_start) == 0x14);
 
+/* The H17 firmware's start record carries one more word, sent as zero. */
+struct cmd_apple_ch_temporal_filter_start_h17 {
+	u64 opcode;
+	u32 chan;
+	u32 unk_c;
+	u32 unk_10;
+	u32 unk_14;
+} __packed;
+static_assert(sizeof(struct cmd_apple_ch_temporal_filter_start_h17) == 0x18);
+
+/* High-strength filtering (0xc120) and band 0 modulation (0xc11c) */
+struct cmd_apple_ch_temporal_filter_enable_set {
+	u64 opcode;
+	u32 chan;
+	u32 enable;
+} __packed;
+static_assert(sizeof(struct cmd_apple_ch_temporal_filter_enable_set) == 0x10);
+
+/* Band 0 strength modulation thresholds, in 1/256 steps */
+struct cmd_apple_ch_temporal_filter_band0_threshold {
+	u64 opcode;
+	u32 chan;
+	u32 threshold[2];
+} __packed;
+static_assert(sizeof(struct cmd_apple_ch_temporal_filter_band0_threshold) == 0x14);
+
 struct cmd_apple_ch_temporal_filter_stop {
 	u64 opcode;
 	u32 chan;
@@ -660,6 +709,13 @@ int isp_cmd_apple_ch_motion_history_start(struct apple_isp *isp, u32 chan);
 int isp_cmd_apple_ch_motion_history_stop(struct apple_isp *isp, u32 chan);
 int isp_cmd_apple_ch_temporal_filter_enable(struct apple_isp *isp, u32 chan);
 int isp_cmd_apple_ch_temporal_filter_disable(struct apple_isp *isp, u32 chan);
+int isp_cmd_apple_ch_tnr_start_h17(struct apple_isp *isp, u32 chan);
+int isp_cmd_apple_ch_tnr_high_strength_set(struct apple_isp *isp, u32 chan,
+					   u32 enable);
+int isp_cmd_apple_ch_tnr_band0_mod_set(struct apple_isp *isp, u32 chan,
+				       u32 enable);
+int isp_cmd_apple_ch_tnr_band0_threshold_set(struct apple_isp *isp, u32 chan,
+					     u32 first, u32 second);
 
 struct cmd_ch_ae_stability_set {
 	u64 opcode;
@@ -709,6 +765,15 @@ struct cmd_apple_ch_ae_fd_scene_metering_config_set {
 static_assert(sizeof(struct cmd_apple_ch_ae_fd_scene_metering_config_set) ==
 	      0x24);
 
+/* The lens shading falloff the firmware corrects to, in percent at the corner */
+struct cmd_ch_lsc_ideal_percent_set {
+	u64 opcode;
+	u32 chan;
+	u16 percent;
+	u16 pad;
+} __packed;
+static_assert(sizeof(struct cmd_ch_lsc_ideal_percent_set) == 0x10);
+
 struct cmd_apple_ch_ae_metering_mode_set {
 	u64 opcode;
 	u32 chan;
@@ -737,6 +802,8 @@ int isp_cmd_apple_ch_ae_fd_scene_metering_config_set(struct apple_isp *isp,
 						     u32 chan);
 int isp_cmd_apple_ch_ae_metering_mode_set(struct apple_isp *isp, u32 chan,
 					  u32 mode);
+int isp_cmd_ch_lsc_ideal_percent_set(struct apple_isp *isp, u32 chan,
+				     u16 percent);
 int isp_cmd_apple_ch_ae_flicker_freq_update_current_set(struct apple_isp *isp,
 							u32 chan, u32 freq);
 

@@ -8,15 +8,18 @@ config VIDEO_APPLE_ISP
 	select APPLE_PMP_REPORT
 	depends on ARCH_APPLE || COMPILE_TEST
 	depends on OF_ADDRESS
+	depends on PM
 	depends on V4L_PLATFORM_DRIVERS
 	depends on VIDEO_DEV
 	help
 	  Driver for the image signal processor that runs the built-in
 	  camera of Apple silicon machines. The ISP firmware is loaded by
 	  the bootloader. When a stream starts, the driver loads the
-	  calibration file for the detected camera module,
+	  sensor tuning file for the detected camera model,
 	  apple/isp_<module>_<revision>XX.dat, from the firmware search
-	  path; if it is missing, the stream runs without calibration.
+	  path; if it is missing, the stream runs without sensor tuning.
+	  Invalid files and firmware upload errors fail the stream setup.
+	  These setfiles do not contain per-module factory calibration.
 
 config VIDEO_APPLE_ISP_KUNIT_TEST
 	bool "KUnit tests for the Apple ISP driver" if !KUNIT_ALL_TESTS
@@ -24,9 +27,10 @@ config VIDEO_APPLE_ISP_KUNIT_TEST
 	depends on KUNIT=y || VIDEO_APPLE_ISP=m
 	default KUNIT_ALL_TESTS
 	help
-	  Builds unit tests for the videobuf2 queue set-up and for the
-	  shared memory the firmware frees into the Apple ISP driver. They
-	  need no hardware. Only useful for kernel developers running KUnit.
+	  Builds unit tests for queue setup, P010 layouts and buffer identity,
+	  firmware sensor geometry, the capture command stream, shared memory
+	  retirement and the per-SoC DART address filter windows. The command
+	  tests stub the IPC transport and need no hardware. Only useful for kernel developers running KUnit.
 
 	  If unsure, say N.
 
