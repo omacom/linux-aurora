@@ -375,6 +375,8 @@ static const struct of_device_id apple_dpin_qualified_soc[] = {
 	{ .compatible = "apple,t6001" },
 	{ .compatible = "apple,t6020" },
 	{ .compatible = "apple,t6021" },
+	/* The M2 Ultra's die-0 ACIO, ATC and display crossbar are t6021's. */
+	{ .compatible = "apple,t6022" },
 	{ .compatible = "apple,t6030" },
 	{},
 };
