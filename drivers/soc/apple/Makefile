@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
+obj-$(CONFIG_APPLE_CPU_CONTEXT_LAB) += apple-cpu-context-lab.o
+apple-cpu-context-lab-y := cpu-context-lab.o cpu-context-lab-entry.o
+
 obj-$(CONFIG_APPLE_DOCKCHANNEL) += apple-dockchannel.o
 apple-dockchannel-y = dockchannel.o
 
