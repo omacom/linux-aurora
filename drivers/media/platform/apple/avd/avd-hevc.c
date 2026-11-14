@@ -16,6 +16,7 @@
 #include <media/videobuf2-dma-contig.h>
 
 #include "avd.h"
+#include "avd-hevc-parse.h"
 #include "avd-inst.h"
 
 #define NEW_TILE_ID	BIT(0)
@@ -1282,6 +1283,37 @@ static int avd_hevc_compute_tiles(struct avd_ctx *ctx, struct avd_hevc_run *run)
 	return 0;
 }
 
+/*
+ * A NAL unit header never starts with two zero bytes (its second byte holds
+ * nuh_temporal_id_plus1, which is not 0), so a leading 00 00 01 or
+ * 00 00 00 01 can only be a start code.
+ */
+static bool avd_hevc_starts_with_start_code(const u8 *buf, size_t len)
+{
+	if (len >= 3 && !buf[0] && !buf[1] && buf[2] == 1)
+		return true;
+	return len >= 4 && !buf[0] && !buf[1] && !buf[2] && buf[3] == 1;
+}
+
+/* Whether this picture's request carries slice parameters. */
+static bool avd_hevc_request_has_slice_params(struct avd_ctx *ctx,
+					      struct avd_hevc_run *run)
+{
+	struct media_request *req = run->base.bufs.src->vb2_buf.req_obj.req;
+	struct v4l2_ctrl_handler *hdl;
+	bool has;
+
+	if (!req)
+		return true;
+	hdl = v4l2_ctrl_request_hdl_find(req, &ctx->ctrl_hdl);
+	if (!hdl)
+		return false;
+	has = v4l2_ctrl_request_hdl_ctrl_find(hdl,
+					      V4L2_CID_STATELESS_HEVC_SLICE_PARAMS);
+	v4l2_ctrl_request_hdl_put(hdl);
+	return has;
+}
+
 static int avd_hevc_run_preamble(struct avd_ctx *ctx, struct avd_hevc_run *run)
 {
 	struct v4l2_ctrl *ctrl, *sl, *ep;
@@ -1316,6 +1348,39 @@ static int avd_hevc_run_preamble(struct avd_ctx *ctx, struct avd_hevc_run *run)
 			    V4L2_CID_STATELESS_HEVC_ENTRY_POINT_OFFSETS);
 
 	/*
+	 * A client that sets no slice parameters with the picture and queues
+	 * it in Annex B form leaves the slice headers to the decoder
+	 * (Chromium). Parse them from the bitstream. A client without start
+	 * codes may have set the slice parameters once and kept them.
+	 */
+	if (!avd_hevc_request_has_slice_params(ctx, run)) {
+		struct vb2_buffer *src = &run->base.bufs.src->vb2_buf;
+		size_t len = vb2_get_plane_payload(src, 0);
+		const u8 *buf = vb2_plane_vaddr(src, 0);
+		int ret;
+
+		if (!buf || !run->sps || !run->pps || !run->decode) {
+			avd_run_postamble(ctx, &run->base);
+			return -EINVAL;
+		}
+		if (!avd_hevc_starts_with_start_code(buf, len))
+			goto persisted_slices;
+		ret = avd_hevc_parse_slices(buf, len,
+					    run->sps, run->pps, run->decode,
+					    (struct v4l2_ctrl_hevc_slice_params **)&run->sl,
+					    &run->num_slices,
+					    (u32 **)&run->entry_point_offsets,
+					    &run->num_entry_point_offsets);
+		if (ret) {
+			dev_dbg(ctx->dev->dev, "hevc: bitstream slice parse failed: %d\n", ret);
+			avd_run_postamble(ctx, &run->base);
+			return ret;
+		}
+		goto have_slices;
+	}
+
+persisted_slices:
+	/*
 	 * Setting a larger dynamic array on a queued request reallocates the
 	 * array's storage, which this run would otherwise keep using. Copy what
 	 * the run needs while holding the control lock.
@@ -1328,12 +1393,13 @@ static int avd_hevc_run_preamble(struct avd_ctx *ctx, struct avd_hevc_run *run)
 		kmemdup(ep->p_cur.p, ep->elems * ep->elem_size, GFP_KERNEL);
 	v4l2_ctrl_unlock(sl);
 	if (!run->sl || !run->entry_point_offsets) {
-		kfree(run->sl);
-		kfree(run->entry_point_offsets);
+		kvfree(run->sl);
+		kvfree(run->entry_point_offsets);
 		avd_run_postamble(ctx, &run->base);
 		return -ENOMEM;
 	}
 
+have_slices:
 	dst_len = run->base.bufs.dst->vb2_buf.planes[0].length;
 
 	mv_color_len = mv_color_size(fmt_width(ctx), fmt_height(ctx));
@@ -1382,8 +1448,8 @@ complete:
 done:
 	kfree(run.tile_info.ctb_addr_rs_to_ts);
 	kfree(run.tile_info.tile_ids);
-	kfree(run.sl);
-	kfree(run.entry_point_offsets);
+	kvfree(run.sl);
+	kvfree(run.entry_point_offsets);
 	return ret;
 }
 
