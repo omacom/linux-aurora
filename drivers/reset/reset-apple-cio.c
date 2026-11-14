@@ -40,6 +40,14 @@
  * On t8142, RegMap 0x62 is a separate MMIO region at 0x380780000.
  * The t8132 layout has not been decoded.
  *
+ * On t8152 (M6) the request and done registers are separate words in the PMGR
+ * block at 0x300780000: BIT(cluster) is written to the request register at
+ * +0x68, BIT(cluster) is then polled in the done register at +0x6c (the vendor
+ * driver allows 10 s), and the done bit is cleared by writing it back. There
+ * is one cluster per port (the pmgr-child cio-cluster property: devices
+ * 320..323, CIOn_RECONFIG-V, clusters 0..3), and the node's reg is the offset
+ * of the request register in the PMGR syscon (0x80068).
+ *
  * Reference firmware polls the busy bits, stores the request, then polls
  * again, with a 192 ms budget. It discards the first poll's result. The
  * t8142 implementation below instead refuses to issue a request while busy.
@@ -61,6 +69,12 @@
 #define T8103_CIO_CTRL_INIT_REQ BIT(0)
 #define T8103_CIO_CTRL_INIT_BUSY BIT(1)
 #define T8103_CIO_CTRL_INIT_DONE BIT(2)
+
+/* The node's reg is the request register; the done register follows it. */
+#define T8152_CIO_REQ 0x0
+#define T8152_CIO_DONE 0x4
+/* The vendor driver waits up to 10 s for a cluster to come online. */
+#define T8152_CIO_TIMEOUT_US 10000000
 
 #define T6000_CIO_CTRL_INIT_REQ(port) BIT(port)
 #define T6000_CIO_CTRL_INIT_BUSY(port) BIT(16 + (port))
@@ -197,6 +211,34 @@ static const struct apple_cio_reset_variant apple_t8142_cio_reset = {
 	.deassert = t8142_cio_deassert,
 };
 
+static int t8152_cio_deassert(struct apple_cio_reset *priv, unsigned long id)
+{
+	u32 val;
+	int ret;
+
+	guard(mutex)(&priv->lock);
+
+	/* A request for this cluster may still be pending; advisory, as on the other SoCs. */
+	ret = regmap_read_poll_timeout(priv->regmap, priv->offset + T8152_CIO_REQ, val,
+				       !(val & BIT(id)), APPLE_CIO_RESET_POLL_US,
+				       APPLE_CIO_RESET_TIMEOUT_US);
+	if (ret)
+		dev_warn(priv->dev, "CIO %lu still busy before reconfigure request\n", id);
+
+	ret = regmap_write(priv->regmap, priv->offset + T8152_CIO_REQ, BIT(id));
+	if (ret)
+		return ret;
+
+	ret = regmap_read_poll_timeout(priv->regmap, priv->offset + T8152_CIO_DONE, val,
+				       val & BIT(id), APPLE_CIO_RESET_POLL_US,
+				       T8152_CIO_TIMEOUT_US);
+	if (ret)
+		return ret;
+
+	/* The done bit is write-one-to-clear. */
+	return regmap_write(priv->regmap, priv->offset + T8152_CIO_DONE, BIT(id));
+}
+
 static const struct apple_cio_reset_variant apple_t8103_cio_reset = {
 	.nr_resets = 2,
 	.deassert = t8103_cio_deassert,
@@ -206,6 +248,12 @@ static const struct apple_cio_reset_variant apple_t6000_cio_reset = {
 	.nr_resets = 4,
 	.pmgr_child = true,
 	.deassert = t6000_cio_deassert,
+};
+
+static const struct apple_cio_reset_variant apple_t8152_cio_reset = {
+	.nr_resets = 4,
+	.pmgr_child = true,
+	.deassert = t8152_cio_deassert,
 };
 
 static int apple_cio_reset_deassert(struct reset_controller_dev *rcdev, unsigned long id)
@@ -292,6 +340,10 @@ static const struct of_device_id apple_cio_reset_match[] = {
 	{
 		.compatible = "apple,t6030-cio-reset",
 		.data = &apple_t6000_cio_reset,
+	},
+	{
+		.compatible = "apple,t8152-cio-reset",
+		.data = &apple_t8152_cio_reset,
 	},
 	{},
 };

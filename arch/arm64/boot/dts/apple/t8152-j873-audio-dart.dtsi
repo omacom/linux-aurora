@@ -1,0 +1,66 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Audio DMA: the SBR DART and the two non-secure audio DMA controllers.
+ *
+ * The SBR DART is shared with firmware: the bootloader leaves its AOP and
+ * audio-DMA streams translating with page-table roots that hold firmware
+ * mappings, so it must not be reset (apple,inherited-roots) and only the
+ * streams Linux uses are ours (apple,owned-streams: 0 = AOP, 1 = the AOP's
+ * second stream, 40 = leap-ns ADMAC, 42 = base-ns ADMAC). Windows, IRQs,
+ * tunables and dma-ranges are from the M6 ADT.
+ */
+
+/ {
+	soc {
+		dart_sbr: iommu@318100000 {
+			compatible = "apple,t8152-dart";
+			reg = <0x3 0x18100000 0x0 0xc000>,
+			      <0x2 0x00000780 0x0 0x10>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 207 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,inherited-roots;
+			apple,owned-streams = <0 1 40 42>;
+			apple,dma-range = /bits/ 64 <0x11000000000 0x2000000000>;
+			/* ADT dart-tunables-instance-0 as (offset, mask, value); left as firmware set them */
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x240 0x01000000 0x00000000>,
+					<0x244 0x01000000 0x01000000>,
+					<0x248 0x01000000 0x00000000>,
+					<0x250 0x01000000 0x00000000>,
+					<0x254 0x01000000 0x01000000>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+
+		/* base-ns: 13 TX and 13 RX channels (Linux channel 2n = TX n, 2n + 1 = RX n) */
+		admac_base_ns: dma-controller@313900000 {
+			compatible = "apple,t8152-admac";
+			reg = <0x3 0x13900000 0x0 0xb4000>;
+			dma-channels = <26>;
+			#dma-cells = <1>;
+			/* four IRQ outputs, only the first is connected */
+			interrupts-extended = <&aic AIC_IRQ 640 IRQ_TYPE_LEVEL_HIGH>,
+					      <0>, <0>, <0>;
+			iommus = <&dart_sbr 42>;
+			apple,dma-range = /bits/ 64 <0x11000000000 0x1000000000>;
+		};
+
+		/* leap-ns: 9 TX and 9 RX channels; no ADT user, kept off */
+		admac_leap_ns: dma-controller@313300000 {
+			compatible = "apple,t8152-admac";
+			reg = <0x3 0x13300000 0x0 0xa4000>;
+			dma-channels = <18>;
+			#dma-cells = <1>;
+			interrupts-extended = <&aic AIC_IRQ 643 IRQ_TYPE_LEVEL_HIGH>,
+					      <0>, <0>, <0>;
+			iommus = <&dart_sbr 40>;
+			apple,dma-range = /bits/ 64 <0x11000000000 0x1000000000>;
+			status = "disabled";
+		};
+	};
+};

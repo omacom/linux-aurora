@@ -108,6 +108,8 @@ struct macaudio_platform_cfg {
 	const char *fe_dai_names[MACAUDIO_NUM_FE_LINKS];
 	unsigned int dai_fmt;
 	unsigned int primary_bclk_ratio;
+	/* DAI format of the speaker amplifier's link only (0: as the others). */
+	unsigned int spk_dai_fmt;
 };
 
 static const char *volume_control_names[] = {
@@ -830,6 +832,8 @@ static int macaudio_parse_of(struct macaudio_snd_data *ma)
 				goto err_free;
 
 			link_props->is_speakers = speakers;
+			if (speakers && ma->cfg->spk_dai_fmt)
+				link->dai_fmt = ma->cfg->spk_dai_fmt;
 			link_props->is_headphones = !speakers;
 
 			link_props->codecs = devm_kcalloc(dev, ncodecs_per_cpu,
@@ -1498,6 +1502,33 @@ static int macaudio_set_speaker(struct snd_soc_card *card, const char *prefix, b
 	return 0;
 }
 
+/*
+ * J873 (Mac mini, T8152): AOP-fed like the J700, but the speaker amplifier is
+ * an SN012776 on the AP's I2C bus and needs no software gain. The speaker
+ * is protected by the limiter in the AOP audio component (a ceiling, a
+ * fixed high-pass and a thermal model of the speaker in the copy path),
+ * not by a user-space daemon: the machine has no sense stream for one, so
+ * there is no volume lock to hand over (safe_vol = 0). The front-end DAIs
+ * are those of the AOP audio component, which keeps the T8140 names. The
+ * serial link format of the speaker is set below; the jack keeps the
+ * default.
+ */
+struct macaudio_platform_cfg macaudio_j873_cfg = {
+	.enable_speakers = true,
+	.amp = AMP_SN012776,
+	.speakers = SPKR_1W,
+	.stereo = false,
+	.amp_gain = 15,
+	.safe_vol = 0,
+	.fe_dai_names = { "j700-pcm-0", "j700-pcm-1", "j700-pcm-2" },
+	/*
+	 * The amplifier must sample on the rising bit-clock edge here: with
+	 * the default format (falling edge) it stays in software shutdown.
+	 */
+	.spk_dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC |
+		       SND_SOC_DAIFMT_GATED | SND_SOC_DAIFMT_NB_IF,
+};
+
 static int macaudio_fixup_controls(struct snd_soc_card *card)
 {
 	struct macaudio_snd_data *ma = snd_soc_card_get_drvdata(card);
@@ -1525,6 +1556,15 @@ static int macaudio_fixup_controls(struct snd_soc_card *card)
 		/* only 1W stereo system (J313) is uses cs42l83 */
 		if (ma->cfg->stereo) {
 			CHECK(macaudio_set_speaker, "* ", false, 0);
+		} else if (ma->cfg == &macaudio_j873_cfg) {
+			/*
+			 * The J873's SN012776 amp node carries the
+			 * sound-name-prefix "Speaker": with the empty prefix
+			 * the lookup of "Amp Gain Volume" fails with -EINVAL,
+			 * and "* " would match the cs42l84 jack codec's
+			 * "Jack HPF Corner Frequency" instead.
+			 */
+			CHECK(macaudio_set_speaker, "Speaker ", false, 0);
 		} else {
 			CHECK(macaudio_set_speaker, "", false, 0);
 		}
@@ -1898,6 +1938,8 @@ static const struct of_device_id macaudio_snd_device_id[]  = {
 	/* j615    AID21   sn012776    15      2x 2W+1T Compat: apple,j415-macaudio */
 	/* j700    AID44   max98360a   -       2x 1W    (AOP-fed, software gain) */
 	{ .compatible = "apple,j700-macaudio", .data = &macaudio_j700_cfg },
+	/* j873    AID?    sn012776    15      1x 1W    (AOP-fed, speakers disabled) */
+	{ .compatible = "apple,j873-macaudio", .data = &macaudio_j873_cfg },
 	/* Fallback, jack only */
 	{ .compatible = "apple,macaudio"},
 	{ }

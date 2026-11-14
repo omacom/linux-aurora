@@ -66,6 +66,11 @@ properties:
         const: apple,t8140-aop-setup-mailbox
 
       - description:
+          T8152 ASCWrap v8 counted-FIFO mailbox, a plain 0x80-byte
+          post-office window without wrapper registers.
+        const: apple,t8152-ascwrap-v8-mailbox
+
+      - description:
           An older ASC mailbox interface found on T2 and A11 that is also
           used for the NVMe coprocessor and the system management
           controller.
@@ -158,12 +163,30 @@ allOf:
   - if:
       properties:
         compatible:
+          contains:
+            const: apple,t8152-ascwrap-v8-mailbox
+    then:
+      properties:
+        interrupts:
+          minItems: 2
+          maxItems: 2
+        interrupt-names:
+          items:
+            - const: send-empty
+            - const: recv-not-empty
+        iommus: false
+        apple,dma-range: false
+
+  - if:
+      properties:
+        compatible:
           not:
             contains:
               enum:
                 - apple,t6021-ane-mailbox
                 - apple,t8112-ane-mailbox
                 - apple,t8140-aop-setup-mailbox
+                - apple,t8152-ascwrap-v8-mailbox
     then:
       properties:
         interrupts:
