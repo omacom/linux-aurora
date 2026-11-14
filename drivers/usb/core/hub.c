@@ -55,6 +55,8 @@
 #define USB_PRODUCT_TUSB8041_USB3		0x8140
 #define USB_PRODUCT_TUSB8041_USB2		0x8142
 #define USB_VENDOR_MICROCHIP			0x0424
+#define USB_VENDOR_APPLE			0x05ac
+#define USB_PRODUCT_APPLE_HUB_800F		0x800f
 #define USB_PRODUCT_USB4913			0x4913
 #define USB_PRODUCT_USB4914			0x4914
 #define USB_PRODUCT_USB4915			0x4915
@@ -6251,6 +6253,11 @@ static const struct usb_device_id hub_id_table[] = {
 			| USB_DEVICE_ID_MATCH_PRODUCT,
       .idVendor = USB_VENDOR_VIA_LABS,
       .idProduct = USB_PRODUCT_VL122,
+      .driver_info = HUB_QUIRK_DISABLE_AUTOSUSPEND},
+    { .match_flags = USB_DEVICE_ID_MATCH_VENDOR
+			| USB_DEVICE_ID_MATCH_PRODUCT,
+      .idVendor = USB_VENDOR_APPLE,
+      .idProduct = USB_PRODUCT_APPLE_HUB_800F,
       .driver_info = HUB_QUIRK_DISABLE_AUTOSUSPEND},
 	{ .match_flags = USB_DEVICE_ID_MATCH_VENDOR
 			| USB_DEVICE_ID_MATCH_PRODUCT,
