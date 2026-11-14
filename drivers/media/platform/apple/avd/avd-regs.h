@@ -13,6 +13,8 @@
 #define AVD_MBOX1_NOT_EMPTY	BIT(3)
 
 #define AVD_REG_MBOX1_STATUS	0x5c
+/* Read side: bits 8-11 write pointer, bits 12-15 read pointer, bit 17 empty. */
+#define AVD_MBOX1_STATUS_EMPTY	BIT(17)
 #define AVD_REG_MBOX1_RETRIEVE	0x64
 #define AVD_MBOX_ENABLE	BIT(0)
 
