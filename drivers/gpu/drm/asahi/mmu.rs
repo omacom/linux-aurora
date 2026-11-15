@@ -2848,8 +2848,8 @@ impl Vm {
             // unmap error. Always release reservations before dropping it.
             core::mem::drop(vm_exec);
             core::mem::drop(bo);
-            // The unmap only queues the GPUVA and VM BO puts. Run them now so the
-            // closed GEM and its admission charge go away with the handle.
+            // The unlinked VM BO waits on the deferred list and still holds the GEM.
+            // Free it now so the closed GEM and its admission charge go with the handle.
             self.bo_deferred_cleanup();
             if result == Err(ENOMEM) {
                 return self.drop_mappings_low_memory(gem);
