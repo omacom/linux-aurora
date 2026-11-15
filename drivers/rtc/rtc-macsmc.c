@@ -145,7 +145,8 @@ static int macsmc_rtc_set_time(struct device *dev, struct rtc_time *tm)
 
 	/* This sets the offset such that the set second begins now */
 	off = (rtc_tm_to_time64(tm) << RTC_SEC_SHIFT) - ctr;
-	return nvmem_cell_write(rtc->rtc_offset, &off, RTC_BYTES);
+	ret = nvmem_cell_write(rtc->rtc_offset, &off, RTC_BYTES);
+	return ret < 0 ? ret : 0;
 }
 
 
