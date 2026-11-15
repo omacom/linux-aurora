@@ -218,3 +218,17 @@
 		status = "disabled";
 	};
 };
+
+/*
+ * The SoC die keys of this machine, in place of the T6030 list: the CPU
+ * die keys of its temperature channels (two for the E cluster, one per P
+ * core), plus the four Tf2x keys that rose 11-14 C with only the GPU busy
+ * and about 1 C with all P cores busy. The GPU's own Tg keys read 0 C or
+ * slightly below on this machine even with the GPU rendering, so they are
+ * not used. Tf2D also follows the GPU but swings by more than 10 C with no
+ * GPU load, and is left out.
+ */
+&smc_hwmon {
+	apple,soc-die-keys = "Te05", "Te0P", "Tp0U", "Tp0a", "Tp1I", "Tp1Q",
+			     "Tp0g", "Tf24", "Tf28", "Tf29", "Tf2E";
+};
