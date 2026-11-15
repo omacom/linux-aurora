@@ -84,6 +84,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e01: cpu@1 {
@@ -98,6 +99,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e02: cpu@2 {
@@ -112,6 +114,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e03: cpu@3 {
@@ -126,6 +129,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e04: cpu@4 {
@@ -140,6 +144,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e05: cpu@5 {
@@ -154,6 +159,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p00: cpu@10100 {
@@ -168,6 +174,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p01: cpu@10101 {
@@ -182,6 +189,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p02: cpu@10102 {
@@ -196,6 +204,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p03: cpu@10103 {
@@ -210,6 +219,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p04: cpu@10104 {
@@ -224,6 +234,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p05: cpu@10105 {
@@ -238,6 +249,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		l2_cache_0: l2-cache-0 {
@@ -1229,6 +1241,55 @@
 
 			smc_hwmon: hwmon {
 				compatible = "apple,smc-hwmon";
+				#thermal-sensor-cells = <1>;
+
+				/*
+				 * CPU die temperatures: two for the E cluster and
+				 * one per P core, the key that rose most with only
+				 * that core busy on a J514S (11-core M3 Pro: about
+				 * 25 C, 10-15 C more than with any other core busy).
+				 * Single E cores barely warm their sensors, so the
+				 * E cluster is covered by the two keys that rose
+				 * most with the whole cluster busy. cpu_p05 is
+				 * absent on the 11-core part and its key is not
+				 * identified. Board thermal zones refer to these by
+				 * channel index, so keep them first and in this
+				 * order.
+				 */
+				temperature-Te05 {
+					apple,key-id = "Te05";
+					label = "E-cluster Temperature 1";
+				};
+
+				temperature-Te0P {
+					apple,key-id = "Te0P";
+					label = "E-cluster Temperature 2";
+				};
+
+				temperature-Tp0U {
+					apple,key-id = "Tp0U";
+					label = "P-core 0 Temperature";
+				};
+
+				temperature-Tp0a {
+					apple,key-id = "Tp0a";
+					label = "P-core 1 Temperature";
+				};
+
+				temperature-Tp1I {
+					apple,key-id = "Tp1I";
+					label = "P-core 2 Temperature";
+				};
+
+				temperature-Tp1Q {
+					apple,key-id = "Tp1Q";
+					label = "P-core 3 Temperature";
+				};
+
+				temperature-Tp0g {
+					apple,key-id = "Tp0g";
+					label = "P-core 4 Temperature";
+				};
 			};
 
 			smc_reboot: reboot {
