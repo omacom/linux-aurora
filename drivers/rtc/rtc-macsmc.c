@@ -110,6 +110,13 @@ static int macsmc_rtc_get_time(struct device *dev, struct rtc_time *tm)
 	memcpy(&off, p_off, RTC_BYTES);
 	kfree(p_off);
 
+	/*
+	 * Nothing has been stored yet, or the PMU lost it: the counter alone
+	 * is the time since the PMU powered up, not the wall-clock time.
+	 */
+	if (!off)
+		return -EINVAL;
+
 	/* Sign extend from 48 to 64 bits, then arithmetic shift right 15 bits to get seconds */
 	now = sign_extend64(ctr + off, RTC_BITS - 1) >> RTC_SEC_SHIFT;
 	rtc_time64_to_tm(now, tm);
