@@ -487,7 +487,7 @@ static int macsmc_battery_set_charge_behaviour(struct macsmc_power *power, int v
 static int macsmc_battery_get_date(const char *s, int *out)
 {
 	if (!isdigit(s[0]) || !isdigit(s[1]))
-		return -EOPNOTSUPP;
+		return -ENODATA;
 
 	*out = (s[0] - '0') * 10 + s[1] - '0';
 	return 0;
@@ -687,7 +687,8 @@ static int macsmc_battery_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_MANUFACTURE_YEAR:
 		ret = macsmc_battery_get_date(&power->mfg_date[0], &val->intval);
 		/* The SMC reports the manufacture year as an offset from 1992. */
-		val->intval += 1992;
+		if (!ret)
+			val->intval += 1992;
 		break;
 	case POWER_SUPPLY_PROP_MANUFACTURE_MONTH:
 		ret = macsmc_battery_get_date(&power->mfg_date[2], &val->intval);
