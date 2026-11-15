@@ -95,7 +95,7 @@ static void v14_bl_swap_unchanged_without_level(struct kunit *test)
 
 	KUNIT_ASSERT_NOT_NULL(test, swap);
 	KUNIT_ASSERT_NOT_NULL(test, plain);
-	dcp_v14_encode_surface(surface, 3456 * 4, 3456, 2160, true);
+	dcp_v14_encode_surface(surface, DCP_V14_FORMAT_BGRA, 3456 * 4, 3456, 2160, true);
 	dcp_v14_encode_swap(plain, 7, DCP_V14_BLACK, surface, 0x100000000ULL, 3456, 2160, 74,
 			    DCP_V14_LAYER);
 	dcp_v14_encode_swap(swap, 7, DCP_V14_BLACK, surface, 0x100000000ULL, 3456, 2160, 74,

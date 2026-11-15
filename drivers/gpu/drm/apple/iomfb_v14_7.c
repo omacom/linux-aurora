@@ -2950,6 +2950,26 @@ static struct drm_framebuffer *dcp_v14_publish_surface(struct apple_dcp_v14 *v14
 	return old;
 }
 
+/* The firmware format that scans out @format; 0: none does. */
+static u32 dcp_v14_format(u32 format)
+{
+	switch (format) {
+	case DRM_FORMAT_XRGB8888:
+	case DRM_FORMAT_ARGB8888:
+		return DCP_V14_FORMAT_BGRA;
+	case DRM_FORMAT_XRGB2101010:
+	case DRM_FORMAT_ARGB2101010:
+		return DCP_V14_FORMAT_L10R;
+	default:
+		return 0;
+	}
+}
+
+static bool dcp_v14_format_opaque(u32 format)
+{
+	return format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_XRGB2101010;
+}
+
 /*
  * Shows the top-left @width x @height of @fb (or only the black background),
  * after the colour matrix of @ctm_state if that is set,
@@ -2970,8 +2990,9 @@ static bool dcp_v14_present_locked(struct apple_dcp_v14 *v14, struct drm_framebu
 		return false;
 	if (fb) {
 		drm_framebuffer_get(fb);
-		dcp_v14_encode_surface(surface, fb->pitches[0], fb->width, fb->height,
-				       fb->format->format == DRM_FORMAT_XRGB8888);
+		dcp_v14_encode_surface(surface, dcp_v14_format(fb->format->format),
+				       fb->pitches[0], fb->width, fb->height,
+				       dcp_v14_format_opaque(fb->format->format));
 		iova = drm_fb_dma_get_gem_obj(fb, 0)->dma_addr;
 	}
 	start = ktime_get_ns();
@@ -3140,8 +3161,10 @@ int iomfb_v14_7_atomic_check(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	fb = p->fb;
 	width = crtc_state->mode.hdisplay;
 	height = crtc_state->mode.vdisplay;
-	if (fb->format->format != DRM_FORMAT_XRGB8888 &&
-	    fb->format->format != DRM_FORMAT_ARGB8888)
+	if (!dcp_v14_format(fb->format->format))
+		return -EINVAL;
+	/* 10 bits were only tested on the internal panel. */
+	if (dcp->external && dcp_v14_format(fb->format->format) != DCP_V14_FORMAT_BGRA)
 		return -EINVAL;
 	if (fb->modifier != DRM_FORMAT_MOD_LINEAR || fb->offsets[0] ||
 	    fb->pitches[0] < width * 4 || (fb->pitches[0] & 63))

@@ -801,6 +801,8 @@ struct drm_plane *apple_plane_init(struct drm_device *dev,
 static const u32 dcp_primary_formats_14_7[] = {
 	DRM_FORMAT_XRGB8888,
 	DRM_FORMAT_ARGB8888,
+	DRM_FORMAT_XRGB2101010,
+	DRM_FORMAT_ARGB2101010,
 };
 
 struct drm_plane *apple_plane_init_v14_7(struct drm_device *dev,

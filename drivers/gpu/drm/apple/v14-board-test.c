@@ -285,7 +285,7 @@ static void v14_swap_timestamps_encoding(struct kunit *test)
 	plain = kunit_kzalloc(test, DCP_V14_SWAP_SIZE, GFP_KERNEL);
 	stamped = kunit_kzalloc(test, DCP_V14_SWAP_SIZE, GFP_KERNEL);
 	KUNIT_ASSERT_TRUE(test, plain && stamped);
-	dcp_v14_encode_surface(surface, 3456 * 4, 3456, 2160, true);
+	dcp_v14_encode_surface(surface, DCP_V14_FORMAT_BGRA, 3456 * 4, 3456, 2160, true);
 
 	for (pass = 0; pass < 2; pass++) {
 		const u8 *s = pass ? surface : NULL;
