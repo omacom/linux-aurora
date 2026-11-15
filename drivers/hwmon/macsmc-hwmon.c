@@ -79,6 +79,20 @@ static const struct macsmc_hwmon_board {
 	const char *pressure_key;
 } macsmc_hwmon_boards[] = {
 	/*
+	 * MacBook Pro (14-inch, M3 Pro): the CPU die keys of the board's
+	 * device tree (two for the E cluster, one per P core), plus the four
+	 * Tf2x keys that rose 11-14 C with only the GPU busy and about 1 C
+	 * with all P cores busy. The GPU's own Tg keys read 0 C or slightly
+	 * below on this machine even with the GPU rendering, so they are not
+	 * used. Tf2D also follows the GPU but swings by more than 10 C with
+	 * no GPU load, and is left out.
+	 */
+	{
+		.compatible = "apple,j514s",
+		.die_keys = "Te05,Te0P,Tp0U,Tp0a,Tp1I,Tp1Q,Tp0g,Tf24,Tf28,Tf29,Tf2E",
+		.pressure_key = "mTPL",
+	},
+	/*
 	 * MacBook Pro (16-inch, M3 Pro): key names used for the CPU
 	 * performance-core and GPU die sensors of M3-family machines. They
 	 * are not confirmed on this machine: the debugfs key list shows which
