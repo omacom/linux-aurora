@@ -21,6 +21,109 @@
 	chosen {
 		asahi,t6030-dispext = "1";
 	};
+
+	/*
+	 * The SMC runs the fans on its own. Under ten-minute loads (five P
+	 * cores, all eleven cores, five P cores plus the GPU) they held the
+	 * hottest core sensor at 93-98 C, at up to about 6000 rpm, with no
+	 * throttling by Linux. A power allocator throttling below that fought
+	 * the fan curve: the fans stayed near 2300 rpm and the P cluster swung
+	 * between 696 MHz and 4.06 GHz. So, as on the Qualcomm X1E laptops,
+	 * these zones carry only a critical trip, for an orderly shutdown if
+	 * the platform's own cooling fails. 110 C matches the J613.
+	 */
+	thermal-zones {
+		cpu-e0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 0>;	/* Te05 */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu-e1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 1>;	/* Te0P */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu-p0-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 2>;	/* Tp0U */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu-p1-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 3>;	/* Tp0a */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu-p2-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 4>;	/* Tp1I */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu-p3-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 5>;	/* Tp1Q */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+
+		cpu-p4-thermal {
+			polling-delay = <1000>;
+			thermal-sensors = <&smc_hwmon 6>;	/* Tp0g */
+
+			trips {
+				trip-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+	};
 };
 
 &framebuffer0 {
