@@ -670,24 +670,25 @@ impl SepData {
             }
         };
         // A cold-boot Mac's create rewrites a pre-Linux record for its own
-        // reasons (XART-SAFETY.md), so only warm attach gets the window.
-        let first_setup = if self.profile.bootstrap == profile::Bootstrap::WarmRegister {
-            match self.with_store(|store| store.open_first_setup()) {
-                Some(Ok(open)) => open,
-                None => false,
-                // Unsent, so the intent is dropped as retryable.
-                Some(Err(e)) => {
-                    dev_err!(
-                        self.dev,
-                        "sks: cannot record the xART guard's first-setup window ({:?}); not creating the keybag this boot\n",
-                        e
-                    );
-                    return false;
-                }
+        // reasons (XART-SAFETY.md), so the guard gives it a window only under
+        // xart_guard_pin, and then pins that record.
+        let first_setup = match self.with_store(|store| store.open_first_setup()) {
+            Some(Ok(open)) => open,
+            None => false,
+            // Unsent, so the intent is dropped as retryable.
+            Some(Err(e)) => {
+                dev_err!(
+                    self.dev,
+                    "sks: cannot record the xART guard's first-setup window ({:?}); not creating the keybag this boot\n",
+                    e
+                );
+                return false;
             }
-        } else {
-            false
         };
+        if first_setup {
+            // The create is sent under the guard: matching follows.
+            crate::diag::xart_guard_setup_recorded();
+        }
         intent.sending();
         let exchanged = self.sks_exchange(request.name, request.msg, &request.img);
         if first_setup {

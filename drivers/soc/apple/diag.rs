@@ -41,6 +41,7 @@ extern "C" {
     fn sep_diag_set_sensor_attach(state: c_int);
     fn sep_diag_set_restore(state: c_int);
     fn sep_diag_set_xart_guard(level: c_uint, list_loaded: bool, matching: c_int);
+    fn sep_diag_set_matching(matching: c_int);
     fn sep_diag_xart_guard_refused(matching: c_int);
     fn sep_diag_bringup_ended();
 }
@@ -70,12 +71,15 @@ pub(crate) enum Restore {
 /// group goes away when the driver unbinds.
 ///
 /// `guard` is the xART guard as the store opened it: its effective level and
-/// whether Linux's list loaded, or `None` when no guard runs.
+/// whether Linux's list loaded, or `None` when no guard runs. `guarded_setup`
+/// is whether that list says this install's first keybag creation was sent
+/// under the guard.
 pub(crate) fn register(
     dev: &device::Device<device::Bound>,
     profile: &profile::PlatformProfile,
     xart_writable: bool,
     guard: Option<(u8, bool)>,
+    guarded_setup: bool,
 ) -> Result {
     // Exhaustive, so a new bootstrap or key store fails to build here until
     // the ABI has a value for it.
@@ -91,6 +95,7 @@ pub(crate) fn register(
     // Probe runs before the guard can refuse anything.
     XART_WRITABLE.store(xart_writable, Relaxed);
     COLD.store(cold, Relaxed);
+    GUARDED_SETUP.store(guarded_setup, Relaxed);
     let (level, list_loaded) = guard.unwrap_or((0, false));
     GUARD_LEVEL.store(u32::from(level), Relaxed);
     GUARD_LIST.store(list_loaded, Relaxed);
@@ -178,6 +183,7 @@ pub(crate) fn restore(state: Restore) {
 
 static XART_WRITABLE: Atomic<bool> = Atomic::new(false);
 static COLD: Atomic<bool> = Atomic::new(false);
+static GUARDED_SETUP: Atomic<bool> = Atomic::new(false);
 static GUARD_LEVEL: Atomic<u32> = Atomic::new(0);
 static GUARD_LIST: Atomic<bool> = Atomic::new(false);
 static REFUSALS: Atomic<u32> = Atomic::new(0);
@@ -189,6 +195,7 @@ fn matching() -> crate::xart_guard::Matching {
     MatchFacts {
         xart_writable: XART_WRITABLE.load(Relaxed),
         cold: COLD.load(Relaxed),
+        guarded_setup: GUARDED_SETUP.load(Relaxed),
         guard: (level != 0).then(|| {
             (
                 u8::try_from(level).unwrap_or(u8::MAX),
@@ -198,6 +205,15 @@ fn matching() -> crate::xart_guard::Matching {
         refusals: REFUSALS.load(Relaxed),
     }
     .matching()
+}
+
+/// The xART guard opened this install's first-setup window and recorded it in
+/// its list, so the keybag creation about to be sent runs under the guard.
+pub(crate) fn xart_guard_setup_recorded() {
+    GUARDED_SETUP.store(true, Relaxed);
+    // SAFETY: no preconditions; stores one word. The refusals counted since
+    // probe stand, which `sep_diag_set_xart_guard` would clear.
+    unsafe { sep_diag_set_matching(matching() as c_int) };
 }
 
 /// The xART guard refused one of the enclave's writes or deletes.

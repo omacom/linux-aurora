@@ -191,6 +191,7 @@ void sep_diag_set_sensor_attach(int state);
 void sep_diag_set_restore(int state);
 void sep_diag_set_xart_guard(unsigned int level, bool list_loaded,
 			     int matching);
+void sep_diag_set_matching(int matching);
 void sep_diag_xart_guard_refused(int matching);
 void sep_diag_bringup_ended(void);
 
