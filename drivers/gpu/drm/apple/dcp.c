@@ -2369,6 +2369,18 @@ static int dcp_dptx_connect_raw(struct apple_dcp *dcp, u32 port, bool *retryable
 		ret = -ESTALE;
 		goto out_unlock;
 	}
+	/*
+	 * Under hpd_mutex: an idle withdraw cannot come between this and the
+	 * link. On failure nothing reached the firmware, so a retry may follow.
+	 */
+	if (dcp->external_native) {
+		ret = iomfb_v14_7_external_pmp_reassert(dcp);
+		if (ret) {
+			if (retryable)
+				*retryable = true;
+			goto out_unlock;
+		}
+	}
 	generation = dcp->typec_generation;
 	if (dcp->external && dcpext_scanout_terminal(dcp)) {
 		mutex_unlock(&dcp->hpd_mutex);
@@ -3888,6 +3900,7 @@ int dcp_dptx_disconnect(struct apple_dcp *dcp, u32 port)
 	mutex_unlock(&dcp->hpd_mutex);
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && !port)
 		dcp_peer_release_26_6(dcp);
+	dcp_external_idle_schedule(dcp);
 
 	return ret;
 }
@@ -8273,6 +8286,43 @@ static const char *dcp_external_sleep_vetoed(struct apple_dcp *dcp)
 	if (dcp->hdmi_hpd && gpiod_get_value_cansleep(dcp->hdmi_hpd) > 0)
 		return "an HDMI display is attached";
 	return NULL;
+}
+
+#define DCP_EXT_IDLE_DELAY_MS	5000
+#define DCP_EXT_IDLE_TRIES	12
+
+/*
+ * A native external processor whose display went away keeps running, but
+ * its PMP request keeps the PMP's external display state up, about 0.25 W of
+ * idle power on J514S. Once nothing is attached, by the same test system sleep
+ * uses before it withdraws that request, withdraw it until the next attach.
+ * A display still being taken down (powered, its link up) is checked again,
+ * for about a minute.
+ */
+void dcp_external_idle_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work), struct apple_dcp,
+					     external_idle_wq);
+	bool idle;
+
+	scoped_guard(mutex, &dcp->hpd_mutex) {
+		idle = !READ_ONCE(dcp->external_suspended) && !dcp_external_sleep_vetoed(dcp);
+		if (idle)
+			iomfb_v14_7_external_pmp_release(dcp);
+	}
+	if (!idle && atomic_inc_return(&dcp->external_idle_tries) < DCP_EXT_IDLE_TRIES)
+		queue_delayed_work(system_freezable_wq, &dcp->external_idle_wq,
+				   msecs_to_jiffies(DCP_EXT_IDLE_DELAY_MS));
+}
+
+void dcp_external_idle_schedule(struct apple_dcp *dcp)
+{
+	/* Set up by iomfb_v14_7_external_prepare(), not on every native path. */
+	if (!dcp->external_native || !dcp->external_idle_wq.work.func)
+		return;
+	atomic_set(&dcp->external_idle_tries, 0);
+	mod_delayed_work(system_freezable_wq, &dcp->external_idle_wq,
+			 msecs_to_jiffies(DCP_EXT_IDLE_DELAY_MS));
 }
 
 /* dpm_prepare completes for every device before any dpm_suspend callback.

@@ -25,6 +25,8 @@ int apple_pmp_report_wait_running(struct device_node *report_np, unsigned int ti
 int apple_pmp_report_check_t6030_gfx(struct device *supplier);
 int apple_pmp_report_set_t6030_gfx(struct device *supplier, bool enable);
 int apple_pmp_report_wait_ready(struct device_node *entry, unsigned long timeout);
+int apple_pmp_report_use(struct device_node *entry, unsigned long timeout);
+int apple_pmp_report_idle(struct device_node *entry);
 int apple_pmp_report_fast_die_effort(const struct device_node *np,
 				     unsigned int lane, u8 *effort);
 void apple_pmp_report_sleep(struct device *pmp, bool at_commit);
@@ -125,6 +127,16 @@ static inline int apple_pmp_report_set_t6030_gfx(struct device *supplier, bool e
 
 static inline int apple_pmp_report_wait_ready(struct device_node *entry,
 					      unsigned long timeout)
+{
+	return -ENODEV;
+}
+
+static inline int apple_pmp_report_use(struct device_node *entry, unsigned long timeout)
+{
+	return -ENODEV;
+}
+
+static inline int apple_pmp_report_idle(struct device_node *entry)
 {
 	return -ENODEV;
 }

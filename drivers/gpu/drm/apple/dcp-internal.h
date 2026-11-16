@@ -598,6 +598,13 @@ struct apple_dcp {
 	unsigned int external_phase;
 	/* Native: bounded recovery of a display link or mode, see dcp.c. */
 	struct delayed_work external_retry_wq;
+	/*
+	 * Native: once no display is attached, the PMP request is withdrawn
+	 * (external_pmp_released) until the next attach asks for it again.
+	 */
+	struct delayed_work external_idle_wq;
+	atomic_t external_idle_tries;
+	bool external_pmp_released;
 	atomic_t external_retries;
 	/* typec_generation when the pending retry was queued */
 	u64 external_retry_generation;
