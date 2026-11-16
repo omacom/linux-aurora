@@ -4,7 +4,9 @@
  * nodes of t8122-dcp.dtsi with the boot loader's handoff applied, the power
  * states they hang from, the PMP topology of t8122.dtsi that the gate
  * reuses, and PMP values. The values are made up: only their presence and
- * the PMP image UUID matter to the gate.
+ * the PMP image UUID matter to the gate. The external display processor is
+ * a J615's: firmware reserved by default, its display DART kept out of the
+ * display subsystem and an fbdma child. It has no Type-C routes.
  *
  * The nodes live under their own disabled bus, not /soc, so that they do
  * not collide with the T6030 test tree (both SoCs put the DCP at
@@ -79,6 +81,13 @@
 						apple,always-on;
 					};
 
+					t8122_ps_dispext_cpu: power-controller@10008 {
+						compatible = "apple,t8122-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+						reg = <0x10008 4>;
+						#power-domain-cells = <0>;
+						label = "dispext_cpu";
+					};
+
 					t8122_ps_disp_cpu: power-controller@10000 {
 						compatible = "apple,t8122-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
 						reg = <0x10000 4>;
@@ -117,7 +126,7 @@
 						apple,always-on;
 					};
 
-					report@8 {
+					t8122_report_dispext: report@8 {
 						compatible = "apple,t8122-pmp-v2-report-entry",
 							     "apple,t6000-pmp-v2-report-entry";
 						reg = <0x8>;
@@ -206,6 +215,67 @@
 					piodma {
 						iommus = <&t8122_disp0_dart 4>;
 						apple,t8122-handoff = <1>;
+					};
+				};
+
+				t8122_dcpext_mbox: mailbox@31ac08000 {
+					compatible = "apple,t8122-asc-mailbox", "apple,asc-mailbox-v4";
+					reg = <0x3 0x1ac08000 0x0 0x4000>;
+					interrupt-parent = <&t8122_aic>;
+					interrupts = <0 582 4>, <0 583 4>, <0 584 4>, <0 585 4>;
+					interrupt-names = "send-empty", "send-not-empty",
+							  "recv-empty", "recv-not-empty";
+					power-domains = <&t8122_ps_dispext_cpu>;
+					#mbox-cells = <0>;
+					status = "disabled";
+				};
+
+				t8122_dcpext_dart: iommu@31930c000 {
+					compatible = "apple,t8122-dart", "apple,t8110-dart";
+					reg = <0x3 0x1930c000 0x0 0x4000>;
+					interrupt-parent = <&t8122_aic>;
+					interrupts = <0 599 4>;
+					#iommu-cells = <1>;
+					power-domains = <&t8122_ps_dispext_cpu>;
+					status = "disabled";
+				};
+
+				t8122_dispext0_dart: iommu@319304000 {
+					compatible = "apple,t8122-dart", "apple,t8110-dart";
+					reg = <0x3 0x19304000 0x0 0x4000>;
+					interrupt-parent = <&t8122_aic>;
+					interrupts = <0 599 4>;
+					#iommu-cells = <1>;
+					power-domains = <&t8122_ps_dispext_cpu>;
+					status = "disabled";
+				};
+
+				t8122_dcpext_fw: dcpext-firmware@1000000000 {
+					reg = <0x10 0x0 0x0 0x4000>;
+				};
+
+				dcp@31ac00000 {
+					compatible = "apple,t8122-dcpext";
+					mboxes = <&t8122_dcpext_mbox>;
+					mbox-names = "mbox";
+					iommus = <&t8122_dcpext_dart 5>;
+					reg-names = "coproc";
+					reg = <0x3 0x1ac00000 0x0 0x4000>;
+					power-domains = <&t8122_ps_dispext_cpu>;
+					memory-region = <&t8122_dcpext_fw>;
+					apple,pmp-report = <&t8122_report_dispext>;
+					status = "disabled";
+					apple,t8122-dcpext-firmware-ready = <2>;
+					apple,firmware-compat = <14 7 0>;
+					apple,no-shared-display-dart;
+
+					piodma {
+						iommus = <&t8122_dispext0_dart 4>;
+					};
+
+					fbdma {
+						iommus = <&t8122_dispext0_dart 0>;
+						apple,dma-range = /bits/ 64 <0x10000000000 0x1000000000>;
 					};
 				};
 
