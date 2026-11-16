@@ -232,3 +232,47 @@
 	apple,soc-die-keys = "Te05", "Te0P", "Tp0U", "Tp0a", "Tp1I", "Tp1Q",
 			     "Tp0g", "Tf24", "Tf28", "Tf29", "Tf2E";
 };
+
+/*
+ * Further SMC temperature keys of this machine. TB2T reads what macOS
+ * shows as the battery gas gauge's temperature (TB1T repeats TB0T). The
+ * four Tf2x keys follow the GPU: on macOS they track its Tg keys about
+ * 8 C below them, and here they rose 11-14 C with only the GPU busy and
+ * about 1 C with all P cores busy. The Tg keys read 0 C under Linux.
+ */
+&smc_hwmon {
+	temperature-TaLP {
+		apple,key-id = "TaLP";
+		label = "Airflow Left";
+	};
+
+	temperature-TaRF {
+		apple,key-id = "TaRF";
+		label = "Airflow Right";
+	};
+
+	temperature-TB2T {
+		apple,key-id = "TB2T";
+		label = "Battery Gas Gauge";
+	};
+
+	temperature-Tf24 {
+		apple,key-id = "Tf24";
+		label = "GPU Temperature 1";
+	};
+
+	temperature-Tf28 {
+		apple,key-id = "Tf28";
+		label = "GPU Temperature 2";
+	};
+
+	temperature-Tf29 {
+		apple,key-id = "Tf29";
+		label = "GPU Temperature 3";
+	};
+
+	temperature-Tf2E {
+		apple,key-id = "Tf2E";
+		label = "GPU Temperature 4";
+	};
+};
