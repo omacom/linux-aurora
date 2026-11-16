@@ -327,6 +327,8 @@ struct tipd_data {
 	int (*connect)(struct tps6598x *tps, u32 status);
 	void (*prepare)(struct tps6598x *tps);
 	void (*complete)(struct tps6598x *tps);
+	/* Read the active PD contract into contract_rdo/contract_pdo. */
+	void (*read_contract)(struct tps6598x *tps);
 };
 
 struct tps6598x {
@@ -360,6 +362,9 @@ struct tps6598x {
 	u32 status; /* status reg */
 	u32 data_status;
 	u16 pwr_status;
+	/* Active PD contract while sinking under PD, or 0; see read_contract. */
+	u32 contract_rdo;
+	u32 contract_pdo;
 	struct delayed_work	wq_poll;
 
 	const struct tipd_data *data;

@@ -14,6 +14,8 @@
 #include <linux/of.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/unaligned.h>
+#include <linux/usb/pd.h>
 #include <linux/usb/typec.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_dp.h>
@@ -54,6 +56,13 @@
 #define TPS_REG_INTEL_VID_STATUS	0x59
 #define TPS_REG_DATA_STATUS		0x5f
 #define TPS_REG_SLEEP_CONF		0x70
+
+/*
+ * SN201202x: the active contract, as the Request Data Object followed by
+ * the source PDO it selects. TI's TPS_REG_ACTIVE_CONTRACT layout (PDO at
+ * 0x34) does not apply: 0x34 reads zero on this controller.
+ */
+#define SN201202X_REG_ACTIVE_CONTRACT	0x35
 
 /* TPS_REG_SYSTEM_CONF bits */
 #define TPS_SYSCONF_PORTINFO(c)		((c) & 7)
@@ -121,6 +130,14 @@ static const char *const modes[] = {
 static enum power_supply_property tps6598x_psy_props[] = {
 	POWER_SUPPLY_PROP_USB_TYPE,
 	POWER_SUPPLY_PROP_ONLINE,
+};
+
+/* Controllers that report the active PD contract (tipd_data.read_contract). */
+static const enum power_supply_property tps6598x_contract_psy_props[] = {
+	POWER_SUPPLY_PROP_USB_TYPE,
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_CURRENT_MAX,
 };
 
 static const char *tps6598x_psy_name_prefix = "tps6598x-source-psy-";
@@ -571,6 +588,30 @@ static bool tps6598x_read_power_status(struct tps6598x *tps)
 		tps->data->trace_power_status(pwr_status);
 
 	return true;
+}
+
+/*
+ * Controllers that report the active PD contract, on the machines where that
+ * was checked: the J514S (MacBook Pro 14", M3 Pro).
+ */
+static bool tps6598x_reports_contract(struct tps6598x *tps)
+{
+	return tps->data->read_contract && of_machine_is_compatible("apple,j514s");
+}
+
+/*
+ * Refresh the active PD contract after a power status read, on controllers
+ * that report it, and tell power supply listeners when it changed.
+ */
+static void tps6598x_update_contract(struct tps6598x *tps)
+{
+	u32 rdo = tps->contract_rdo, pdo = tps->contract_pdo;
+
+	if (!tps6598x_reports_contract(tps))
+		return;
+	tps->data->read_contract(tps);
+	if (tps->psy && (rdo != tps->contract_rdo || pdo != tps->contract_pdo))
+		power_supply_changed(tps->psy);
 }
 
 static void tps6598x_handle_plug_event(struct tps6598x *tps, u32 status)
@@ -1451,6 +1492,7 @@ static void cd321x_resume_work(struct work_struct *work)
 	if (status & TPS_STATUS_PLUG_PRESENT) {
 		if (!tps6598x_read_power_status(tps))
 			goto retry;
+		tps6598x_update_contract(tps);
 		if (TPS_POWER_STATUS_PWROPMODE(tps->pwr_status) == TYPEC_PWR_MODE_PD &&
 		    tps6598x_read_partner_identity(tps))
 			goto retry;
@@ -1594,6 +1636,7 @@ static irqreturn_t cd321x_interrupt(int irq, void *data)
 	if (event & APPLE_CD_REG_INT_POWER_STATUS_UPDATE) {
 		if (!tps6598x_read_power_status(tps))
 			goto err_lost;
+		tps6598x_update_contract(tps);
 		if (TPS_POWER_STATUS_PWROPMODE(tps->pwr_status) == TYPEC_PWR_MODE_PD) {
 			if (tps6598x_read_partner_identity(tps)) {
 				dev_err(tps->dev, "failed to read partner identity\n");
@@ -1815,6 +1858,40 @@ static int tps6598x_psy_get_online(struct tps6598x *tps,
 	return 0;
 }
 
+/*
+ * The voltage and current of the active PD contract: a fixed supply's
+ * voltage and the current requested from it, or the voltage and current
+ * requested from a PPS APDO. Nothing while not sinking under a contract.
+ */
+static int tps6598x_psy_get_contract(struct tps6598x *tps,
+				     enum power_supply_property psp,
+				     union power_supply_propval *val)
+{
+	u32 rdo = READ_ONCE(tps->contract_rdo), pdo = READ_ONCE(tps->contract_pdo);
+	unsigned int mv, ma;
+
+	if (!rdo)
+		return -ENODATA;
+
+	switch (pdo_type(pdo)) {
+	case PDO_TYPE_FIXED:
+		mv = pdo_fixed_voltage(pdo);
+		ma = rdo_op_current(rdo);
+		break;
+	case PDO_TYPE_APDO:
+		if (pdo_apdo_type(pdo) != APDO_TYPE_PPS)
+			return -ENODATA;
+		mv = ((rdo >> RDO_PROG_VOLT_SHIFT) & RDO_PROG_VOLT_MASK) * RDO_PROG_VOLT_MV_STEP;
+		ma = ((rdo >> RDO_PROG_CURR_SHIFT) & RDO_PROG_CURR_MASK) * RDO_PROG_CURR_MA_STEP;
+		break;
+	default:
+		return -ENODATA;
+	}
+
+	val->intval = (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW ? mv : ma) * 1000;
+	return 0;
+}
+
 static int tps6598x_psy_get_prop(struct power_supply *psy,
 				 enum power_supply_property psp,
 				 union power_supply_propval *val)
@@ -1831,6 +1908,10 @@ static int tps6598x_psy_get_prop(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_ONLINE:
 		ret = tps6598x_psy_get_online(tps, val);
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+	case POWER_SUPPLY_PROP_CURRENT_MAX:
+		ret = tps6598x_psy_get_contract(tps, psp, val);
 		break;
 	default:
 		ret = -EINVAL;
@@ -1884,8 +1965,13 @@ static int devm_tps6598_psy_register(struct tps6598x *tps)
 	tps->psy_desc.type = POWER_SUPPLY_TYPE_USB;
 	tps->psy_desc.usb_types = BIT(POWER_SUPPLY_USB_TYPE_C) |
 				  BIT(POWER_SUPPLY_USB_TYPE_PD);
-	tps->psy_desc.properties = tps6598x_psy_props;
-	tps->psy_desc.num_properties = ARRAY_SIZE(tps6598x_psy_props);
+	if (tps6598x_reports_contract(tps)) {
+		tps->psy_desc.properties = tps6598x_contract_psy_props;
+		tps->psy_desc.num_properties = ARRAY_SIZE(tps6598x_contract_psy_props);
+	} else {
+		tps->psy_desc.properties = tps6598x_psy_props;
+		tps->psy_desc.num_properties = ARRAY_SIZE(tps6598x_psy_props);
+	}
 	tps->psy_desc.get_property = tps6598x_psy_get_prop;
 
 	tps->usb_type = POWER_SUPPLY_USB_TYPE_C;
@@ -2723,6 +2809,7 @@ int tipd_init(struct tps6598x *tps)
 		ret = -EINVAL;
 		if (!tps6598x_read_power_status(tps))
 			goto err_disconnect;
+		tps6598x_update_contract(tps);
 		if (!tps->data->read_data_status(tps))
 			goto err_disconnect;
 		ret = tps->data->connect(tps, status);
@@ -2947,6 +3034,28 @@ static const struct tipd_data tipd_tps25750_data = {
 	.connect = tps6598x_connect,
 };
 
+/*
+ * The contract is read only while this controller sinks power under PD:
+ * otherwise, or if the read fails, none is reported.
+ */
+static void sn201202x_read_contract(struct tps6598x *tps)
+{
+	u32 rdo = 0, pdo = 0;
+	u8 buf[8];
+
+	if (TPS_POWER_STATUS_CONNECTION(tps->pwr_status) &&
+	    TPS_POWER_STATUS_SOURCESINK(tps->pwr_status) &&
+	    TPS_POWER_STATUS_PWROPMODE(tps->pwr_status) == TYPEC_PWR_MODE_PD &&
+	    !tps6598x_block_read(tps, SN201202X_REG_ACTIVE_CONTRACT, buf, sizeof(buf))) {
+		rdo = get_unaligned_le32(buf);
+		pdo = get_unaligned_le32(buf + 4);
+		if (!rdo_index(rdo))
+			rdo = 0;
+	}
+	WRITE_ONCE(tps->contract_rdo, rdo);
+	WRITE_ONCE(tps->contract_pdo, pdo);
+}
+
 static const struct tipd_data tipd_sn201202x_data = {
 	.irq_handler = cd321x_interrupt,
 	.irq_mask1 = APPLE_CD_REG_INT_POWER_STATUS_UPDATE |
@@ -2968,6 +3077,7 @@ static const struct tipd_data tipd_sn201202x_data = {
 	.connect = cd321x_connect,
 	.prepare = cd321x_prepare,
 	.complete = cd321x_complete,
+	.read_contract = sn201202x_read_contract,
 };
 
 const struct tipd_data *tipd_hw_variants[] = {
