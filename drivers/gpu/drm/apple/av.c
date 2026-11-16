@@ -377,6 +377,29 @@ bool dcp_audiosrv_link_on(struct device *dev, u64 gen)
 	return asrv->open_srv && asrv->open_gen == gen && asrv->link_gen == gen;
 }
 
+/* open_lock pins the client; the endpoint can replace its published instance. */
+static bool av_audiosrv_open_published(struct audiosrv_data *asrv)
+{
+	lockdep_assert_held(&asrv->open_lock);
+	guard(rwsem_read)(&asrv->srv_rwsem);
+	return asrv->open_srv && asrv->srv == asrv->open_srv &&
+	       asrv->gen == asrv->open_gen;
+}
+
+bool dcp_audiosrv_link_live(struct device *dev)
+{
+	struct apple_dcp *dcp;
+	struct audiosrv_data *asrv;
+
+	KUNIT_STATIC_STUB_REDIRECT(dcp_audiosrv_link_live, dev);
+	dcp = dev_get_drvdata(dev);
+	asrv = dcp->audiosrv;
+	if (!asrv)
+		return false;
+	guard(mutex)(&asrv->open_lock);
+	return asrv->link_gen == asrv->open_gen && av_audiosrv_open_published(asrv);
+}
+
 /*
  * The link commands of the 14.7 external role's audio service, the native
  * audio driver's: prepare, start, stop and complete all take the selected
@@ -418,20 +441,28 @@ int dcp_audiosrv_link(struct device *dev, enum dcp_audio_link op,
 	scoped_guard(mutex, &asrv->open_lock) {
 		if (!asrv->open_srv)
 			return -ENODEV;
+		if (op == DCP_AUDIO_LINK_PREPARE) {
+			asrv->link_gen = 0;
+			if (!av_audiosrv_open_published(asrv))
+				return -ENODEV;
+		}
 		/* A link ends on the instance it was prepared on; one gone took it along. */
 		if (op != DCP_AUDIO_LINK_PREPARE && asrv->link_gen != asrv->open_gen)
 			return -ENODEV;
 		ret = av_audiosrv_call(asrv->open_srv, command, body, sizeof(body), 0,
 				       reply, sizeof(reply));
-		if (!ret && op == DCP_AUDIO_LINK_PREPARE)
+		if (ret)
+			return ret;
+		status = get_unaligned_le32(reply + 48);
+		if (status) {
+			dev_err(dev, "audiosrv: link method %u answered %#x\n", command, status);
+			return -EIO;
+		}
+		if (op == DCP_AUDIO_LINK_PREPARE) {
+			if (!av_audiosrv_open_published(asrv))
+				return -ENODEV;
 			asrv->link_gen = asrv->open_gen;
-	}
-	if (ret)
-		return ret;
-	status = get_unaligned_le32(reply + 48);
-	if (status) {
-		dev_err(dev, "audiosrv: link method %u answered %#x\n", command, status);
-		return -EIO;
+		}
 	}
 	return 0;
 }

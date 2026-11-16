@@ -78,7 +78,17 @@ impl KernelObject {
         let mut this = Self::backing(dev, size, cpu)?;
         let mapping = match placement {
             Placement::At(addr) => this.obj.map_at(vm, addr, prot, false)?,
-            Placement::In(range, align) => this.obj.map_into_range(vm, range, align, prot, true)?,
+            Placement::In(range, align) => {
+                let site = if range.start >= crate::hw::t8140::dynamic::LOWER.start
+                    && range.end <= crate::hw::t8140::dynamic::LOWER.end {
+                    super::capacity::Site::LowerVa
+                } else {
+                    super::capacity::Site::UpperVa
+                };
+                this.obj.map_into_range(vm, range, align, prot, true).map_err(|error| {
+                    if error == ENOSPC { super::capacity::refused(site) } else { error }
+                })?
+            }
         };
         this.mapping = Some(mapping);
         Ok(this)
@@ -113,6 +123,9 @@ impl KernelObject {
         prot: mmu::Prot,
     ) -> Result<mmu::KernelMapping> {
         gem::ObjectRef::new(self.obj.gem.clone()).map_at(vm, addr, prot, false)
+            .map_err(|error| if error == ENOSPC {
+                super::capacity::refused(super::capacity::Site::AliasVa)
+            } else { error })
     }
 
     /// Reuses only a complete alias of this exact retained backing. Permanent
@@ -159,6 +172,20 @@ impl KernelObject {
         prot: mmu::Prot,
     ) -> Result<mmu::KernelMapping> {
         gem::ObjectRef::new(self.obj.gem.clone()).map_into_range(vm, range, align, prot, false)
+            .map_err(|error| if error == ENOSPC {
+                super::capacity::refused(super::capacity::Site::AliasVa)
+            } else { error })
+    }
+
+    fn alias_in_lowest(
+        &self,
+        vm: &mmu::Vm,
+        range: Range<u64>,
+        align: u64,
+        prot: mmu::Prot,
+        guard_size: usize,
+    ) -> Result<mmu::KernelMapping> {
+        vm.map_in_range_lowest(&self.obj.gem, 0..self.size, align, range, prot, guard_size)
     }
 
     /// Maps an exact backing subrange, retaining an explicit unmapped guard.
@@ -341,6 +368,76 @@ impl Allocator<'_> {
             cpu,
         )
     }
+
+    /// Place fresh backing at one address in the canonical and both alias VMs.
+    /// A client may retain mappings after their canonical reservation is freed.
+    /// Retry only address collisions, keeping the same backing throughout.
+    pub(crate) fn lower_with_aliases(
+        &self,
+        size: usize,
+        align: u64,
+        prot: mmu::Prot,
+        cpu: CpuMap,
+        aliases: [&mmu::Vm; 2],
+    ) -> Result<(KernelObject, [mmu::KernelMapping; 2])> {
+        if size == 0 || size % mmu::UAT_PGSZ != 0 {
+            return Err(EINVAL);
+        }
+        let mut object = KernelObject::backing(self.dev, size, cpu)?;
+        let mut range = crate::hw::t8140::dynamic::LOWER;
+        let mut searching = false;
+        loop {
+            // Keep ordinary best-fit placement on the uncontended path. A
+            // collision starts a lowest-address search over the whole arena.
+            let mapping = (if searching {
+                object.alias_in_lowest(
+                    self.uat.kernel_lower_vm(), range.clone(), align, prot, mmu::UAT_PGSZ,
+                )
+            } else {
+                object.obj.map_into_range(
+                    self.uat.kernel_lower_vm(), range.clone(), align, prot, true,
+                )
+            }).map_err(|error| if error == ENOSPC {
+                crate::g17::capacity::refused(crate::g17::capacity::Site::LowerVa)
+            } else { error })?;
+            let address = mapping.iova();
+            let end = address.checked_add(size as u64).ok_or(EOVERFLOW)?;
+            // Partial aliases are destroyed before releasing the canonical
+            // reservation, so a retry cannot expose its address prematurely.
+            let mapped: core::result::Result<_, (Error, usize)> = (|| {
+                let first = object.map_alias(aliases[0], address, prot)
+                    .map_err(|error| (error, 0))?;
+                let second = object.map_alias(aliases[1], address, prot)
+                    .map_err(|error| (error, 1))?;
+                Ok([first, second])
+            })();
+            match mapped {
+                Ok(mapped) => {
+                    object.mapping = Some(mapping);
+                    return Ok((object, mapped));
+                }
+                Err((error, index)) if error == ENOSPC && end < range.end => {
+                    drop(mapping);
+                    let start = if searching {
+                        address + mmu::UAT_PGSZ as u64
+                    } else {
+                        range.start
+                    };
+                    // Jump to an actual hole in the VM that refused the alias,
+                    // rather than remapping backing at every intervening page.
+                    let candidate = object.alias_in_lowest(
+                        aliases[index], start..range.end, align, prot, 0,
+                    ).map_err(|error| if error == ENOSPC {
+                        crate::g17::capacity::refused(crate::g17::capacity::Site::AliasVa)
+                    } else { error })?;
+                    range.start = candidate.iova();
+                    drop(candidate);
+                    searching = true;
+                }
+                Err((error, _)) => return Err(error),
+            }
+        }
+    }
 }
 
 /// Families whose upper mappings remain cached and installed until firmware
@@ -369,7 +466,16 @@ struct PoolInner {
     reserved: [usize; POOL_FAMILIES],
     bytes: usize,
     stopped: bool,
+    /// Objects the firmware may still reference after their owner dropped them, kept mapped
+    /// and out of reuse until firmware stop (see [`PooledObject::retain_until_stop`]).
+    kept: KVec<KernelObject>,
+    kept_bytes: usize,
+    /// Kept objects still owned by their users, whose list entries are reserved.
+    kept_reserved: usize,
 }
+
+/// Retained objects past this many are still retained, with one warning.
+const KEPT_WARN: usize = 256;
 
 /// Per-device cache-safe object recycling. Every converted mapping reserves
 /// one return slot before its page-table attributes change. Active leases and
@@ -393,6 +499,9 @@ struct CacheLease {
 pub(crate) struct PooledObject {
     object: core::mem::ManuallyDrop<KernelObject>,
     lease: Option<CacheLease>,
+    /// The pool keeping this object until firmware stop, and whether `reserve_kept` took its
+    /// list entry.
+    keep: Option<(kernel::sync::Arc<Pool>, bool)>,
 }
 
 impl core::ops::Deref for PooledObject {
@@ -406,11 +515,28 @@ impl core::ops::DerefMut for PooledObject {
         &mut self.object
     }
 }
+impl PooledObject {
+    /// The firmware may still reference this object after its owner drops it: keep it mapped
+    /// and never hand it out again before firmware stop. It leaves the reuse cache, so it
+    /// does not take cache capacity. Call from sleepable context: this reserves the list
+    /// entry, so the drop, wherever it happens, does not allocate.
+    pub(crate) fn retain_until_stop(&mut self, pool: &kernel::sync::Arc<Pool>) {
+        if self.keep.is_none() {
+            let reserved = pool.reserve_kept();
+            self.keep = Some((pool.clone(), reserved));
+        }
+    }
+}
+
 impl Drop for PooledObject {
     fn drop(&mut self) {
         // SAFETY: This destructor is the only operation that moves `object`
         // out; ManuallyDrop prevents a second implicit drop of the field.
         let object = unsafe { core::mem::ManuallyDrop::take(&mut self.object) };
+        if let Some((pool, reserved)) = self.keep.take() {
+            pool.keep_object(object, self.lease.take(), reserved);
+            return;
+        }
         match self.lease.take() {
             Some(lease) => lease.pool.return_object(object, &lease),
             None => drop(object),
@@ -426,7 +552,10 @@ impl Pool {
         }
         kernel::sync::Arc::pin_init(
             pin_init!(Self {
-                inner <- kernel::new_mutex!(PoolInner { returned, reserved: [0; POOL_FAMILIES], bytes: 0, stopped: false }, "g17::object::Pool"),
+                inner <- kernel::new_mutex!(PoolInner {
+                    returned, reserved: [0; POOL_FAMILIES], bytes: 0, stopped: false, kept: KVec::new(),
+                    kept_bytes: 0, kept_reserved: 0,
+                }, "g17::object::Pool"),
             }),
             GFP_KERNEL,
         )
@@ -475,6 +604,7 @@ impl Pool {
             return Ok(PooledObject {
                 object: core::mem::ManuallyDrop::new(entry.object),
                 lease: Some(lease()),
+                keep: None,
             });
         }
         let object = alloc.kernel(size, mmu::UAT_PGSZ as u64, prot, cpu)?;
@@ -499,6 +629,7 @@ impl Pool {
         let mut result = PooledObject {
             object: core::mem::ManuallyDrop::new(object),
             lease: reserved.then(lease),
+            keep: None,
         };
         if !reserved {
             return Ok(result);
@@ -558,10 +689,67 @@ impl Pool {
         core::mem::forget(object);
     }
 
+    /// Room for one more kept object, taken by the matching `keep_object`. Returns whether
+    /// it was reserved; after a failed allocation that drop leaks the object instead.
+    fn reserve_kept(&self) -> bool {
+        let mut inner = self.inner.lock();
+        let pending = inner.kept_reserved + 1;
+        if inner.kept.capacity() - inner.kept.len() < pending
+            && inner.kept.reserve(pending, GFP_KERNEL).is_err()
+        {
+            return false;
+        }
+        inner.kept_reserved = pending;
+        true
+    }
+
+    fn keep_object(&self, object: KernelObject, lease: Option<CacheLease>, reserved: bool) {
+        let mut inner = self.inner.lock();
+        if reserved {
+            inner.kept_reserved = inner.kept_reserved.saturating_sub(1);
+        }
+        if let Some(lease) = &lease {
+            // The object leaves the reuse cache and its capacity.
+            inner.reserved[lease.family as usize] -= 1;
+            inner.bytes -= object.size();
+        }
+        if inner.stopped {
+            drop(inner);
+            drop(object);
+            return;
+        }
+        let size = object.size();
+        if inner.kept.len() == KEPT_WARN {
+            pr_warn!("G17 keeps {} firmware-linked objects until the GPU firmware restarts\n", KEPT_WARN);
+        }
+        if !reserved {
+            // Another kept object's reservation must not be used: leak this one instead.
+            pr_err!("G17 could not record a firmware-linked object; leaking it\n");
+            core::mem::forget(object);
+            return;
+        }
+        // retain_until_stop reserved the entry; this never allocates.
+        match inner.kept.push_within_capacity(object) {
+            Ok(()) => inner.kept_bytes += size,
+            Err(error) => {
+                // Never unmap an object the firmware may still reference.
+                pr_err!("G17 could not record a firmware-linked object; leaking it\n");
+                core::mem::forget(error.0);
+            }
+        }
+    }
+
     /// Releases retained mappings after both firmware processors have stopped.
     /// Active objects returned later observe the same stop witness.
     pub(crate) fn stop_after_firmware(&self) {
-        self.inner.lock().stopped = true;
+        let kept = {
+            let mut inner = self.inner.lock();
+            inner.stopped = true;
+            inner.kept_bytes = 0;
+            core::mem::take(&mut inner.kept)
+        };
+        // Mapping teardown must not run while the pool mutex is held.
+        drop(kept);
         for index in 0..POOL_FAMILIES * POOL_SLOTS {
             let entry = {
                 let mut inner = self.inner.lock();
@@ -575,5 +763,19 @@ impl Pool {
             // Mapping teardown must not run while the pool mutex is held.
             drop(entry);
         }
+    }
+}
+
+impl Pool {
+    pub(crate) fn write_capacity(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        let inner = self.inner.lock();
+        for family in 0..POOL_FAMILIES {
+            let entries = &inner.returned[family * POOL_SLOTS..(family + 1) * POOL_SLOTS];
+            writeln!(f, "cached_objects_{} used={} total={} returned={} poisoned={}", family,
+                     inner.reserved[family], POOL_SLOTS, entries.iter().flatten().count(),
+                     entries.iter().flatten().filter(|entry| entry.poisoned).count())?;
+        }
+        writeln!(f, "cached_object_bytes used={} total={}", inner.bytes, POOL_BYTES)?;
+        writeln!(f, "firmware_linked_objects kept={} bytes={}", inner.kept.len(), inner.kept_bytes)
     }
 }

@@ -12,6 +12,7 @@ impl Registry {
         packet: &Arc<Packet>,
     ) -> Result<Frontier> {
         let mut frontier = Frontier::new();
+        let compute = packet.engine() == crate::g17::job::Engine::Compute;
         for entry in self.render.entries.iter().flatten() {
             if let Some(pair) = entry.pair.as_ref() {
                 pair.collect_dependencies(
@@ -19,6 +20,7 @@ impl Registry {
                     packet.completion.status(),
                     packet.order.wait_through[0],
                     &mut frontier,
+                    compute,
                 )?;
             } else if let Some(dependencies) = entry.borrowed_dependencies.as_ref() {
                 dependencies.collect(
@@ -26,6 +28,7 @@ impl Registry {
                     packet.completion.status(),
                     packet.order.wait_through[0],
                     &mut frontier,
+                    compute,
                 )?;
             }
         }

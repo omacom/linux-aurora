@@ -1129,7 +1129,8 @@ int smu_cmn_update_table_read_arg(struct smu_context *smu,
 	table_size = smu_table->tables[table_index].size;
 
 	if (drv2smu) {
-		memcpy(table->cpu_addr, table_data, table_size);
+		amdgpu_bo_memcpy_to(table->bo, table->cpu_addr, table_data,
+				    table_size);
 		/*
 		 * Flush hdp cache: to guard the content seen by
 		 * GPU is consitent with CPU.
@@ -1151,7 +1152,8 @@ int smu_cmn_update_table_read_arg(struct smu_context *smu,
 
 	if (!drv2smu) {
 		amdgpu_hdp_invalidate(adev, NULL);
-		memcpy(table_data, table->cpu_addr, table_size);
+		amdgpu_bo_memcpy_from(table->bo, table_data, table->cpu_addr,
+				      table_size);
 	}
 
 	return 0;

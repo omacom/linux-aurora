@@ -45,6 +45,13 @@ def main():
              'static int apple_pmp_report_wait_t6030_14(', 'int apple_pmp_report_wait_supplier_ready(']
     if 'static int apple_pmp_report_wait_t6030_bound(' in source:
         names.insert(names.index('static struct device_node *apple_pmp_report_t6030_entry('), 'static int apple_pmp_report_wait_t6030_bound(')
+    # System sleep (apple,release-for-sleep), where the source has it.
+    sleep = 'static int apple_pmp_report_entry_sleep(' in source
+    if sleep:
+        at = names.index('static int apple_pmp_report_entry_power_on(')
+        names[at:at] = ['static int apple_pmp_report_entry_sleep(',
+                        'static int apple_pmp_report_entry_suspend_noirq(',
+                        'static int apple_pmp_report_entry_resume_noirq(']
     offsets = re.search(r'static const struct apple_pmp_report_offsets apple_pmp_offsets_t6030 = \{.*?\n\};', source, re.S)[0]
     functions = '\n'.join(extract.function(source, n) for n in names)
     # The T8122 14.x wait (CONFIG_APPLE_T8122_GPU_PMP_LINK=0 here) precedes the dispatch; it is
@@ -54,7 +61,7 @@ def main():
     def with_t8122(text):
         return text.replace(dispatch, t8122 + dispatch, 1)
     validation = re.sub(r'^#include .*\n', '', (ROOT / 'drivers/pmdomain/apple/pmp-report-validation.h').read_text(), flags=re.M)
-    code = offsets + '\n' + validation + '\n' + functions
+    code = ('#define HAVE_SLEEP_RELEASE 1\n' if sleep else '') + offsets + '\n' + validation + '\n' + functions
     # The actual overlay must still describe a halted supplier and disabled DMA/mailbox.
     assert overlay.count('status = \"disabled\";') >= 3
     (args.output / 'production.h').write_text(with_t8122(code))
@@ -87,6 +94,13 @@ def main():
             ('storage-ack-layout', 'st->ack & ~st->record_seed,', 'st->seed & ~st->record_seed,'),
             ('skip-supplier-wait', 'apple_pmp_report_wait_ready(entry, msecs_to_jiffies(timeout_ms))', '((void)timeout_ms, 0)'),
         ]
+        if sleep:
+            controls += [
+                ('sleep-releases-unacked', '!(readq(rep->base + rep->offsets->actual) & BIT_ULL(ent->id))', 'false'),
+                ('sleep-not-reasserted', 'ret = apple_pmp_report_entry_sleep(ent, false);', 'ret = 0;'),
+                ('sleep-ignores-mark', '!ent->sleep_release ||', ''),
+                ('sleep-not-rewritten', '++tries < 3', '++tries < 1'),
+            ]
         for name, old, new in controls:
             assert code.count(old) == 1, (name, code.count(old))
             (args.output / 'production.h').write_text(with_t8122(code.replace(old, new)))

@@ -162,12 +162,10 @@ struct DCP_FW_NAME(dcp_swap_submit_resp) {
 } __packed;
 
 /*
- * A406 swap_start / A473 set_power_state.  H17P shrank both requests: the
- * 0x10-byte struct dcp_iouserclient became a bare u64 handle and the
- * swap_start response no longer echoes it.  swap_start is 0x10 in / 0x8 out,
- * set_power_state 0x10 in.
+ * A406 swap_start.  From 14.7 the 0x10-byte struct dcp_iouserclient is a bare
+ * u64 handle, and the response no longer echoes it: 0x10 in, 8 out.
  */
-#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0) || DCP_FW_LAYOUT_14_7(DCP_FW_VER)
 struct DCP_FW_NAME(dcp_swap_start_req) {
 	u32 swap_id;
 	u64 client;			/* IOUserClient kernel VA */
@@ -180,16 +178,8 @@ struct DCP_FW_NAME(dcp_swap_start_resp) {
 	u32 ret;
 } __packed;
 
-struct DCP_FW_NAME(dcp_set_power_state_req) {
-	u64 unklong;
-	u32 unkint;			/* widened from u8 on H17P */
-	u8 unkint_null;
-	u8 padding[3];
-} __packed;
-
 static_assert(sizeof(struct DCP_FW_NAME(dcp_swap_start_req)) == 0x10);
 static_assert(sizeof(struct DCP_FW_NAME(dcp_swap_start_resp)) == 0x8);
-static_assert(sizeof(struct DCP_FW_NAME(dcp_set_power_state_req)) == 0x10);
 #else
 struct DCP_FW_NAME(dcp_swap_start_req) {
 	u32 swap_id;
@@ -204,7 +194,22 @@ struct DCP_FW_NAME(dcp_swap_start_resp) {
 	struct dcp_iouserclient client;
 	u32 ret;
 } __packed;
+#endif
 
+/*
+ * A473 set_power_state.  H17P shrank the request: the iouserclient became a
+ * bare u64 handle, 0x10 in.
+ */
+#if DCP_FW_VER >= DCP_FW_VERSION(26, 0, 0)
+struct DCP_FW_NAME(dcp_set_power_state_req) {
+	u64 unklong;
+	u32 unkint;			/* widened from u8 on H17P */
+	u8 unkint_null;
+	u8 padding[3];
+} __packed;
+
+static_assert(sizeof(struct DCP_FW_NAME(dcp_set_power_state_req)) == 0x10);
+#else
 struct DCP_FW_NAME(dcp_set_power_state_req) {
 	u64 unklong;
 	u8 unkbool;

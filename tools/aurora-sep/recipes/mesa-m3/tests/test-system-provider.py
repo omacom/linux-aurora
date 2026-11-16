@@ -29,6 +29,38 @@ class SystemProviderTest(unittest.TestCase):
                                             **(environment or {})},
                               capture_output=True, text=True, timeout=10)
 
+    def test_bash_append_cannot_override_system_admission_silently(self):
+        folder = self.root / "home/tester/.config/uwsm"
+        folder.mkdir()
+        config = folder / "env"
+        cases = (("LIBGL_ALWAYS_SOFTWARE", "1"),
+                 ("LD_LIBRARY_PATH", "/opt/custom/lib"))
+        for name, value in cases:
+            with self.subTest(variable=name):
+                config.write_text("export " + name + "+=" + value + "\n")
+                # The target's sh is Bash. This is a real assignment in
+                # POSIX mode, although the legacy parser ignores it.
+                shell = subprocess.run(
+                    ["bash", "--posix", "-c",
+                     'unset LIBGL_ALWAYS_SOFTWARE LD_LIBRARY_PATH; . "$1"; '
+                     'printf "%s" "${!2}"', "bash", str(config), name],
+                    env={"PATH": "/usr/bin:/bin"}, capture_output=True,
+                    text=True, timeout=10)
+                self.assertEqual(shell.returncode, 0, shell.stderr)
+                self.assertEqual(shell.stdout, value)
+                result = self.run_detector()
+                self.assertEqual(result.returncode, 3, result.stdout)
+                self.assertIn(name, result.stdout)
+                self.assertIn("user_setup=unknown", result.stdout)
+                # Keep the default legacy decision unchanged.
+                self.assertEqual(self.run_detector(system=False).returncode, 0)
+
+    def test_unrelated_bash_append_is_not_a_mesa_choice(self):
+        folder = self.root / "home/tester/.config/uwsm"
+        folder.mkdir()
+        (folder / "env").write_text("export MY_TOOLS_PATH+=/tools\n")
+        self.assertEqual(self.run_detector().returncode, 0)
+
     def test_clean_setup(self):
         self.assertEqual(self.run_detector().returncode, 0)
 

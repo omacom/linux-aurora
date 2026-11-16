@@ -508,8 +508,8 @@ static void mt_regulatory_notify(struct wiphy *wiphy, struct regulatory_request 
 			channel->flags |= IEEE80211_CHAN_DISABLED;
 			continue;
 		}
-		/* Radar channels carry cfg80211's RADAR flag: the firmware may
-		 * listen there, but the station never probes or joins them.
+		/* Radar channels carry cfg80211's RADAR flag: the station never
+		 * probes them, and joins only an AP it has heard there.
 		 */
 		put_unaligned_le16(channel->hw_value, reg.domain + 12 + count * 8);
 		/* Driver bandwidth limits are already in channel->flags. Adding
@@ -599,7 +599,7 @@ static const struct cfg80211_ops mt_cfg_ops = {
 int mt_register_regulatory_gate(struct mt7932 *m)
 {
 	static const int rates[] = {10,20,55,110,60,90,120,180,240,360,480,540};
-	static const u32 ciphers[] = { WLAN_CIPHER_SUITE_CCMP };
+	static const u32 ciphers[] = { WLAN_CIPHER_SUITE_CCMP, WLAN_CIPHER_SUITE_TKIP };
 	static const u32 akms[] = {
 		WLAN_AKM_SUITE_PSK, WLAN_AKM_SUITE_SAE, WLAN_AKM_SUITE_OWE,
 	};

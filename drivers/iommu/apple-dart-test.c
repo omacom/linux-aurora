@@ -71,6 +71,108 @@ static void apple_dart_test_iommu_specifiers(struct kunit *test)
 	}
 }
 
+static void apple_dart_test_consumer_window(struct kunit *test)
+{
+	__be32 value[] = { cpu_to_be32(0x100), 0, cpu_to_be32(0x10), 0 };
+	struct property property = {
+		.name = "apple,dma-range",
+		.length = sizeof(value),
+		.value = value,
+	};
+	struct device_node node = { .properties = &property };
+	struct of_phandle_args args = { .args_count = 1 };
+	struct apple_dart *dart;
+	struct device *dev;
+	dma_addr_t dma_min, dma_max;
+	int i, ret;
+
+	dev = kunit_device_register(test, "apple-dart-consumer-window-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	dart = kunit_kzalloc(test, sizeof(*dart), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dart);
+	dart->ias = 36;
+	dart->pgsize = SZ_16K;
+	dev->of_node = &node;
+
+	/* J613's common scanout aperture must survive both DART defaults. */
+	for (i = 0; i < 2; i++) {
+		dart->dma_min = i ? 0 : 0x10000000000;
+		dart->dma_max = i ? 0xffffeffff : 0x10fffffffff;
+		ret = apple_dart_parse_dma_window(dev, dart, &args,
+						  &dma_min, &dma_max);
+		KUNIT_EXPECT_EQ(test, ret, 0);
+		KUNIT_EXPECT_EQ(test, dma_min, (dma_addr_t)0x10000000000);
+		KUNIT_EXPECT_EQ(test, dma_max, (dma_addr_t)0x10fffffffff);
+	}
+
+	/* Domain allocation gives the consumer priority over five-cell args too. */
+	args.args_count = 5;
+	args.args[3] = 0xf;
+	args.args[4] = 0xffff0000;
+	ret = apple_dart_parse_dma_window(dev, dart, &args, &dma_min, &dma_max);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, dma_min, (dma_addr_t)0x10000000000);
+	KUNIT_EXPECT_EQ(test, dma_max, (dma_addr_t)0x10fffffffff);
+
+	/* An override must not make a malformed stream specifier acceptable. */
+	args.args[3] = 0;
+	args.args[4] = 0;
+	KUNIT_EXPECT_EQ(test, apple_dart_parse_dma_window(dev, dart, &args,
+							 &dma_min, &dma_max), -EINVAL);
+
+	/* PIODMA is a different consumer of the same external display DART. */
+	dev->of_node = NULL;
+	args.args_count = 1;
+	args.args[0] = 4;
+	ret = apple_dart_parse_dma_window(dev, dart, &args, &dma_min, &dma_max);
+	KUNIT_EXPECT_EQ(test, ret, 0);
+	KUNIT_EXPECT_EQ(test, dma_min, (dma_addr_t)0);
+	KUNIT_EXPECT_EQ(test, dma_max, (dma_addr_t)0xffffeffff);
+}
+
+static void apple_dart_test_invalid_consumer_window(struct kunit *test)
+{
+	static const struct {
+		u64 base, size;
+	} windows[] = {
+		{ 0, 0 },
+		{ U64_MAX - SZ_16K + 1, 2 * SZ_16K },
+		{ 1, SZ_16K },
+		{ 0, SZ_16K + 1 },
+		{ 0, BIT_ULL(37) },
+	};
+	__be64 value[2];
+	struct property property = {
+		.name = "apple,dma-range",
+		.length = sizeof(value),
+		.value = value,
+	};
+	struct device_node node = { .properties = &property };
+	struct of_phandle_args args = { .args_count = 1 };
+	struct apple_dart *dart;
+	struct device *dev;
+	dma_addr_t dma_min, dma_max;
+	int i;
+
+	dev = kunit_device_register(test, "apple-dart-invalid-window-test");
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	dart = kunit_kzalloc(test, sizeof(*dart), GFP_KERNEL);
+	KUNIT_ASSERT_NOT_NULL(test, dart);
+	dart->ias = 36;
+	dart->pgsize = SZ_16K;
+	dev->of_node = &node;
+	for (i = 0; i < ARRAY_SIZE(windows); i++) {
+		value[0] = cpu_to_be64(windows[i].base);
+		value[1] = cpu_to_be64(windows[i].size);
+		KUNIT_EXPECT_EQ(test, apple_dart_parse_dma_window(dev, dart, &args,
+							 &dma_min, &dma_max), -EINVAL);
+	}
+	property.length = sizeof(__be32);
+	KUNIT_EXPECT_LT(test, apple_dart_parse_dma_window(dev, dart, &args,
+							 &dma_min, &dma_max), 0);
+	dev->of_node = NULL;
+}
+
 static void apple_dart_test_before_attach(struct kunit *test)
 {
 	struct apple_dart_master_cfg master = {};
@@ -942,6 +1044,8 @@ static void apple_dart_test_resume_reset_retry(struct kunit *test)
 
 static struct kunit_case apple_dart_test_cases[] = {
 	KUNIT_CASE(apple_dart_test_iommu_specifiers),
+	KUNIT_CASE(apple_dart_test_consumer_window),
+	KUNIT_CASE(apple_dart_test_invalid_consumer_window),
 	KUNIT_CASE(apple_dart_test_independent_remap_roots),
 	KUNIT_CASE(apple_dart_test_before_attach),
 	KUNIT_CASE(apple_dart_test_locked_handoff),

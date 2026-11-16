@@ -93,7 +93,7 @@ impl Vm {
         drop(mutation);
         let _ = inner;
         ret?;
-        Ok(KernelMapping(node))
+        Ok(KernelMapping(ManuallyDrop::new(node)))
     }
 
     /// [`Vm::map_io`] at `iova`, without the per-mapping log line.

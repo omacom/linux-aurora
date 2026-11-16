@@ -217,3 +217,17 @@ mod tests {
         assert!(reader.read_supported::<Pair>(8, 8).is_err());
     }
 }
+
+/// Fallibly initializes `slot` with `init` (`pin_init::raw_try_init` of later pin-init releases).
+///
+/// # Safety
+///
+/// - `slot` is a valid pointer to uninitialized memory.
+/// - the caller does not touch `slot` when `Err` is returned, they are only permitted to
+///   deallocate.
+/// - `slot` will not move until it is dropped, i.e. it will be pinned.
+#[inline(always)]
+pub(crate) unsafe fn raw_try_init<T, E>(slot: *mut T, init: impl PinInit<T, E>) -> Result<(), E> {
+    // SAFETY: Per safety requirement.
+    unsafe { init.__pinned_init(slot) }
+}

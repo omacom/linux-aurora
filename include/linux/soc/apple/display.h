@@ -7,5 +7,6 @@ struct device;
 /* Initial native display admission, before starting retained G15 firmware. */
 int apple_drm_t6030_link_device(struct device *consumer);
 int apple_drm_t6031_link_device(struct device *consumer);
+int apple_drm_t6034_link_device(struct device *consumer);
 
 #endif

@@ -59,7 +59,7 @@ impl RenderId {
                 }
             }
         }
-        Err(ENOSPC)
+        Err(super::capacity::refused(super::capacity::Site::RenderPoolIds))
     }
 }
 impl Drop for RenderId {
@@ -69,19 +69,84 @@ impl Drop for RenderId {
     }
 }
 
+/// Free-list backing is by far the largest user of the shared lower GPU VA
+/// window, and placing it populates every page before the window is searched.
+/// After a refused placement, builders waiting for capacity would allocate and
+/// free tens of MiB per attempt while nothing in the window changed. A refused
+/// size is therefore refused again without allocating until free-list backing
+/// is freed, except for one probe per interval across all callers.
+static LOWER_FREED: AtomicU64 = AtomicU64::new(0);
+/// `LOWER_FREED + 1` at the latest refusal, or zero after a placement fits.
+static LOWER_REFUSED: AtomicU64 = AtomicU64::new(0);
+static LOWER_REFUSED_SIZE: AtomicU64 = AtomicU64::new(0);
+static LOWER_PROBE_AT: AtomicU64 = AtomicU64::new(0);
+const LOWER_PROBE_NS: u64 = 100_000_000;
+
+/// The window refused free-list backing and nothing was freed since.
+pub(crate) fn lower_pressure() -> bool {
+    let refused = LOWER_REFUSED.load(Ordering::Acquire);
+    refused != 0 && refused == LOWER_FREED.load(Ordering::Acquire).wrapping_add(1)
+}
+
+/// Place free-list backing of `size` bytes unless the same or a smaller size
+/// was refused with nothing freed since; `place` allocates and maps it.
+fn place_lower<T>(size: usize, place: impl FnOnce() -> Result<T>) -> Result<T> {
+    let size = size as u64;
+    if lower_pressure() && size >= LOWER_REFUSED_SIZE.load(Ordering::Relaxed) {
+        let now = super::now_ns();
+        let at = LOWER_PROBE_AT.load(Ordering::Relaxed);
+        if now < at
+            || LOWER_PROBE_AT
+                .compare_exchange(at, now + LOWER_PROBE_NS, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+        {
+            return Err(ENOSPC);
+        }
+    }
+    match place() {
+        Err(error) if error == ENOSPC => {
+            LOWER_REFUSED_SIZE.store(size, Ordering::Relaxed);
+            LOWER_PROBE_AT.store(super::now_ns() + LOWER_PROBE_NS, Ordering::Relaxed);
+            LOWER_REFUSED.store(
+                LOWER_FREED.load(Ordering::Acquire).wrapping_add(1),
+                Ordering::Release,
+            );
+            Err(error)
+        }
+        Ok(placed) => {
+            if size >= LOWER_REFUSED_SIZE.load(Ordering::Relaxed) {
+                LOWER_REFUSED.store(0, Ordering::Release);
+            }
+            Ok(placed)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) struct Pages {
     backing: KernelObject,
     blocks: usize,
     layout: RunLayout,
 }
+impl Drop for Pages {
+    fn drop(&mut self) {
+        LOWER_FREED.fetch_add(1, Ordering::AcqRel);
+    }
+}
 impl Pages {
     fn new(alloc: &Allocator<'_>, blocks: usize, layout: RunLayout) -> Result<Self> {
-        let mut backing = alloc.lower(
-            TABLE_SIZE + blocks * FREE_LIST_BLOCK_SIZE,
-            mmu::UAT_PGSZ as u64,
-            mmu::PROT_GPU_SHARED_RW,
-            CpuMap::WriteCombined,
-        )?;
+        let size = TABLE_SIZE + blocks * FREE_LIST_BLOCK_SIZE;
+        let backing = place_lower(size, || {
+            alloc.lower(
+                size,
+                mmu::UAT_PGSZ as u64,
+                mmu::PROT_GPU_SHARED_RW,
+                CpuMap::WriteCombined,
+            )
+        })?;
+        Self::from_backing(backing, blocks, layout)
+    }
+    fn from_backing(mut backing: KernelObject, blocks: usize, layout: RunLayout) -> Result<Self> {
         let base = backing.gpu_va();
         backing.initialize::<PoolTables>(0, |tables| tables.init(base, blocks, layout))?;
         Ok(Self {
@@ -100,7 +165,7 @@ impl Pages {
     pub(crate) fn map_client(&self, vm: &mmu::Vm) -> Result<mmu::KernelMapping> {
         self.backing.map_alias(vm, self.page_list_va(), mmu::PROT_GPU_SHARED_RW)
     }
-    fn page_list_va(&self) -> u64 {
+    pub(crate) fn page_list_va(&self) -> u64 {
         self.backing.gpu_va()
     }
     fn run_list_va(&self) -> u64 {
@@ -144,14 +209,17 @@ impl RenderBacking {
         if blocks < RENDER_BLOCKS || blocks > PAGE_LIST_SIZE / (FREE_LIST_BLOCK_PAGES as usize * 8) {
             return Err(EINVAL);
         }
-        let pages = Pages::new(alloc, blocks, RunLayout::Render)?;
-        let address = pages.page_list_va();
-        let global = pages
-            .backing
-            .map_alias(render_global, address, mmu::PROT_GPU_SHARED_RW)?;
-        let client = pages
-            .backing
-            .map_alias(client, address, mmu::PROT_GPU_SHARED_RW)?;
+        let size = TABLE_SIZE + blocks * FREE_LIST_BLOCK_SIZE;
+        let (backing, [global, client]) = place_lower(size, || {
+            alloc.lower_with_aliases(
+                size,
+                mmu::UAT_PGSZ as u64,
+                mmu::PROT_GPU_SHARED_RW,
+                CpuMap::WriteCombined,
+                [render_global, client],
+            )
+        })?;
+        let pages = Pages::from_backing(backing, blocks, RunLayout::Render)?;
         Ok(Self {
             _client: client,
             _global: global,
@@ -522,6 +590,18 @@ impl ComputePool {
         if self.pages.is_some() {
             return Err(EBUSY);
         }
+        self.write_pages(&pages)?;
+        self.pages = Some(pages);
+        Ok(())
+    }
+    /// Preserve both sets of pages on failure. The caller owns the consumed
+    /// release and returns old pages for destruction outside the device mutex.
+    pub(crate) fn replace_pages(&mut self, pages: &mut Option<Pages>) -> Result {
+        self.write_pages(pages.as_ref().ok_or(EINVAL)?)?;
+        core::mem::swap(&mut self.pages, pages);
+        Ok(())
+    }
+    fn write_pages(&mut self, pages: &Pages) -> Result {
         let completed = self.control.pointer(FreeListControl::COMPLETED, 8)?;
         let mut bytes = [0; 8];
         for (index, byte) in bytes.iter_mut().enumerate() {
@@ -540,9 +620,9 @@ impl ComputePool {
         header.unk_54[..8].copy_from_slice(&bytes);
         self.control.write(0, header)?;
         fence(Ordering::SeqCst);
-        self.pages = Some(pages);
         Ok(())
     }
+
     pub(crate) fn map_client(&mut self, vm: &mmu::Vm) -> Result<mmu::KernelMapping> {
         let pages = self.pages.as_mut().ok_or(EAGAIN)?;
         let address = pages.page_list_va();
@@ -590,9 +670,17 @@ pub(crate) struct Owner {
 enum LeasePhase {
     Preparing,
     Ready,
+    /// No reference since the given time. The registration stays live so that
+    /// the owner's next render reuses it without a control-ring release; the
+    /// release becomes pending when the linger ends.
+    Lingering(u64),
     ReleaseSent(u32),
     Released,
 }
+
+/// How long an idle registration of an open owner may stay live: the
+/// firmware's effort idle hold.
+pub(crate) const LINGER_NS: u64 = 16_000_000;
 
 /// References to one prepopulated owner: preparation and two engine commands
 /// per render. Published releases do not gate reacquisition; their consumption
@@ -627,10 +715,14 @@ impl Lease {
         }
         let generation = previous.generation.checked_add(1).ok_or(EOVERFLOW)?;
         let same_owner = previous.owner == owner;
+        // A lingering registration was never released: it continues like an
+        // overlap of the owner's previous render.
         let overlapping = same_owner
-            && previous.phase == LeasePhase::Ready
-            && previous.references >= 2
-            && previous.commands >= 2;
+            && match previous.phase {
+                LeasePhase::Ready => previous.references >= 2 && previous.commands >= 2,
+                LeasePhase::Lingering(_) => true,
+                _ => false,
+            };
         let reacquire = previous.reacquirable();
         if !overlapping && !reacquire {
             return Err(EBUSY);
@@ -692,15 +784,34 @@ impl Lease {
         Err(EIO)
     }
     /// Both engines have retired this render's exact retained submission.
+    /// With `linger`, a registration left without references stays live
+    /// instead of making its final release pending.
     pub(crate) fn complete_render(
         &mut self,
+        linger: bool,
     ) -> Result<Option<super::fw::channels::FreeListRelease>> {
         if self.phase != LeasePhase::Ready || self.references < 2 || self.commands < 2 {
             return Err(EINVAL);
         }
         self.references -= 2;
         self.commands -= 2;
+        if self.references == 0 && linger {
+            self.phase = LeasePhase::Lingering(super::now_ns().max(1));
+        }
         Ok(self.pending_release())
+    }
+    /// The time since which an idle registration lingers, if it does.
+    pub(crate) fn lingering(&self) -> Option<u64> {
+        match self.phase {
+            LeasePhase::Lingering(since) => Some(since),
+            _ => None,
+        }
+    }
+    /// Ends a linger; the final release becomes pending.
+    pub(crate) fn end_linger(&mut self) {
+        if matches!(self.phase, LeasePhase::Lingering(_)) {
+            self.phase = LeasePhase::Ready;
+        }
     }
     pub(crate) fn pending_release(&self) -> Option<super::fw::channels::FreeListRelease> {
         (self.phase == LeasePhase::Ready && self.references == 0).then(|| {
@@ -741,4 +852,31 @@ pub(crate) fn control_consumed(consumer: u32, producer: u32, cursor: u32) -> Res
     let pending = producer.wrapping_sub(consumer) & (slots - 1);
     let ahead = cursor.wrapping_sub(consumer) & (slots - 1);
     Ok(ahead == 0 || ahead > pending)
+}
+
+impl RenderIds {
+    pub(crate) fn used(&self) -> u32 {
+        self.used[0].load(Ordering::Acquire).count_ones()
+            + (self.used[1].load(Ordering::Acquire) & !(1u64 << 63)).count_ones()
+    }
+}
+
+#[kunit_tests(asahi_g17_render_id_capacity)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn rejected_pool_construction_returns_all_render_ids() {
+        let ids = Arc::new(RenderIds::new(), GFP_KERNEL).unwrap();
+        for _ in 0..8 {
+            let mut pools = KVec::with_capacity(127, GFP_KERNEL).unwrap();
+            for _ in 0..127 {
+                pools.push(RenderId::new(&ids).unwrap(), GFP_KERNEL).unwrap();
+            }
+            assert_eq!(ids.used(), 127);
+            assert!(matches!(RenderId::new(&ids), Err(ENOSPC)));
+            drop(pools);
+            assert_eq!(ids.used(), 0);
+        }
+    }
 }

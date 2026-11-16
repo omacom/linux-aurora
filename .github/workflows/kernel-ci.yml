@@ -7,9 +7,11 @@
 #                  label for a build now (kernel-ci-label.yml)
 #   merge queue    everything: the kernel package built with omarchy-pkgs'
 #                  own recipe, KUnit, a QEMU boot that loads every module,
-#                  and a comparison with the target branch's package
-#   push           the merged commit, reusing the queue's build; attests
-#                  the packages
+#                  and a comparison with the target branch's package; the
+#                  build and tests are skipped when an eligible run at the
+#                  head being merged tested exactly the same tree
+#   push           the merged commit, reusing a branch or queue build for
+#                  the key, else building it; attests the packages
 #   nightly        rebuilds from scratch, so a change in omarchy-pkgs or in
 #                  the Arch Linux ARM packages it builds with shows up
 #                  before the next release

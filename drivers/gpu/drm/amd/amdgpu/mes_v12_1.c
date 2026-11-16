@@ -997,7 +997,8 @@ static int mes_v12_1_allocate_ucode_buffer(struct amdgpu_device *adev,
 		return r;
 	}
 
-	memcpy(adev->mes.ucode_fw_ptr[inst], fw_data, fw_size);
+	amdgpu_bo_memcpy_to(adev->mes.ucode_fw_obj[inst],
+			    adev->mes.ucode_fw_ptr[inst], fw_data, fw_size);
 
 	amdgpu_bo_kunmap(adev->mes.ucode_fw_obj[inst]);
 	amdgpu_bo_unreserve(adev->mes.ucode_fw_obj[inst]);
@@ -1032,7 +1033,8 @@ static int mes_v12_1_allocate_ucode_data_buffer(struct amdgpu_device *adev,
 		return r;
 	}
 
-	memcpy(adev->mes.data_fw_ptr[inst], fw_data, fw_size);
+	amdgpu_bo_memcpy_to(adev->mes.data_fw_obj[inst],
+			    adev->mes.data_fw_ptr[inst], fw_data, fw_size);
 
 	amdgpu_bo_kunmap(adev->mes.data_fw_obj[inst]);
 	amdgpu_bo_unreserve(adev->mes.data_fw_obj[inst]);

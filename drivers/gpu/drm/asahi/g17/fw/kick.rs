@@ -234,7 +234,7 @@ impl McacheRange {
             return Err(EINVAL);
         }
         Ok(Self {
-            start: start | (context as u64) << Self::CONTEXT_SHIFT | Self::UNK_START,
+            start: start | u64::from(context) << Self::CONTEXT_SHIFT | Self::UNK_START,
             end: end | Self::UNK_END | 1 << (Self::CLASS_SHIFT + class as u32),
         })
     }
@@ -278,6 +278,20 @@ impl RegisterArray {
         self.size = (size_of_val(writes) as u32) << 16 | count as u32;
         Ok(())
     }
+
+    /// Stores `writes` without the entry at `skip`, exactly as [`Self::set`] stores the
+    /// remaining writes, without first copying them elsewhere.
+    pub(crate) fn set_without(&mut self, self_va: u64, writes: &[RegisterWrite], skip: usize) -> Result {
+        let count = writes.len().checked_sub(1).ok_or(EINVAL)?;
+        if skip > count || count > REGISTER_ARRAY_ENTRIES {
+            return Err(EINVAL);
+        }
+        self.entries[..skip].copy_from_slice(&writes[..skip]);
+        self.entries[skip..count].copy_from_slice(&writes[skip + 1..]);
+        self.self_va = self_va;
+        self.size = ((count * size_of::<RegisterWrite>()) as u32) << 16 | count as u32;
+        Ok(())
+    }
 }
 
 /// Binding of one [`RegisterArray`] to a kick entry.
@@ -297,7 +311,7 @@ impl RegisterArrayBinding {
             return Err(EINVAL);
         }
         Ok(Self {
-            word: packed_va(array_va)? | (checkpoint as u64) << Self::CHECKPOINT_SHIFT,
+            word: packed_va(array_va)? | u64::from(checkpoint) << Self::CHECKPOINT_SHIFT,
         })
     }
 
@@ -332,7 +346,7 @@ impl McacheTable {
 
     fn word(self) -> u64 {
         (self.va >> PACKED_VA_SHIFT) << Self::VA_SHIFT
-            | ((self.count - 1) as u64) << Self::COUNT_SHIFT
+            | u64::from(self.count - 1) << Self::COUNT_SHIFT
     }
 }
 
@@ -444,8 +458,8 @@ impl KickEntry {
         }
 
         let mut header = args.timestamp.get() << Self::TIMESTAMP_SHIFT
-            | (args.qid as u64) << Self::QID_SHIFT
-            | (args.priority as u64) << Self::PRIORITY_SHIFT;
+            | u64::from(args.qid) << Self::QID_SHIFT
+            | u64::from(args.priority) << Self::PRIORITY_SHIFT;
         if args.scs_enabled {
             header |= Self::SCS_ENABLED;
         }
@@ -478,9 +492,9 @@ impl KickEntry {
             mcache,
             descriptor_va: args.descriptor_va,
             queue_va: args.queue_va,
-            dependency_control: mask as u64
-                | (args.qos.slot as u64) << Self::QOS_SLOT_SHIFT
-                | (args.qos.class as u64) << Self::QOS_CLASS_SHIFT
+            dependency_control: u64::from(mask)
+                | u64::from(args.qos.slot) << Self::QOS_SLOT_SHIFT
+                | u64::from(args.qos.class) << Self::QOS_CLASS_SHIFT
                 | Self::UNK_DEPENDENCY_CONTROL,
             dependencies,
             event_mask: args.event_mask,

@@ -45,7 +45,7 @@ static void host_log(const char *format, ...)
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 struct device_node {
 	const char *name, *compatible;
-	bool available, always_on, no_ack, deferred, uuid, soc_record;
+	bool available, always_on, no_ack, deferred, uuid, soc_record, release_sleep;
 	u32 reg;
 	int refs;
 	struct device_node *parent, *child, *sibling, *pmp;
@@ -142,6 +142,7 @@ struct apple_pmp_report_entry {
 	struct device_node *node, *report_node;
 	u32 id;
 	bool no_ack, removed;
+	bool sleep_release, released;
 };
 #define genpd_to_apple_pmp_report_entry(p) \
 	container_of(p, struct apple_pmp_report_entry, genpd)
@@ -297,11 +298,18 @@ static u64 readq(const void *a)
 {
 	return *(const u64 *)a;
 }
+/* The sleep cases: the PMP acknowledges the requests it is given, ack_late writes late. */
+static bool ack_follows;
+static unsigned int ack_late;
 static void writeq(u64 v, void *a)
 {
 	assert(a == (char *)regs + 0x108c0);
 	*(u64 *)a = v;
 	regs[0x1180 / 8] = v;
+	if (ack_follows && ack_late)
+		ack_late--;
+	else if (ack_follows)
+		regs[0x11c0 / 8] = v;
 }
 #define readq_poll_timeout(address, value, condition, delay, timeout) \
 	({                                                            \
@@ -364,6 +372,8 @@ static bool of_property_read_bool(const struct device_node *n, const char *p)
 		return n->deferred;
 	if (!strcmp(p, "apple,soc-device-record"))
 		return n->soc_record;
+	if (!strcmp(p, "apple,release-for-sleep"))
+		return n->release_sleep;
 	return false;
 }
 static bool of_property_present(const struct device_node *n, const char *p)
@@ -666,6 +676,8 @@ static struct apple_pmp_report *setup(void)
 			put32(devices + i * 0x7c + 8, 2);
 	}
 	ack_polls = 0;
+	ack_follows = false;
+	ack_late = 0;
 	check_error = enable_error = 0;
 	hw_binds = hw_ready = true;
 	hw_ack = BIT_ULL(7);
@@ -798,6 +810,48 @@ int main(void)
 	assert(g15_vote() == -EINVAL && commands == 0 && !enables);
 	cases++;
 	cleanup();
+#ifdef HAVE_SLEEP_RELEASE
+	/* System sleep withdraws an acknowledged request marked for it, then asserts it again. */
+	setup();
+	entries[1].release_sleep = true;
+	assert(apple_pmp_report_probe(&report_dev) == 0);
+	assert(apple_pmp_report_wait_ready(&entries[0], 30000) == 0);
+	struct apple_pmp_report_entry *disp = entry_devs[0].dev.data;
+	struct apple_pmp_report_entry *ext = entry_devs[1].dev.data;
+
+	assert(ext->sleep_release && !disp->sleep_release);
+	ack_follows = true;
+	regs[0x11c0 / 8] = regs[0x1180 / 8];
+	u64 target = regs[0x1180 / 8];
+
+	assert(target & BIT_ULL(8));
+	assert(apple_pmp_report_entry_suspend_noirq(&entry_devs[0].dev) == 0 &&
+	       !disp->released && regs[0x1180 / 8] == target);
+	assert(apple_pmp_report_entry_suspend_noirq(&entry_devs[1].dev) == 0);
+	assert(ext->released && regs[0x1180 / 8] == (target & ~BIT_ULL(8)));
+	assert(apple_pmp_report_entry_resume_noirq(&entry_devs[1].dev) == 0);
+	assert(!ext->released && regs[0x1180 / 8] == target);
+	cases++;
+	/* A request the PMP has not acknowledged is left as it is. */
+	regs[0x11c0 / 8] &= ~BIT_ULL(8);
+	assert(apple_pmp_report_entry_suspend_noirq(&entry_devs[1].dev) == 0);
+	assert(!ext->released && regs[0x1180 / 8] == target);
+	assert(apple_pmp_report_entry_resume_noirq(&entry_devs[1].dev) == 0 &&
+	       regs[0x1180 / 8] == target);
+	cases++;
+	/* A re-assert the PMP acknowledges late is written again, three times at most. */
+	regs[0x11c0 / 8] = target;
+	assert(apple_pmp_report_entry_suspend_noirq(&entry_devs[1].dev) == 0 && ext->released);
+	ack_late = 2;
+	assert(apple_pmp_report_entry_resume_noirq(&entry_devs[1].dev) == 0 &&
+	       !ack_late && regs[0x11c0 / 8] == target);
+	assert(apple_pmp_report_entry_suspend_noirq(&entry_devs[1].dev) == 0 && ext->released);
+	ack_late = 5;
+	assert(apple_pmp_report_entry_resume_noirq(&entry_devs[1].dev) == -ETIMEDOUT &&
+	       ack_late == 2 && regs[0x1180 / 8] == target);
+	cases++;
+	cleanup();
+#endif
 	printf("PASS: %u actual overlay/probe/entry/DCP7/managed-start/supplier graph cases\n",
 	       cases);
 	return 0;

@@ -11,7 +11,11 @@ use kernel::{dma_fence::RawDmaFence, prelude::*, sync::Arc};
 
 impl Backend {
     pub(in crate::g17) fn timeout_render(&self, packet: &Arc<Packet>) -> Result {
-        let mut deferred = DeferredBatch::worker()?;
+        // Without a collector the watchdog expires again and retries: memory
+        // pressure must not stop the runtime for every client.
+        let Ok(mut deferred) = DeferredBatch::worker() else {
+            return Ok(());
+        };
         let result = {
             let mut state = self.shared.state.lock();
             let Some(firmware) = (*state).as_deref_mut() else {
@@ -33,7 +37,7 @@ impl Backend {
             kernel::bindings::dma_fence_wait_timeout(
                 fence.raw(),
                 false,
-                kernel::time::msecs_to_jiffies(2000) as _,
+                kernel::time::msecs_to_jiffies(2000) as isize,
             )
         };
         if completed > 0 {
@@ -121,6 +125,14 @@ impl crate::g17::Firmware {
             .find(|pair| pair.qids().contains(&qid))
             .and_then(|pair| pair.oldest_packet());
         if let Some(packet) = packet {
+            // Unclassified work counts as innocent, and a blamed group must never be replayed.
+            // Work an earlier recovery spared is collateral here (classify() blames before its
+            // collateral check) and stays spared, so its failure stays non-sticky; the blame
+            // itself is recorded apart from the class, and refuses any replay of it.
+            packet.completion.note_blamed();
+            if !packet.completion.spared() {
+                packet.completion.classify(crate::g17::recovery::Class::Guilty);
+            }
             self.fail_render_packet(&packet, error, deferred)?;
         }
         Ok(())

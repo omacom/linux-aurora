@@ -13,8 +13,9 @@ config MT7932_FULLMAC
 	  Apple MacBook Neo (J700). The firmware runs association and the
 	  WPA2-PSK or WPA3-SAE handshake; the driver is a cfg80211 station on
 	  2.4 GHz and the 5 GHz UNII-1, -2, -2e and -3 channels that the regulatory
-	  domain permits. Radar (DFS) channels are scanned passively but not
-	  joined. Other MediaTek devices and other machines are not matched.
+	  domain permits. Radar (DFS) channels are scanned passively; an AP heard
+	  there may be joined, and is left when it announces a channel switch.
+	  Other MediaTek devices and other machines are not matched.
 
 	  The driver needs the original firmware, the unit's own calibration
 	  and the country policy packages under mediatek/mt7932/, besides the

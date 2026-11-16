@@ -24,6 +24,45 @@ struct Entry {
     phase: Phase,
     armed: u64,
     announce_pending: bool,
+    render_kill: Option<RenderKill>,
+    /// Since when, and whether reported, a render-only kill has waited for other contexts'
+    /// compute to pause.
+    kill_wait: Option<(u64, bool)>,
+    /// A render-only kill of this context was refused (counted once per context).
+    kill_refused: bool,
+}
+
+/// The kill of a closed context whose compute side is clean, published so that its render
+/// pairs' executed but unstamped commands can be released (see `Pair::firmware_drained`).
+/// The scheduler page's killed state, not this record, proves the kill to the pairs.
+#[derive(Clone, Copy)]
+struct RenderKill {
+    cookie: u64,
+    published: u64,
+    announced: bool,
+    acknowledged: bool,
+}
+
+impl RenderKill {
+    fn new(cookie: u64, now: u64) -> Self {
+        Self {
+            cookie,
+            published: now,
+            announced: false,
+            acknowledged: false,
+        }
+    }
+    /// Only this kill's exact cookie acknowledges it, once.
+    fn acknowledge(&mut self, cookie: u64) -> bool {
+        if cookie == 0 || cookie != self.cookie || self.acknowledged {
+            return false;
+        }
+        self.acknowledged = true;
+        true
+    }
+    fn awaiting(&self, now: u64, window: u64) -> bool {
+        !self.acknowledged && now.saturating_sub(self.published) < window
+    }
 }
 
 /// Publication and announcement errors retain the entry; no timeout frees
@@ -75,6 +114,21 @@ impl Pending {
         self.entries.is_empty()
     }
 
+    /// The context's scheduler release is armed or published, and the queues it
+    /// last ran have not been detached yet. Until then the firmware may still
+    /// process the release against those queues: none of them may change owner.
+    pub(crate) fn releasing(&self, context: &Arc<Context>) -> bool {
+        self.find(context)
+            .is_some_and(|index| self.entries[index].phase != Phase::Deferred)
+    }
+
+    /// `releasing` for the context that owns scheduler page `scheduler`.
+    pub(crate) fn releasing_scheduler(&self, scheduler: u64) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.phase != Phase::Deferred && entry.context.scheduler_va() == scheduler
+        })
+    }
+
     fn find(&self, context: &Arc<Context>) -> Option<usize> {
         self.entries
             .iter()
@@ -89,6 +143,9 @@ impl Pending {
             phase,
             armed: now,
             announce_pending: false,
+            render_kill: None,
+            kill_wait: None,
+            kill_refused: false,
         };
         self.entries.push(entry, GFP_KERNEL)?;
         Ok(())
@@ -218,6 +275,94 @@ impl Pending {
         Ok(None)
     }
 
+    /// A render-only kill of the closed context at `index` was published.
+    pub(crate) fn render_kill_published(&self, index: usize) -> bool {
+        self.entries.get(index).is_some_and(|entry| entry.render_kill.is_some())
+    }
+
+    /// Record a published render-only kill. Publication is irrevocable: the record stays
+    /// with the entry until the context's scheduler release is consumed.
+    pub(crate) fn record_render_kill(&mut self, index: usize, cookie: u64, now: u64) -> Result {
+        let entry = self.entries.get_mut(index).ok_or(EINVAL)?;
+        if entry.render_kill.is_some() {
+            return Err(EINVAL);
+        }
+        entry.render_kill = Some(RenderKill::new(cookie, now));
+        Ok(())
+    }
+
+    /// Ring the doorbell for published render-only kills not yet announced. A failed
+    /// doorbell is retried on a later pass and never duplicates the record.
+    pub(crate) fn announce_render_kills(&mut self, mut notify: impl FnMut() -> Result) {
+        for entry in self.entries.iter_mut() {
+            if let Some(kill) = entry.render_kill.as_mut() {
+                if !kill.announced && !kill.acknowledged && notify().is_ok() {
+                    kill.announced = true;
+                }
+            }
+        }
+    }
+
+    /// Only the exact cookie of an unacknowledged render-only kill is accepted.
+    pub(crate) fn acknowledge_render_kill(&mut self, cookie: u64) -> bool {
+        self.entries
+            .iter_mut()
+            .filter_map(|entry| entry.render_kill.as_mut())
+            .any(|kill| kill.acknowledge(cookie))
+    }
+
+    /// A render-only kill awaits its acknowledgement within the polling window.
+    pub(crate) fn render_kill_polling(&self, now: u64, window: u64) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.render_kill.is_some_and(|kill| kill.awaiting(now, window)))
+    }
+
+    /// The render-only kill of the entry at `index` waits; how long, and whether this is the
+    /// first time it crossed `slow`.
+    pub(crate) fn note_kill_wait(&mut self, index: usize, now: u64, slow: u64) -> (u64, bool) {
+        let Some(entry) = self.entries.get_mut(index) else {
+            return (0, false);
+        };
+        let (since, warned) = entry.kill_wait.get_or_insert((now, false));
+        let waited = now.saturating_sub(*since);
+        let crossed = waited >= slow && !*warned;
+        *warned |= crossed;
+        (waited, crossed)
+    }
+
+    /// The render-only kill was published: how long it waited, if it did.
+    pub(crate) fn take_kill_wait(&mut self, index: usize, now: u64) -> u64 {
+        self.entries
+            .get_mut(index)
+            .and_then(|entry| entry.kill_wait.take())
+            .map_or(0, |(since, _)| now.saturating_sub(since))
+    }
+
+    /// A render-only kill of the context at `index` was refused: it no longer waits, and this
+    /// returns whether it is the first refusal for this context.
+    pub(crate) fn refuse_render_kill(&mut self, index: usize) -> bool {
+        let Some(entry) = self.entries.get_mut(index) else {
+            return false;
+        };
+        entry.kill_wait = None;
+        !core::mem::replace(&mut entry.kill_refused, true)
+    }
+
+    /// The context at `index` is not waiting for a render-only kill (any more).
+    pub(crate) fn clear_kill_wait(&mut self, index: usize) {
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.kill_wait = None;
+        }
+    }
+
+    /// How long each waiting render-only kill has waited.
+    pub(crate) fn kill_waits(&self, now: u64) -> impl Iterator<Item = u64> + '_ {
+        self.entries
+            .iter()
+            .filter_map(move |entry| entry.kill_wait.map(|(since, _)| now.saturating_sub(since)))
+    }
+
     /// Poll for a bounded window at close and again at actual release publication.
     /// Failed announcements remain retryable on later service even after polling
     /// expires. Time passage never substitutes for a firmware-consumption witness.
@@ -225,5 +370,23 @@ impl Pending {
         self.entries.iter().any(|entry| {
             entry.phase != Phase::Deferred && now.saturating_sub(entry.armed) < POLL_NS
         })
+    }
+}
+
+#[kernel::macros::kunit_tests(asahi_g17_render_kill)]
+mod render_kill_tests {
+    use super::RenderKill;
+
+    #[test]
+    fn only_the_exact_cookie_acknowledges_a_render_kill_once() {
+        let mut kill = RenderKill::new(7, 1_000);
+        assert!(kill.awaiting(1_000, 10));
+        assert!(!kill.acknowledge(0));
+        assert!(!kill.acknowledge(8));
+        assert!(kill.awaiting(1_009, 10));
+        assert!(!kill.awaiting(1_010, 10));
+        assert!(kill.acknowledge(7));
+        assert!(!kill.acknowledge(7));
+        assert!(!kill.awaiting(1_001, 10));
     }
 }

@@ -78,7 +78,7 @@ impl BufferIds {
             self.entries
                 .iter()
                 .position(|entry| entry.free())
-                .ok_or(ENOSPC)? as u8
+                .ok_or_else(|| super::capacity::refused(super::capacity::Site::ParameterBuffers))? as u8
         };
         if !self.entries[usize::from(id)].free() {
             return Err(EIO);
@@ -503,7 +503,7 @@ impl MetricsLease {
                 break;
             }
         }
-        let slot = selected.ok_or(ENOSPC)?;
+        let slot = selected.ok_or_else(|| super::capacity::refused(super::capacity::Site::MetricsIds))?;
         // Construct the lease before any fallible address/view validation so
         // every constructor failure returns the selected bit.
         let mut lease = Self {
@@ -556,6 +556,8 @@ pub(crate) struct Manager {
     buffer_id: u8,
     generation: u64,
     shrink: Shrink,
+    /// A tiling pass initialized this buffer manager (25G83 InitBM published).
+    initialized: bool,
 }
 
 /// Native tiler-heap shrink policy, matching the heap behaviour seen
@@ -657,7 +659,17 @@ impl Manager {
             buffer_id: args.buffer_id,
             generation: args.generation,
             shrink: Shrink::default(),
+            initialized: false,
         })
+    }
+
+    /// Whether a published tiling pass initialized this manager (25G83 InitBM).
+    pub(crate) fn initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub(crate) fn mark_initialized(&mut self) {
+        self.initialized = true;
     }
     pub(crate) fn buffer_id(&self) -> u8 {
         self.buffer_id
@@ -1118,4 +1130,52 @@ fn append_reserved<T>(values: &mut KVec<T>, value: T) {
     values.spare_capacity_mut()[0].write(value);
     // SAFETY: All callers preflighted this spare entry and initialized it once.
     unsafe { values.set_len(length + 1) };
+}
+
+impl BufferIds {
+    pub(crate) fn write_capacity(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        writeln!(f, "parameter_buffers used={} total={} owned={} referenced={}",
+                 self.entries.iter().filter(|entry| !entry.free()).count(), BUFFER_IDS,
+                 self.entries.iter().filter(|entry| entry.owner).count(),
+                 self.entries.iter().filter(|entry| entry.references != 0).count())
+    }
+}
+impl MetricsIds {
+    pub(crate) fn used(&self) -> u32 {
+        self.used.iter().map(|bits| bits.load(Ordering::Acquire).count_ones()).sum::<u32>()
+            - (128 - fw::METRICS_SLOTS as u32)
+    }
+}
+
+#[kunit_tests(asahi_g17_buffer_capacity)]
+mod capacity_tests {
+    use super::*;
+
+    #[test]
+    fn failed_build_and_fault_retirement_return_parameter_buffers() {
+        let mut ids = KBox::init(BufferIds::new(), GFP_KERNEL).unwrap();
+        for _ in 0..8 {
+            let mut clients = KVec::with_capacity(BUFFER_IDS, GFP_KERNEL).unwrap();
+            for _ in 0..BUFFER_IDS {
+                clients.push(ids.allocate_render().unwrap().0, GFP_KERNEL).unwrap();
+            }
+            assert_eq!(ids.allocate_render(), Err(ENOSPC));
+            for (index, id) in clients.into_iter().enumerate() {
+                if index % 2 == 0 {
+                    // Failed constructor never installed the graph owner.
+                    ids.release(id).unwrap();
+                } else {
+                    ids.reserve_owner(id).unwrap();
+                    ids.release(id).unwrap();
+                    ids.acquire_owner(id).unwrap();
+                    // Close cannot return a still-owned failed command.
+                    ids.unreserve_owner(id).unwrap();
+                    assert!(!ids.entries[id as usize].free());
+                    ids.release(id).unwrap();
+                }
+            }
+            assert!(ids.entries.iter().all(|entry| entry.free()));
+            assert_eq!(ids.returned_count, BUFFER_IDS);
+        }
+    }
 }

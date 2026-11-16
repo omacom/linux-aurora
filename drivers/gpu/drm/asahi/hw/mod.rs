@@ -13,6 +13,7 @@ const MAX_POWERZONES: usize = 5;
 
 pub(crate) mod t600x;
 pub(crate) mod t602x;
+pub(crate) mod t6040;
 pub(crate) mod t8103;
 pub(crate) mod t8112;
 pub(crate) mod t8140;
@@ -23,6 +24,7 @@ pub(crate) mod t8140;
 pub(crate) enum GpuGen {
     G13 = 13,
     G14 = 14,
+    G16 = 16,
     G17 = 17,
 }
 

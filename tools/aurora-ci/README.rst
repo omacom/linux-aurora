@@ -14,7 +14,8 @@ What runs when
 Builds take time and, on some runners, money. Pull requests get the checks
 that run on free GitHub-hosted runners on every push; the team's pull
 requests are also built on every push, and everyone's kernel is built again
-in the merge queue, from exactly the tree that will land.
+in the merge queue, from exactly the tree that will land, unless a run at
+the pull request's head already tested exactly that tree (see below).
 
 ====================  =================================================
 Event                 Jobs
@@ -24,8 +25,11 @@ pull request push     plan, commits, compile, device trees, host tests,
 trusted author push   all of the above, then package, KUnit and boot
                       (not on drafts)
 ``ci:build`` label    all of the above, then package, KUnit and boot
-merge queue           everything
-push to the branch    package (reused from the queue), attestation
+merge queue           everything, or the checks only when an eligible
+                      run at the head being merged tested exactly the tree
+                      being merged
+push to the branch    package (reused from a branch or queue run, else
+                      built), attestation
 nightly               package, KUnit and boot, rebuilt from scratch
 manual run            everything, never reusing an earlier result
 ====================  =================================================
@@ -156,13 +160,53 @@ once approved they run the checks only unless a maintainer applies
 
 On a ``pull_request`` event GitHub runs the workflow files from the pull
 request itself, so these rules decide cost, not security: a fork could edit
-them. For the same reason no pull request's run is a source of results, and
-neither is a manual run of another branch: both run code nobody has reviewed
-yet. Earlier packages, verification records and baselines are reused only
-from ``kernel-ci.yml`` runs on ``integration/aurora`` and its merge queue
-branches (``lookup-build.py``), so no one can plant a package that a later
-run would skip testing and attest. The merge queue therefore builds a pull
-request again even after a ``ci:build`` run. What keeps untrusted code off
+them. For the same reason a pull request's run is not a source of results
+before review, and a manual run of another branch never is: both run code
+nobody has reviewed yet. Earlier packages, verification records and
+baselines are reused from ``kernel-ci.yml`` runs on ``integration/aurora``
+and its merge queue branches (``lookup-build.py``), so no one can plant a
+package that a later run would skip testing and attest.
+
+The one exception is the merge queue itself. A queued pull request has been
+approved after its last push, and a push takes it out of the queue, so a
+run of that pull request at the head being merged (the queue commit's
+second parent) ran the reviewed code, provided it ran on the merge GitHub
+makes with ``integration/aurora``: a run of the same head in another pull
+request, say one onto a branch with other workflows, runs that branch's
+workflows. So the queue takes the packages and verification of a run
+instead of building and booting again only when:
+
+- the run is ``kernel-ci.yml`` or ``kernel-ci-label.yml`` on a pull request
+  event in this repository, at that head, and passed at its first attempt
+  (never re-run);
+- GitHub recorded exactly one call of ``kernel-ci-jobs.yml`` for it, from the
+  run's own workflow file (ref ``refs/pull/<number>/merge`` of the pull request
+  the queue is merging, path ending in the commit it ran), and that commit's
+  tree is exactly the queue commit's tree, CI files and expected results
+  included;
+- the run has exactly one live package and one live verification record for
+  the build key, and the record names the key, the run and that commit.
+
+The package job downloads that very artifact by its ID. A later queue
+entry also carries the entries ahead of it, so its tree normally differs
+and it builds; an equal tree is taken. The queue still runs the checks and,
+when the branch has a baseline, compares the packages with it, but uploads
+no reusable package, metadata or verification record, so nothing from a
+pull request becomes evidence a later run trusts. Anything else, or
+evidence that cannot be read, leaves the usual lookup, which trusts only
+the branch and the queue.
+
+What this trusts: GitHub's record of which pull request and commit the run
+ran, and, within that run, the verification record, which is the run's own
+word. Nothing shows which job of the run wrote it, or that it verified
+those exact package bytes, so code at the reviewed head that ran in that
+run could have written it. And for these pull requests any trusted build
+and test still needed happens after the merge: the push takes the usual
+path for the key (a branch or queue run's packages and verification, else a
+build, and KUnit and boot unless a branch or queue run already verified
+the key), so a failure there comes after the change has merged.
+
+What keeps untrusted code off
 paid runners is GitHub's setting to
 require approval before running workflows from outside collaborators, and,
 for a runner like Namespace's, a runner group limited to this repository.
@@ -176,6 +220,14 @@ repository. ``package`` and ``KUnit`` use the repository variable
 ``["namespace-profile-arm64-linux-apple-12x32"]``, the machine omarchy-pkgs
 builds kernels on. Without it they use ``ubuntu-24.04-arm``, where the
 package build takes about 45 minutes.
+
+Repository variables do not reach a fork's pull request run, so a fork would
+always get that 45 minute build. When both the author and whoever triggered
+the run are vouched for, ``plan.py`` names the Namespace runner for the fork
+instead. Any other fork stays on GitHub's runner, a maintainer's ``ci:build``
+label included. This only routes honest pull requests: a pull request's own
+copy of the workflow can ask for any runner, so what keeps untrusted code off
+Namespace is still the approval and runner group described above.
 
 Repository setup
 ================

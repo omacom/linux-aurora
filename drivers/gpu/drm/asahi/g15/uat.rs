@@ -101,7 +101,7 @@ fn with_table<R>(
     // SAFETY: Every table walked here is a page the shared page-table code allocated in RAM
     // (`Page::alloc_page`) and never frees while the firmware runs (tables are not freed on
     // unmap, and these VMs are retained until reboot).
-    unsafe { pgtable::with_root_entries(pa, count, f) }
+    unsafe { pgtable::with_root_entries(None, pa, count, f) }
 }
 
 /// Cleans `len` bytes of the RAM table page at `pa`, from entry `first`, to the point of

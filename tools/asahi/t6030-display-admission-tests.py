@@ -48,6 +48,8 @@ def main():
             ('wrong-gpu', '!of_device_is_compatible(consumer->of_node, gpu)', '((void)gpu, false)'),
             ('withdraw-wrong-provider', 'if (*slot == dev)', 'if (((void)dev, true))'),
             ('shared-display-slot', 'return &apple_t6031_display;', 'return &apple_t6030_display;'),
+            ('missing-t6034-slot', 'return &apple_t6034_display;', 'return NULL;'),
+            ('t6034-shared-display-slot', 'return &apple_t6034_display;', 'return &apple_t6031_display;'),
         ]:
             assert code.count(old) == 1, (name, code.count(old))
             variants.append((name, code.replace(old, new)))

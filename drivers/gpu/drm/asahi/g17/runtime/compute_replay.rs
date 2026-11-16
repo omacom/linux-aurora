@@ -3,7 +3,7 @@
 //! Ordered republication of witnessed, unexecuted compute commands.
 
 use super::DeferredBatch;
-use crate::g17::{completion::Deferred, qos, recovery, Firmware};
+use crate::g17::{completion::Deferred, recovery, Firmware};
 use kernel::prelude::*;
 
 impl Firmware {
@@ -31,12 +31,12 @@ impl Firmware {
             return Ok(());
         }
         deferred.reserve_replays(commands)?;
-        let view = qos::View::new(self.init.qos()?)?;
+        let port = &self.port;
         for entry in self.queues.compute.iter_mut().flatten() {
-            if let Some(queue) = entry.queue.as_deref_mut() {
+            if let Some(mut queue) = entry.queue.as_deref_mut() {
                 queue.prepare_replays(
                     state,
-                    |owner| self.queues.accounting.complete(&view, &[owner]),
+                    |owner| port.qos_complete(&[owner]),
                     &mut |event| deferred.push(event),
                 )?;
             }
@@ -46,20 +46,14 @@ impl Firmware {
                 if self.recovery.pending() || recovery::Memory::recovery_state(&self.init)? != 0 {
                     return Ok(());
                 }
-                let Some(queue) = self.queues.compute[index]
+                let Some((packet, owner)) = self.queues.compute[index]
                     .as_ref()
                     .and_then(|entry| entry.queue.as_deref())
+                    .and_then(|queue| Some((queue.replay_front()?, queue.owner())))
                 else {
                     break;
                 };
-                let Some(packet) = queue.replay_front() else {
-                    break;
-                };
-                let owner = queue.owner();
-                let outer_ready = self.init.work_ready(
-                    packet.context.policy().priority(),
-                    crate::g17::fw::queue::DataMaster::Compute,
-                )?;
+                let outer_ready = self.port.compute_ready(packet.context.policy().priority())?;
                 if !outer_ready {
                     let now = super::now_ns();
                     let since = *self.queues.replay_outer_wait.get_or_insert(now);
@@ -83,14 +77,14 @@ impl Firmware {
                         .ok_or(EIO)?
                         .prepare_replay(&packet)?;
                     let owner = owner.ok_or(EIO)?;
-                    packet.check_dependencies()?;
+                    packet.check_replay_dependencies()?;
                     let dependencies = self.queues.render_prefix(owner, &packet)?;
                     self.publish_compute(owner, packet.clone(), dependencies.as_slice(), deferred)
                 })() };
                 let recovery_wait = matches!(result, Err(EAGAIN) | Err(EBUSY))
                     && (self.recovery.pending()
                         || recovery::Memory::recovery_state(&self.init)? != 0);
-                let queue = self.queues.compute[index]
+                let mut queue = self.queues.compute[index]
                     .as_mut()
                     .and_then(|entry| entry.queue.as_deref_mut())
                     .ok_or(EIO)?;
@@ -110,6 +104,8 @@ impl Firmware {
             }
         }
         self.queues.replay_outer_wait = None;
+        // Publication behind these replays may proceed.
+        self.primary.state.shared.progress.notify();
         Ok(())
     }
 }

@@ -2,7 +2,7 @@
 
 //! Bounded read-only slot identity sampling while firmware is halted.
 
-use crate::{hw::t8140, mmu};
+use crate::mmu;
 use core::{
     ffi::c_void,
     ptr::NonNull,
@@ -19,11 +19,11 @@ impl Drop for Mapping {
     }
 }
 
-pub(super) fn key(slot: usize) -> Result<u64> {
+pub(super) fn key(slot: usize, slot_keys: u64) -> Result<u64> {
     if slot >= super::attribution::SLOTS {
         return Err(EINVAL);
     }
-    let physical = t8140::recovery::SLOT_KEYS + slot as u64 * size_of::<u64>() as u64;
+    let physical = slot_keys + slot as u64 * size_of::<u64>() as u64;
     let offset = physical as usize & (mmu::UAT_PGSZ - 1);
     // SAFETY: The fixed recovery-key range is firmware RAM, page aligned here
     // for mapping. Only the selected aligned eight-byte word is read below.
@@ -31,7 +31,7 @@ pub(super) fn key(slot: usize) -> Result<u64> {
         bindings::memremap(
             physical - offset as u64,
             mmu::UAT_PGSZ,
-            bindings::MEMREMAP_WB as _,
+            bindings::MEMREMAP_WB as usize,
         )
     };
     let mapping = Mapping(NonNull::new(raw).ok_or(ENOMEM)?);

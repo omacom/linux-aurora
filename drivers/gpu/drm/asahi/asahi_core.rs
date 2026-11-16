@@ -25,6 +25,7 @@ mod gpu;
 mod hw;
 mod initdata;
 mod mem;
+mod memacct;
 mod m3;
 mod microseq;
 mod mmu;
@@ -34,7 +35,9 @@ mod queue;
 mod regs;
 mod slotalloc;
 mod stats;
+mod stats_raw;
 mod sysfs_exports;
+mod timestamp;
 mod util;
 #[cfg(CONFIG_DRM_ASAHI_MAPLE_TREE)]
 mod vm;
@@ -159,6 +162,22 @@ module! {
             default: 1024,
             description: "G15: PB blocks posted above which an idle engine reclaims the PB",
         },
+        g15_stamp_base: u32 {
+            default: 0,
+            description: "G15 (testing): render ordinal the TA/FS stamps start from; 0 = unchanged",
+        },
+        g15_stamp_reseed_margin: u32 {
+            default: 0,
+            description: "G15: renders before the TA stamp wrap within which TA/FS are renumbered while idle; 0 = off",
+        },
+        g15_compute_stamp_base: u32 {
+            default: 0,
+            description: "G15 (testing): compute ordinal the compute stamp starts from; 0 = unchanged",
+        },
+        g15_compute_reseed_margin: u32 {
+            default: 0,
+            description: "G15: computes before the compute stamp wrap within which it is renumbered while idle; 0 = off",
+        },
         g15_early_tiling: u32 {
             default: 0,
             description: "G15: advertise FRAGMENT_BARRIERS, mapped to early tiling (slower on 2419)",
@@ -171,6 +190,18 @@ module! {
             default: 1,
             // permissions: 0,
             description: "Export AGX firmware stats to sysfs (1 = on, 0 = off)",
+        },
+        mem_limit_pct: u32 {
+            default: 67,
+            description: "G17: device-wide GPU memory limit in percent of RAM (0 or >= 100: none)",
+        },
+        client_mem_limit_pct: u32 {
+            default: 50,
+            description: "G17: per-client GPU memory limit in percent of RAM (0: the device limit)",
+        },
+        oom_attribution: u8 {
+            default: 1,
+            description: "G17: count held GPU memory in its creator's RSS for the OOM killer (1 = on)",
         },
     },
 }

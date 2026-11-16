@@ -39,8 +39,9 @@ def c_source(root):
     state = [line for line in apple.splitlines()
              if line in ("static DEFINE_MUTEX(apple_g15_display_lock);",
                          "static struct device *apple_t6030_display;",
-                         "static struct device *apple_t6031_display;")]
-    assert len(state) == 3, f"publication state not found: {state}"
+                         "static struct device *apple_t6031_display;",
+                         "static struct device *apple_t6034_display;")]
+    assert len(state) == 4, f"publication state not found: {state}"
     bodies = [item(apple, marker) for marker in (
         "\nstatic struct device **apple_g15_display_slot(struct device *dev)\n{",
         "\nstatic int apple_g15_display_publish(struct device *dev)\n{",
@@ -48,6 +49,7 @@ def c_source(root):
         "\nstatic int apple_g15_link_device(",
         "\nint apple_drm_t6030_link_device(struct device *consumer)\n{",
         "\nint apple_drm_t6031_link_device(struct device *consumer)\n{",
+        "\nint apple_drm_t6034_link_device(struct device *consumer)\n{",
     )]
     bodies.append(item(glue, "\nint asahi_g15_display_prepare(struct device *dev)\n{"))
     return "\n".join(state) + "\n\n" + "\n\n".join(bodies) + "\n"
@@ -73,7 +75,7 @@ struct device_link { struct device *consumer, *supplier; unsigned int flags; };
 struct mutex { bool held; };
 
 static const char *machine_compat[2];
-static struct device_node *nodes[4];
+static struct device_node *nodes[6];
 static int links_made, link_fail, infos;
 static struct device_link last_link;
 
@@ -92,7 +94,7 @@ static struct device_node *of_find_compatible_node(struct device_node *from, con
 						   const char *compat)
 {
 	(void)from; (void)type;
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < 6; i++)
 		if (nodes[i] && !strcmp(nodes[i]->compatible, compat)) {
 			nodes[i]->refs++;
 			return nodes[i];
@@ -112,7 +114,7 @@ static struct device_link *device_link_add(struct device *consumer, struct devic
 	last_link = (struct device_link){ consumer, supplier, flags };
 	return &last_link;
 }
-#define dev_info_once(dev, ...) do { static bool once_; (void)(dev); if (!once_) { once_ = true; infos++; } } while (0)
+#define dev_info_once(dev, ...) do { static bool once_; (void)(dev); if (false) fprintf(stderr, __VA_ARGS__); if (!once_) { once_ = true; infos++; } } while (0)
 
 static void unlock_(struct mutex **m) { if (*m) { assert((*m)->held); (*m)->held = false; } }
 static struct mutex *lock_(struct mutex *m) { assert(!m->held); m->held = true; return m; }
@@ -128,6 +130,9 @@ static const char *scenario;
 static struct device_node gpu31 = { "apple,agx-t6031", true }, gpu30 = { "apple,agx-t6030", true };
 static struct device_node disp31 = { "apple,t6031-display-subsystem", false };
 static struct device_node disp30 = { "apple,t6030-display-subsystem", true };
+static struct device_node gpu34 = { "apple,agx-t6034", true };
+static struct device_node disp34 = { "apple,t6034-display-subsystem", true };
+static struct device g34 = { &gpu34 }, d34 = { &disp34 };
 static struct device_node other = { "apple,display-subsystem", true };
 static struct device g31 = { &gpu31 }, g30 = { &gpu30 }, none = { NULL };
 static struct device d31 = { &disp31 }, d31b = { &disp31 }, d30 = { &disp30 }, dother = { &other };
@@ -140,7 +145,7 @@ static void machine(const char *soc, const char *board)
 static void clean(void)
 {
 	CHECK(!apple_g15_display_lock.held);
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < 6; i++)
 		CHECK(!nodes[i] || nodes[i]->refs == 0);
 }
 static int prepare(struct device *dev) { int ret = asahi_g15_display_prepare(dev); clean(); return ret; }
@@ -157,6 +162,8 @@ int main(int argc, char **argv)
 	nodes[1] = &disp31;
 	nodes[2] = &disp30;
 	nodes[3] = &other;
+	nodes[4] = &gpu34;
+	nodes[5] = &disp34;
 	if (!strcmp(scenario, "disabled")) {
 		/* The gate left the display disabled: no start, no success, said once. */
 		CHECK(prepare(&g31) == -EPROBE_DEFER && infos == 1);
@@ -206,6 +213,24 @@ int main(int argc, char **argv)
 		withdraw(&d30);
 		CHECK(d30.refs == 0 && link30(&g30) == -EPROBE_DEFER);
 		CHECK(link30(&g31) == -ENODEV);
+	} else if (!strcmp(scenario, "t6034")) {
+		/* A published T6031 display never admits the separate T6034 GPU. */
+		CHECK(publish(&d31) == 0);
+		machine("apple,t6034", "apple,j514m");
+		CHECK(prepare(&g34) == -EPROBE_DEFER && links_made == 0);
+		CHECK(publish(&d34) == 0 && d34.refs == 1);
+		CHECK(prepare(&g34) == 0 && links_made == 1 && last_link.supplier == &d34);
+		machine("apple,t6034", "apple,j516m");
+		CHECK(prepare(&g34) == 0 && links_made == 2 && last_link.supplier == &d31);
+		withdraw(&d31);
+		CHECK(prepare(&g34) == -EPROBE_DEFER && links_made == 2);
+		machine("apple,t6034", "apple,j999");
+		CHECK(prepare(&g34) == -ENODEV && links_made == 2);
+		machine("apple,t6031", "apple,j514m");
+		CHECK(prepare(&g34) == -ENODEV && links_made == 2);
+		machine("apple,t6034", "apple,j514m");
+		withdraw(&d34);
+		CHECK(!d34.refs && prepare(&g34) == -EPROBE_DEFER);
 	} else {
 		CHECK(!"unknown scenario");
 	}
@@ -213,13 +238,16 @@ int main(int argc, char **argv)
 }
 '''
 
-C_SCENARIOS = ["disabled", "absent", "pending", "ready", "isolation", "foreign", "t6030"]
+C_SCENARIOS = ["disabled", "absent", "pending", "ready", "isolation", "foreign", "t6030", "t6034"]
 
 C_MUTANTS = {
     "unpublished-succeeds": ("if (!*display)\n\t\treturn -EPROBE_DEFER;", "if (!*display)\n\t\treturn 0;"),
     "disabled-display-skipped": (re.compile(r"\t\tdev_info_once\(dev,[^;]*;\n"), "\t\t{ of_node_put(np); return 0; }\n"),
     "pending-display-silent": (re.compile(r"\telse\n\t\tdev_info_once\(dev,[^;]*;\n"), ""),
     "t6031-reads-t6030-slot": ("&apple_t6031_display);", "&apple_t6030_display);"),
+    "t6034-reads-t6031-slot": ("&apple_t6034_display);", "&apple_t6031_display);"),
+    "t6034-published-as-t6031": ("return &apple_t6034_display;", "return &apple_t6031_display;"),
+    "t6034-no-board-check": ('if (!of_machine_is_compatible("apple,j514m"))', 'if (false)'),
     "t6031-published-as-t6030": ("return &apple_t6031_display;", "return &apple_t6030_display;"),
     "no-machine-check": ("!of_machine_is_compatible(machine) ||", ""),
     "withdraw-keeps-display": ("*slot = NULL;", ";"),
@@ -227,7 +255,9 @@ C_MUTANTS = {
 }
 
 RS_PREFIX = r'''
-#![allow(dead_code, unused_variables, unused_imports, non_snake_case)]
+#![allow(dead_code, unused_variables, unused_imports, unused_macros, non_snake_case)]
+extern crate self as kernel;
+#[macro_export] macro_rules! c_str { ($s:literal) => { $s }; }
 use std::cell::RefCell;
 use std::marker::PhantomData;
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -236,13 +266,28 @@ impl Error { fn from_errno(errno: i32) -> Self { Self(errno) } }
 type Result<T = ()> = std::result::Result<T, Error>;
 const ENODEV: Error = Error(-19);
 const EINVAL: Error = Error(-22);
+const EIO: Error = Error(-5);
 const EPROBE_DEFER: Error = Error(-517);
 macro_rules! dev_err { ($($args:tt)*) => {{}}; }
 macro_rules! dev_info { ($($args:tt)*) => {{}}; }
-struct State { board: bool, machine: bool, pmp: i32, display: i32 }
+macro_rules! dev_warn { ($dev:expr, $($args:tt)*) => {{ warned(format!($($args)*)); }}; }
+struct State { board: bool, machine: bool, pmp: i32, display: i32, sleep_hold: bool, asc_fail: bool, j514c: bool, t6031: bool, j514m: bool, t6034: bool }
 thread_local! {
     static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
-    static STATE: RefCell<State> = const { RefCell::new(State { board: true, machine: true, pmp: 0, display: 0 }) };
+    static STATE: RefCell<State> = const { RefCell::new(State { board: true, machine: true, pmp: 0, display: 0, sleep_hold: true, asc_fail: false, j514c: false, t6031: false, j514m: false, t6034: false }) };
+    static HOLD: RefCell<Option<bool>> = const { RefCell::new(None) };
+    static WARNINGS: RefCell<u32> = const { RefCell::new(0) };
+    static WARNING_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+}
+fn warned(text: String) { WARNINGS.with(|w| *w.borrow_mut() += 1); WARNING_TEXT.with(|w| *w.borrow_mut() = text); }
+mod board { pub mod record {
+    const RELATIVE_STATES: usize = 7;
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    @REFERENCE_TYPE@
+    @REFERENCE_VALUE@;
+} }
+mod params {
+    pub fn sleep_hold() -> bool { super::STATE.with(|s| s.borrow().sleep_hold) }
 }
 fn call(name: &'static str) { CALLS.with(|c| c.borrow_mut().push(name)); }
 mod device {
@@ -257,15 +302,18 @@ struct Core<'a>(PhantomData<&'a ()>);
 struct AsahiDevice;
 mod hw {
     #[derive(Copy, Clone, PartialEq, Eq)] pub enum Platform { AdtWithPmp, DeviceTree }
-    #[derive(Copy, Clone, PartialEq, Eq)] pub enum Board { None, Templates, Blob }
+    #[derive(Copy, Clone, PartialEq, Eq)] pub enum Board { None, Templates, DeviceTree(&'static super::board::record::Reference) }
 }
-struct Config { platform: hw::Platform, machine: &'static str, name: &'static str, firmware: (), board: hw::Board }
+struct Config { chip_id: u32, platform: hw::Platform, machine: &'static str, name: &'static str, firmware: (), board: hw::Board }
 mod adt {
     pub struct GpuAdt;
     pub fn read(_: &super::device::Device, _: &super::Config) -> super::Result<GpuAdt> { super::call("adt"); Ok(GpuAdt) }
 }
 mod identity {
-    pub fn firmware(_: &super::device::Device, _: &super::adt::GpuAdt, _: ()) -> super::Result { super::call("identity"); Ok(()) }
+    pub fn firmware(_: &super::device::Device, _: &super::adt::GpuAdt, _: (), allow_prefix: bool) -> super::Result {
+        super::STATE.with(|s| assert_eq!(allow_prefix, !s.borrow().t6034));
+        super::call("identity"); Ok(())
+    }
 }
 mod initdata {
     pub fn prepare_board(_: &super::device::Device, _: &super::Config, _: &super::adt::GpuAdt) -> super::Result<u32> {
@@ -276,44 +324,152 @@ mod regs {
     pub struct Regs;
     impl Regs {
         pub fn new<C>(_: &super::platform::Device<C>) -> super::Result<Self> { super::call("regs"); Ok(Self) }
-        pub fn asc_control(&self) -> super::Result<u32> { Ok(0) }
+        pub fn asc_control(&self) -> super::Result<u32> {
+            if super::STATE.with(|s| s.borrow().asc_fail) { Err(super::EIO) } else { Ok(0) }
+        }
     }
 }
 mod glue {
     use super::{call, STATE};
     pub fn board() -> bool { call("board"); STATE.with(|s| s.borrow().board) }
-    pub fn machine(_: &str) -> bool { call("machine"); STATE.with(|s| s.borrow().machine) }
+    pub fn machine(name: &str) -> bool { if !["apple,j514c", "apple,t6031", "apple,j514m", "apple,j516m", "apple,t6034"].contains(&name) { call("machine"); } STATE.with(|s| { let s=s.borrow(); match name { "apple,j514c" => s.j514c, "apple,t6031" => s.t6031, "apple,j514m" => s.j514m, "apple,j516m" => false, "apple,t6034" => s.t6034, _ => s.machine } }) }
     pub unsafe fn asahi_g15_pmp_prepare(_: *mut core::ffi::c_void) -> core::ffi::c_int { call("pmp"); STATE.with(|s| s.borrow().pmp) }
     pub unsafe fn asahi_g15_display_prepare(_: *mut core::ffi::c_void) -> core::ffi::c_int { call("display"); STATE.with(|s| s.borrow().display) }
     pub fn dma_coherent(_: &super::device::Device) -> bool { call("coherent"); false }
-    pub fn hold_power(_: &super::device::Device) { call("hold"); }
+@HOLD_POWER@
 }
 struct Admitted { regs: regs::Regs, adt: adt::GpuAdt, board_images: u32 }
 '''
 
 RS_MAIN = r'''
-static T6031: Config = Config { platform: hw::Platform::DeviceTree, machine: "apple,j516c", name: "T6031 G15C", firmware: (), board: hw::Board::Blob };
-static T6030: Config = Config { platform: hw::Platform::AdtWithPmp, machine: "apple,t6030", name: "T6030 G15S", firmware: (), board: hw::Board::Templates };
+static T6031: Config = Config { chip_id: 0x6031, platform: hw::Platform::DeviceTree, machine: "apple,j516c", name: "T6031 G15C", firmware: (), board: hw::Board::DeviceTree(&board::record::J516C) };
+static T6030: Config = Config { chip_id: 0x6030, platform: hw::Platform::AdtWithPmp, machine: "apple,t6030", name: "T6030 G15S", firmware: (), board: hw::Board::Templates };
 const TAIL: [&str; 6] = ["adt", "identity", "coherent", "board_images", "regs", "hold"];
 fn run(cfg: &'static Config, machine: bool, pmp: i32, display: i32) -> (Result<()>, Vec<&'static str>) {
     CALLS.with(|c| c.borrow_mut().clear());
-    STATE.with(|s| *s.borrow_mut() = State { board: true, machine, pmp, display });
+    STATE.with(|s| *s.borrow_mut() = State { board: true, machine, pmp, display, sleep_hold: true, asc_fail: false, j514c: false, t6031: false, j514m: false, t6034: false });
+    HOLD.with(|h| *h.borrow_mut() = None);
+    WARNINGS.with(|w| *w.borrow_mut() = 0);
     let pdev = platform::Device(device::Device, Core(PhantomData));
     let ret = admit(&pdev, &AsahiDevice, cfg).map(|_| ());
     (ret, CALLS.with(|c| c.borrow().clone()))
 }
 fn with_tail(head: &[&'static str]) -> Vec<&'static str> { head.iter().chain(TAIL.iter()).copied().collect() }
+@SLEEP_HOLD_RUN@
+fn candidate_for(cfg: &'static Config, board: bool, soc: bool, display: i32) -> (Result<()>, Vec<&'static str>, u32) {
+    CALLS.with(|c| c.borrow_mut().clear());
+    STATE.with(|s| *s.borrow_mut() = State { board: true, machine: false, pmp: 0, display, sleep_hold: true, asc_fail: false, j514c: board, t6031: soc, j514m: false, t6034: false });
+    WARNINGS.with(|w| *w.borrow_mut() = 0);
+    let pdev = platform::Device(device::Device, Core(PhantomData));
+    let result = admit(&pdev, &AsahiDevice, cfg).map(|_| ());
+    (result, CALLS.with(|c| c.borrow().clone()), WARNINGS.with(|w| *w.borrow()))
+}
+fn candidate(board: bool, soc: bool, display: i32) -> (Result<()>, Vec<&'static str>, u32) {
+    candidate_for(&T6031, board, soc, display)
+}
+static T6034: Config = Config { chip_id: 0x6034, platform: hw::Platform::DeviceTree, machine: "apple,j514m", name: "T6034", firmware: (), board: hw::Board::DeviceTree(&board::record::J516C) };
+fn candidate34(board: bool, soc: bool, display: i32) -> (Result<()>, Vec<&'static str>, u32) {
+    CALLS.with(|c| c.borrow_mut().clear());
+    STATE.with(|s| *s.borrow_mut() = State { board: true, machine: false, pmp: 0, display,
+        sleep_hold: true, asc_fail: false, j514c: false, t6031: false, j514m: board, t6034: soc });
+    WARNINGS.with(|w| *w.borrow_mut() = 0);
+    let pdev = platform::Device(device::Device, Core(PhantomData));
+    let result = admit(&pdev, &AsahiDevice, &T6034).map(|_| ());
+    (result, CALLS.with(|c| c.borrow().clone()), WARNINGS.with(|w| *w.borrow()))
+}
+static FOREIGN: Config = Config { chip_id: 0x6030, platform: hw::Platform::DeviceTree, machine: "apple,j516c", name: "foreign", firmware: (), board: hw::Board::DeviceTree(&board::record::J516C) };
 fn main() {
+    let (result, calls, _) = candidate_for(&FOREIGN, true, true, 0);
+    assert_eq!(result, Err(ENODEV), "J514C must not override another Config's chip");
+    assert!(!calls.contains(&"display") && !calls.contains(&"adt"));
+    for (board, soc) in [(false, true), (true, false), (false, false)] {
+        let (result, calls, _) = candidate34(board, soc, 0);
+        assert_eq!(result, Err(ENODEV), "T6034 needs its exact board and SoC");
+        assert!(!calls.contains(&"display") && !calls.contains(&"adt"));
+    }
+    let (result, calls, warnings) = candidate34(true, true, 0);
+    assert_eq!(result, Ok(()));
+    assert!(calls.ends_with(&TAIL));
+    assert_eq!(warnings, 1, "T6034 must identify inherited unqualified power words");
+    for code in [-517, -19] {
+        let (result, calls, _) = candidate34(true, true, code);
+        assert_eq!(result, Err(Error(code)));
+        assert!(!calls.contains(&"adt") && !calls.contains(&"hold"));
+    }
+    let (result, calls, _) = candidate_for(&T6034, true, true, 0);
+    assert_eq!(result, Err(ENODEV), "wrong Config cannot inherit this candidate");
+    assert!(!calls.contains(&"display") && !calls.contains(&"adt"));
+    for (board, soc) in [(false, true), (true, false), (false, false)] {
+        let (result, calls, _) = candidate(board, soc, 0);
+        assert_eq!(result, Err(ENODEV), "wrong board or SoC must not inherit T6031");
+        assert!(!calls.contains(&"display") && !calls.contains(&"adt"));
+    }
+    let (result, calls, warnings) = candidate(true, true, 0);
+    assert_eq!(result, Ok(()));
+    assert!(calls.ends_with(&TAIL));
+    assert_eq!(warnings, 1, "candidate must identify its unqualified reference assumptions");
+    WARNING_TEXT.with(|w| {
+        let text = w.borrow();
+        for value in ["max_power_mw=116739", "relative_power=[11, 23, 33, 44, 55, 71, 90]",
+                      "fast_die_mask=0x802a002b802a002b", "alarm_mask=0x902a102b802a002b",
+                      "OPP powers are boot-loader stand-ins"] {
+            assert!(text.contains(value), "warning lacks {}: {}", value, text);
+        }
+    });
+    for code in [-517, -19] {
+        let (result, calls, _) = candidate(true, true, code);
+        assert_eq!(result, Err(Error(code)), "candidate still requires its native display");
+        assert!(!calls.contains(&"adt") && !calls.contains(&"hold"));
+    }
     assert_eq!(run(&T6031, true, 0, -517), (Err(EPROBE_DEFER), vec!["machine", "display"]), "T6031 defers before firmware");
     assert_eq!(run(&T6031, true, 0, -19), (Err(ENODEV), vec!["machine", "display"]), "T6031 refusal stops admission");
     assert_eq!(run(&T6031, true, 0, 0), (Ok(()), with_tail(&["machine", "display"])), "T6031 admitted after its display");
     assert_eq!(run(&T6031, false, 0, 0), (Err(ENODEV), vec!["machine"]), "the machine check comes first");
     assert_eq!(run(&T6030, true, 0, -517), (Ok(()), with_tail(&["board", "pmp"])), "T6030 path unchanged");
     assert_eq!(run(&T6030, true, -517, 0), (Err(EPROBE_DEFER), vec!["board", "pmp"]), "T6030 still defers on its PMP link");
+@SLEEP_HOLD_CHECKS@
 }
 '''
 
+HOLD_PLAIN = '    pub fn hold_power(_: &super::device::Device) { call("hold"); }'
+HOLD_SLEEP = ('    pub fn hold_power(_: &super::device::Device, sleep_hold: bool) {\n'
+              '        call("hold"); super::HOLD.with(|h| *h.borrow_mut() = Some(sleep_hold));\n    }')
+SLEEP_HOLD_RUN = r'''
+fn run_hold(cfg: &'static Config, sleep_hold: bool, asc_fail: bool) -> (Result<()>, Vec<&'static str>, Option<bool>, u32) {
+    CALLS.with(|c| c.borrow_mut().clear());
+    STATE.with(|s| *s.borrow_mut() = State { board: true, machine: true, pmp: 0, display: 0, sleep_hold, asc_fail, j514c: false, t6031: false, j514m: false, t6034: false });
+    HOLD.with(|h| *h.borrow_mut() = None);
+    WARNINGS.with(|w| *w.borrow_mut() = 0);
+    let pdev = platform::Device(device::Device, Core(PhantomData));
+    let ret = admit(&pdev, &AsahiDevice, cfg).map(|_| ());
+    (ret, CALLS.with(|c| c.borrow().clone()), HOLD.with(|h| *h.borrow()), WARNINGS.with(|w| *w.borrow()))
+}
+fn before_hold(head: &[&'static str]) -> Vec<&'static str> { head.iter().chain(TAIL[..TAIL.len() - 1].iter()).copied().collect() }
+'''
+SLEEP_HOLD_CHECKS = r'''
+    // The system-sleep hold: T6031 only, and only while g15_sleep_hold is on; off is warned about.
+    assert_eq!(run_hold(&T6031, true, false), (Ok(()), with_tail(&["machine", "display"]), Some(true), 0), "T6031 holds gfx through sleep");
+    assert_eq!(run_hold(&T6031, false, false), (Ok(()), with_tail(&["machine", "display"]), Some(false), 1), "g15_sleep_hold=0: no sleep hold, one warning");
+    assert_eq!(run_hold(&T6030, true, false), (Ok(()), with_tail(&["board", "pmp"]), Some(false), 0), "T6030 never holds through sleep");
+    // The ASC read comes before the hold: a failure there leaves no hold behind.
+    assert_eq!(run_hold(&T6031, true, true), (Err(EIO), before_hold(&["machine", "display"]), None, 0), "T6031: ASC failure takes no hold");
+    assert_eq!(run_hold(&T6030, true, true), (Err(EIO), before_hold(&["board", "pmp"]), None, 0), "T6030: ASC failure takes no hold");
+'''
+SLEEP_HOLD_MUTANTS = {
+    "sleep-hold-any-platform": ("let sleep_hold = t6031 && params::sleep_hold();", "let sleep_hold = params::sleep_hold();"),
+    "sleep-hold-ignores-parameter": ("let sleep_hold = t6031 && params::sleep_hold();", "let sleep_hold = t6031;"),
+    "no-warning-when-off": ("} else if t6031 {", "} else if false {"),
+    "asc-read-after-hold": (re.compile(r"(\n\s*)let asc = regs\.asc_control\(\)\?;(.*?glue::hold_power\(dev, sleep_hold\);)", re.S),
+                            r"\2\1let asc = regs.asc_control()?;"),
+}
+
 RS_MUTANTS = {
+    "t6034-prefix-enabled": ('cfg.chip_id != 0x6034', 'true'),
+    "other-prefix-policy-lost": ('cfg.chip_id != 0x6034', 'false'),
+    "t6034-ignores-soc": ('&& glue::machine(kernel::c_str!("apple,t6034"))', "&& true"),
+    "candidate-ignores-config-chip": ("cfg.chip_id == 0x6031", "true"),
+    "candidate-ignores-board": ('&& glue::machine(kernel::c_str!("apple,j514c"))', "&& true"),
+    "candidate-ignores-soc": ('&& glue::machine(kernel::c_str!("apple,t6031"))', "&& true"),
     "display-refusal-ignored": ("dev_err!(dev, \"native display not admitted: {:?}\\n\", err);\n            }\n            return Err(err);",
                                 "dev_err!(dev, \"native display not admitted: {:?}\\n\", err);\n            }"),
     "display-order-skipped": ("let ret = unsafe { glue::asahi_g15_display_prepare(dev.as_raw().cast()) };", "let ret = 0;"),
@@ -346,10 +502,21 @@ def c_failures(exe):
     return [s for s in C_SCENARIOS if subprocess.run([str(exe), s], capture_output=True).returncode]
 
 
-def compile_rs(work, rustc, source, name):
+def rs_model(admit, root):
+    """The prelude and main for this admit(): with the system-sleep hold argument (g15_sleep_hold) or without."""
+    sleep = "glue::hold_power(dev, sleep_hold);" in admit
+    prefix = RS_PREFIX.replace("@HOLD_POWER@", HOLD_SLEEP if sleep else HOLD_PLAIN)
+    record = (root / "drivers/gpu/drm/asahi/g15/board/record.rs").read_text()
+    prefix = prefix.replace("@REFERENCE_TYPE@", item(record, "pub(crate) struct Reference {"))
+    prefix = prefix.replace("@REFERENCE_VALUE@", item(record, "pub(crate) const J516C: Reference = Reference {"))
+    main = RS_MAIN.replace("@SLEEP_HOLD_RUN@", SLEEP_HOLD_RUN if sleep else "").replace("@SLEEP_HOLD_CHECKS@", SLEEP_HOLD_CHECKS if sleep else "")
+    return sleep, prefix, main
+
+
+def compile_rs(work, rustc, source, name, model):
     src = work / f"{name}.rs"
     exe = work / name
-    src.write_text(RS_PREFIX + source + RS_MAIN)
+    src.write_text(model[1] + source + model[2])
     result = subprocess.run([rustc, "--edition=2021", "-o", str(exe), str(src)], capture_output=True, text=True)
     if result.returncode:
         raise SystemExit(f"{name}: does not build with {rustc}:\n{result.stderr}")
@@ -365,8 +532,8 @@ def static_checks(root):
     autoload = module[start:module.index("\n);", start)]
     start = module.index("const OF_TABLE:")
     matched = module[start:module.index("]);", start)]
-    assert compat.findall(autoload) == ["apple,agx-t6030", "apple,agx-t6031"], "autoload table"
-    assert compat.findall(matched) == ["apple,agx-t6030", "apple,agx-t6031"], "match table"
+    assert compat.findall(autoload) == ["apple,agx-t6030", "apple,agx-t6031", "apple,agx-t6034"], "autoload table"
+    assert compat.findall(matched) == ["apple,agx-t6030", "apple,agx-t6031", "apple,agx-t6034"], "match table"
     init = item(apple, "\nstatic int apple_drm_init(struct device *dev)\n{")
     order = [init.index(s) for s in ("drm_dev_register(", "drm_client_setup_with_fourcc(", "apple_g15_display_publish(dev)")]
     assert order == sorted(order), "publication must follow DRM registration and client setup"
@@ -385,8 +552,12 @@ def main():
     args = parser.parse_args()
     rustcs = args.rustc or ["rustc"]
     checks = static_checks(args.root)
+    for path in ("drivers/gpu/drm/asahi/asahi_core.rs", "drivers/gpu/drm/asahi/g15/params.rs"):
+        assert "g15_j514c_bringup" not in (args.root / path).read_text(), "normal boot must not require an enable flag"
     source = c_source(args.root)
     admit = item((args.root / BOOT).read_text(), "pub(crate) fn admit(")
+    model = rs_model(admit, args.root)
+    rs_mutants = dict(RS_MUTANTS, **(SLEEP_HOLD_MUTANTS if model[0] else {}))
     with tempfile.TemporaryDirectory(prefix="g15-display-order-", dir=os.environ.get("TMPDIR")) as tmp:
         work = Path(tmp)
         failed = c_failures(compile_c(work, source, "control"))
@@ -396,16 +567,17 @@ def main():
             assert failed, f"C mutant {name} survived"
             print(f"mutant {name}: caught by {', '.join(failed)}")
         for rustc in rustcs:
-            exe = compile_rs(work, rustc, admit, "admit")
+            exe = compile_rs(work, rustc, admit, "admit", model)
             run = subprocess.run([str(exe)], capture_output=True, text=True)
             assert run.returncode == 0, f"admit() control failed with {rustc}:\n{run.stderr}"
-            for name, change in RS_MUTANTS.items():
-                exe = compile_rs(work, rustc, mutate(admit, change), f"admit-{name}")
+            for name, change in rs_mutants.items():
+                exe = compile_rs(work, rustc, mutate(admit, change), f"admit-{name}", model)
                 run = subprocess.run([str(exe)], capture_output=True, text=True)
                 assert run.returncode, f"admit() mutant {name} survived with {rustc}"
                 print(f"mutant {name} ({rustc}): caught")
     print(f"PASS: {checks} static checks, {len(C_SCENARIOS)} C scenarios, "
-          f"{len(C_MUTANTS)} C mutants, admit() on {len(rustcs)} rustc, {len(RS_MUTANTS)} admit() mutants")
+          f"{len(C_MUTANTS)} C mutants, admit() on {len(rustcs)} rustc, {len(rs_mutants)} admit() mutants"
+          + (", system-sleep hold checks" if model[0] else ""))
 
 
 if __name__ == "__main__":

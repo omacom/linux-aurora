@@ -709,7 +709,9 @@ static int sdma_v7_0_load_microcode(struct amdgpu_device *adev)
 			return r;
 		}
 
-		memcpy(adev->sdma.instance[i].sdma_fw_ptr, fw_data, fw_size);
+		amdgpu_bo_memcpy_to(adev->sdma.instance[i].sdma_fw_obj,
+				    adev->sdma.instance[i].sdma_fw_ptr,
+				    fw_data, fw_size);
 
 		amdgpu_bo_kunmap(adev->sdma.instance[i].sdma_fw_obj);
 		amdgpu_bo_unreserve(adev->sdma.instance[i].sdma_fw_obj);

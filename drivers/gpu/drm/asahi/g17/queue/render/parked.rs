@@ -25,12 +25,19 @@ pub(crate) struct ParkedPair {
     slot: u8,
     ordinal: u64,
     clusters: u32,
+    deflake: crate::g17::fw::render::Deflake,
     descriptor_flags: [u32; 2],
+    variant: &'static crate::g17::fw::Variant,
     installed: [bool; 2],
     recovery_generation: u64,
     registered: Option<u8>,
     outer_started: u8,
     previous: Option<RetiredBinding>,
+    /// Scheduler page these queues last ran a command for. A pair parked
+    /// without a consumed release (an unused warm pair taken for another
+    /// owner) keeps it, so its next owner change still waits while that
+    /// scheduler is released.
+    executed: u64,
 }
 
 /// All new graph ownership stays separate from the installed kick storage until commit.
@@ -48,11 +55,20 @@ pub(crate) struct Prepared {
 }
 
 impl Pair {
+    /// The current graph never entered command publication. Physical identities
+    /// may have older users; parking retains their rings and retirement owners.
+    pub(crate) fn can_yield_unused(&self) -> Result<bool> {
+        Ok(!self.graph_started && self.can_park_backing(self.context())?)
+    }
+
     /// The registry also checks the shared free-list release and scheduler-release witness.
     /// Drain displaced owners before this preflight; they have their own logical releases.
     pub(crate) fn can_park(&self, context: &Arc<Context>) -> Result<bool> {
+        Ok(self.owner.is_none() && self.can_park_backing(context)?)
+    }
+
+    fn can_park_backing(&self, context: &Arc<Context>) -> Result<bool> {
         Ok(Arc::ptr_eq(context, self.context())
-            && self.owner.is_none()
             && self
                 .previous
                 .as_ref()
@@ -76,12 +92,15 @@ impl Pair {
             slot: self.slot,
             ordinal: self.ordinal,
             clusters: self.clusters,
+            deflake: self.deflake,
             descriptor_flags: self.descriptor_flags,
+            variant: self.variant,
             installed: self.installed,
             recovery_generation: self.recovery_generation,
             registered: self.registered,
             outer_started: self.outer_started,
             previous: self.previous,
+            executed: self.executed,
         };
         let retired = RetiredBinding {
             memory: Some(self.memory),
@@ -96,11 +115,22 @@ impl Pair {
 }
 
 impl ParkedPair {
+    /// The release of `scheduler` has been consumed: a later owner change no
+    /// longer has to wait for it.
+    pub(crate) fn release_consumed(&mut self, scheduler: u64) {
+        if self.executed == scheduler {
+            self.executed = 0;
+        }
+    }
     pub(crate) fn qids(&self) -> [u8; 2] {
         self.ids.map(kick::Id::qid)
     }
 
     #[inline(never)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preparation forwards the render binding inputs without changing their ownership."
+    )]
     pub(crate) fn prepare(
         &self,
         alloc: &Allocator<'_>,
@@ -125,7 +155,7 @@ impl ParkedPair {
             return Err(EINVAL);
         }
         alloc.uat.vm_context_mask(context.vm())?;
-        let layout = target::Layout::new(pass, self.clusters)?;
+        let layout = target::Layout::new(pass, self.clusters, self.variant.programs)?;
         let aliases = [
             kicks[0].prepare_client_alias(context.vm())?,
             kicks[1].prepare_client_alias(context.vm())?,
@@ -141,6 +171,7 @@ impl ParkedPair {
             pm_generation,
             self.ordinal,
             word,
+            self.variant,
         )?;
         Ok(Prepared {
             memory: Some(memory),
@@ -190,6 +221,7 @@ impl ParkedPair {
             return Err(EIO);
         };
         storage.write_init(kernel::try_init!(Pair {
+            graph_started: false,
             kick_aliases: None,
             memory,
             kicks,
@@ -202,7 +234,9 @@ impl ParkedPair {
             ordinal: self.ordinal,
             initial_packet: next.initial_packet,
             clusters: self.clusters,
+            deflake: self.deflake,
             descriptor_flags: self.descriptor_flags,
+            variant: self.variant,
             installed: self.installed,
             configs: [None; 2],
             cursors: [0; 2],
@@ -213,8 +247,12 @@ impl ParkedPair {
             terminal: None,
             previous: self.previous.take(),
             displaced: None,
-            replay: None,
+            replay: Tracker::new(),
+            replay_since: None,
             context_update: true,
+            executed: self.executed,
+            switch: None,
+            published_completions: None,
         }))
     }
 }

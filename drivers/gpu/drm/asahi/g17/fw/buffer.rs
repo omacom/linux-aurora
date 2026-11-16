@@ -161,7 +161,7 @@ impl Graph {
         }
         let scratch = args.scratch.checked_sub(cfg::USER_BASE).ok_or(EINVAL)?;
         let discard = args.discard.checked_sub(cfg::USER_BASE).ok_or(EINVAL)?;
-        if scratch > u32::MAX as u64 || discard > u32::MAX as u64 {
+        if scratch > u64::from(u32::MAX) || discard > u64::from(u32::MAX) {
             return Err(EINVAL);
         }
         let stats = offset_va(args.fw_va, (CONTROL + 0x40) as u64)?;
@@ -235,7 +235,7 @@ pub(crate) fn scene_registers(index: usize, scratch: u64, metrics: u64) -> Resul
         .ok_or(EINVAL)?
         .checked_add((index % SCRATCH_SLOTS) as u64 * SCRATCH_STRIDE)
         .ok_or(EOVERFLOW)?;
-    if scratch > u32::MAX as u64 || scratch & 0xf != 0 {
+    if scratch > u64::from(u32::MAX) || scratch & 0xf != 0 {
         return Err(EINVAL);
     }
     let metric = offset_va(metrics, (index * 4) as u64)?;

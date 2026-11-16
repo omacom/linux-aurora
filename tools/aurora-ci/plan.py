@@ -29,6 +29,10 @@ which the workflow reads from the target branch so that a pull request cannot
 vouch for itself. Repository or organization access alone does not count:
 the organization is wider than the kernel team. An author denounced there
 gets light runs only, whatever their labels.
+
+Repository variables do not reach a fork's pull request run, so the plan names
+the runner for a trusted author's fork; any other run leaves it empty and the
+workflow uses KERNEL_CI_RUNNER, or GitHub's runner without it.
 """
 
 import argparse
@@ -40,6 +44,7 @@ from pathlib import Path
 DEFAULT_LABEL = "ci:build"
 ZERO_SHA = "0" * 40
 PR_REFRESH_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
+VOUCHED_FORK_RUNNER = '["namespace-profile-arm64-linux-apple-aurora"]'
 
 
 def read_vouched(text):
@@ -81,7 +86,7 @@ def trust(event, vouched):
 def plan(event_name, event, label=DEFAULT_LABEL, vouched=None):
     """Return the plan as a dict of strings, ready for $GITHUB_OUTPUT."""
     out = {"tier": "light", "reason": "", "base_sha": "", "head_sha": "",
-           "pr_number": "", "fork": "false", "force": "false"}
+           "pr_number": "", "fork": "false", "force": "false", "runner": ""}
 
     if event_name == "pull_request":
         pr = event["pull_request"]
@@ -108,6 +113,8 @@ def plan(event_name, event, label=DEFAULT_LABEL, vouched=None):
         else:
             out["reason"] = (f"checks only ({author} is not in .github/VOUCHED.td); the merge "
                              f"queue builds the kernel, or add `{label}` for a build now")
+        if fork and status == "vouched" and out["tier"] == "full":
+            out["runner"] = VOUCHED_FORK_RUNNER
     elif event_name == "merge_group":
         group = event["merge_group"]
         out.update(tier="full", reason="merge queue", base_sha=group["base_sha"],

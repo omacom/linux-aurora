@@ -254,7 +254,8 @@ impl gpu::Gpu for Backend {
         Ok(KBox::new(crate::m3::m3_submit::Queue::new(self.shared.clone(),self.scheduler.clone(),vm,priority,usc_exec_base,
             self.soc.features.fragment_dependency)?,GFP_KERNEL)?)
     }
-    fn map_timestamp_buffer(&self, bo: gem::ObjectRef, range: Range<usize>) -> Result<mmu::KernelMapping> {
-        Option::as_mut(&mut *self.shared.lock()).ok_or(ENODEV)?.map_timestamp(bo,range)
+    fn map_timestamp_buffer(&self, bo: gem::ObjectRef, range: Range<usize>) -> Result<crate::timestamp::Buffer> {
+        crate::timestamp::Buffer::firmware(
+            Option::as_mut(&mut *self.shared.lock()).ok_or(ENODEV)?.map_timestamp(bo,range)?)
     }
 }

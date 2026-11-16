@@ -87,8 +87,16 @@ static int __drm_gem_shmem_init(struct drm_device *dev, struct drm_gem_shmem_obj
 		 * why this is required _and_ expected if you're
 		 * going to pin these pages.
 		 */
-		mapping_set_gfp_mask(obj->filp->f_mapping, GFP_HIGHUSER |
-				     __GFP_RETRY_MAYFAIL | __GFP_NOWARN);
+		gfp_t gfp = GFP_HIGHUSER | __GFP_RETRY_MAYFAIL | __GFP_NOWARN;
+
+		/* A bulk pin must not run direct reclaim once per folio when
+		 * the driver can instead return an allocation failure. Clearing
+		 * DIRECT_RECLAIM also makes memcg charges fail without reclaim
+		 * or invoking the OOM killer. Preserve placement and kswapd.
+		 */
+		if (shmem->pages_no_reclaim)
+			gfp &= ~(__GFP_DIRECT_RECLAIM | __GFP_RETRY_MAYFAIL);
+		mapping_set_gfp_mask(obj->filp->f_mapping, gfp);
 	}
 
 	return 0;
@@ -612,10 +620,10 @@ bool drm_gem_shmem_idle_pages_releasable_locked(struct drm_gem_shmem_object *shm
 	struct drm_gem_object *obj = &shmem->base;
 
 	dma_resv_assert_held(obj->resv);
-	return shmem->sgt && !drm_gem_is_imported(obj) && !obj->dma_buf &&
+	return !drm_gem_is_imported(obj) && !obj->dma_buf &&
 		shmem->madv >= 0 && !refcount_read(&shmem->pages_pin_count) &&
 		!refcount_read(&shmem->vmap_use_count) &&
-		refcount_read(&shmem->pages_use_count) == 1 &&
+		refcount_read(&shmem->pages_use_count) == !!shmem->sgt &&
 		dma_resv_test_signaled(obj->resv, DMA_RESV_USAGE_BOOKKEEP);
 }
 EXPORT_SYMBOL_GPL(drm_gem_shmem_idle_pages_releasable_locked);
@@ -1074,6 +1082,10 @@ static struct sg_table *drm_gem_shmem_get_pages_sgt_locked(struct drm_gem_shmem_
 
 	if (shmem->sgt)
 		return shmem->sgt;
+
+	/* Purged contents cannot be restored by rebuilding an empty table. */
+	if (shmem->madv < 0)
+		return ERR_PTR(-EINVAL);
 
 	drm_WARN_ON(obj->dev, drm_gem_is_imported(obj));
 

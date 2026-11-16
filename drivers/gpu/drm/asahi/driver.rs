@@ -20,7 +20,8 @@ use kernel::{
     prelude::*,
     sync::{
         aref::ARef,
-        Arc, //
+        Arc,
+        SpinLock, //
     }, //
 };
 
@@ -31,7 +32,8 @@ use crate::{
     gem::AsahiObject,
     gpu,
     hw,
-    regs, //
+    regs,
+    stats_raw, //
 };
 
 use kernel::macros::vtable;
@@ -57,6 +59,11 @@ pub(crate) struct AsahiPlatformDriverData<'bound> {
     raw_stats: *mut core::ffi::c_void,
     // Own the allocation until unregister has drained all sysfs readers.
     stats: Option<Arc<crate::stats::StatsSnapshot>>,
+    /// Own the raw statistics snapshot until the DRM registration (which owns
+    /// the debugfs entry pointing at it) is dropped. Never read: held for its
+    /// lifetime.
+    #[allow(dead_code)]
+    debug_stats: Option<Arc<SpinLock<stats_raw::RawStatsSnapshot>>>,
 }
 
 // SAFETY: `raw_dev` is only passed back to the sysfs shim, which serializes its own state.
@@ -90,6 +97,10 @@ const INFO: drm::driver::DriverInfo = drm::driver::DriverInfo {
     name: c"asahi",
     desc: c"Apple AGX Graphics",
 };
+
+// Open DRM files and exported DMA buffers take their callbacks' module from `MODULE`. With
+// `None`, a modular build could be unloaded while they still point into it.
+const _: () = assert!(<AsahiDrmDriver as drm::driver::Driver>::MODULE.is_some());
 
 /// DRM Driver implementation for `AsahiDriver`.
 #[vtable]
@@ -152,6 +163,10 @@ kernel::of_device_table!(
         (
             of::DeviceId::new(c"apple,agx-t8140"),
             ProbeConfig::G17(&hw::t8140::CONFIG)
+        ),
+        (
+            of::DeviceId::new(c"apple,agx-t6040"),
+            ProbeConfig::G17(&hw::t6040::CONFIG)
         ),
         (
             of::DeviceId::new(c"apple,agx-t8103"),
@@ -291,11 +306,18 @@ impl platform::Driver for AsahiPlatformDriver {
         gpu.init()?;
 
         let stats = gpu.stats_snapshot();
+        let debug_stats = gpu.raw_stats_snapshot();
         let data = try_pin_init!(AsahiDrmRegistrationData { gpu, resources });
 
         // SAFETY: `reg` is stored in `AsahiPlatformDriverData` and dropped when the driver is
         // unbound; it is never forgotten.
         let reg = unsafe { drm::Registration::new(pdev.as_ref(), drm, data, 0)? };
+
+        // The DRM core created this card's debugfs directory when the device
+        // was registered; publish the raw firmware statistics in it.
+        if let Some(snapshot) = debug_stats.as_ref() {
+            crate::stats_raw::register(reg.device(), snapshot);
+        }
 
         // Register the sysfs file on the platform device. Must happen after
         // the DRM device is registered so the device is fully bound.
@@ -315,6 +337,7 @@ impl platform::Driver for AsahiPlatformDriver {
             raw_dev,
             raw_stats,
             stats,
+            debug_stats,
         };
 
         Ok(driver)
@@ -347,6 +370,7 @@ impl AsahiPlatformDriver {
             raw_dev: core::ptr::null_mut(),
             raw_stats: core::ptr::null_mut(),
             stats: None,
+            debug_stats: None,
         })
     }
 
@@ -383,6 +407,7 @@ impl AsahiPlatformDriver {
             raw_dev: core::ptr::null_mut(),
             raw_stats: core::ptr::null_mut(),
             stats: None,
+            debug_stats: None,
         })
     }
 
@@ -390,6 +415,8 @@ impl AsahiPlatformDriver {
         pdev: &'bound platform::Device<Core<'_>>,
         cfg: &'static g17::Config,
     ) -> Result<AsahiPlatformDriverData<'bound>> {
+        // The GPU memory limits and RSS attribution apply only to G17 for now.
+        crate::memacct::LEDGER.configure();
         // SAFETY: The GPU performs DMA through a UAT whose output width is part of the SoC config.
         unsafe { pdev.dma_set_mask_and_coherent(DmaMask::try_new(cfg.uat_oas)?)? };
         let resources = regs::Resources::new(pdev)?;
@@ -419,6 +446,11 @@ impl AsahiPlatformDriver {
                 return Err(error);
             }
         };
+        if let Err(error) =
+            crate::sysfs_exports::register_idle(raw_dev, crate::g17::power::IDLE_HOLD_MS.as_ptr())
+        {
+            dev_warn!(pdev.as_ref(), "idle_off_delay_ms not registered: {:?}\n", error);
+        }
         Ok(AsahiPlatformDriverData {
             _device: reg.device().into(),
             _reg: reg,
@@ -427,13 +459,14 @@ impl AsahiPlatformDriver {
             raw_dev,
             raw_stats,
             stats: None,
+            debug_stats: None,
         })
     }
 }
 
 impl Drop for AsahiPlatformDriverData<'_> {
     fn drop(&mut self) {
-        // SAFETY: `self.raw_dev` was set in `probe` from the platform
+        // `self.raw_dev` was set in `probe` from the platform
         // device's `as_raw()`, valid for the lifetime of the bound driver.
         if !self.raw_dev.is_null() {
             crate::sysfs_exports::unregister(self.raw_dev, self.raw_stats);

@@ -365,7 +365,8 @@ impl Timestamps<'_> {
             .get(timestamp.handle.try_into()?)
             .ok_or(ENOENT)?
             .clone();
-        let file::Object::TimestampBuffer(mapping) = object;
+        let file::Object::TimestampBuffer(buffer) = object;
+        let mapping = buffer.firmware_mapping()?;
         let offset = timestamp.offset as usize;
         if offset % 8 != 0 || offset >= mapping.size() || mapping.size() - offset < 8 {
             return Err(EINVAL);

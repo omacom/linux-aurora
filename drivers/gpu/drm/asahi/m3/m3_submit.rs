@@ -18,12 +18,13 @@ impl Destination {
         let guard = objects.lock();
         let object = guard.get(timestamp.handle.try_into()?).ok_or(ENOENT)?;
         match &*object {
-            file::Object::TimestampBuffer(mapping) => {
+            file::Object::TimestampBuffer(buffer) => {
+                let mapping = buffer.firmware_mapping()?;
                 let offset = timestamp.offset as usize;
                 if offset & 7 != 0 || offset.checked_add(8).ok_or(EOVERFLOW)? > mapping.size() {
                     return Err(EINVAL);
                 }
-                Ok(Some(Self { mapping: mapping.clone(), offset }))
+                Ok(Some(Self { mapping, offset }))
             }
         }
     }

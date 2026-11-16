@@ -151,6 +151,59 @@ impl Mm {
     }
 }
 
+/// A resident-set counter of an address space (`MM_*PAGES` in `struct mm_struct`).
+///
+/// The counters make up the RSS that `/proc/<pid>/status`, `oom_badness()` and the OOM report
+/// show for a process.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RssCounter {
+    /// Resident file-backed pages (`MM_FILEPAGES`).
+    File,
+    /// Resident anonymous pages (`MM_ANONPAGES`).
+    Anon,
+    /// Swapped-out anonymous pages (`MM_SWAPENTS`).
+    Swap,
+    /// Resident shared-memory pages (`MM_SHMEMPAGES`).
+    Shmem,
+}
+
+impl RssCounter {
+    fn as_raw(self) -> core::ffi::c_int {
+        let member = match self {
+            Self::File => bindings::MM_FILEPAGES,
+            Self::Anon => bindings::MM_ANONPAGES,
+            Self::Swap => bindings::MM_SWAPENTS,
+            Self::Shmem => bindings::MM_SHMEMPAGES,
+        };
+        member as core::ffi::c_int
+    }
+}
+
+// The RSS counters live as long as the `mm_struct` itself (until `__mmdrop()`), so these
+// methods are safe even if `mm_users` is zero.
+impl Mm {
+    /// Adds `pages` (which may be negative) to one of the resident-set counters.
+    ///
+    /// This is how a driver attributes pages it holds on behalf of a process, but which are not
+    /// mapped into it, to that process. Every page added must be subtracted again before the
+    /// last `mmgrab` reference is dropped: `__mmdrop()` reports a non-zero counter as a bad
+    /// rss-counter state.
+    #[inline]
+    pub fn add_rss_counter(&self, counter: RssCounter, pages: isize) {
+        // SAFETY: The pointer is valid since self is a reference, and the counters are initialized
+        // for as long as the `mm_struct` is.
+        unsafe { bindings::add_mm_counter(self.as_raw(), counter.as_raw(), pages as _) };
+    }
+
+    /// Returns the exact current value of one of the resident-set counters.
+    #[inline]
+    pub fn rss_counter(&self, counter: RssCounter) -> usize {
+        // SAFETY: The pointer is valid since self is a reference, and the counters are initialized
+        // for as long as the `mm_struct` is.
+        unsafe { bindings::get_mm_counter_sum(self.as_raw(), counter.as_raw()) as usize }
+    }
+}
+
 // These methods require `mm_users` to be non-zero.
 impl MmWithUser {
     /// Obtain a reference from a raw pointer.

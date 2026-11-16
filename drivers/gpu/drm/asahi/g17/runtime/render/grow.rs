@@ -40,7 +40,7 @@ impl RenderState {
                 entry.published
                     && u32::from(entry.reservation.buffer.0) == request.buffer_slot
                     && entry.context.as_ref().is_some_and(|context| {
-                        request.vm_slot == -1 || request.vm_slot as u32 == u32::from(context.id())
+                        request.vm_slot == -1 || request.vm_slot as u32 == context.id()
                     })
             })
         })
@@ -228,6 +228,8 @@ impl crate::g17::Shared {
                             .is_some_and(|pair| pair.published_in_flight());
                         entry.borrowed_dependencies =
                             entry.pair.as_ref().map(|pair| pair.dependency_snapshot());
+                        entry.borrowed_switch =
+                            entry.pair.as_ref().and_then(|pair| pair.switch_in_flight());
                         entry.growing = true;
                         Some(entry.pair.take().ok_or(EIO)?)
                     }
@@ -269,13 +271,16 @@ impl crate::g17::Shared {
                 }
                 entry.pair = pair.take();
                 entry.borrowed_dependencies = None;
+                entry.borrowed_switch = None;
                 entry.growing = false;
+                // The grow work item requests an event pass when it finishes.
+                entry.missed_event = false;
             }
             if firmware.queues.render.grow.active != Some(request) {
                 return Err(EIO);
             }
             firmware.queues.render.grow.active = None;
-            self.changed.notify_all();
+            self.note_changed();
             if !lease.is_current() || request.halt_count != firmware.recovery.generation() {
                 continue;
             }

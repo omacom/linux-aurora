@@ -21,8 +21,10 @@ use kernel::{
         }, //
     },
     error::Result,
+    new_mutex,
     prelude::*,
     sync::aref::ARef,
+    sync::Mutex,
     uapi, //
 };
 
@@ -40,6 +42,7 @@ use crate::{
         AsahiDrmDriver, //
     },
     file,
+    memacct,
     mmu,
 };
 
@@ -60,6 +63,11 @@ pub(crate) struct AsahiObject {
     kernel: bool,
     /// Driver aliases outside the user GPUVA tree; they pin the backing.
     kernel_mappings: AtomicU64,
+    /// Memory accounting and process attribution of the held backing.
+    charge: memacct::Charge,
+    /// Serializes overlapping timestamp writes through every binding of this BO.
+    #[pin]
+    pub(crate) timestamp_lock: Mutex<()>,
 }
 
 /// Type alias for the shmem GEM object type for this driver.
@@ -74,6 +82,9 @@ pub(crate) type Object = shmem::Object<AsahiObject>;
 /// comes with unevictable, as `mapping_set_inaccessible()` sets it; nothing reads or writes a GEM
 /// shmem file through its mapping. Releasing idle backing or purging clears the mark, so the
 /// released pages can be swapped and migrated again.
+///
+/// The same transitions charge and uncharge the held pages (see [`memacct`]): a held user object
+/// counts towards the resident set of the process that created it.
 pub(crate) fn set_mapping_held(gem: &Object, held: bool) {
     let raw = gem.as_raw();
     // SAFETY: `gem` keeps the GEM object alive. A shmem-backed object's `filp` and its
@@ -99,6 +110,7 @@ pub(crate) fn set_mapping_held(gem: &Object, held: bool) {
     } else {
         flags.fetch_and(!inaccessible, Ordering::Relaxed);
     }
+    gem.charge.set_held(held);
 }
 
 /// Takes the SG table of `gem`, which holds its pages for the device, and marks the
@@ -106,7 +118,7 @@ pub(crate) fn set_mapping_held(gem: &Object, held: bool) {
 pub(crate) fn held_sg_table<'a>(
     gem: &'a Object,
     dev: &'a kernel::device::Device<kernel::device::Bound>,
-) -> Result<&'a kernel::scatterlist::SGTable> {
+) -> Result<shmem::SGTable<'a, AsahiObject>> {
     let sgt = gem.sg_table(dev)?;
     set_mapping_held(gem, true);
     Ok(sgt)
@@ -115,9 +127,7 @@ pub(crate) fn held_sg_table<'a>(
 /// VM-private BOs share their assigned VM's reservation object. Validate this
 /// before acquiring mapping state; generic GPUVM accepts external shareable BOs.
 pub(crate) fn validate_vm_binding(gem: &Object, vm: &mmu::Vm) -> Result {
-    if gem.flags & uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_VM_PRIVATE != 0
-        && vm.is_extobj(gem)
-    {
+    if gem.flags & uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_VM_PRIVATE != 0 && vm.is_extobj(gem) {
         return Err(EINVAL);
     }
     Ok(())
@@ -211,6 +221,7 @@ pub(crate) struct AsahiObjConfig {
     flags: u32,
     exportable: bool,
     kernel: bool,
+    charge: memacct::Charge,
 }
 
 /// Create a new kernel-owned GEM object.
@@ -229,20 +240,23 @@ pub(crate) fn new_kernel_object_wc(dev: &AsahiDrmDevice, size: usize) -> Result<
 /// Validate before rounding: wrapping a user size can create a much smaller
 /// backing than requested (or panic with overflow checks). Kernel callers use
 /// the same boundary so malformed calculated sizes cannot bypass this check.
-fn checked_object_size(size: usize) -> Result<usize> {
-    if size == 0 { return Err(EINVAL); }
+pub(crate) fn checked_object_size(size: usize) -> Result<usize> {
+    if size == 0 {
+        return Err(EINVAL);
+    }
     size.checked_add(mmu::UAT_PGMSK)
         .map(|rounded| rounded & !mmu::UAT_PGMSK)
         .ok_or(EOVERFLOW)
 }
 
-
 fn new_kernel_object_mapped(dev: &AsahiDrmDevice, size: usize, map_wc: bool) -> Result<ObjectRef> {
+    let size = checked_object_size(size)?;
     let gem = shmem::Object::<AsahiObject>::new(
         dev,
-        checked_object_size(size)?,
+        size,
         shmem::ObjectConfig::<AsahiObject> {
             reclaimable_cpu_mappings: false,
+            pages_no_reclaim: false,
             map_wc,
             parent_resv_obj: None,
         },
@@ -250,6 +264,7 @@ fn new_kernel_object_mapped(dev: &AsahiDrmDevice, size: usize, map_wc: bool) -> 
             flags: 0,
             exportable: false,
             kernel: true,
+            charge: memacct::Charge::kernel(&memacct::LEDGER, size as u64),
         },
     )?;
 
@@ -259,12 +274,17 @@ fn new_kernel_object_mapped(dev: &AsahiDrmDevice, size: usize, map_wc: bool) -> 
 }
 
 /// Create a new user-owned GEM object with the given flags.
+///
+/// `commit` is the admission of `size` (already rounded by [`checked_object_size`]) for the
+/// creating client; the object is attributed to the current process.
 pub(crate) fn new_object(
     dev: &AsahiDrmDevice,
     size: usize,
     flags: u32,
     parent_object: Option<&shmem::Object<AsahiObject>>,
     reclaim_cpu: bool,
+    pages_no_reclaim: bool,
+    commit: memacct::Commit,
 ) -> Result<ARef<Object>> {
     if (flags & uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_VM_PRIVATE != 0) != parent_object.is_some()
     {
@@ -276,6 +296,7 @@ pub(crate) fn new_object(
         checked_object_size(size)?,
         shmem::ObjectConfig::<AsahiObject> {
             reclaimable_cpu_mappings: parent_object.is_some() && reclaim_cpu,
+            pages_no_reclaim,
             map_wc: flags & uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_WRITEBACK == 0,
             parent_resv_obj: parent_object,
         },
@@ -283,6 +304,7 @@ pub(crate) fn new_object(
             flags,
             exportable: parent_object.is_none(),
             kernel: false,
+            charge: memacct::Charge::user_current(commit),
         },
     )?;
 
@@ -308,16 +330,22 @@ impl DriverObject for AsahiObject {
             exportable: args.exportable,
             kernel: args.kernel,
             kernel_mappings: AtomicU64::new(0),
+            charge: args.charge,
+            timestamp_lock <- new_mutex!((), "Asahi timestamp stores"),
         })
     }
 
     /// Objects the DRM core allocates for us (dma-bufs imported from other devices and dumb
     /// buffers) are shared user objects, like a GEM_CREATE object without flags.
+    ///
+    /// Their memory is not counted: an import's backing belongs to, and is charged by, its
+    /// exporter, and the driver offers no dumb buffers (it has no KMS).
     fn core_object_args(_dev: &AsahiDrmDevice, _size: usize) -> Result<Self::Args> {
         Ok(AsahiObjConfig {
             flags: 0,
             exportable: true,
             kernel: false,
+            charge: memacct::Charge::none(),
         })
     }
 
@@ -372,6 +400,11 @@ impl Drop for KernelMappingPin {
 }
 
 impl AsahiObject {
+    /// Whether CPU mappings use the cacheable WRITEBACK policy.
+    pub(crate) fn is_writeback(&self) -> bool {
+        self.flags & uapi::drm_asahi_gem_flags_DRM_ASAHI_GEM_WRITEBACK != 0
+    }
+
     pub(crate) fn idle_reclaim_candidate(&self) -> bool {
         !self.kernel && !self.exportable && self.kernel_mappings.load(Ordering::Acquire) == 0
     }
@@ -439,3 +472,22 @@ extern "C" { fn asahi_g15_dma_coherent(dev: *mut core::ffi::c_void) -> bool; }
 
 #[cfg(not(CONFIG_DRM_ASAHI_G15))]
 pub(crate) fn prepare_new_object(_gem: &Object) -> Result { Err(EINVAL) }
+/// Large user BOs have a cheap ENOMEM fallback instead of per-folio reclaim.
+/// Keep ordinary resource allocations and kernel-owned backing on their existing
+/// policy. 256 MiB also matches Mesa's maximum reusable BO-cache footprint.
+pub(crate) fn user_pages_no_reclaim(size: usize, g17: bool) -> bool {
+    g17 && size >= 256 * 1024 * 1024
+}
+
+#[kernel::macros::kunit_tests(asahi_gem_allocation_policy)]
+mod allocation_policy_tests {
+    use super::*;
+
+    #[test]
+    fn large_user_backing() {
+        assert!(!user_pages_no_reclaim(256 * 1024 * 1024 - 1, true));
+        assert!(user_pages_no_reclaim(256 * 1024 * 1024, true));
+        assert!(user_pages_no_reclaim(3_257_113_344, true));
+        assert!(!user_pages_no_reclaim(3_257_113_344, false));
+    }
+}

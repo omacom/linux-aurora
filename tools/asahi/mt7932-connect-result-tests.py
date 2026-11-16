@@ -23,6 +23,7 @@ typedef uint8_t u8; typedef uint16_t u16; typedef int gfp_t;
 #define WLAN_STATUS_SUCCESS 0
 #define WLAN_STATUS_UNSPECIFIED_FAILURE 1
 #define WLAN_REASON_UNSPECIFIED 1
+#define WLAN_REASON_DEAUTH_LEAVING 3
 #define NL80211_TIMEOUT_UNSPECIFIED 0
 #define GFP_ATOMIC 0
 #define GFP_KERNEL 0
@@ -32,6 +33,7 @@ typedef uint8_t u8; typedef uint16_t u16; typedef int gfp_t;
 #define NLA_HDRLEN 4
 #define BIT(n) (1U<<(n))
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
 #define rcu_dereference(x) (x)
 #define rcu_read_lock() ((void)0)
 #define rcu_read_unlock() ((void)0)
@@ -75,7 +77,7 @@ static void genlmsg_end(struct sk_buff*m,void*h){}
 static int wiphy_net(int*w){return 0;}
 static void genlmsg_multicast_netns(int*f,int n,struct sk_buff*m,int p,int g,gfp_t t){}
 ENCODER
-struct mt7932 {bool stopping,connect_open,assoc_request_seen,connecting,connected,disconnecting,connect_cancelled,connect_publishing,connect_lost,rf_ready,connect_pmk_valid;
+struct mt7932 {bool stopping,connect_open,assoc_request_seen,connecting,connected,disconnecting,connect_cancelled,connect_publishing,connect_lost,rf_ready,connect_pmk_valid,roam_moving,roam_landed;
  int connect_error,response_lock,command_mutex,data_lock,wiphy,power_work;u16 disconnect_reason;struct net_device *netdev;struct cfg80211_bss *connect_bss;u8 connect_bssid[6],connect_pmk[32],connect_sae_pwd[63],connect_sae_pwd_length,assoc_request_ies[512];unsigned assoc_request_ie_len;
  struct {struct {bool ht_supported;}ht_cap;}band2;bool power_tim,data_ready,station_signal_valid,station_rx_rate_valid,station_tx_rate_valid;unsigned long station_tx_bytes,station_rx_bytes,station_tx_packets,station_rx_packets,station_connected;};
 static unsigned long jiffies=1;
@@ -94,10 +96,12 @@ static void cfg80211_disconnected(struct net_device*n,u16 r,const u8*p,size_t l,
 static void cfg80211_connect_done(struct net_device*n,struct cfg80211_connect_resp_params*p,gfp_t f){struct cfg80211_registered_device r={};saved=*p;notifications++;nl80211_send_connect_result(&r,n,p,f);}
 static void schedule_work(int*w){work_count++;}
 static void netif_carrier_on(struct net_device*n){carrier++;}
+static void netif_carrier_off(struct net_device*n){}
+static void mt_report_disconnected(struct mt7932*m,u16 r,bool local,gfp_t f){disconnections++;}
 static void netif_wake_queue(struct net_device*n){}
 static void cfg80211_port_authorized(struct net_device*n,const u8*b,const u8*p,size_t l,gfp_t f){authorizations++;}
 static void report_worker(struct mt7932 *m,int ret,bool retirement_attempted){
- struct cfg80211_connect_resp_params response={};unsigned long flags;bool submitted=true,peer_owned=true,cancelled;u16 reason;
+ struct cfg80211_connect_resp_params response={};unsigned long flags;bool submitted=true,peer_owned=true,cancelled;bool roam __attribute__((unused));u16 reason;
 REPORT
 int main(void){struct net_device n={1};struct cfg80211_bss b={};
  int errors[]={0,-ETIMEDOUT,-ECONNREFUSED,-EPROTO,-ECANCELED,-ECONNRESET,-EIO};

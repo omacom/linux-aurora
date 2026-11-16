@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! T6031 (M3 Max, G15C) configuration, admitted on J516C only.
+//! T6031 (M3 Max, G15C) configuration, qualified on J516C only.
+//!
+//! J514C uses these reference words on normal boots after its board, firmware,
+//! and hardware checks pass. This is not J514C power/thermal qualification.
 //!
 //! One die, four clusters of ten core slots. The firmware is the same RTKit 2419 generation as
 //! the T6030's and the initdata graph keeps the T6030 canonical VAs; what differs is the SoC
@@ -136,7 +139,7 @@ pub(crate) const CONFIG: Config = Config {
     firmware: &[
         FirmwareBuild {
             name: "macOS 14.7 stub firmware (iBoot-10151.140.19.700.2), J516C",
-            machine: None,
+            machine: Some(kernel::c_str!("apple,j516c")),
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -148,7 +151,7 @@ pub(crate) const CONFIG: Config = Config {
         },
         FirmwareBuild {
             name: "macOS 14.8 stub firmware, J516C",
-            machine: None,
+            machine: Some(kernel::c_str!("apple,j516c")),
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -158,9 +161,25 @@ pub(crate) const CONFIG: Config = Config {
                 0x9d, 0x6b, 0xcd, 0xa0, 0x26, 0xcf,
             ],
         },
+        // Measured by the normal driver on J514C's 14.7 boot chain (system
+        // firmware 26.5.2). Short native GL/Vulkan and normal-login checks passed;
+        // power/thermal qualification remains open. Exact board identity is required.
+        FirmwareBuild {
+            name: "J514C macOS 14.7 boot-chain firmware",
+            machine: Some(kernel::c_str!("apple,j514c")),
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x66, 0x99, 0x13, 0xfb, 0xa2, 0x73, 0x6e, 0x4b, 0x8f, 0x8a, 0x0f, 0x81,
+                0xea, 0xdc, 0x5a, 0xc0, 0x0c, 0x9d, 0xc5, 0x1f, 0xdd, 0x4c, 0x9d, 0x37,
+                0x70, 0xc6, 0x6d, 0x2b, 0x0a, 0x1e, 0x87, 0x86,
+            ],
+        },
     ],
-    // The reference words and measured layout belong to the J516C, not
-    // every T6031 board (in particular, not the 14-inch J514C).
+    // This is the reference board. The exact J514C/T6031 pair also uses this
+    // configuration through normal admission, with the unmeasured reference
+    // power words reported explicitly for that chassis.
     machine: kernel::c_str!("apple,j516c"),
     platform: super::Platform::DeviceTree,
     layout: &LAYOUT,

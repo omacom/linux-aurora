@@ -173,6 +173,7 @@ enum mt_auth_change {
 	MT_AUTH_NO_PASSWORD, MT_AUTH_WPA, MT_AUTH_PAIR_COUNT,
 	MT_AUTH_PAIR, MT_AUTH_GROUP, MT_AUTH_NO_AKM, MT_AUTH_PSK_FIRST,
 	MT_AUTH_SAE_FIRST, MT_AUTH_OTHER_FIRST, MT_AUTH_OTHER_AKM, MT_AUTH_PSK,
+	MT_AUTH_OWE,
 };
 
 static void mt_connect_auth_test(struct kunit *test)
@@ -186,6 +187,13 @@ static void mt_connect_auth_test(struct kunit *test)
 		{ "pure PSK", MT_AUTH_PSK, 0, WLAN_AKM_SUITE_PSK },
 		{ "PSK missing PMK", MT_AUTH_PSK, 1, -EOPNOTSUPP },
 		{ "PSK required MFP", MT_AUTH_PSK, 2, -EOPNOTSUPP },
+		{ "PSK TKIP group", MT_AUTH_PSK, 3, WLAN_AKM_SUITE_PSK },
+		{ "PSK TKIP pairwise", MT_AUTH_PSK, 4, -EOPNOTSUPP },
+		{ "PSK WEP group", MT_AUTH_PSK, 5, -EOPNOTSUPP },
+		{ "PSK TKIP group missing PMK", MT_AUTH_PSK, 6, -EOPNOTSUPP },
+		{ "PSK TKIP group WPA1", MT_AUTH_PSK, 7, -EOPNOTSUPP },
+		{ "OWE", MT_AUTH_OWE, WLAN_CIPHER_SUITE_CCMP, WLAN_AKM_SUITE_OWE },
+		{ "OWE TKIP group", MT_AUTH_OWE, WLAN_CIPHER_SUITE_TKIP, -EOPNOTSUPP },
 		{ "pure SAE", MT_AUTH_NONE, 0, WLAN_AKM_SUITE_SAE },
 		{ "optional MFP", MT_AUTH_MFP, NL80211_MFP_OPTIONAL, WLAN_AKM_SUITE_SAE },
 		{ "no MFP", MT_AUTH_MFP, NL80211_MFP_NO, -EOPNOTSUPP },
@@ -210,7 +218,7 @@ static void mt_connect_auth_test(struct kunit *test)
 		{ "no pairwise", MT_AUTH_PAIR_COUNT, 0, -EOPNOTSUPP },
 		{ "multiple pairwise", MT_AUTH_PAIR_COUNT, 2, -EOPNOTSUPP },
 		{ "TKIP pairwise", MT_AUTH_PAIR, WLAN_CIPHER_SUITE_TKIP, -EOPNOTSUPP },
-		{ "TKIP group", MT_AUTH_GROUP, WLAN_CIPHER_SUITE_TKIP, -EOPNOTSUPP },
+		{ "SAE TKIP group", MT_AUTH_GROUP, WLAN_CIPHER_SUITE_TKIP, -EOPNOTSUPP },
 		{ "no AKM", MT_AUTH_NO_AKM, 0, -EOPNOTSUPP },
 		{ "SAE EXT KEY", MT_AUTH_OTHER_AKM, SUITE(0x000fac, 24), -EOPNOTSUPP },
 		{ "PSK SHA256", MT_AUTH_OTHER_AKM, WLAN_AKM_SUITE_PSK_SHA256, -EOPNOTSUPP },
@@ -223,6 +231,8 @@ static void mt_connect_auth_test(struct kunit *test)
 		{ "PSK first mixed versions", MT_AUTH_PSK_FIRST, 4, WLAN_AKM_SUITE_PSK },
 		{ "PSK first VERSION_3 only", MT_AUTH_PSK_FIRST, 5, -EOPNOTSUPP },
 		{ "SAE first mixed versions", MT_AUTH_SAE_FIRST, 2, WLAN_AKM_SUITE_SAE },
+		{ "SAE first TKIP group", MT_AUTH_SAE_FIRST, 3, -EOPNOTSUPP },
+		{ "PSK first TKIP group", MT_AUTH_PSK_FIRST, 6, WLAN_AKM_SUITE_PSK },
 		{ "unsupported AKM before SAE", MT_AUTH_OTHER_FIRST, 0, -EOPNOTSUPP },
 	};
 	u8 password[64] = {}, pmk[32] = {};
@@ -284,11 +294,26 @@ static void mt_connect_auth_test(struct kunit *test)
 		case MT_AUTH_PSK:
 			p.crypto.wpa_versions = NL80211_WPA_VERSION_2;
 			p.crypto.akm_suites[0] = WLAN_AKM_SUITE_PSK;
-			p.crypto.psk = value == 1 ? NULL : pmk;
+			p.crypto.psk = value == 1 || value == 6 ? NULL : pmk;
 			p.crypto.sae_pwd = NULL;
 			p.crypto.sae_pwd_len = 0;
 			p.auth_type = NL80211_AUTHTYPE_AUTOMATIC;
 			p.mfp = value == 2 ? NL80211_MFP_REQUIRED : NL80211_MFP_NO;
+			if (value == 3 || value == 4 || value == 6 || value == 7)
+				p.crypto.cipher_group = WLAN_CIPHER_SUITE_TKIP;
+			if (value == 4)
+				p.crypto.ciphers_pairwise[0] = WLAN_CIPHER_SUITE_TKIP;
+			if (value == 5)
+				p.crypto.cipher_group = WLAN_CIPHER_SUITE_WEP40;
+			if (value == 7)
+				p.crypto.wpa_versions = NL80211_WPA_VERSION_1;
+			break;
+		case MT_AUTH_OWE:
+			p.crypto.akm_suites[0] = WLAN_AKM_SUITE_OWE;
+			p.crypto.cipher_group = value;
+			p.crypto.sae_pwd = NULL;
+			p.crypto.sae_pwd_len = 0;
+			p.auth_type = NL80211_AUTHTYPE_OPEN_SYSTEM;
 			break;
 		case MT_AUTH_PSK_FIRST:
 			p.crypto.wpa_versions = value == 5 ? NL80211_WPA_VERSION_3 :
@@ -302,6 +327,8 @@ static void mt_connect_auth_test(struct kunit *test)
 			p.auth_type = NL80211_AUTHTYPE_OPEN_SYSTEM;
 			p.mfp = value == 2 ? NL80211_MFP_REQUIRED :
 				value == 3 ? NL80211_MFP_NO : NL80211_MFP_OPTIONAL;
+			if (value == 6)
+				p.crypto.cipher_group = WLAN_CIPHER_SUITE_TKIP;
 			break;
 		case MT_AUTH_SAE_FIRST:
 			p.crypto.n_akm_suites = 2;
@@ -311,6 +338,8 @@ static void mt_connect_auth_test(struct kunit *test)
 				p.crypto.sae_pwd = NULL;
 			if (value == 2)
 				p.crypto.wpa_versions |= NL80211_WPA_VERSION_2;
+			if (value == 3)
+				p.crypto.cipher_group = WLAN_CIPHER_SUITE_TKIP;
 			p.mfp = NL80211_MFP_OPTIONAL;
 			break;
 		case MT_AUTH_OTHER_FIRST:

@@ -699,10 +699,18 @@ static void apple_pmp_start_finish(struct apple_pmp_start *st, int result)
 			st->result = result;
 		complete_all(&st->started);
 	}
-	if (result && READ_ONCE(st->enabled))
+	if (result && READ_ONCE(st->enabled)) {
+		const char *fallback = st->rep->offsets->fallback;
+
+		/* J516M shares the T6031 report layout, but has its own display gate. */
+		if (of_machine_is_compatible("apple,t6034") &&
+		    of_machine_is_compatible("apple,j516m"))
+			fallback = "apple_t6034_display.enable=0";
+
 		dev_err(st->rep->dev,
 			"%s PMP start failed (%d) after the PMP was enabled: it may keep running until the next reboot. Reboot to stop it; to boot without starting it: %s, or nomodeset\n",
-			st->rep->offsets->name, result, st->rep->offsets->fallback);
+			st->rep->offsets->name, result, fallback);
+	}
 }
 
 /* Teardown has begun: a start still in progress gives up early. */
@@ -1217,7 +1225,26 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t6031 = {
 	.status = 0x10,
 	.starts_pmp = true,
 	.name = "T6031",
-	.fallback = "leave out apple_t6031_display.enable=1",
+	.fallback = "apple_t6031_display.enable=0",
+	.pwrstate = "apple,t6031-pmgr-pwrstate",
+	.devices_ordered = true,
+};
+
+/*
+ * J514M/T6034's selected ADT ptd-range has the same request (index 0x200),
+ * acknowledge (0x208) and status (0x1) apertures. Its 35 soc-device records
+ * are in ID order; DISP is ID 17 with ACK and ANS is ID 34 without ACK.
+ * The exact T6034 display gate supplies the halted PMP and validated values.
+ * The generic T6020 fallback only observes an already-running PMP.
+ */
+static const struct apple_pmp_report_offsets apple_pmp_offsets_t6034 = {
+	.tgt_read = 0x2000,
+	.tgt_write = 0x11000,
+	.actual = 0x2080,
+	.status = 0x10,
+	.starts_pmp = true,
+	.name = "T6034",
+	.fallback = "apple_t6034_display.enable=0",
 	.pwrstate = "apple,t6031-pmgr-pwrstate",
 	.devices_ordered = true,
 };
@@ -1238,6 +1265,7 @@ static const struct of_device_id apple_pmp_report_of_match[] = {
 	{ .compatible = "apple,t6020-pmp-v2-report", .data = &apple_pmp_offsets_t602x },
 	{ .compatible = "apple,t6030-pmp-v2-report", .data = &apple_pmp_offsets_t6030 },
 	{ .compatible = "apple,t6031-pmp-v2-report", .data = &apple_pmp_offsets_t6031 },
+	{ .compatible = "apple,t6034-pmp-v2-report", .data = &apple_pmp_offsets_t6034 },
 	{ .compatible = "apple,t8112-pmp-v2-report", .data = &apple_pmp_offsets_t8112 },
 	{ .compatible = "apple,t8122-pmp-v2-report", .data = &apple_pmp_offsets_t8122 },
 	{ .compatible = "apple,t8140-pmp-v2-report", .data = &apple_pmp_offsets_t8140 },
@@ -1261,6 +1289,9 @@ struct apple_pmp_report_entry {
 	u32 id;
 	/* The PMP does not acknowledge this request (a started PMP only). */
 	bool no_ack;
+	/* Withdrawn for system sleep (apple,release-for-sleep), and now so. */
+	bool sleep_release;
+	bool released;
 	bool removed;
 };
 
@@ -1368,6 +1399,80 @@ static int apple_pmp_report_entry_set_state(struct generic_pm_domain *genpd, boo
 	return ret;
 }
 
+/*
+ * System sleep. An external display processor's request keeps the PMP's
+ * external display state up while nothing is shown, about 0.25 W in
+ * suspend-to-idle on J514S. By the noirq phase every display processor has
+ * suspended, its displays off and its links released or idle: withdraw such a
+ * request if it is acknowledged, with one replacement write as macOS releases
+ * its display requests, and assert it again before the processors resume.
+ */
+static int apple_pmp_report_entry_sleep(struct apple_pmp_report_entry *ent, bool release)
+{
+	struct apple_pmp_report *rep;
+	int ret = -ENODEV;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(rep, &apple_pmp_reports, list) {
+		if (rep->dev->of_node != ent->report_node)
+			continue;
+		if (release && (!(readq(rep->base + rep->offsets->status) & PMP_REPORT_READY) ||
+				!(readq(rep->base + rep->offsets->actual) & BIT_ULL(ent->id))))
+			ret = -EALREADY;
+		else
+			ret = apple_pmp_report_set_state(rep, ent->id, !release, ent->no_ack);
+		break;
+	}
+	rcu_read_unlock();
+	return ret;
+}
+
+static int apple_pmp_report_entry_suspend_noirq(struct device *dev)
+{
+	struct apple_pmp_report_entry *ent = dev_get_drvdata(dev);
+	int ret;
+
+	if (!ent || !ent->sleep_release || READ_ONCE(ent->removed))
+		return 0;
+	ret = apple_pmp_report_entry_sleep(ent, true);
+	if (ret == -EALREADY)
+		return 0;
+	/* A withdrawal that was not acknowledged is asserted again all the same. */
+	if (ret)
+		dev_warn(dev, "request %u not withdrawn for sleep: %d\n", ent->id, ret);
+	ent->released = true;
+	return 0;
+}
+
+static int apple_pmp_report_entry_resume_noirq(struct device *dev)
+{
+	struct apple_pmp_report_entry *ent = dev_get_drvdata(dev);
+	int ret, tries = 0;
+
+	if (!ent || !ent->released)
+		return 0;
+	ent->released = false;
+	/*
+	 * Without the request the external display stays dark until reboot:
+	 * write it again, three times at most, while the PMP does not
+	 * acknowledge it in time.
+	 */
+	do {
+		ret = apple_pmp_report_entry_sleep(ent, false);
+	} while (ret == -ETIMEDOUT && ++tries < 3);
+	if (ret)
+		dev_err(dev, "request %u not asserted after sleep: %d\n", ent->id, ret);
+	else if (tries)
+		dev_warn(dev, "request %u asserted after sleep on write %d\n", ent->id,
+			 tries + 1);
+	return ret;
+}
+
+static const struct dev_pm_ops apple_pmp_report_entry_pm_ops = {
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(apple_pmp_report_entry_suspend_noirq,
+				  apple_pmp_report_entry_resume_noirq)
+};
+
 static int apple_pmp_report_entry_power_on(struct generic_pm_domain *genpd)
 {
 	return apple_pmp_report_entry_set_state(genpd, true);
@@ -1440,6 +1545,7 @@ static int apple_pmp_report_entry_probe(struct platform_device *pdev)
 		}
 		ent->no_ack = of_property_read_bool(node, "apple,no-ack");
 	}
+	ent->sleep_release = of_property_read_bool(node, "apple,release-for-sleep");
 
 	ret = of_property_read_string(node, "label", &name);
 	if (ret < 0) {
@@ -1521,6 +1627,7 @@ static struct platform_driver apple_pmp_report_entry_driver = {
 	.driver = {
 		.name = "apple-pmp-report-entry",
 		.of_match_table = apple_pmp_report_entry_of_match,
+		.pm = pm_sleep_ptr(&apple_pmp_report_entry_pm_ops),
 		/* Power-domain providers are not intended for manual unbinding. */
 		.suppress_bind_attrs = true,
 	},

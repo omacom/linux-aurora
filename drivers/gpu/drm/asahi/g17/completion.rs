@@ -27,9 +27,9 @@ mod publication;
 pub(crate) use publication::{Prepared as PreparedPublication, Publication};
 
 struct Destination {
-    // Keep the existing GPU alias alive along with its prepared CPU view.
-    _mapping: Arc<mmu::KernelMapping>,
-    cpu: mmu::TimestampMapping,
+    // The buffer keeps its GPU alias and its CPU mapping alive.
+    buffer: Arc<crate::timestamp::Buffer>,
+    offset: usize,
 }
 
 impl Destination {
@@ -45,13 +45,13 @@ impl Destination {
             .get(timestamp.handle.try_into()?)
             .ok_or(ENOENT)?
             .clone();
-        let file::Object::TimestampBuffer(mapping) = object;
+        let file::Object::TimestampBuffer(buffer) = object;
         let offset: usize = timestamp.offset.try_into()?;
-        if offset.checked_add(size_of::<u64>()).ok_or(EINVAL)? > mapping.size() {
+        if offset.checked_add(size_of::<u64>()).ok_or(EINVAL)? > buffer.size() {
             return Err(ERANGE);
         }
-        let cpu = mapping.timestamp_mapping(offset)?;
-        Ok(Some(Self { _mapping: mapping, cpu }))
+        let offset = buffer.timestamp_offset(offset)?;
+        Ok(Some(Self { buffer, offset }))
     }
 
     fn write(&self, ticks: u64) {
@@ -61,13 +61,14 @@ impl Destination {
             .wrapping_add(
                 ticks % cfg::COMMAND_TIMESTAMP_HZ * NSEC_PER_SEC / cfg::COMMAND_TIMESTAMP_HZ,
             );
-        self.cpu.write(ns);
+        self.buffer.write_timestamp(self.offset, ns);
         barrier(Ordering::Release);
     }
 }
 
-/// Timestamp mappings resolved and retained before any command is enqueued.
-pub(crate) struct Destinations(Option<crate::cleanup::Deferred<[Option<Destination>; 4]>>);
+/// Timestamp destinations resolved and retained before any command is enqueued. Dropping
+/// one releases only a buffer reference; the buffer defers its own mapping release.
+pub(crate) struct Destinations([Option<Destination>; 4]);
 
 impl Destinations {
     pub(crate) fn resolve(
@@ -82,20 +83,13 @@ impl Destinations {
             destinations[2 * index] = Destination::resolve(objects, timestamp.start)?;
             destinations[2 * index + 1] = Destination::resolve(objects, timestamp.end)?;
         }
-        // Empty submissions need no cleanup allocation. Timestamped commands
-        // prepare the unique work item before any output fence is published.
-        let retained = if destinations.iter().any(Option::is_some) {
-            Some(crate::cleanup::Deferred::new(destinations)?)
-        } else {
-            None
-        };
-        Ok(Self(retained))
+        Ok(Self(destinations))
     }
 
+    pub(crate) fn has_outputs(&self) -> bool { self.0.iter().any(Option::is_some) }
+
     fn iter(&self) -> core::slice::Iter<'_, Option<Destination>> {
-        let destinations: &[Option<Destination>] =
-            self.0.as_deref().map_or(&[], |destinations| destinations.as_slice());
-        destinations.iter()
+        self.0.iter()
     }
 }
 
@@ -144,7 +138,8 @@ impl HostOutput {
     }
 }
 
-/// Firmware writes two aligned words in a fresh write-combined page per compute command.
+/// Firmware writes two aligned words in a write-combined page of its own per
+/// compute command.
 struct ComputeTimestamps {
     // Remove the GPU alias before releasing its backing.
     mapping: mmu::KernelMapping,
@@ -166,6 +161,84 @@ impl ComputeTimestamps {
     }
 }
 
+/// Compute timestamp pages of one context, kept mapped for its next commands.
+///
+/// A fresh page costs a GEM object, its write-combined kernel mapping and a
+/// GPU mapping on the submission path, and their teardown when the command's
+/// completion is dropped. A page comes back here only from that drop, which
+/// follows exact retirement or a kill witness, so the firmware no longer
+/// writes it; both words are cleared before the page is handed out again.
+#[pin_data]
+pub(crate) struct ComputeTimestampCache {
+    #[pin]
+    pages: Mutex<KVec<ComputeTimestamps>>,
+}
+
+impl ComputeTimestampCache {
+    /// Pages retained per context; deeper pipelines allocate the rest.
+    const RETAINED: usize = 8;
+
+    pub(crate) fn new() -> Result<Arc<Self>> {
+        let pages = KVec::with_capacity(Self::RETAINED, GFP_KERNEL)?;
+        Arc::pin_init(
+            pin_init!(Self {
+                pages <- new_mutex!(pages, "G17 compute timestamp pages"),
+            }),
+            GFP_KERNEL,
+        )
+    }
+
+    fn take(self: &Arc<Self>, dev: &AsahiDrmDevice, vm: &mmu::Vm) -> Result<PooledTimestamps> {
+        let reused = self.pages.lock().pop();
+        let page = match reused {
+            Some(page) => {
+                page.object.dword(0)?.store(0, Ordering::Relaxed);
+                page.object.dword(8)?.store(0, Ordering::Relaxed);
+                barrier(Ordering::SeqCst);
+                page
+            }
+            None => ComputeTimestamps::new(dev, vm)?,
+        };
+        Ok(PooledTimestamps {
+            page: Some(page),
+            cache: self.clone(),
+        })
+    }
+
+    fn put(&self, page: ComputeTimestamps) {
+        let rejected = {
+            let mut pages = self.pages.lock();
+            pages.push_within_capacity(page).err()
+        };
+        // Teardown of a page beyond the retained count runs unlocked.
+        drop(rejected);
+    }
+}
+
+/// A compute timestamp page lent to one command, returned to its context's
+/// cache when the command's completion is dropped.
+struct PooledTimestamps {
+    page: Option<ComputeTimestamps>,
+    cache: Arc<ComputeTimestampCache>,
+}
+
+impl PooledTimestamps {
+    fn page(&self) -> Result<&ComputeTimestamps> {
+        self.page.as_ref().ok_or(EINVAL)
+    }
+}
+
+impl Drop for PooledTimestamps {
+    fn drop(&mut self) {
+        if let Some(page) = self.page.take() {
+            self.cache.put(page);
+        }
+    }
+}
+
+/// Republications of one command whose earlier publications firmware dropped unexecuted.
+pub(crate) const MAX_REPLAYS: u8 = 3;
+
 #[pin_data]
 pub(crate) struct Completion {
     status: Arc<VmStatus>,
@@ -173,8 +246,9 @@ pub(crate) struct Completion {
     // Present only when this command's public result may wait for a render
     // predecessor's host writes. DRM credits must follow the terminal result.
     terminal: Option<UserFence<CompletionFence>>,
-    compute: Option<ComputeTimestamps>,
+    compute: Option<PooledTimestamps>,
     feed: Option<Arc<super::feed::Feed>>,
+    sources: Option<Arc<super::sync_input::Sources>>,
     #[pin]
     vm_job: Mutex<Option<mmu::VmJobGuard>>,
     #[pin]
@@ -185,11 +259,21 @@ pub(crate) struct Completion {
     timeout_error: AtomicI32,
     replays: AtomicU8,
     replay_timeout: AtomicBool,
+    /// A recovery blamed this command. Unlike `class`, which a later
+    /// classification can change, this never clears.
+    blamed: AtomicBool,
+    /// A firmware restart listed this command as in flight. Until a replay
+    /// republishes it from the start, it never reports success.
+    interrupted: AtomicBool,
     firmware_consumer: AtomicBool,
     class: AtomicU8,
 }
 
 impl Completion {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Completion construction takes distinct queue, context, and lifetime owners."
+    )]
     pub(crate) fn new(
         dev: &AsahiDrmDevice,
         contexts: &FenceContexts,
@@ -200,6 +284,7 @@ impl Completion {
         compute: bool,
         host_predecessors: bool,
         feed: Option<Arc<super::feed::Feed>>,
+        sources: Option<Arc<super::sync_input::Sources>>,
     ) -> Result<Arc<Self>> {
         let fence = fence::independent(contexts)?;
         let ordered = !compute
@@ -216,7 +301,7 @@ impl Completion {
             HostOutput::Immediate(output)
         };
         let compute = if compute {
-            Some(ComputeTimestamps::new(dev, context.vm())?)
+            Some(context.compute_timestamps().take(dev, context.vm())?)
         } else {
             None
         };
@@ -227,6 +312,7 @@ impl Completion {
                 terminal,
                 compute,
                 feed,
+                sources,
                 vm_job <- new_mutex!(Some(vm_job), "G17 command VM pin"),
                 render <- new_mutex!(None, "G17 command render lease"),
                 signalled: AtomicBool::new(false),
@@ -235,6 +321,8 @@ impl Completion {
                 timeout_error: AtomicI32::new(0),
                 replays: AtomicU8::new(0),
                 replay_timeout: AtomicBool::new(false),
+                blamed: AtomicBool::new(false),
+                interrupted: AtomicBool::new(false),
                 firmware_consumer: AtomicBool::new(false),
                 class: AtomicU8::new(0),
             }),
@@ -270,6 +358,38 @@ impl Completion {
     pub(crate) fn status(&self) -> &Arc<VmStatus> {
         &self.status
     }
+    pub(super) fn sources(&self) -> Option<&Arc<super::sync_input::Sources>> {
+        self.sources.as_ref()
+    }
+    pub(super) fn is_input_source(&self, source: &Arc<super::fence::Submission>) -> bool {
+        self.output.output().member.is_source(source)
+    }
+    pub(super) fn set_source_ready(&self, ready: Fence) {
+        self.output.output().member.set_source_ready(ready);
+    }
+    pub(super) fn needs_source_ready(&self) -> bool {
+        self.output.output().member.needs_source_ready()
+    }
+    pub(super) fn note_input_error(&self, error: Error) -> bool {
+        self.output.output().member.note_error(error)
+    }
+    /// Called under the device mutex as a successful retirement is queued.
+    pub(super) fn note_source_retired(&self) {
+        if self.interrupted() {
+            // complete() fails it; consumers must not take its output as valid.
+            self.note_input_error(ECANCELED);
+            return;
+        }
+        match self.check_source_inputs() {
+            Ok(()) => self.output.output().member.note_retired(),
+            Err(error) => { self.note_input_error(error); }
+        }
+    }
+    pub(super) fn check_source_inputs(&self) -> Result {
+        if let Some(sources) = &self.sources { sources.check()?; }
+        Ok(())
+    }
+
     pub(crate) fn work_state(&self) -> Result<Arc<WorkStateLease>> {
         self.output.output().member.work_state()
     }
@@ -278,14 +398,14 @@ impl Completion {
     }
 
     pub(crate) fn compute_timestamp_va(&self) -> Result<u64> {
-        Ok(self.compute.as_ref().ok_or(EINVAL)?.mapping.iova())
+        Ok(self.compute.as_ref().ok_or(EINVAL)?.page()?.mapping.iova())
     }
 
     /// The caller has proved that firmware retired this command, or has
     /// received its scheduler kill acknowledgement with recovery closed.
     /// These are the command's public timestamp words, not queue-private state.
     pub(crate) fn compute_words(&self) -> Result<[u64; 2]> {
-        let object = &self.compute.as_ref().ok_or(EINVAL)?.object;
+        let object = &self.compute.as_ref().ok_or(EINVAL)?.page()?.object;
         let words = [
             object.dword(0)?.load(Ordering::Relaxed),
             object.dword(8)?.load(Ordering::Relaxed),
@@ -305,11 +425,14 @@ impl Completion {
         let accepted = self
             .replays
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                (count < 3).then_some(count + 1)
+                (count < MAX_REPLAYS).then_some(count + 1)
             })
             .is_ok();
         if accepted {
             self.replay_timeout.store(true, Ordering::Release);
+            // Callers replay only work proven not to have started; the new
+            // publication runs from the beginning and reports its own result.
+            self.interrupted.store(false, Ordering::Release);
         }
         accepted
     }
@@ -335,7 +458,7 @@ impl Completion {
         if self.signalled.load(Ordering::Acquire) {
             return Err(ECANCELED);
         }
-        let object = &self.compute.as_ref().ok_or(EINVAL)?.object;
+        let object = &self.compute.as_ref().ok_or(EINVAL)?.page()?.object;
         let start = object.dword(0)?;
         let end = object.dword(8)?;
         start.store(0, Ordering::Relaxed);
@@ -384,6 +507,49 @@ impl Completion {
         self.class.load(Ordering::Acquire) == 1
     }
 
+    pub(crate) fn guilty(&self) -> bool {
+        self.class.load(Ordering::Acquire) == 2
+    }
+
+    /// A recovery blamed this command, whatever class it keeps: it may have caused the fault,
+    /// so it is never published again.
+    pub(crate) fn note_blamed(&self) {
+        self.blamed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn blamed(&self) -> bool {
+        self.blamed.load(Ordering::Acquire)
+    }
+
+    /// A firmware restart listed this command in its recovery table: it was in
+    /// flight, so it may have run partly. Its stamps and completion record may
+    /// still look like success. Unless a replay republishes it from the start,
+    /// it fails and the failure is always reported to the client.
+    pub(crate) fn note_interrupted(&self) {
+        self.interrupted.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn interrupted(&self) -> bool {
+        self.interrupted.load(Ordering::Acquire)
+    }
+
+    /// Whether this failure makes the VM unusable. Spared work, and interrupted
+    /// work no recovery found guilty, fail without poisoning it.
+    pub(crate) fn poisons(&self, error: Error) -> bool {
+        let interrupted = self.interrupted();
+        (error != ECANCELED || interrupted) && !self.spared() && !(interrupted && !self.guilty())
+    }
+
+    /// ECANCELED stays silent only for work that was never interrupted (closed
+    /// or cancelled by its owner); every other failure reaches the client.
+    fn report(&self, error: Error) {
+        if self.poisons(error) {
+            self.status.record(error);
+        } else if error != ECANCELED || self.interrupted() {
+            self.status.report_failure(error);
+        }
+    }
+
     /// Installed before the first firmware-visible prefix. Cancellation takes
     /// the same lock after claiming the signal, so it cannot miss a late lease.
     pub(crate) fn attach_render_lease(
@@ -401,6 +567,12 @@ impl Completion {
         Ok(())
     }
 
+    /// An ioctl publication that met contention returns its lease before the
+    /// scheduler publishes the command. Nothing referred to it yet.
+    pub(crate) fn detach_render_lease(&self) -> Option<super::queue::admission::RenderLease> {
+        self.render.lock().take()
+    }
+
     pub(crate) fn render_slot(&self) -> Option<u8> {
         self.render
             .lock()
@@ -408,16 +580,24 @@ impl Completion {
             .map(super::queue::admission::RenderLease::slot)
     }
 
+    /// Called under the device mutex once the render's kicks are committed.
+    pub(crate) fn note_render_publication(&self, fragment: super::fw::kick::KickDependency) {
+        if let Some(lease) = self.render.lock().as_ref() {
+            lease.note_publication(fragment);
+        }
+    }
+
     /// Called under the device mutex before deferring the error signal.
     pub(crate) fn quarantine_render(&self) {
         if let Some(lease) = self.render.lock().as_ref() {
-            lease.quarantine();
+            lease.quarantine(self.spared());
         }
     }
 
     /// An exact whole-pair drain or processor stop allows rehabilitation. The
     /// VM pin goes first; the still-held lease excludes reuse until both settle.
     pub(crate) fn release_after_retirement(&self) {
+        if let Some(sources) = &self.sources { sources.release(); }
         drop(self.vm_job.lock().take());
         let lease = self.render.lock().take();
         if let Some(lease) = lease.as_ref() {
@@ -427,6 +607,7 @@ impl Completion {
     }
 
     fn release_healthy(&self) {
+        if let Some(sources) = &self.sources { sources.release(); }
         drop(self.render.lock().take());
         drop(self.vm_job.lock().take());
     }
@@ -434,19 +615,28 @@ impl Completion {
     /// Exact retirement permits the physical lease and VM pin to be released
     /// before waking userspace. A failure fence alone never establishes this.
     #[track_caller]
-    pub(crate) fn complete(&self, result: Result<[u64; 4]>) {
+    pub(crate) fn complete(&self, mut result: Result<[u64; 4]>) {
+        if result.is_ok() {
+            if let Err(error) = self.check_source_inputs() { result = Err(error); }
+        }
         if self.signalled.swap(true, Ordering::AcqRel) {
             return;
         }
+        if result.is_ok() && self.interrupted() {
+            result = Err(ECANCELED);
+        }
         if let (Some(feed), Ok(ticks)) = (&self.feed, &result) {
-            feed.note_render_pass(ticks[2], ticks[3]);
+            // Compute reports its dispatch envelope in the first pair, a
+            // render its fragment pass in the second.
+            if self.compute.is_some() {
+                feed.note_pass(ticks[0], ticks[1]);
+            } else {
+                feed.note_pass(ticks[2], ticks[3]);
+            }
         }
         if let Err(error) = result {
-            if self.spared() {
-                self.status.report_failure(error);
-            } else if error != ECANCELED {
-                self.status.record(error);
-            }
+            // Spared work cancelled after another VM's recovery is not this client's device loss.
+            self.report(error);
         }
         self.release_healthy();
         self.signal_terminal(result);
@@ -480,8 +670,8 @@ impl Completion {
         }
         if self.spared() {
             self.status.report_failure(error);
-        } else if error != ECANCELED {
-            self.status.record(error);
+        } else {
+            self.report(error);
         }
         self.signal_terminal(Err(error));
         self.output.finish(Err(error));

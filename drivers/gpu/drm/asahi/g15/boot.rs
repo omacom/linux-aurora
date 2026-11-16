@@ -46,7 +46,7 @@ use super::fw::initdata::runtime;
 use super::hw;
 use super::initdata::{self, InitData};
 use super::object::Objects;
-use super::{identity, regs, uat, Config, Shared};
+use super::{identity, params, regs, uat, Config, Shared};
 use crate::driver::AsahiDrmDevice as AsahiDevice;
 use crate::mmu;
 
@@ -467,6 +467,23 @@ pub(crate) fn admit(
 ) -> Result<Admitted> {
     let dev = pdev.as_ref();
     let pmp = cfg.platform == hw::Platform::AdtWithPmp;
+    // J514C uses the same-die T6031 path on a normal boot. This does not qualify
+    // the inherited J516C reference words. Keep exact board AND SoC checks;
+    // T6034 boards use their own profile and never inherit T6031 admission.
+    // The remaining display, DT/ADT, full firmware identity, hardware identity
+    // and record-builder admission below is unchanged.
+    let j514c_board = cfg.chip_id == 0x6031
+        && cfg.platform == hw::Platform::DeviceTree
+        && glue::machine(kernel::c_str!("apple,j514c"))
+        && glue::machine(kernel::c_str!("apple,t6031"));
+    let j514m_board = cfg.chip_id == 0x6034
+        && cfg.platform == hw::Platform::DeviceTree
+        && glue::machine(kernel::c_str!("apple,j514m"))
+        && glue::machine(kernel::c_str!("apple,t6034"));
+    let j516m_board = cfg.chip_id == 0x6034
+        && cfg.platform == hw::Platform::DeviceTree
+        && glue::machine(kernel::c_str!("apple,j516m"))
+        && glue::machine(kernel::c_str!("apple,t6034"));
     if pmp {
         if !glue::board() {
             return Err(ENODEV);
@@ -481,7 +498,9 @@ pub(crate) fn admit(
             }
             return Err(err);
         }
-    } else if !glue::machine(cfg.machine) {
+    } else if (cfg.chip_id == 0x6034 && !j514m_board && !j516m_board)
+        || (!glue::machine(cfg.machine) && !j514c_board)
+    {
         dev_err!(dev, "G15: not a {} machine\n", cfg.name);
         return Err(ENODEV);
     } else {
@@ -496,9 +515,24 @@ pub(crate) fn admit(
             return Err(err);
         }
     }
+    if j514c_board || j514m_board || j516m_board {
+        if let hw::Board::DeviceTree(reference) = cfg.board {
+            dev_warn!(
+                dev,
+                "{} bring-up: unqualified J516C reference: max_power_mw={} relative_power={:?} fast_die_mask={:#018x} alarm_mask={:#018x}; OPP powers are boot-loader stand-ins\n",
+                cfg.name,
+                reference.max_power_mw,
+                reference.relative_power,
+                reference.fast_die_mask,
+                reference.alarm_mask
+            );
+        }
+    }
     let adt = adt::read(dev, cfg)
         .inspect_err(|e| dev_err!(dev, "GPU regions not admitted: {:?}\n", e))?;
-    identity::firmware(dev, &adt, cfg.firmware)
+    // T6034 requires complete identities; the older profiles keep their
+    // existing explicitly requested bring-up prefix policy.
+    identity::firmware(dev, &adt, cfg.firmware, cfg.chip_id != 0x6034)
         .inspect_err(|e| dev_err!(dev, "loaded GFX TEXT identity mismatch: {:?}\n", e))?;
     dev_info!(dev, "M3: firmware identity accepted\n");
     if cfg.board == hw::Board::None {
@@ -648,6 +682,19 @@ pub(crate) fn start(
             cfg.name,
             id.version,
             id.counts
+        );
+        return Err(eproto());
+    }
+    if cfg.chip_id == 0x6034
+        && glue::machine(kernel::c_str!("apple,j516m"))
+        && !hw::j516m::identity_matches(id.version, id.counts, id.cores)
+    {
+        dev_err!(
+            d,
+            "J516M powered identity is not the 30-core G15C: version {:#x} counts {:#x} core-mask {:#x}\n",
+            id.version,
+            id.counts,
+            id.cores
         );
         return Err(eproto());
     }

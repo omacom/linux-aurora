@@ -100,6 +100,8 @@ impl ReclaimBatch {
 
 struct Service<'a> {
     render: &'a mut super::render::RenderState,
+    admission: &'a crate::g17::queue::admission::Pool,
+    objects: &'a Arc<crate::g17::object::Pool>,
     compute: &'a [Option<ComputeEntry>],
     buffers: &'a mut BufferIds,
     init: &'a InitData,
@@ -115,8 +117,8 @@ impl Host for Service<'_> {
         self.compute
             .iter()
             .flatten()
-            .filter_map(|entry| entry.queue.as_ref())
-            .all(|queue| queue.idle_for_context(context))
+            .filter_map(|entry| entry.queue.as_deref())
+            .all(|queue| queue.idle_for_context(context) && !queue.switching_from(context))
     }
     fn flists_released(&self, context: &Arc<Context>) -> bool {
         self.render.teardown_pools_released(context)
@@ -137,8 +139,15 @@ impl Host for Service<'_> {
         self.primary.notify(MSG_CONTROL_NOTIFY)
     }
     fn detach(&mut self, context: &Arc<Context>) -> Result {
+        let linked = context.retain_linked_work(self.objects);
+        let (_, _, slots) = self.render.exit_scope(context);
+        crate::g17::trace::teardown(5, u64::from(context.id()), slots, u64::from(linked));
         self.render
             .detach_context(context, self.buffers, self.reclaim)?;
+        // The firmware consumed this context's scheduler release after its kill (if any)
+        // was acknowledged and its pairs went idle: it no longer names these pairs, so
+        // their kill hold ends here rather than at the next processor stop.
+        self.admission.release_killed_slots(slots);
         // detach_context preflights this slot together with every graph slot.
         // Retain it before Pending removes its reference under the device lock.
         self.reclaim.context(context)
@@ -173,6 +182,7 @@ impl Firmware {
         self.queues.render.observe_teardown_releases(&self.init)?;
         let recovery = self.recovery.pending() || self.init.recovery_state()? != 0;
         let Registry {
+            admission,
             render,
             compute,
             buffers,
@@ -181,6 +191,8 @@ impl Firmware {
         } = &mut self.queues;
         let mut service = Service {
             render,
+            admission,
+            objects: &self.pool,
             compute,
             buffers,
             init: &self.init,
@@ -190,10 +202,17 @@ impl Firmware {
         teardown.publish_ready(&mut service, recovery, super::now_ns())?;
         let consumer = self.init.control_consumer()?.load(Ordering::Relaxed);
         let producer = self.init.control_producer()?.load(Ordering::Relaxed);
+        let mut consumed = false;
         while teardown
             .take_consumed(consumer, producer, &mut service)?
             .is_some()
-        {}
+        {
+            consumed = true;
+        }
+        if consumed {
+            // A channel whose last scheduler release is consumed can change owner.
+            self.primary.state.shared.channels.notify();
+        }
         Ok(())
     }
 }

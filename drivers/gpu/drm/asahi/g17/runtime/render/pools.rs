@@ -6,7 +6,7 @@
 
 use crate::g17::{
     channel::Rings,
-    freelist::{Lease, Owner, RenderPool},
+    freelist::{Lease, Owner, RenderPool, LINGER_NS},
     fw::{
         channels::{ControlRecord, FreeListCompletion},
         initdata::PagePoolDescriptor,
@@ -49,7 +49,7 @@ impl Pools {
         Ok(slot)
     }
 
-    fn owner(pool: &RenderPool) -> Owner {
+    pub(super) fn owner(pool: &RenderPool) -> Owner {
         Owner {
             serial: pool.serial(),
             epoch: pool.epoch(),
@@ -154,12 +154,12 @@ impl Pools {
     }
 
     /// Preflight a paired retirement before QoS or PB reference accounting.
-    pub(super) fn completed(&self, id: u16, generation: u64) -> Result<Lease> {
+    pub(super) fn completed(&self, id: u16, generation: u64, linger: bool) -> Result<Lease> {
         let mut next = self.leases[Self::slot(id)?].ok_or(EIO)?;
         if next.generation() != generation {
             return Err(EIO);
         }
-        next.complete_render()?;
+        next.complete_render(linger)?;
         Ok(next)
     }
 
@@ -167,6 +167,32 @@ impl Pools {
     /// accepted under the same device mutex, so this assignment cannot fail.
     pub(super) fn commit_completed(&mut self, id: u16, next: Lease) {
         self.leases[usize::from(id)] = Some(next);
+    }
+
+    /// Ends the linger of every idle registration that `keep` (an open owner
+    /// still bound to the pool) does not retain or whose linger has elapsed.
+    /// Returns whether a release became pending, and the next expiry delay.
+    pub(super) fn expire_lingers(
+        &mut self,
+        now: u64,
+        keep: impl Fn(&Owner) -> bool,
+    ) -> (bool, Option<u64>) {
+        let mut ended = false;
+        let mut next: Option<u64> = None;
+        for lease in self.leases[FIRST_RENDER_POOL..].iter_mut().flatten() {
+            let Some(since) = lease.lingering() else {
+                continue;
+            };
+            let age = now.saturating_sub(since);
+            if age >= LINGER_NS || !keep(&lease.owner()) {
+                lease.end_linger();
+                ended = true;
+            } else {
+                let delay = LINGER_NS - age;
+                next = Some(next.map_or(delay, |next| next.min(delay)));
+            }
+        }
+        (ended, next)
     }
 
     pub(super) fn pending(&self) -> bool {
@@ -186,7 +212,7 @@ impl Pools {
         fence(Ordering::Acquire);
         let consumer = init.control_consumer()?.load(Ordering::Relaxed);
         let producer = init.control_producer()?.load(Ordering::Relaxed);
-        for lease in self.leases.iter_mut().flatten() {
+        for lease in self.leases[FIRST_RENDER_POOL..].iter_mut().flatten() {
             lease.observe_releases(consumer, producer)?;
         }
         Ok(())
@@ -199,7 +225,7 @@ impl Pools {
         init: &InitData,
         mut announce: impl FnMut() -> Result,
     ) -> Result {
-        for lease in self.leases.iter_mut().flatten() {
+        for lease in self.leases[FIRST_RENDER_POOL..].iter_mut().flatten() {
             let Some(release) = lease.pending_release() else {
                 continue;
             };
@@ -238,4 +264,12 @@ fn descriptor_words(table: &KernelObject, id: u16) -> Result<[&AtomicU64; 4]> {
         table.dword(offset + 16)?,
         table.dword(offset + 24)?,
     ])
+}
+
+impl Pools {
+    pub(super) fn write_capacity(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        writeln!(f, "render_pool_leases used={} total={} retained={}",
+                 self.leases.iter().flatten().filter(|lease| !lease.released()).count(),
+                 POOLS - FIRST_RENDER_POOL, self.leases.iter().flatten().count())
+    }
 }

@@ -6,6 +6,7 @@
 
 mod exit;
 mod dependencies;
+mod direct;
 mod grow;
 mod observe;
 mod pools;
@@ -16,6 +17,7 @@ mod settle;
 mod submit;
 pub(super) mod teardown;
 
+pub(super) use submit::FALLBACK;
 use super::{DeferredBatch, Registry};
 use crate::g17::{context::Context, fw::queue::DataMaster, job::Packet, kick, queue::render::Pair};
 use crate::hw::t8140::queues::RENDER_SLOTS;
@@ -24,6 +26,7 @@ use kernel::{prelude::*, sync::Arc};
 #[derive(Copy, Clone)]
 struct Config {
     clusters: u32,
+    deflake: crate::g17::fw::render::Deflake,
     descriptor_flags: [u32; 2],
 }
 
@@ -46,7 +49,13 @@ struct Entry {
     pending_owner_closed: bool,
     borrowed_active: bool,
     borrowed_dependencies: Option<crate::g17::queue::render::Dependencies>,
+    /// `Pair::switch_in_flight` of a borrowed pair. A borrowed pair publishes
+    /// nothing, so the snapshot can only be stale towards an older switch.
+    borrowed_switch: Option<u64>,
     event_masks: [u64; 2],
+    /// A completion event for this pair arrived while it was borrowed. Event
+    /// passes skip borrowed pairs, so the returning borrower requests another.
+    missed_event: bool,
     closed: bool,
     pending_error: Option<(Arc<crate::g17::status::VmStatus>, Error)>,
     pending_timeout: bool,
@@ -55,17 +64,30 @@ struct Entry {
     published: bool,
 }
 
+/// Unpublished objects removed together, then destroyed outside the device lock.
+pub(super) struct UnusedRenderSpare {
+    _entry: Option<Entry>,
+    _binding: Option<crate::g17::queue::render::RetiredBinding>,
+}
+
 pub(super) struct RenderState {
     config: Config,
     entries: KVec<Option<Entry>>,
     pools: pools::Pools,
     grow: grow::Grow,
     retired: KVec<crate::g17::queue::render::RetiredBinding>,
+    /// Graphs of released contexts the firmware may still walk (see `detach_context`): kept
+    /// until the firmware stops, when this state is dropped.
+    kept_graphs: KVec<crate::g17::queue::render::RetiredBinding>,
     next_pm_generation: u64,
 }
 
 impl RenderState {
-    pub(super) fn new(clusters: u32, descriptor_flags: [u32; 2]) -> Result<Self> {
+    pub(super) fn new(
+        clusters: u32,
+        deflake: crate::g17::fw::render::Deflake,
+        descriptor_flags: [u32; 2],
+    ) -> Result<Self> {
         if clusters == 0 {
             return Err(EINVAL);
         }
@@ -76,12 +98,14 @@ impl RenderState {
         Ok(Self {
             config: Config {
                 clusters,
+                deflake,
                 descriptor_flags,
             },
             entries,
             pools: pools::Pools::new()?,
             grow: grow::Grow::new()?,
             retired: KVec::with_capacity(128, GFP_KERNEL)?,
+            kept_graphs: KVec::new(),
             next_pm_generation: 1,
         })
     }
@@ -124,6 +148,14 @@ impl RenderState {
             .ok_or(EIO)
     }
 
+    /// Whether a completion event arrived while the pair in `slot` was
+    /// borrowed; clears the record. The returned pair is installed again, so
+    /// the next event pass observes it.
+    fn take_missed_event(&mut self, slot: u8) -> bool {
+        self.entry_mut(slot)
+            .is_ok_and(|entry| core::mem::take(&mut entry.missed_event))
+    }
+
     fn reserved(&mut self, reservation: Reservation) -> Result<&mut Entry> {
         let entry = self.entry_mut(reservation.slot)?;
         if entry.reservation.ids != reservation.ids
@@ -157,6 +189,7 @@ impl RenderState {
         }
         entry.borrowed_active = pair.published_in_flight();
         entry.borrowed_dependencies = Some(pair.dependency_snapshot());
+        entry.borrowed_switch = pair.switch_in_flight();
         entry.preparing = Some(packet.clone());
         entry.pair.take().ok_or(EIO)
     }
@@ -176,6 +209,7 @@ impl RenderState {
         }
         entry.pair = pair.take();
         entry.borrowed_dependencies = None;
+        entry.borrowed_switch = None;
         entry.preparing = None;
         Ok(())
     }
@@ -198,11 +232,155 @@ impl RenderState {
 }
 
 impl Registry {
-    fn ensure_render_ids(&mut self, slot: u8, owner: u64) -> Result {
+    /// Yield unused warming only when admission has run out of physical slots.
+    /// Previously published graphs keep their existing ownership and retirement
+    /// rules. The caller destroys returned backing after dropping the device lock.
+    pub(super) fn reclaim_unused_render_spare(
+        &mut self,
+        owner: Option<u64>,
+        require_ids: bool,
+    ) -> Result<Option<UnusedRenderSpare>> {
+        // Prefer an empty reservation or an already parked channel.
+        for with_backing in [false, true] {
+            for slot in 1..RENDER_SLOTS {
+                let mut warm = false;
+                let expected = if let Some(entry) = self.render.entries[slot].as_ref() {
+                    if entry.constructing
+                        || entry.preparing.is_some()
+                        || entry.growing
+                        || entry.pending_error.is_some()
+                        || entry.pending_timeout
+                    {
+                        continue;
+                    }
+                    // Compute can gain identities only from physical channels
+                    // that never entered command publication. Render can reuse
+                    // a retained render identity without changing its lifetime.
+                    if owner.is_none()
+                        && !entry
+                            .reservation
+                            .ids
+                            .iter()
+                            .all(|id| self.qids.can_cancel_unpublished(*id))
+                    {
+                        continue;
+                    }
+                    if let Some(pair) = entry.pair.as_ref() {
+                        if !with_backing {
+                            continue;
+                        }
+                        if owner.is_some() && pair.reusable()? {
+                            None
+                        } else if pair.can_yield_unused()? {
+                            warm = true;
+                            Some(entry.reservation.owner)
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        if with_backing || entry.context.is_some() {
+                            continue;
+                        }
+                        None
+                    }
+                } else {
+                    if with_backing || require_ids || owner.is_none() {
+                        continue;
+                    }
+                    None
+                };
+                if !self
+                    .admission
+                    .reassign_unused_spare(slot as u8, expected, owner)
+                {
+                    continue;
+                }
+                if owner.is_none() {
+                    let entry = self.render.entries[slot].take();
+                    if let Some(entry) = entry.as_ref() {
+                        for id in entry.reservation.ids {
+                            self.qids.cancel_unpublished(id)?;
+                        }
+                        if let Some(pair) = entry.pair.as_ref() {
+                            self.buffers.unreserve_owner(pair.buffer_id())?;
+                        }
+                        self.note_build_room();
+                    }
+                    return Ok(Some(UnusedRenderSpare {
+                        _entry: entry,
+                        _binding: None,
+                    }));
+                }
+                let mut binding = None;
+                if warm {
+                    let entry = self.render.entries[slot].as_mut().ok_or(EIO)?;
+                    let mut pair = entry.pair.take().ok_or(EIO)?;
+                    self.buffers.unreserve_owner(pair.buffer_id())?;
+                    pair.release_owner();
+                    let (parked, retired) = KBox::into_inner(pair).park();
+                    entry.parked = Some(parked);
+                    entry.context = None;
+                    entry.pool = None;
+                    binding = Some(retired);
+                }
+                return Ok(Some(UnusedRenderSpare {
+                    _entry: None,
+                    _binding: binding,
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The installed pair in `slot` belongs to `owner` and its context, is
+    /// neither borrowed nor settling a failure, and its pool has backing: the
+    /// state in which building the pair would do nothing.
+    pub(super) fn render_ready(&self, slot: u8, owner: u64, context: &Arc<Context>) -> Result<bool> {
+        let Ok(entry) = self.render.entry(slot) else {
+            return Ok(false);
+        };
+        if entry.pending_error.is_some()
+            || entry.pending_timeout
+            || entry.constructing
+            || entry.preparing.is_some()
+            || entry.growing
+            || entry.parked.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(pair) = entry.pair.as_ref() else {
+            return Ok(false);
+        };
+        Ok(pair.matches(owner, context)? && !pair.pool().vacant())
+    }
+
+    fn has_render_ids(&self, owner: u64) -> bool {
+        self.render
+            .entries
+            .iter()
+            .enumerate()
+            .any(|(slot, entry)| entry.is_some() && self.admission.owns_slot(owner, slot))
+    }
+
+    /// Tell admission whether another render pair can still be built.
+    pub(super) fn note_build_room(&self) {
+        self.admission.note_build_room(self.qids.render_pair_fits());
+    }
+
+    pub(super) fn ensure_render_ids(&mut self, slot: u8, owner: u64) -> Result {
         if owner == 0 || slot == 0 || usize::from(slot) >= RENDER_SLOTS {
             return Err(EINVAL);
         }
-        if self.render.entries[usize::from(slot)].is_none() {
+        if self.render.entries[usize::from(slot)].is_some() {
+            return Ok(());
+        }
+        let built = self.build_render_ids(slot, owner);
+        self.note_build_room();
+        built
+    }
+
+    fn build_render_ids(&mut self, slot: u8, owner: u64) -> Result {
+        {
             let identity = self.identities.reserve(2)?.start;
             let tiling = self.qids.reserve(identity, DataMaster::Tiling, None)?;
             let fragment = match self.qids.reserve(identity + 1, DataMaster::Fragment, None) {
@@ -228,7 +406,9 @@ impl Registry {
                 pending_owner_closed: false,
                 borrowed_active: false,
                 borrowed_dependencies: None,
+                borrowed_switch: None,
                 event_masks: [0; 2],
+                missed_event: false,
                 closed: false,
                 pending_error: None,
                 pending_timeout: false,
@@ -244,6 +424,13 @@ impl Registry {
     /// ensure_render_ids cancels a first ID if the second cannot be reserved;
     /// validation, identity overflow, and cancellation errors still propagate.
     fn prepare_render_ids(&mut self, slot: u8, owner: u64, optional: bool) -> Result<bool> {
+        // A full queue table refuses a sibling without scanning it on every preparation.
+        if optional
+            && self.render.entries.get(usize::from(slot)).is_some_and(Option::is_none)
+            && !self.qids.render_pair_fits()
+        {
+            return Ok(false);
+        }
         match self.ensure_render_ids(slot, owner) {
             Ok(()) => Ok(true),
             Err(error) if optional && error == ENOSPC => Ok(false),
@@ -262,12 +449,8 @@ impl Registry {
         {
             return Err(EBUSY);
         }
-        let ids = self.render.entry(slot)?.reservation.ids;
-        // Physical queue identities survive failed graph construction. Only
-        // failure to acquire the second identity can return the first one.
-        for id in ids {
-            self.qids.publish(id)?;
-        }
+        // Construction keeps identities reserved. Publication pins them at the
+        // first firmware-visible command, so unused warming can still yield.
         let buffer = self.buffers.allocate_render()?;
         let entry = self.render.entry_mut(slot)?;
         entry.reservation.owner = owner;
@@ -374,32 +557,26 @@ impl crate::g17::queue::render::Host for Host<'_> {
         core::sync::atomic::fence(Ordering::Acquire);
         Ok(stamps)
     }
-    fn qos_publish(
+    fn qos_publish_pair(
         &mut self,
-        owner: crate::g17::qos::Owner,
+        owners: [crate::g17::qos::Owner; 2],
         scheduler: u64,
         policy: crate::g17::fw::queue::Policy,
-    ) -> Result<crate::g17::qos::Publication> {
-        use crate::g17::qos;
-        self.firmware.queues.accounting.publish(
-            &qos::View::new(self.firmware.init.qos()?)?,
-            owner,
-            scheduler,
-            policy,
-            qos::clock,
-        )
+    ) -> Result<[crate::g17::qos::Publication; 2]> {
+        self.firmware.port.qos_publish_pair(owners, scheduler, policy)
     }
     fn qos_cancel(&mut self, publication: crate::g17::qos::Publication) -> Result {
-        use crate::g17::qos;
-        self.firmware
-            .queues
-            .accounting
-            .cancel(&qos::View::new(self.firmware.init.qos()?)?, publication)
+        self.firmware.port.qos_cancel(publication)
     }
     /// Idle descent is held for the whole first install. A point-in-time power
     /// check let the firmware gate the cores between the host's configuration
     /// writes while several clients installed their first pairs at once.
     fn install_pair(&mut self, registration: &crate::g17::fw::kick::RenderRegistration) -> Result {
+        // Firmware builds without MMIO registration install the pair from its queue
+        // configuration alone.
+        if !self.firmware.variant.mmio_pair_registration {
+            return Ok(());
+        }
         if !self.registration_powered {
             self.firmware.acquire_registration_power()?;
             self.registration_powered = true;
@@ -418,6 +595,9 @@ impl crate::g17::queue::render::Host for Host<'_> {
     }
     fn publish_qid(&mut self, id: kick::Id) -> Result {
         self.firmware.queues.qids.publish(id)
+    }
+    fn next_publication(&mut self) -> Result<u64> {
+        Ok(self.firmware.port.next_publication())
     }
     fn publish_outer_pair(
         &mut self,
@@ -458,6 +638,9 @@ impl crate::g17::queue::render::Host for Host<'_> {
     /// Pipe 0 (tiling) in bits 1:0, priority class in bits 3:2.
     fn notify_render(&mut self, priority: u8) -> Result {
         self.release_registration();
+        crate::g17::trace::doorbell(crate::g17::trace::RENDER, || {
+            self.firmware.bridge.regs.g17_core_power()
+        });
         let result = self
             .firmware
             .primary
@@ -477,13 +660,20 @@ impl crate::g17::queue::render::Host for Host<'_> {
         generation: u64,
         buffer_id: u8,
     ) -> Result {
-        use crate::g17::qos;
         let queues = &mut self.firmware.queues;
-        let next = queues.render.pools.completed(pool_id, generation)?;
+        // Each final release is a control record the firmware processes before
+        // it returns to the work rings. While other pairs keep it busy, a
+        // registration left idle lingers instead, and the owner's next render
+        // reuses it. On an otherwise idle device the release is cheaper than
+        // reusing a registration that went idle, so it is sent at once.
+        // The pair retiring here is lent out of its entry meanwhile.
+        let linger = queues.render.entries.iter().flatten().any(|entry| {
+            entry.pair.as_ref().is_some_and(|pair| pair.published_in_flight())
+        });
+        let next = queues.render.pools.completed(pool_id, generation, linger)?;
         queues.buffers.can_release(buffer_id)?;
-        let view = qos::View::new(self.firmware.init.qos()?)?;
         if let Some(owners) = owners {
-            queues.accounting.complete(&view, &owners)?;
+            self.firmware.port.qos_complete(&owners)?;
         }
         queues.render.pools.commit_completed(pool_id, next);
         queues.buffers.release(buffer_id)
@@ -514,6 +704,30 @@ impl crate::g17::Firmware {
         host.release_registration();
         self.queues.render.entries[slot].as_mut().ok_or(EIO)?.pair = Some(pair);
         result
+    }
+
+    /// Event-worker turn: ends free-list lingers that elapsed or whose owner
+    /// closed or moved on, publishes their releases, and returns the delay to
+    /// the next expiry, which the worker turns into a timed wake.
+    pub(in crate::g17) fn expire_render_lingers(&mut self, now: u64) -> Result<Option<u64>> {
+        let render = &mut self.queues.render;
+        let entries = &render.entries;
+        let (ended, next) = render.pools.expire_lingers(now, |owner| {
+            entries.iter().flatten().any(|entry| {
+                !entry.closed
+                    && entry
+                        .pool
+                        .as_ref()
+                        .is_some_and(|pool| pools::Pools::owner(pool) == *owner)
+            })
+        });
+        if ended {
+            match self.release_render_lists() {
+                Err(error) if error == EAGAIN => {}
+                result => result?,
+            }
+        }
+        Ok(next)
     }
 
     fn release_render_lists(&mut self) -> Result {
@@ -549,6 +763,44 @@ impl crate::g17::Firmware {
                 Err(error) if error == EAGAIN => break,
                 result => result?,
             }
+        }
+        Ok(())
+    }
+
+    /// A final retirement pass before a render watchdog attributes its timeout, as compute runs
+    /// scan_compute() first: a head that finished but whose completion the event worker has not
+    /// processed yet must not defer another VM's timeout. Pairs lent out, or holding a deferred
+    /// timeout or error, stay with the worker, which observes and settles them in its order.
+    pub(in crate::g17::runtime) fn scan_renders(&mut self, deferred: &mut DeferredBatch) -> Result {
+        if self.recovery.pending()
+            || self
+                .primary
+                .state
+                .shared
+                .crashed
+                .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        for slot in 1..self.queues.render.entries.len() {
+            if !self.queues.render.entries[slot]
+                .as_ref()
+                .is_some_and(|entry| {
+                    entry
+                        .pair
+                        .as_ref()
+                        .is_some_and(|pair| pair.published_in_flight())
+                        && entry.preparing.is_none()
+                        && !entry.growing
+                        && !entry.pending_timeout
+                        && entry.pending_error.is_none()
+                })
+            {
+                continue;
+            }
+            self.retire_render_slot(slot, None, deferred)?;
+            self.queues.render.collect_retired(slot)?;
+            self.settle_render_terminal(slot, deferred)?;
         }
         Ok(())
     }
@@ -603,6 +855,22 @@ impl Registry {
             .filter_map(|entry| entry.pair.as_ref())
             .find(|pair| pair.qids().contains(&qid))
             .and_then(|pair| pair.oldest_spared())
+    }
+    /// Marks the interrupted group of the pair that owns `qid`.
+    pub(in crate::g17) fn note_render_interrupted(
+        &self,
+        qid: u8,
+        stamp: u32,
+    ) -> crate::g17::recovery::Interrupted {
+        self.render
+            .entries
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.pair.as_ref())
+            .find(|pair| pair.qids().contains(&qid))
+            .map_or(crate::g17::recovery::Interrupted::None, |pair| {
+                pair.note_interrupted(stamp)
+            })
     }
     pub(in crate::g17) fn visit_render_owners(
         &self,
@@ -763,9 +1031,19 @@ impl Registry {
     }
     pub(in crate::g17) fn retain_render_completions(&mut self, masks: [u64; 2]) {
         for entry in self.render.entries.iter_mut().flatten() {
+            let mut hit = false;
             for id in entry.reservation.ids {
                 let qid = usize::from(id.qid());
-                entry.event_masks[qid / 64] |= masks[qid / 64] & (1u64 << (qid % 64));
+                let bit = masks[qid / 64] & (1u64 << (qid % 64));
+                entry.event_masks[qid / 64] |= bit;
+                hit |= bit != 0;
+            }
+            // Event passes skip a pair while preparation, growth or an
+            // observation has borrowed it. Without a record, a completion
+            // that arrived meanwhile waits for an unrelated later event or the
+            // one-millisecond rescan.
+            if hit && (entry.preparing.is_some() || entry.growing) {
+                entry.missed_event = true;
             }
         }
     }
@@ -779,10 +1057,10 @@ impl Registry {
                     |pair| pair.published_in_flight(),
                 );
             active
-                && entry.reservation.ids.into_iter().all(|id| {
-                    let qid = usize::from(id.qid());
-                    entry.event_masks[qid / 64] & (1u64 << (qid % 64)) != 0
-                })
+                && crate::g17::queue::render::completion_noted(
+                    entry.reservation.ids.map(kick::Id::qid),
+                    entry.event_masks,
+                )
         })
     }
     pub(in crate::g17) fn defer_render_timeout(
@@ -815,5 +1093,106 @@ impl Registry {
         packet.completion.defer_timeout(error);
         entry.pending_timeout = true;
         true
+    }
+
+    /// The oldest published group of every render pair, for cross-VM timeout attribution
+    /// (crate::g17::timeout).
+    pub(in crate::g17) fn render_timeout_heads(
+        &self,
+    ) -> impl Iterator<Item = crate::g17::timeout::Head> + '_ {
+        self.render
+            .entries
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.pair.as_ref())
+            .filter_map(|pair| pair.timeout_head())
+    }
+
+    /// A render watchdog blocked behind another VM's older unfinished work gets the same
+    /// bounded grace as compute; the oldest unfinished work is never excused. When the GPU
+    /// stalls on one client, the others' renders then outlive the culprit's teardown instead
+    /// of all timing out together.
+    pub(in crate::g17) fn render_timeout_decision(
+        &self,
+        packet: &Arc<Packet>,
+        renewals: u8,
+    ) -> Option<crate::g17::timeout::Verdict> {
+        let own = self
+            .render
+            .entries
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.pair.as_ref())
+            .find(|pair| pair.contains_packet(packet))
+            .and_then(|pair| pair.timeout_head());
+        let computes = self
+            .compute
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.queue.as_deref())
+            .filter_map(|queue| queue.timeout_head());
+        // Without a head of its own the timeout is its own.
+        own.map(|own| {
+            crate::g17::timeout::attribute(
+                own,
+                renewals,
+                Iterator::chain(self.render_timeout_heads(), computes),
+            )
+        })
+    }
+}
+
+impl RenderState {
+    pub(super) fn write_capacity(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        writeln!(f, "retired_render_bindings used={} total={}", self.retired.len(), self.retired.capacity())?;
+        writeln!(f, "firmware_linked_render_graphs kept={} leaked={}", self.kept_graphs.len(),
+                 teardown::LEAKED_GRAPHS.load(core::sync::atomic::Ordering::Relaxed))?;
+        self.pools.write_capacity(f)?;
+        for (slot, entry) in self.entries.iter().enumerate() {
+            if let Some(context) = entry.as_ref().and_then(|entry| entry.context.as_ref()) {
+                context.write_capacity(f, "render", slot)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Registry {
+    /// Give idle private backing to another ready client under capacity pressure.
+    /// Keep graph/QID/context ownership; the next use rearms the same pool after
+    /// its consumed release, exactly as eviction-driven reclaim does.
+    pub(super) fn reclaim_idle_render_pools(
+        &mut self, init: &crate::g17::initdata::InitData, deferred: &mut DeferredBatch,
+    ) -> Result {
+        let render = &mut self.render;
+        render.pools.observe(init)?;
+        for entry in render.entries.iter().flatten() {
+            if !deferred.render_backing_room() { break; }
+            let Some(pool) = entry.pool.as_ref() else { continue; };
+            // None means this pool never acquired a firmware registration;
+            // otherwise require its exact final release to have been consumed.
+            if pool.vacant() || !render.pools.released(u32::from(pool.id()), pool.control_va())
+                || self.admission.owner_active(entry.reservation.owner) { continue; }
+            // A sibling or replacement may be building off-lock before it has
+            // installed its pool reference. Its logical owner also excludes us.
+            let mut idle = true;
+            for other in render.entries.iter().flatten().filter(|other| {
+                other.reservation.owner == entry.reservation.owner
+                    || other.pool.as_ref().is_some_and(|bound| Arc::ptr_eq(bound, pool))
+            }) {
+                if other.constructing || other.growing || other.preparing.is_some()
+                    || other.pending_error.is_some() || other.pending_timeout {
+                    idle = false;
+                    break;
+                }
+                if let Some(pair) = other.pair.as_ref() {
+                    if !pair.idle_for_context(pair.context())? { idle = false; break; }
+                }
+            }
+            if idle {
+                if let Some(backing) = pool.vacate() { deferred.defer_render_backing(backing); }
+            }
+        }
+        Ok(())
     }
 }

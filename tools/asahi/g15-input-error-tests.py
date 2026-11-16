@@ -35,13 +35,15 @@ impl Error { fn from_errno(n:i32)->Self {assert!(n<0);Self(n)} fn to_errno(self)
 type Result<T=()> = std::result::Result<T,Error>;
 const EIO:Error=Error(-5);const ENODEV:Error=Error(-19);const ETIMEDOUT:Error=Error(-110);
 const ECANCELED:Error=Error(-125);const EINVAL:Error=Error(-22);const ENOMEM:Error=Error(-12);
-const ENOSPC:Error=Error(-28);const EAGAIN:Error=Error(-11);
+const ENOSPC:Error=Error(-28);const EAGAIN:Error=Error(-11);const ENOENT:Error=Error(-2);
 macro_rules! pr_warn { ($($arg:tt)*)=>{{ let _=format_args!($($arg)*); }} }
+macro_rules! mod_pr_debug { ($($arg:tt)*)=>{{ let _=format_args!($($arg)*); }} }
 struct Mutex<T>(StdMutex<T>);impl<T> Mutex<T>{fn lock(&self)->MutexGuard<'_,T>{self.0.lock().unwrap()}}
 struct Mirror{word:*mut i32}
-struct VmStatus{error:AtomicI32,reported_error:AtomicI32,mirror:Mutex<Option<Mirror>>}
+struct VmStatus{error:AtomicI32,reported_error:AtomicI32,client_closed:AtomicBool,warned:AtomicBool,mirror:Mutex<Option<Mirror>>}
 impl VmStatus {
- fn new(word:*mut i32)->Self{Self{error:AtomicI32::new(0),reported_error:AtomicI32::new(0),mirror:Mutex(StdMutex::new(Some(Mirror{word})))}}
+ // The client's VM handle stays open here, as for every job these checks run.
+ fn new(word:*mut i32)->Self{Self{error:AtomicI32::new(0),reported_error:AtomicI32::new(0),client_closed:AtomicBool::new(false),warned:AtomicBool::new(false),mirror:Mutex(StdMutex::new(Some(Mirror{word})))}}
 __STATUS__
 }
 mod g17 {use super::*;__POLICY__}
@@ -231,7 +233,8 @@ def main():
     bodies = "\n".join(methods)
     code = PRELUDE.replace("__JOB__", bodies).replace("__STATUS__", "\n".join(
         extract(status, marker) for marker in ["    pub(crate) fn get(", "    pub(crate) fn record(",
-        "    pub(crate) fn reported_error(", "    pub(crate) fn report_failure("])).replace(
+        "    pub(crate) fn reported_error(", "    pub(crate) fn report_failure(",
+        "    fn unobserved_teardown("])).replace(
         "__POLICY__", extract(policy, "pub(crate) fn inherited_error(")).replace(
         "__PREFIX__", extract(engine, "    fn publish_prefix("))
     variants = {"control": code}

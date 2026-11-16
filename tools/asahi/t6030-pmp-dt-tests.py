@@ -15,6 +15,32 @@ PMP_NODES = {
     "pmp@350500000",
     "mbox@350c08000",
 }
+PMP_COMPATIBLES = {"apple,t6000-pmp-v2", "apple,t6030-pmp-v2-report"}
+
+
+def check_default_compatibles(dtb, board):
+    pending = ["/"]
+    while pending:
+        node = pending.pop()
+        raw = subprocess.check_output(
+            ["fdtget", "-t", "bx", "-d", "", str(dtb), node, "compatible"],
+            text=True,
+        )
+        # Match the gate's whole-tree OF lookup, including disabled nodes
+        # and every string in a compatible list.
+        compatible = bytes(int(value, 16) for value in raw.split())
+        matches = PMP_COMPATIBLES.intersection(
+            value.decode("ascii").lower() for value in compatible.split(b"\0")
+            if value
+        )
+        if matches:
+            raise AssertionError(f"{board} default: static PMP compatible "
+                                 f"{sorted(matches)} at {node}")
+        children = subprocess.check_output(
+            ["fdtget", "-l", str(dtb), node], text=True,
+        )
+        pending.extend(node.rstrip("/") + "/" + child
+                       for child in children.splitlines())
 
 
 def check_profile(tree, output, dtc, board, static):
@@ -38,6 +64,8 @@ def check_profile(tree, output, dtc, board, static):
     if present != expected:
         raise AssertionError(f"{board} {profile}: static PMP nodes "
                              f"{sorted(present)}, expected {sorted(expected)}")
+    if not static:
+        check_default_compatibles(dtb, board)
 
     alias = subprocess.run(["fdtget", "-t", "s", str(dtb), "/aliases", "pmp"],
                            capture_output=True, text=True)

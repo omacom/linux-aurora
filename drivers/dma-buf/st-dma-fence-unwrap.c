@@ -15,6 +15,7 @@
 struct mock_fence {
 	struct dma_fence base;
 	spinlock_t lock;
+	atomic_t polls;
 };
 
 static const char *mock_name(struct dma_fence *f)
@@ -22,9 +23,18 @@ static const char *mock_name(struct dma_fence *f)
 	return "mock";
 }
 
+static bool mock_signaled(struct dma_fence *fence)
+{
+	struct mock_fence *f = container_of(fence, struct mock_fence, base);
+
+	atomic_inc(&f->polls);
+	return false;
+}
+
 static const struct dma_fence_ops mock_ops = {
 	.get_driver_name = mock_name,
 	.get_timeline_name = mock_name,
+	.signaled = mock_signaled,
 };
 
 static struct dma_fence *__mock_fence(u64 context, u64 seqno)
@@ -36,6 +46,7 @@ static struct dma_fence *__mock_fence(u64 context, u64 seqno)
 		return NULL;
 
 	spin_lock_init(&f->lock);
+	atomic_set(&f->polls, 0);
 	dma_fence_init(&f->base, &mock_ops, &f->lock, context, seqno);
 
 	return &f->base;
@@ -584,7 +595,71 @@ error_put_f1:
 	dma_fence_put(f1);
 }
 
+/*
+ * A pending all-of array needs no polls of later members. Keep its
+ * independent member fences so their polling and out-of-order completion
+ * remain observable without enabling callbacks on the array.
+ */
+static void test_array_pending_prefix(struct kunit *test)
+{
+	struct dma_fence *first = mock_fence(), *last = mock_fence();
+	struct dma_fence *array;
+	struct mock_fence *last_mock;
+
+	if (!first || !last) {
+		KUNIT_FAIL(test, "Could not allocate member fences");
+		goto out;
+	}
+	last_mock = container_of(last, struct mock_fence, base);
+	array = mock_array(2, dma_fence_get(first), dma_fence_get(last));
+	if (!array) {
+		KUNIT_FAIL(test, "Could not allocate fence array");
+		goto out;
+	}
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(array));
+	KUNIT_EXPECT_EQ(test, atomic_read(&last_mock->polls), 0);
+	dma_fence_signal(last);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(array));
+	dma_fence_signal(first);
+	KUNIT_EXPECT_TRUE(test, dma_fence_is_signaled(array));
+	dma_fence_put(array);
+out:
+	dma_fence_put(last);
+	dma_fence_put(first);
+}
+
+static void test_array_pending_suffix(struct kunit *test)
+{
+	struct dma_fence *first = mock_fence(), *last = mock_fence();
+	struct dma_fence *array;
+
+	if (!first || !last) {
+		KUNIT_FAIL(test, "Could not allocate member fences");
+		goto out;
+	}
+	array = mock_array(2, dma_fence_get(first), dma_fence_get(last));
+	if (!array) {
+		KUNIT_FAIL(test, "Could not allocate fence array");
+		goto out;
+	}
+	dma_fence_signal(first);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(array));
+	/* Installing callbacks after a lazy partial poll must still account
+	 * for the already signaled first member and wait for the last.
+	 */
+	dma_fence_enable_signaling(array);
+	KUNIT_EXPECT_FALSE(test, dma_fence_is_signaled(array));
+	dma_fence_signal(last);
+	KUNIT_EXPECT_GT(test, dma_fence_wait_timeout(array, false, HZ), 0L);
+	dma_fence_put(array);
+out:
+	dma_fence_put(last);
+	dma_fence_put(first);
+}
+
 static struct kunit_case dma_fence_unwrap_cases[] = {
+	KUNIT_CASE(test_array_pending_prefix),
+	KUNIT_CASE(test_array_pending_suffix),
 	KUNIT_CASE(test_sanitycheck),
 	KUNIT_CASE(test_unwrap_array),
 	KUNIT_CASE(test_unwrap_chain),

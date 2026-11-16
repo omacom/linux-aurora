@@ -137,10 +137,71 @@ fn main() {
         OWNER_CALLS.set(0); let bytes = fixture(kind);
         assert!(parse(&dev, &Adt { data: &bytes }).is_err()); assert_eq!(OWNER_CALLS.get(), 0);
     }
-    assert_eq!(BUILDS.len(), 2, "maintained B0 firmware row must not require an absent profile symbol");
-    assert_eq!(BUILDS[1].machine.unwrap().to_bytes(), b"apple,j516s");
-    assert_eq!((BUILDS[1].text_size, BUILDS[1].data_size, BUILDS[1].marker), (0x5c000, 0x114000, 0x58e88));
-    assert_eq!(BUILDS[1].text_sha256, [0xda,0x26,0xec,0xca,0xb1,0xf8,0x59,0x8d,0xa8,0x0c,0x85,0x5e,0xca,0x91,0x65,0x20,0x40,0x6d,0x1d,0x06,0x70,0xf1,0xd4,0x70,0xe7,0x9b,0xb9,0xb0,0x22,0x09,0xdb,0x53]);
+    assert_eq!(BUILDS.len(), 7, "maintained B0 firmware row must not require an absent profile symbol");
+    for (row, machine) in [(1, &b"apple,j516s"[..]), (2, &b"apple,j514s"[..])] {
+        assert_eq!(BUILDS[row].machine.unwrap().to_bytes(), machine);
+        assert_eq!((BUILDS[row].text_size, BUILDS[row].data_size, BUILDS[row].marker), (0x5c000, 0x114000, 0x58e88));
+        assert_eq!(BUILDS[row].text_sha256, [0xda,0x26,0xec,0xca,0xb1,0xf8,0x59,0x8d,0xa8,0x0c,0x85,0x5e,0xca,0x91,0x65,0x20,0x40,0x6d,0x1d,0x06,0x70,0xf1,0xd4,0x70,0xe7,0x9b,0xb9,0xb0,0x22,0x09,0xdb,0x53]);
+    }
+    assert_eq!(BUILDS[4].machine.unwrap().to_bytes(), b"apple,j516s");
+    assert_eq!((BUILDS[4].text_size, BUILDS[4].data_size, BUILDS[4].marker), (0x5c000, 0x114000, 0x58e88));
+    assert_eq!(BUILDS[4].text_sha256, [0xcd,0x05,0xaf,0x6a,0x82,0x8b,0x52,0xe4,0xc2,0xfe,0xd2,0x00,0x86,0xd3,0xd1,0x8a,0x7d,0xb4,0x2e,0x03,0xa8,0xfd,0x6f,0x83,0x54,0xf9,0xf0,0x6e,0x0a,0x61,0x36,0x3e]);
+    // Issue #247: this J514S build must pin without the bring-up override.
+    use identity::lookup::{Measured, Verdict, verdict};
+    let measured = Measured {
+        text_size: 0x5c000, data_size: 0x114000, marker: 0x58e88,
+        sha256: [0xcd,0x05,0xaf,0x6a,0x82,0x8b,0x52,0xe4,
+                 0xc2,0xfe,0xd2,0x00,0x86,0xd3,0xd1,0x8a,
+                 0x7d,0xb4,0x2e,0x03,0xa8,0xfd,0x6f,0x83,
+                 0x54,0xf9,0xf0,0x6e,0x0a,0x61,0x36,0x3e],
+    };
+    let identify = |m: &Measured, machine: &[u8]| verdict(m, BUILDS.iter().map(|b| (
+        Measured { text_size: b.text_size, data_size: b.data_size,
+                   marker: b.marker, sha256: b.text_sha256 },
+        b.machine.map_or(true, |board| board.to_bytes() == machine),
+    )), 0);
+    assert!(matches!(identify(&measured, b"apple,j514s"), Verdict::Pinned(3)),
+            "J514S cd05 firmware must pin without a prefix override");
+    assert_eq!(identify(&measured, b"apple,j516s"), Verdict::Pinned(4));
+    let mut changed = measured;
+    changed.sha256[31] ^= 1;
+    assert_eq!(identify(&changed, b"apple,j514s"), Verdict::Refused);
+    changed = measured; changed.text_size += 0x1000;
+    assert_eq!(identify(&changed, b"apple,j514s"), Verdict::Refused);
+    changed = measured; changed.data_size += 0x1000;
+    assert_eq!(identify(&changed, b"apple,j514s"), Verdict::Refused);
+    changed = measured; changed.marker += 8;
+    assert_eq!(identify(&changed, b"apple,j514s"), Verdict::Refused);
+    // Issue #247: the 4118 build pins on the J514S and the J516S, each to
+    // its own row, without the bring-up override.
+    let digest = [0x41,0x18,0x33,0xa7,0xde,0xd7,0x73,0xfe,
+                  0xea,0xc4,0xa1,0x81,0x55,0x2e,0x3f,0xf5,
+                  0x58,0x2e,0xaf,0x44,0x35,0xf2,0xdd,0x8f,
+                  0x62,0x0c,0x1e,0xd0,0xb3,0x1d,0xf1,0xb0];
+    for (row, machine) in [(5, &b"apple,j514s"[..]), (6, &b"apple,j516s"[..])] {
+        assert_eq!(BUILDS[row].machine.unwrap().to_bytes(), machine);
+        assert_eq!((BUILDS[row].text_size, BUILDS[row].data_size, BUILDS[row].marker), (0x5c000, 0x114000, 0x58e88));
+        assert_eq!(BUILDS[row].text_sha256, digest);
+    }
+    let measured = Measured { text_size: 0x5c000, data_size: 0x114000, marker: 0x58e88, sha256: digest };
+    assert_eq!(identify(&measured, b"apple,j514s"), Verdict::Pinned(5),
+               "J514S 4118 firmware must pin without a prefix override");
+    assert_eq!(identify(&measured, b"apple,j516s"), Verdict::Pinned(6),
+               "J516S 4118 firmware must pin without a prefix override");
+    for other in [&b"apple,j514c"[..], b"apple,j516c", b"apple,j514m", b"apple,j516m", b"apple,t6030"] {
+        assert_eq!(identify(&measured, other), Verdict::Refused);
+    }
+    for machine in [&b"apple,j514s"[..], b"apple,j516s"] {
+        let mut changed = measured;
+        changed.sha256[31] ^= 1;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+        changed = measured; changed.text_size += 0x1000;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+        changed = measured; changed.data_size += 0x1000;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+        changed = measured; changed.marker += 8;
+        assert_eq!(identify(&changed, machine), Verdict::Refused);
+    }
     for error in [0, -517, -12] {
         INIT_ERROR.set(error); let shared = Arc::new(Shared); let result = Rtkit::new(&dev, &shared);
         assert_eq!(result.is_ok(), error == 0);
@@ -165,7 +226,8 @@ def main():
     while depth: depth+=(hw[end]=='[')-(hw[end]==']'); end+=1
     firmware='static BUILDS: &[FirmwareBuild] = &'+hw[start:end]+';\n'+item(hw,'pub(crate) struct FirmwareBuild')
     constructor=item(boot,'    fn new(dev: &device::Device, shared: &Arc<Shared>)')
-    source=PREFIX+'\nmod hw {\n'+constants+'\n}\nmod record {\n'+record_constants+'\n}\n'+helpers+'\n'+firmware+'\nimpl Rtkit {\n'+constructor+'\n}\n'+CASES
+    identity='mod identity {\n'+''.join(f'#[path = "{G15 / "identity" / (name + ".rs")}"] pub(crate) mod {name};\n' for name in ['matching', 'lookup'])+'}\n'
+    source=PREFIX+'\nmod hw {\n'+constants+'\n}\nmod record {\n'+record_constants+'\n}\n'+helpers+'\n'+firmware+'\nimpl Rtkit {\n'+constructor+'\n}\n'+identity+CASES
     variants={'actual':source}
     if a.mutations:
         variants['skip-owner-check']=source.replace('if !glue::reserved_uat(i as u32, r.start, r.end - r.start) {','if false {')

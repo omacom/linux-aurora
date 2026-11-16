@@ -20,15 +20,36 @@ properties:
     const: apple,smc-rtc
 
   nvmem-cells:
+    minItems: 1
     items:
       - description:
           RTC offset. By default a 48bit value, specified in 32768 (2^15) Hz
           clock ticks. With apple,rtc-offset-seconds, a 64bit little-endian
           count of whole seconds.
+      - description:
+          PMU alarm control byte, with the alarm enable, the monitor bit and
+          the latched alarm event.
+      - description:
+          PMU alarm compare value, a 32-bit count of whole seconds of the RTC
+          counter without the offset.
+      - description: PMU alarm mask byte.
 
   nvmem-cell-names:
-    items:
-      - const: rtc_offset
+    oneOf:
+      - items:
+          - const: rtc_offset
+      - items:
+          - const: rtc_offset
+          - const: rtc_ctrl
+          - const: rtc_alarm
+          - const: rtc_alarm_mask
+
+  interrupts:
+    maxItems: 1
+    description:
+      The PMU's RTC alarm interrupt. Only used with the three alarm cells.
+
+  wakeup-source: true
 
   apple,rtc-offset-seconds:
     type: boolean

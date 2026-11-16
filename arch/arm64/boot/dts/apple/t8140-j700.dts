@@ -388,18 +388,6 @@
 
 #include "isp-imx558.dtsi"
 
-&ave_dart0 {
-	status = "okay";
-};
-
-&ave_dart1 {
-	status = "okay";
-};
-
-&ave {
-	status = "okay";
-};
-
 &serial0 {
 	status = "okay";
 };

@@ -15,7 +15,7 @@ DRIVER = Path('drivers/media/platform/apple/avd')
 
 
 def function(source, name):
-    match = re.search(r'^(?:static )?(?:int|void)\s+' + name + r'\(', source, re.M)
+    match = re.search(r'^(?:static )?(?:int|void|u64)\s+' + name + r'\(', source, re.M)
     if not match:
         raise ValueError(name)
     start = match.start()
@@ -46,6 +46,9 @@ PREFIX = r'''
 typedef uint8_t u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int8_t s8;
+#define U64_MAX UINT64_MAX
 typedef uint64_t dma_addr_t;
 #define ALIGN(x,a) (((x)+(a)-1)&~((__typeof__(x))(a)-1))
 #define ALIGN_DOWN(x,a) ((x)&~((__typeof__(x))(a)-1))
@@ -73,9 +76,10 @@ static struct v4l2_ctrl_av1_tile_group_entry tile;
 static struct v4l2_ctrl_av1_film_grain grain;
 static struct v4l2_ctrl controls[4];
 static unsigned int lookup_calls, preamble_calls;
+static uint64_t last_timestamp;
 static void *vb2_plane_vaddr(struct vb2_buffer *b,unsigned int p){assert(p==0);return b->memory;}
 static struct avd_decoded_buffer *vb2_to_avd_decoded_buf(struct vb2_buffer *b){return (void *)b;}
-static struct avd_decoded_buffer *avd_get_ref_buf(struct avd_ctx *ctx,struct vb2_v4l2_buffer *dst,uint64_t timestamp){(void)ctx;(void)dst;assert(timestamp==1000);lookup_calls++;return reference;}
+static struct avd_decoded_buffer *avd_get_ref_buf(struct avd_ctx *ctx,struct vb2_v4l2_buffer *dst,uint64_t timestamp){(void)ctx;last_timestamp=timestamp;lookup_calls++;return timestamp==1000?reference:vb2_to_avd_decoded_buf(&dst->vb2_buf);}
 static void avd_run_preamble(struct avd_ctx *ctx,struct avd_run *run){(void)ctx;(void)run;preamble_calls++;}
 static struct v4l2_ctrl *v4l2_ctrl_find(int *h,unsigned int id){
  (void)h;
@@ -110,7 +114,7 @@ static void inheritance(unsigned int residue,unsigned int mode,const char *neigh
  assert(avd_av1_run_preamble(&ctx,&run)==0);assert(preamble_calls==1);
  if(check_addresses){assert(run.addresses.probs_out==run.base.y_out+dst_offset);assert(run.addresses.color==run.base.y_out+dst_offset+9216);}
  avd_av1_set_prob(&ctx,&run);
- assert(lookup_calls==(mode?0:1));assert(memcmp(probabilities,&expected,sizeof(expected))==0);
+ assert(lookup_calls==(mode?0:1));if(!mode)assert(last_timestamp==1000);assert(memcmp(probabilities,&expected,sizeof(expected))==0);
  assert(memcmp(dst.base.vb.vb2_buf.memory+dst_offset,&expected,sizeof(expected))==0);
  for(size_t i=0;i<dst_offset;i++)assert(dst.base.vb.vb2_buf.memory[i]==0xa5);
  for(size_t i=dst_offset+sizeof(expected);i<dst_len;i++)assert(dst.base.vb.vb2_buf.memory[i]==0xa5);
@@ -125,6 +129,30 @@ static void reservation(unsigned int width,unsigned int height,unsigned int comp
  assert(cdf%256==0&&co%256==0);assert(cdf>=compressed);assert(cdf+sizeof(struct avd_av1_cdfs)<=co);assert(co+color<=length);
  assert(cdf==aligned_cdf(length,color));assert(co==cdf+9216);
 }
+#ifdef HAVE_AVD_AV1_REF_TS
+/* Not periodic: a read at a wrong offset, even a multiple of 256, sees other bytes. */
+static unsigned char fill(size_t i){uint32_t x=(uint32_t)i*2654435761u;x^=x>>15;x*=2246822519u;x^=x>>13;return (unsigned char)(x>>11);}
+static void invalid_primary_index(signed char idx){
+ const size_t len=7000064,color=138240,offset=aligned_cdf(len,color);
+ struct avd_decoded_buffer dst={0};struct avd_av1_ctx av1={0};struct avd_ctx ctx={.priv=&av1};struct avd_av1_run run={0};
+ unsigned char probabilities[sizeof(struct avd_av1_cdfs)],expected[sizeof(struct avd_av1_cdfs)];
+ dst.base.vb.vb2_buf.planes[0].length=len;dst.base.vb.vb2_buf.memory=malloc(len);assert(dst.base.vb.vb2_buf.memory);dst.av1.color_size=color;
+ for(size_t i=0;i<len;i++)dst.base.vb.vb2_buf.memory[i]=fill(i);
+ for(size_t i=0;i<sizeof(expected);i++)expected[i]=fill(offset+i);
+ memset(probabilities,0,sizeof(probabilities));
+ memset(&frame,0,sizeof(frame));frame.frame_width_minus_1=1919;frame.frame_height_minus_1=1079;frame.quantization.base_q_idx=47;
+ frame.frame_type=V4L2_AV1_INTER_FRAME;frame.primary_ref_frame=0;frame.ref_frame_idx[0]=idx;frame.reference_frame_ts[0]=1000;
+ for(int i=0;i<8;i++)frame.order_hints[i]=0;
+ controls[1].p_cur.p=&frame;run.frame=&frame;run.base.bufs.dst=&dst.base.vb;av1.bufs.probs.cpu=probabilities;reference=NULL;lookup_calls=0;last_timestamp=0;
+ avd_av1_set_prob(&ctx,&run);
+ assert(lookup_calls==1);assert(last_timestamp==UINT64_MAX);
+ /* Inherited from the destination's own CDF area as it was before the call... */
+ assert(memcmp(probabilities,expected,sizeof(expected))==0);
+ /* ...and written back unchanged: no destination byte differs from the fill. */
+ for(size_t i=0;i<len;i++)assert(dst.base.vb.vb2_buf.memory[i]==fill(i));
+ free(dst.base.vb.vb2_buf.memory);
+}
+#endif
 int main(int argc,char **argv){
  assert(sizeof(struct avd_av1_cdfs)==9166);
  if(argc>1&&(strcmp(argv[1],"snapshot")==0||strcmp(argv[1],"snapshot-copy")==0)){assert(argc==3);inheritance(64,0,argv[2],strcmp(argv[1],"snapshot")==0);puts("snapshot inheritance PASS");return 0;}
@@ -137,6 +165,9 @@ int main(int argc,char **argv){
   for(unsigned int mode=1;mode<=4;mode++){inheritance(residue,mode,NULL,true);cases++;}
   reservation(1920,1080,6425727,residue);cases++;reservation(1281,721,3000017,residue);cases++;
  }
+#ifdef HAVE_AVD_AV1_REF_TS
+ invalid_primary_index(-1);invalid_primary_index(-128);invalid_primary_index(8);invalid_primary_index(127);cases+=4;
+#endif
  printf("%u production controls PASS\n",cases);return 0;
 }
 '''
@@ -148,14 +179,15 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--neighbors', type=Path)
     parser.add_argument('--case', choices=['all', 'snapshot', 'snapshot-copy', 'copy', 'seed', 'aligned'], default='all')
-    parser.add_argument('--mutation', choices=['round-up', 'cpu-unaligned'])
+    parser.add_argument('--mutation', choices=['round-up', 'cpu-unaligned', 'fallback-offset'])
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     paths = {name: args.source / DRIVER / name for name in ['avd-av1.c', 'avd-av1-entropymode.h', 'avd-av1-entropymode.c', 'avd.h']}
     text = {name: p.read_text() for name, p in paths.items()}
     src = text['avd-av1.c']
     macros = src[src.index('#define AVD_CDFS_SIZE'):src.index('struct avd_av1_run {')]
-    functions = {n: function(src, n) for n in ['avd_av1_set_prob', 'avd_color_size', 'avd_av1_run_preamble', 'avd_av1_adjust_decoded_fmt']}
+    helpers = [n for n in ['avd_av1_ref_ts'] if re.search(r'^static u64 ' + n + r'\(', src, re.M)]
+    functions = {n: function(src, n) for n in helpers + ['avd_av1_set_prob', 'avd_color_size', 'avd_av1_run_preamble', 'avd_av1_adjust_decoded_fmt']}
     if args.mutation == 'round-up':
         if 'ALIGN_DOWN((dst), AVD_ALIGN)' not in macros:
             parser.error('round-up mutation requires aligned tail macros')
@@ -163,11 +195,19 @@ def main():
     elif args.mutation == 'cpu-unaligned':
         functions['avd_av1_set_prob'] = functions['avd_av1_set_prob'].replace('AVD_AV1_CDFS_OFFSET(', 'UNALIGNED_CDFS_OFFSET(')
         macros += '\n#define UNALIGNED_CDFS_OFFSET(dst,cl) ((dst)-ALIGN(cl,AVD_ALIGN)-ALIGN(AVD_CDFS_SIZE,AVD_ALIGN))\n'
+    elif args.mutation == 'fallback-offset':
+        read = 'vb2_plane_vaddr(&ref->base.vb.vb2_buf, 0) +'
+        if 'avd_av1_ref_ts' not in helpers or functions['avd_av1_set_prob'].count(read) != 1:
+            print('mutation fallback-offset: no avd_av1_ref_ts() or not one reference read; no mutant verdict')
+            raise SystemExit(0)
+        functions['avd_av1_set_prob'] = functions['avd_av1_set_prob'].replace(read, read + ' (ref == dst ? 1 : 0) +')
     header = text['avd-av1-entropymode.h'].replace('#include <linux/types.h>', '')
     defaults = re.sub(r'^#include .*$', '', text['avd-av1-entropymode.c'], flags=re.M)
     alignment = re.search(r'^#define AVD_ALIGN\s+\d+', text['avd.h'], re.M).group()
     generated = PREFIX.replace('@ALIGNMENT@', alignment).replace('@CDF_HEADER@', header).replace('@CDF_DEFAULTS@', defaults).replace('@RUN_STRUCT@', structure(src, 'avd_av1_run')).replace('@CTX_STRUCT@', structure(src, 'avd_av1_ctx'))
     generated += macros + '\n' + '\n'.join(functions.values()) + TESTS
+    if helpers:
+        generated = '#define HAVE_AVD_AV1_REF_TS 1\n' + generated
     uapi = args.source / 'include/uapi/linux/v4l2-controls.h'
     (args.out / 'controls.h').write_bytes(uapi.read_bytes())
     cfile = args.out / 'controls.c'
@@ -178,6 +218,9 @@ def main():
     build = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=environment)
     (args.out / 'build.log').write_text(build.stdout)
     if build.returncode:
+        if args.mutation:
+            print(f'mutation {args.mutation}: controls did not build (see build.log); no mutant verdict')
+            raise SystemExit(0)
         raise SystemExit(build.returncode)
     run_command = [str(exe)]
     if args.case != 'all':

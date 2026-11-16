@@ -13,7 +13,8 @@ have succeeded; a skipped job passes only when the plan skips it on purpose:
     pull request or merge group range (push, schedule, manual runs).
 
 A light run that passes says only that the checks passed: the kernel itself
-is built in the merge queue, and the summary says so.
+is built in the merge queue (or, there, taken from the pull request's run of
+the same tree), and the summary says so.
 """
 
 import argparse
@@ -73,8 +74,12 @@ def main(argv=None):
              "| Job | Result | Expected | |", "|---|---|---|---|"]
     lines += [f"| {job} | {got} | {want} | {verdict} |" for job, got, want, verdict in rows]
     if outputs.get("tier") == "light" and ok:
-        lines += ["", "The kernel was not built in this run; the merge queue builds and boots it."]
-    if outputs.get("verified_run"):
+        lines += ["", "The kernel was not built in this run; the merge queue builds and boots it, "
+                      "unless the run of the head it merges passed for exactly the tree it merges."]
+    if outputs.get("pull_request_run"):
+        lines += ["", f"Packages, KUnit and boot taken from pull request run {outputs['pull_request_run']}, "
+                      "whose record names a commit with this exact tree; that record is the run's own word."]
+    elif outputs.get("verified_run"):
         lines += ["", f"KUnit and the boot test passed for this build key in run {outputs['verified_run']}."]
     text = "\n".join(lines) + "\n"
     print(text)

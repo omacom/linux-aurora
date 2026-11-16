@@ -82,6 +82,12 @@ pub struct ObjectConfig<'a, T: DriverObject> {
     /// Opt in to revocable CPU VMAs, with driver-controlled idle eviction.
     pub reclaimable_cpu_mappings: bool,
 
+    /// Fail backing population when it would need direct reclaim.
+    ///
+    /// Background reclaim and ordinary allocation placement are preserved.
+    /// Intended for large, fallible pin requests, not essential kernel backing.
+    pub pages_no_reclaim: bool,
+
     /// Reuse the DMA reservation from another GEM object.
     ///
     /// The newly created [`Object`] will hold an owned refcount to `parent_resv_obj` if specified.
@@ -94,13 +100,13 @@ impl<'a, T: DriverObject> Default for ObjectConfig<'a, T> {
         Self {
             map_wc: false,
             reclaimable_cpu_mappings: false,
+            pages_no_reclaim: false,
             parent_resv_obj: None,
         }
     }
 }
 
-const SGT_PERMANENT: usize = 1 << (usize::BITS - 1);
-const SGT_RECLAIMING: usize = 1 << (usize::BITS - 2);
+const SGT_RECLAIMING: usize = 1 << (usize::BITS - 1);
 const SGT_USERS: usize = SGT_RECLAIMING - 1;
 
 /// A shmem-backed GEM object.
@@ -116,12 +122,12 @@ pub struct Object<T: DriverObject> {
     obj: Opaque<bindings::drm_gem_shmem_object>,
     /// Parent object that owns this object's DMA reservation object.
     parent_resv_obj: Option<ARef<Object<T>>>,
-    /// Devres object for unmapping any SGTable on driver-unbind.
-    sgt_res: ManuallyDrop<SetOnce<Devres<SGTableMap<T>>>>,
+    /// One cleanup registration for the C SG-table cache; never holds a table borrow.
+    sgt_cleanup: ManuallyDrop<SetOnce<Devres<SGTableCleanup<T>>>>,
     #[pin]
-    /// Lock for protecting initialization of `sgt_res`.
+    /// Serializes cleanup registration and table acquisition.
     sgt_lock: Mutex<()>,
-    /// Owned SGT readers, or permanent borrowed access, exclude backing eviction.
+    /// Counted SG leases exclude backing eviction; the high bit excludes new leases.
     sgt_access: AtomicUsize,
     #[pin]
     inner: T,
@@ -189,13 +195,13 @@ impl<T: DriverObject> Object<T> {
         //   `Object<T>`
         let this = unsafe { container_of!(Opaque::cast_from(base), Self, obj) }.cast_mut();
 
-        // We need to drop `sgt_res` first, since doing so requires that the GEM object is still
+        // We need to drop `sgt_cleanup` first, since doing so requires that the GEM object is still
         // alive.
         // SAFETY:
         // - We verified above that `this` is valid.
         // - We are in free_callback, guaranteeing we have exclusive access to `this` and that
-        //   `sgt_res` will not be used after dropping it here.
-        unsafe { ManuallyDrop::drop(&mut (*this).sgt_res) };
+        //   `sgt_cleanup` will not be used after dropping it here.
+        unsafe { ManuallyDrop::drop(&mut (*this).sgt_cleanup) };
 
         // SAFETY:
         // - We're in free_callback - so this function is safe to call.
@@ -273,67 +279,59 @@ impl<T: DriverObject> Object<T> {
         self.make_vmap()
     }
 
-    /// Creates (if necessary) and returns an immutable reference to a scatter-gather table of DMA
-    /// pages for this object.
+    /// Acquire a revocable lease on this object's DMA scatter-gather table.
     ///
-    /// This will pin the object in memory. It is expected that `dev` should be a pointer to the
-    /// same [`device::Device`] which `self` belongs to, otherwise this function will return
-    /// `Err(EINVAL)`.
-    pub fn sg_table<'a>(
-        &'a self,
-        dev: &'a device::Device<Bound>,
-    ) -> Result<&'a scatterlist::SGTable> {
+    /// Keep the lease for as long as any device mapping or copied DMA address uses the backing.
+    /// The table borrow cannot outlive the lease. The device must be this object's parent.
+    /// This may acquire the DMA reservation; call before locking it for a VM_BIND transaction.
+    pub fn sg_table<'a>(&'a self, dev: &'a device::Device<Bound>) -> Result<SGTable<'a, T>> {
         let parent = self.dev().as_ref();
         if dev.as_raw() != parent.as_ref().as_raw() {
             return Err(EINVAL);
         }
 
-        // SAFETY: `import_attach` is set before an imported object is published and does not
-        // change until the object is freed.
-        if !unsafe { (*self.as_raw()).import_attach }.is_null() {
-            // The SG table of an imported object is the dma-buf attachment's mapping, which the
-            // exporter made for this device at import time. It belongs to the attachment, and
-            // `drm_gem_shmem_release()` hands it back to the exporter through
-            // `drm_prime_gem_destroy()`. It must not be placed in `sgt_res`, whose `SGTableMap`
-            // would unmap and free it as if these helpers had built it.
-            //
-            // SAFETY: `sgt` of an imported object is set before the object is published and stays
-            // valid and unmodified until the object is freed, which `'a` cannot outlive.
+        // Release and purge set the reclaim bit only while they hold this object's reservation.
+        // Wait for that holder instead of failing a concurrent bind with a transient EBUSY.
+        while let Err(e) = self.acquire_sgt_access() {
+            if e != EBUSY {
+                return Err(e);
+            }
+            drop(DmaResvGuard::new(self));
+        }
+        // Every failure after incrementing the count drops this lease.
+        let lease = SGLease { obj: self.into() };
+
+        // SAFETY: Import attachment ownership is immutable after publication.
+        let sgt = if !unsafe { (*self.as_raw()).import_attach }.is_null() {
+            // Imports belong to the exporter. Never register them for Rust devres cleanup,
+            // rebuild their tables, or release their backing.
+            // SAFETY: The attachment table stays valid until this object is freed.
             let sgt = unsafe { (*self.as_raw_shmem()).sgt };
             if sgt.is_null() {
                 return Err(EINVAL);
             }
-            // SAFETY: See above.
-            return Ok(unsafe { scatterlist::SGTable::from_raw(sgt) });
-        }
-
-        // The borrowed reference can outlive any lock, so pin the backing permanently.
-        self.acquire_sgt_access(true)?;
-
-        let sgt_res = 'out: {
-            // Fast path: sgt_res is already initialized
-            if let Some(sgt_res) = self.sgt_res.as_ref() {
-                break 'out sgt_res;
-            }
-
-            // Slow path: Grab the lock and see if we need to initialize sgt_res.
+            sgt
+        } else {
+            // Register cleanup once, but cache the actual table only in C's shmem->sgt.
+            // Reclaim clears that pointer. No Rust reference to it survives without a lease.
             let _guard = self.sgt_lock.lock();
-
-            // If someone initialized it while we were waiting, we can exit early.
-            if let Some(sgt_res) = self.sgt_res.as_ref() {
-                break 'out sgt_res;
+            if self.sgt_cleanup.as_ref().is_none() {
+                self.sgt_cleanup.populate(Devres::new(
+                    dev,
+                    Ok::<_, Error>(SGTableCleanup { obj: self.into() }),
+                )?);
             }
-
-            // If not, finish initializing and return. `populate()` cannot return false, as
-            // `sgt_res` must be unpopulated, and we must hold `sgt_lock` to reach this point.
-            self.sgt_res
-                .populate(Devres::new(dev, SGTableMap::new(self))?);
-
-            // SAFETY: We just populated sgt_res above.
-            unsafe { self.sgt_res.as_ref().unwrap_unchecked() }
+            self.sgt_cleanup.as_ref().ok_or(EIO)?.access(dev)?;
+            // SAFETY: The live object and lease exclude backing release. The helper locks
+            // the reservation and either returns the cached table or rebuilds it.
+            from_err_ptr(unsafe { bindings::drm_gem_shmem_get_pages_sgt(self.as_raw_shmem()) })?
         };
 
-        Ok(sgt_res.access(dev)?)
+        Ok(SGTable {
+            // SAFETY: The lease excludes release; the Bound device excludes devres revocation.
+            table: unsafe { scatterlist::SGTable::from_raw(sgt) },
+            lease,
+        })
     }
 
     /// Create a new shmem-backed DRM object of the given size.
@@ -349,7 +347,7 @@ impl<T: DriverObject> Object<T> {
             try_pin_init!(Self {
                 obj <- Opaque::init_zeroed(),
                 parent_resv_obj: config.parent_resv_obj.map(|p| p.into()),
-                sgt_res: ManuallyDrop::new(SetOnce::new()),
+                sgt_cleanup: ManuallyDrop::new(SetOnce::new()),
                 sgt_lock <- new_mutex!(()),
                 sgt_access: AtomicUsize::new(0),
                 inner <- T::new(dev, size, args),
@@ -359,6 +357,10 @@ impl<T: DriverObject> Object<T> {
 
         // SAFETY: `obj.as_raw()` is guaranteed to be valid by the initialization above.
         unsafe { (*new.as_raw()).funcs = &Self::VTABLE };
+
+        // SAFETY: The object is initialized but not published. The C initializer
+        // reads this policy when setting up the backing mapping's GFP mask.
+        unsafe { (*new.as_raw_shmem()).pages_no_reclaim = config.pages_no_reclaim };
 
         // SAFETY: The arguments are all valid via the type invariants.
         to_result(unsafe { bindings::drm_gem_shmem_init(dev.as_raw(), new.as_raw_shmem(), size) })?;
@@ -403,7 +405,7 @@ impl<T: DriverObject> Object<T> {
                 try_pin_init!(Self {
                     obj <- Opaque::init_zeroed(),
                     parent_resv_obj: None,
-                    sgt_res: ManuallyDrop::new(SetOnce::new()),
+                    sgt_cleanup: ManuallyDrop::new(SetOnce::new()),
                     sgt_lock <- new_mutex!(()),
                     sgt_access: AtomicUsize::new(0),
                     inner <- T::new(dev, size, args),
@@ -429,23 +431,18 @@ impl<T: DriverObject> Object<T> {
         }
     }
 
-    fn acquire_sgt_access(&self, permanent: bool) -> Result {
+    fn acquire_sgt_access(&self) -> Result {
         let mut state = self.sgt_access.load(Ordering::Acquire);
         loop {
             if state & SGT_RECLAIMING != 0 {
                 return Err(EBUSY);
             }
-            let next = if permanent {
-                state | SGT_PERMANENT
-            } else {
-                if state & SGT_USERS == SGT_USERS {
-                    return Err(EOVERFLOW);
-                }
-                state + 1
-            };
+            if state & SGT_USERS == SGT_USERS {
+                return Err(EOVERFLOW);
+            }
             match self.sgt_access.compare_exchange_weak(
                 state,
-                next,
+                state + 1,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -466,11 +463,34 @@ impl<T: DriverObject> Object<T> {
             unsafe { bindings::drm_gem_shmem_idle_pages_releasable_locked(self.as_raw_shmem()) }
     }
 
+    /// Whether the object still has a cached device SG table.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the object's DMA reservation lock.
+    pub unsafe fn has_sg_table_locked(&self) -> bool {
+        // SAFETY: Reservation ownership serializes the C table pointer.
+        !unsafe { (*self.as_raw_shmem()).sgt }.is_null()
+    }
+
+    /// Whether backing without a Rust SG lease can be reclaimed or purged.
+    ///
+    /// Also accepts backing whose SG table was already released by idle reclaim.
+    ///
+    /// # Safety
+    ///
+    /// The caller holds the object's DMA reservation lock.
+    pub unsafe fn unleased_pages_releasable_locked(&self) -> bool {
+        self.sgt_access.load(Ordering::Acquire) == 0 &&
+            // SAFETY: The caller establishes the reservation-lock contract.
+            unsafe { bindings::drm_gem_shmem_idle_pages_releasable_locked(self.as_raw_shmem()) }
+    }
+
     /// Release idle backing without discarding contents. A later SG table may have different DMA
     /// addresses.
     ///
-    /// Refused with `EBUSY` once [`Self::sg_table`] has handed out a borrowed table, since that
-    /// borrow may outlive any lock.
+    /// Refused with `EBUSY` while any SG lease remains. The cached C table is cleared on
+    /// success and the next [`Self::sg_table`] rebuilds it before exposing DMA addresses.
     ///
     /// # Safety
     ///
@@ -516,7 +536,9 @@ impl<T: DriverObject> Object<T> {
     /// invalidated every device mapping, and no Rust SG lease remains.
     pub unsafe fn purge_locked(&self) -> Result {
         // SAFETY: The caller's contract; the exclusive state below excludes new leases.
-        if !unsafe { bindings::drm_gem_shmem_is_purgeable(self.as_raw_shmem()) } {
+        if !unsafe { bindings::drm_gem_shmem_is_purgeable(self.as_raw_shmem()) }
+            || !unsafe { bindings::drm_gem_shmem_idle_pages_releasable_locked(self.as_raw_shmem()) }
+        {
             return Err(EBUSY);
         }
         self.sgt_access
@@ -706,63 +728,72 @@ where
 {
 }
 
-/// A reference to a GEM object that is known to have a mapped [`SGTable`].
+/// An owned backing lease, suitable for retaining copied DMA segments.
 ///
-/// This is used by the Rust bindings with [`Devres`] in order to ensure that mappings for SGTables
-/// on GEM shmem objects are revoked on driver-unbind.
-///
-/// # Invariants
-///
-/// - `self.obj` always points to a valid GEM object.
-/// - This object is proof that `self.obj.owner.sgt_res` has an initialized and valid pointer to an
-///   [`SGTable`].
-///
-/// [`SGTable`]: scatterlist::SGTable
-pub struct SGTableMap<T: DriverObject> {
-    obj: NonNull<Object<T>>,
+/// Dropping the last lease permits reclaim after device translations have been invalidated.
+/// This does not itself provide access to the table: table access also requires a Bound device.
+#[must_use = "retain until all device uses of the backing have ended"]
+pub struct SGLease<T: DriverObject> {
+    obj: ARef<Object<T>>,
 }
 
-impl<T: DriverObject> Deref for SGTableMap<T> {
+impl<T: DriverObject> Drop for SGLease<T> {
+    fn drop(&mut self) {
+        let old = self.obj.sgt_access.fetch_sub(1, Ordering::Release);
+        debug_assert!(old & SGT_USERS != 0 && old & SGT_RECLAIMING == 0);
+    }
+}
+
+/// A leased SG-table borrow. References obtained from it cannot outlive the lease.
+#[must_use = "retain while using the SG table or transfer into an owned lease"]
+pub struct SGTable<'a, T: DriverObject> {
+    table: &'a scatterlist::SGTable,
+    lease: SGLease<T>,
+}
+
+impl<T: DriverObject> Deref for SGTable<'_, T> {
     type Target = scatterlist::SGTable;
 
     fn deref(&self) -> &Self::Target {
-        // SAFETY:
-        // - The NonNull is guaranteed to be valid via our type invariants.
-        // - The sgt field is guaranteed to be initialized and valid via our type invariants.
-        unsafe { scatterlist::SGTable::from_raw((*self.obj.as_ref().as_raw_shmem()).sgt) }
+        self.table
     }
 }
 
-impl<T: DriverObject> Drop for SGTableMap<T> {
+impl<T: DriverObject> SGTable<'_, T> {
+    /// Retain the backing after copying the DMA addresses, without retaining a table borrow.
+    pub fn into_lease(self) -> SGLease<T> {
+        self.lease
+    }
+}
+
+/// Device-unbind cleanup registration for locally allocated SG tables.
+///
+/// This token owns no table reference: reclaim may clear shmem->sgt and a later lease may
+/// rebuild it. It is dropped before the GEM object, and is never constructed for imports.
+struct SGTableCleanup<T: DriverObject> {
+    obj: NonNull<Object<T>>,
+}
+
+impl<T: DriverObject> Drop for SGTableCleanup<T> {
     fn drop(&mut self) {
-        // SAFETY: `obj` is always valid via our type invariants
+        // SAFETY: The registration is dropped before its GEM object.
         let obj = unsafe { self.obj.as_ref() };
         let _lock = DmaResvGuard::new(obj);
 
-        // SAFETY: We acquired the lock needed for calling this function above
-        unsafe { bindings::__drm_gem_shmem_free_sgt_locked(obj.as_raw_shmem()) };
+        // SAFETY: Reservation ownership serializes shmem->sgt. Imports never get this token.
+        // Reclaim may already have freed the table; the C free helper requires a non-null one.
+        unsafe {
+            if !(*obj.as_raw_shmem()).sgt.is_null() {
+                bindings::__drm_gem_shmem_free_sgt_locked(obj.as_raw_shmem());
+            }
+        }
     }
 }
 
-impl<T: DriverObject> SGTableMap<T> {
-    fn new(obj: &Object<T>) -> impl Init<Self, Error> {
-        // INVARIANT:
-        // - We call drm_gem_shmem_get_pages_sgt below and check whether or not it succeeds,
-        //   fulfilling the invariant of SGTableMap that the object's `sgt` field is initialized.
-        // SAFETY:
-        // - `obj` is fully initialized, making this function safe to call.
-        from_err_ptr(unsafe { bindings::drm_gem_shmem_get_pages_sgt(obj.as_raw_shmem()) })?;
-
-        Ok(Self { obj: obj.into() })
-    }
-}
-
-// SAFETY: The NonNull in SGTableMap is guaranteed valid by our type invariants, and the GEM object
-// it points to is guaranteed to be thread-safe.
-unsafe impl<T: DriverObject> Send for SGTableMap<T> {}
-// SAFETY: The NonNull in SGTableMap is guaranteed valid by our type invariants, and the GEM object
-// it points to is guaranteed to be thread-safe.
-unsafe impl<T: DriverObject> Sync for SGTableMap<T> {}
+// SAFETY: The NonNull is valid until cleanup, and its GEM object is thread-safe.
+unsafe impl<T: DriverObject> Send for SGTableCleanup<T> {}
+// SAFETY: The NonNull is valid until cleanup, and its GEM object is thread-safe.
+unsafe impl<T: DriverObject> Sync for SGTableCleanup<T> {}
 
 #[kunit_tests(rust_drm_gem_shmem)]
 mod tests {
@@ -839,6 +870,14 @@ mod tests {
         let data = try_pin_init!(KunitData {});
         let reg = faux::Registration::new(c"Kunit", None)?;
         let fdev = reg.as_ref();
+        let dev: &device::Device<Bound> = fdev.as_ref();
+        // SAFETY: This new faux device is private to the fixture. Use direct DMA with a
+        // 64-bit mask, as the C shmem KUnit fixture does, before publishing any mappings.
+        unsafe {
+            let raw = dev.as_raw();
+            (*raw).coherent_dma_mask = u64::MAX;
+            (*raw).dma_mask = &raw mut (*raw).coherent_dma_mask;
+        }
         let drm = UnregisteredDevice::new(fdev, data)?;
 
         Ok((reg, drm))
@@ -885,19 +924,225 @@ mod tests {
         // Ensure the ordering in memory is correct
         let expected = 0xFEDCBA98_u32.to_ne_bytes().into_iter();
         for (offset, expected) in (0x20..=0x23).zip(expected) {
-            assert_eq!(vmap.read8(offset), expected);
+            assert_eq!(vmap.try_read8(offset).unwrap(), expected);
         }
 
         Ok(())
     }
 
-    // TODO: I would love to actually test the success paths of sg_table(), but that would require
-    // also implementing dummy dma_ops so that trying to create a mapping doesn't explode. So, leave
-    // that for someone else.
+    #[test]
+    fn sg_lease_counting() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let first = obj.sg_table(dev.as_ref().as_ref())?.into_lease();
+        let second = obj.sg_table(dev.as_ref().as_ref())?;
+        assert_eq!(obj.sgt_access.load(Ordering::Acquire), 2);
+        drop(first);
+        assert_eq!(obj.sgt_access.load(Ordering::Acquire), 1);
+        drop(second);
+        assert_eq!(obj.sgt_access.load(Ordering::Acquire), 0);
+        Ok(())
+    }
 
-    // Ensures that passing the wrong device to sg_table() fails as we expect, and also ensure it
-    // skips initializing `sgt_res` since we could otherwise create `sgt_res` with the wrong device
-    // bound to it.
+    #[test]
+    fn release_idle_without_mappings() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        drop(obj.sg_table(dev.as_ref().as_ref())?);
+        let _guard = DmaResvGuard::new(&obj);
+        // SAFETY: Reservation held, and no device mappings or SG leases exist in this test.
+        unsafe { obj.release_idle_pages_locked()? };
+        // SAFETY: Reservation ownership serializes these fields.
+        let empty = unsafe {
+            (
+                (*obj.as_raw_shmem()).sgt.is_null(),
+                (*obj.as_raw_shmem()).pages.is_null(),
+            )
+        };
+        assert!(empty.0);
+        assert!(empty.1);
+        // SAFETY: Still no device mappings or leases; an already idle release succeeds too.
+        unsafe { obj.release_idle_pages_locked()? };
+        Ok(())
+    }
+
+    #[test]
+    fn release_refused_while_leased() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let mapping = obj.sg_table(dev.as_ref().as_ref())?.into_lease();
+        let bind = obj.sg_table(dev.as_ref().as_ref())?.into_lease();
+        let _guard = DmaResvGuard::new(&obj);
+        // SAFETY: Reservation held; no actual device mappings were installed.
+        assert!(!unsafe { obj.sole_sg_lease_releasable_locked() });
+        // SAFETY: Reservation held; no actual device mappings were installed.
+        assert_eq!(unsafe { obj.release_idle_pages_locked() }, Err(EBUSY));
+        drop(bind);
+        // SAFETY: Reservation held; the mapping lease is now the sole owner.
+        assert!(unsafe { obj.sole_sg_lease_releasable_locked() });
+        // SAFETY: Reservation held; the remaining lease must still exclude release.
+        assert_eq!(unsafe { obj.release_idle_pages_locked() }, Err(EBUSY));
+        drop(mapping);
+        // SAFETY: Reservation held; no device mapping or SG lease remains.
+        unsafe { obj.release_idle_pages_locked()? };
+        Ok(())
+    }
+
+    #[test]
+    fn purge_madvised_after_last_lease() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let mapping = obj.sg_table(dev.as_ref().as_ref())?.into_lease();
+        assert!(obj.madvise(1));
+        {
+            let _guard = DmaResvGuard::new(&obj);
+            // SAFETY: Reservation held; no real device access.
+            assert_eq!(unsafe { obj.purge_locked() }, Err(EBUSY));
+            drop(mapping);
+            // SAFETY: Reservation held; all device uses and SG leases have ended.
+            unsafe { obj.purge_locked()? };
+            // SAFETY: Reservation ownership serializes the backing fields and advice.
+            let (empty_sgt, empty_pages, madv) = unsafe {
+                (
+                    (*obj.as_raw_shmem()).sgt.is_null(),
+                    (*obj.as_raw_shmem()).pages.is_null(),
+                    obj.madv_locked(),
+                )
+            };
+            assert!(empty_sgt);
+            assert!(empty_pages);
+            assert_eq!(madv, -1);
+        }
+        assert!(!obj.madvise(0));
+        assert!(obj.sg_table(dev.as_ref().as_ref()).is_err());
+        assert_eq!(obj.sgt_access.load(Ordering::Acquire), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn sg_rebuild_after_release() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        obj.vmap::<4>()?.as_view().write32(0x12345678, 0);
+        for _ in 0..3 {
+            let table = obj.sg_table(dev.as_ref().as_ref())?;
+            assert!(table.iter().count() > 0);
+            drop(table);
+            {
+                let _guard = DmaResvGuard::new(&obj);
+                // SAFETY: Reservation held; all leases have dropped, with no device mappings.
+                unsafe { obj.release_idle_pages_locked()? };
+                // SAFETY: Reservation ownership serializes the table pointer.
+                assert!(unsafe { (*obj.as_raw_shmem()).sgt.is_null() });
+            }
+            assert_eq!(obj.vmap::<4>()?.as_view().read32(0), 0x12345678);
+        }
+        // Drop with a rebuilt table exercises the surviving devres cleanup registration too.
+        drop(obj.sg_table(dev.as_ref().as_ref())?);
+        Ok(())
+    }
+
+    #[test]
+    fn purge_after_idle_release() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        drop(obj.sg_table(dev.as_ref().as_ref())?);
+        {
+            let _guard = DmaResvGuard::new(&obj);
+            // SAFETY: Reservation held; no device access or SG leases remain.
+            unsafe { obj.release_idle_pages_locked()? };
+        }
+        assert!(obj.madvise(1));
+        let _guard = DmaResvGuard::new(&obj);
+        // SAFETY: Reservation held; no device access or SG leases remain.
+        assert!(unsafe { obj.unleased_pages_releasable_locked() });
+        // SAFETY: Reservation held; no device access or SG lease remains.
+        unsafe { obj.purge_locked()? };
+        // SAFETY: Reservation ownership serializes the advice and table pointer.
+        let (madv, empty) = unsafe { (obj.madv_locked(), (*obj.as_raw_shmem()).sgt.is_null()) };
+        assert_eq!(madv, -1);
+        assert!(empty);
+        Ok(())
+    }
+
+    #[test]
+    fn purge_refuses_kernel_vmap() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        drop(obj.sg_table(dev.as_ref().as_ref())?);
+        let vmap = obj.vmap::<4>()?;
+        assert!(obj.madvise(1));
+        {
+            let _guard = DmaResvGuard::new(&obj);
+            // SAFETY: Reservation held; the vmap must prevent the backing from being freed.
+            assert_eq!(unsafe { obj.purge_locked() }, Err(EBUSY));
+            // SAFETY: Reservation held; the vmap must exclude idle release too.
+            assert_eq!(unsafe { obj.release_idle_pages_locked() }, Err(EBUSY));
+        }
+        drop(vmap);
+        let _guard = DmaResvGuard::new(&obj);
+        // SAFETY: Reservation held; no device, vmap or SG users remain.
+        unsafe { obj.purge_locked()? };
+        Ok(())
+    }
+
+    #[test]
+    fn sg_reclaim_excludes_new_leases() -> Result {
+        let (_dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        obj.sgt_access.store(SGT_RECLAIMING, Ordering::Release);
+        assert_eq!(obj.acquire_sgt_access(), Err(EBUSY));
+        assert_eq!(obj.sgt_access.load(Ordering::Acquire), SGT_RECLAIMING);
+        obj.sgt_access.store(SGT_USERS, Ordering::Release);
+        assert_eq!(obj.acquire_sgt_access(), Err(EOVERFLOW));
+        obj.sgt_access.store(0, Ordering::Release);
+        Ok(())
+    }
+
+    #[test]
+    fn sg_import_attachment_is_not_owned() -> Result {
+        let (dev, drm) = create_drm_dev()?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let mut table = MaybeUninit::<bindings::sg_table>::zeroed();
+        let mut attachment = MaybeUninit::<bindings::dma_buf_attachment>::zeroed();
+        // SAFETY: Private fixture; neither mock is dereferenced by the import path. Both stay
+        // live until the lease drops and are detached before the real object destructor runs.
+        unsafe {
+            (*obj.as_raw()).import_attach = attachment.as_mut_ptr();
+            (*obj.as_raw_shmem()).sgt = table.as_mut_ptr();
+        }
+        let result = obj.sg_table(dev.as_ref().as_ref()).map(|lease| {
+            let no_cleanup = obj.sgt_cleanup.as_ref().is_none();
+            let _guard = DmaResvGuard::new(&obj);
+            // SAFETY: Reservation held. Capture results before restoring the fixture, so a
+            // failed assertion cannot leave a mock attachment for the GEM destructor.
+            unsafe {
+                let held = obj.release_idle_pages_locked();
+                drop(lease);
+                (
+                    no_cleanup,
+                    held,
+                    obj.release_idle_pages_locked(),
+                    obj.purge_locked(),
+                    (*obj.as_raw_shmem()).sgt == table.as_mut_ptr(),
+                )
+            }
+        });
+        // SAFETY: The mock table borrow has ended; restore the private fixture for normal free.
+        unsafe {
+            (*obj.as_raw()).import_attach = ptr::null_mut();
+            (*obj.as_raw_shmem()).sgt = ptr::null_mut();
+        }
+        let (no_cleanup, held, unleased, purge, unchanged) = result?;
+        assert!(no_cleanup);
+        assert_eq!(held, Err(EBUSY));
+        assert_eq!(unleased, Err(EINVAL));
+        assert_eq!(purge, Err(EBUSY));
+        assert!(unchanged);
+        Ok(())
+    }
+
+    // A wrong device must fail before registering cleanup or taking any SG lease.
     #[test]
     fn fail_sg_table_on_wrong_dev() -> Result {
         let (_dev, drm) = create_drm_dev()?;
@@ -908,10 +1153,10 @@ mod tests {
 
         assert_eq!(obj.sg_table(wrong_dev.as_ref()).err().unwrap(), EINVAL);
 
-        // If sgt_res was not initialized mistakenly with the wrong device, this should still fail.
+        // A failed lookup must not bind the cleanup registration to the wrong device.
         assert_eq!(obj.sg_table(wrong_dev.as_ref()).err().unwrap(), EINVAL);
 
-        // TODO: Someday, we should test that creating an sg_table here still succeeds.
+        assert_eq!(obj.sgt_access.load(Ordering::Acquire), 0);
 
         Ok(())
     }

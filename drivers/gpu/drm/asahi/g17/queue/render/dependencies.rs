@@ -31,6 +31,7 @@ fn include(
     prefix: Option<u64>,
     packet: &Arc<Packet>,
     word: u64,
+    compute: bool,
 ) -> Result {
     if !Arc::ptr_eq(packet.completion.status(), status) {
         return Ok(());
@@ -38,12 +39,15 @@ fn include(
     if !job::Order::contains(prefix, packet.order.sequence) {
         return Ok(());
     }
-    frontier.include(
-        prefix,
-        packet.order.sequence,
-        job::fence_status(&packet.completion.scheduler_fence()),
-        word,
-    )
+    let status = job::fence_status(&packet.completion.scheduler_fence());
+    frontier.include(prefix, packet.order.sequence, status, word)?;
+    // A compute consumer's firmware wait ends once firmware retires this group, even unexecuted
+    // after a restart, so it may then read output the group never wrote. Render consumers of the
+    // same owner follow the group on its pair, and a replay keeps that order.
+    if compute && status == 0 {
+        packet.completion.note_firmware_consumer();
+    }
+    Ok(())
 }
 
 impl Dependencies {
@@ -60,12 +64,13 @@ impl Dependencies {
         status: &Arc<VmStatus>,
         prefix: Option<u64>,
         frontier: &mut Frontier,
+        compute: bool,
     ) -> Result {
         if self.owner != Some(owner) {
             return Ok(());
         }
         for entry in self.entries.iter().flatten() {
-            include(frontier, status, prefix, &entry.packet, entry.word)?;
+            include(frontier, status, prefix, &entry.packet, entry.word, compute)?;
         }
         Ok(())
     }
@@ -80,7 +85,7 @@ impl Dependencies {
             return Ok(());
         }
         for entry in self.entries.iter().flatten() {
-            include(frontier, status, prefix, &entry.packet, entry.ta_word)?;
+            include(frontier, status, prefix, &entry.packet, entry.ta_word, false)?;
         }
         Ok(())
     }
@@ -112,6 +117,7 @@ impl Pair {
         status: &Arc<VmStatus>,
         prefix: Option<u64>,
         frontier: &mut Frontier,
+        compute: bool,
     ) -> Result {
         if self.owner != Some(owner) {
             return Ok(());
@@ -120,7 +126,7 @@ impl Pair {
         for entry in self.active.iter() {
             let word =
                 KickDependency::new(qid, entry.kicks[1]).map_or(u64::MAX, KickDependency::word);
-            include(frontier, status, prefix, &entry.packet, word)?;
+            include(frontier, status, prefix, &entry.packet, word, compute)?;
         }
         Ok(())
     }
@@ -138,7 +144,7 @@ impl Pair {
         for entry in self.active.iter() {
             let word =
                 KickDependency::new(qid, entry.kicks[0]).map_or(u64::MAX, KickDependency::word);
-            include(frontier, status, prefix, &entry.packet, word)?;
+            include(frontier, status, prefix, &entry.packet, word, false)?;
         }
         Ok(())
     }
