@@ -5737,6 +5737,41 @@ static int apple_pcie_host_init(struct platform_device *pdev, struct pci_host_br
 	return ret;
 }
 
+/*
+ * Machines whose internal links may enter the ASPM and PCI-PM L1.1 and L1.2
+ * substates. Both ends of these links support them, but the boot loader
+ * leaves them off and the default ASPM policy keeps what it found. On a J514S
+ * (T6030) turning them on for the Wi-Fi/Bluetooth and SD reader links lowered
+ * display-off idle power by about 0.3 W, with no change in Wi-Fi latency or
+ * throughput. Only measured machines are listed; tunneled ports never are.
+ * The J516S has the same T6030 links but has not been measured.
+ */
+static const char *const apple_pcie_l1ss_machines[] = {
+	"apple,j514s", NULL
+};
+
+static int apple_pcie_enable_l1ss(struct pci_dev *pdev, void *data)
+{
+	int state = PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1 |
+		    PCIE_LINK_STATE_L1_1 | PCIE_LINK_STATE_L1_2 |
+		    PCIE_LINK_STATE_L1_1_PCIPM | PCIE_LINK_STATE_L1_2_PCIPM;
+	u16 lnkctl;
+
+	/*
+	 * pci_enable_link_state_locked() replaces the link's defaults. L0s is
+	 * masked by what the link supports, so keep it. Clock PM is not forced
+	 * on DT platforms: keep it only where the ASPM core left CLKREQ# on.
+	 */
+	if (!pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &lnkctl) &&
+	    (lnkctl & PCI_EXP_LNKCTL_CLKREQ_EN))
+		state |= PCIE_LINK_STATE_CLKPM;
+
+	/* PCI-PM L1 substates need the device in D0 (PCIe r6.0, sec 5.5.4). */
+	pci_set_power_state_locked(pdev, PCI_D0);
+	pci_enable_link_state_locked(pdev, state);
+	return 0;
+}
+
 static int apple_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -5958,6 +5993,8 @@ static int apple_pcie_probe(struct platform_device *pdev)
 
 	if (pcie->hw->tunneled)
 		pci_walk_bus(bridge->bus, apple_pcie_tunnel_keep_d0, NULL);
+	else if (of_machine_compatible_match(apple_pcie_l1ss_machines))
+		pci_walk_bus(bridge->bus, apple_pcie_enable_l1ss, NULL);
 	if (pcie->hw->adopt_link)
 		apple_pcie_t6050_sleep_probe(pdev, pcie);
 
