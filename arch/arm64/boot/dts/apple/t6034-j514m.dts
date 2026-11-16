@@ -10,6 +10,7 @@
 /dts-v1/;
 
 #include "t6034.dtsi"
+#include "t6034-dcp.dtsi"
 #include "t603x-j514-j516.dtsi"
 
 / {
@@ -27,6 +28,17 @@
 
 &bluetooth0 {
 	brcm,board-type = "apple,texa";
+};
+
+/* J514 panel dimensions, as on the other 14-inch M3 MacBook Pros. */
+&dcp {
+	panel {
+		compatible = "apple,panel-j514", "apple,panel-mini-led", "apple,panel";
+		width-mm = <302>;
+		height-mm = <196>;
+		adj-height-mm = <189>;
+		apple,max-brightness = <500>;
+	};
 };
 
 &aop_audio {

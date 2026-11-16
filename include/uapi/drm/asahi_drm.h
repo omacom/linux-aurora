@@ -212,6 +212,20 @@ struct drm_asahi_params_global {
 	 * DRM_ASAHI_GPU_HAL_200.
 	 */
 	__u32 gpu_hal_generation;
+
+	/**
+	 * @memory_limit: Device-wide limit on user committed plus kernel
+	 * resident bytes. Zero means no driver limit. This is a capacity,
+	 * not current free memory; other clients share it.
+	 */
+	__u64 memory_limit;
+
+	/**
+	 * @client_memory_limit: Per-DRM-file limit on user committed bytes.
+	 * Zero means no driver limit. Userspace must zero-initialize the reply
+	 * buffer: older kernels leave these optional tail fields untouched.
+	 */
+	__u64 client_memory_limit;
 };
 
 /**
@@ -348,6 +362,66 @@ enum drm_asahi_feature {
 	 * accept render_scs_layout.
 	 */
 	DRM_ASAHI_FEATURE_RENDER_RAY_QUERY = (1UL) << 15,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_BOUNDED_AS_BUILD: Compute commands accept
+	 * DRM_ASAHI_COMPUTE_AS_BUILD for a bounded long execution allowance.
+	 */
+	DRM_ASAHI_FEATURE_BOUNDED_AS_BUILD = (1UL) << 16,
+
+	/*
+	 * Bits 17 to 28 belong to the M5 (G17G/G17S) runtime, which reports
+	 * them; this kernel never does. They are listed so that the numbers are
+	 * not given to anything else, and userspace reads every kernel's
+	 * features the same way. Bits 25 and 27 are also reserved for that
+	 * runtime.
+	 */
+
+	/** @DRM_ASAHI_FEATURE_RENDER_RESOURCES: M5: per-program render storage. */
+	DRM_ASAHI_FEATURE_RENDER_RESOURCES = (1UL) << 17,
+
+	/** @DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2: M5: versioned render storage. */
+	DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2 = (1UL) << 18,
+
+	/** @DRM_ASAHI_FEATURE_SPARSE_TILES: M5: DRM_ASAHI_BIND_SPARSE_TILE. */
+	DRM_ASAHI_FEATURE_SPARSE_TILES = (1UL) << 19,
+
+	/** @DRM_ASAHI_FEATURE_COMPUTE_MATRIX: M5: compute matrix instructions. */
+	DRM_ASAHI_FEATURE_COMPUTE_MATRIX = (1UL) << 20,
+
+	/** @DRM_ASAHI_FEATURE_TASK_MESH_STORAGE: M5: task and mesh storage. */
+	DRM_ASAHI_FEATURE_TASK_MESH_STORAGE = (1UL) << 21,
+
+	/** @DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES: M5: per-render shader writes. */
+	DRM_ASAHI_FEATURE_RENDER_SHADER_WRITES = (1UL) << 22,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION: M5: compressed
+	 * multisample depth.
+	 */
+	DRM_ASAHI_FEATURE_M5_DEPTH_MSAA_COMPRESSION = (1UL) << 23,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS: M5: a compute prefix for a
+	 * render's tiling half.
+	 */
+	DRM_ASAHI_FEATURE_COMPUTE_STAGE_BARRIERS = (1UL) << 24,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION: M5: compressed
+	 * multisample stencil.
+	 */
+	DRM_ASAHI_FEATURE_M5_STENCIL_MSAA_COMPRESSION = (1UL) << 26,
+
+	/** @DRM_ASAHI_FEATURE_COMPUTE_RESOURCES: M5: per-dispatch storage. */
+	DRM_ASAHI_FEATURE_COMPUTE_RESOURCES = (1UL) << 28,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS: SUBMIT accepts one
+	 * DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ_CUMULATIVE output. All outputs
+	 * include the earlier points of that timeline without adding GPU waits.
+	 */
+	DRM_ASAHI_FEATURE_CUMULATIVE_SIGNALS = (1UL) << 29,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -626,6 +700,12 @@ enum drm_asahi_bind_flags {
 	 * It is intended as a mechanism to accelerate sparse.
 	 */
 	DRM_ASAHI_BIND_SINGLE_PAGE = (1L << 3),
+
+	/**
+	 * @DRM_ASAHI_BIND_SPARSE_TILE: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_SPARSE_TILES). This kernel rejects it.
+	 */
+	DRM_ASAHI_BIND_SPARSE_TILE = (1L << 4),
 };
 
 /**
@@ -787,6 +867,24 @@ enum drm_asahi_cmd_type {
 	 * Followed by (possibly multiple) @drm_asahi_attachment payloads.
 	 */
 	DRM_ASAHI_SET_COMPUTE_ATTACHMENTS = 4,
+
+	/**
+	 * @DRM_ASAHI_SET_RENDER_RESOURCES: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_RENDER_RESOURCES). This kernel rejects it.
+	 */
+	DRM_ASAHI_SET_RENDER_RESOURCES = 5,
+
+	/**
+	 * @DRM_ASAHI_SET_COMPUTE_RESOURCES: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_COMPUTE_RESOURCES). This kernel rejects it.
+	 */
+	DRM_ASAHI_SET_COMPUTE_RESOURCES = 6,
+
+	/**
+	 * @DRM_ASAHI_SET_RENDER_RESOURCES_V2: Reserved for the M5 runtime
+	 * (DRM_ASAHI_FEATURE_RENDER_RESOURCES_V2). This kernel rejects it.
+	 */
+	DRM_ASAHI_SET_RENDER_RESOURCES_V2 = 7,
 };
 
 /**
@@ -806,7 +904,8 @@ enum drm_asahi_priority {
 	/**
 	 * @DRM_ASAHI_PRIORITY_HIGH: High priority queue.
 	 *
-	 * Reserved for future extension.
+	 * Requires CAP_SYS_NICE or DRM master; otherwise queue creation fails
+	 * with -EACCES.
 	 */
 	DRM_ASAHI_PRIORITY_HIGH = 2,
 
@@ -880,6 +979,16 @@ enum drm_asahi_sync_type {
 
 	/** @DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ: Timeline sync object */
 	DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ = 1,
+
+	/**
+	 * @DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ_CUMULATIVE: Output-only queue
+	 * timeline anchor, requiring CUMULATIVE_SIGNALS and a nonzero point.
+	 * At most one is allowed. All outputs receive completion of this submit
+	 * and the earlier anchor points.
+	 * Other outputs must not alias the anchor. No execution dependency is
+	 * added. Calls updating this private anchor must be externally serialized.
+	 */
+	DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ_CUMULATIVE = 2,
 };
 
 /**
@@ -1614,6 +1723,17 @@ enum drm_asahi_compute_flags {
 	DRM_ASAHI_COMPUTE_G17P_ADD3_PROOF = (1L << 0),
 
 	DRM_ASAHI_COMPUTE_WIDE_VISIBILITY = (1L << 1),
+
+	/**
+	 * @DRM_ASAHI_COMPUTE_AS_BUILD: Acceleration-structure build work,
+	 * including compute-based transfers. Requires BOUNDED_AS_BUILD.
+	 * This is an execution hint, not proof of progress or permission to
+	 * access additional memory. The kernel validates the command normally
+	 * and caps its execution allowance at ten seconds (four extra 2s polls).
+	 * Other commands in the same submission receive the same allowance so
+	 * ordered helpers cannot time out while waiting for the build.
+	 */
+	DRM_ASAHI_COMPUTE_AS_BUILD = (1L << 2),
 };
 
 /**

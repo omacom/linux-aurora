@@ -21,30 +21,36 @@
 //! The engine owns an `Arc<Job>` from [`super::Firmware::enqueue`] on. It completes the job
 //! exactly once with [`Job::complete`] (later calls are ignored), through [`Completions`]
 //! collected under the device lock and [`complete_all`] after it is dropped. A job whose storage
-//! the firmware may still reference stays in `Engine::retained` (failed jobs until reboot): its
-//! [`mmu::VmJobGuard`] keeps the VM's mappings and its VM state keeps the VM's TTBAT slot until
+//! the firmware may still reference after a fail-stop stays in `Engine::retained` until reboot: its
+//! [`mmu::VmJobGuard`] keeps the VM's mappings and its binding keeps the VM's TTBAT slot until
 //! the last `Arc<Job>` drops.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use kernel::{
     bindings, c_str, device,
     dma_fence::{Fence, RawDmaFence},
     drm::sched,
+    new_mutex,
     prelude::*,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use super::{command::Command, fence::JobFence, hw, queue::QueueState, vm::VmState, Shared};
 use crate::mmu;
 
 /// A job as the engine sees it.
+#[pin_data]
 pub(crate) struct Job {
     /// Submission ID (debugging).
     pub(crate) id: u64,
     /// The submitting queue (priority, service turn, horizon history).
     pub(crate) queue: Arc<QueueState>,
-    /// The job's VM (TTBAT slot, status).
+    /// The job's VM and status.
     pub(crate) vm: Arc<VmState>,
+    /// Hardware context, assigned immediately before the engine publishes the job.
+    context: AtomicU32,
+    #[pin]
+    binding: Mutex<Option<mmu::VmBind>>,
     /// Validated commands, in submission order (at most 64).
     pub(crate) commands: KVec<Command>,
     /// The job's hardware fence.
@@ -73,11 +79,13 @@ impl Job {
         guard: mmu::VmJobGuard,
     ) -> Result<Arc<Self>> {
         let progress = super::engine::Progress::new(commands.len());
-        Ok(Arc::new(
-            Self {
+        Arc::pin_init(
+            pin_init!(Self {
                 id,
                 queue,
                 vm,
+                context: AtomicU32::new(0),
+                binding <- new_mutex!(None, "g15::Job::binding"),
                 commands,
                 fence,
                 progress,
@@ -85,9 +93,29 @@ impl Job {
                 _guard: guard,
                 accepted: AtomicBool::new(false),
                 started: AtomicBool::new(false),
-            },
+            }),
             GFP_KERNEL,
-        )?)
+        )
+    }
+
+    pub(crate) fn slot(&self) -> u32 {
+        self.context.load(Ordering::Relaxed)
+    }
+
+    /// Called under the device lock immediately before publication.
+    pub(crate) fn bind(&self) -> Result {
+        let mut slot = self.binding.lock();
+        if slot.is_none() {
+            let binding = self.vm.try_bind()?;
+            self.context.store(binding.slot(), Ordering::Relaxed);
+            *slot = Some(binding);
+        }
+        Ok(())
+    }
+
+    /// All commands retired successfully, or nothing of the job was published.
+    pub(crate) fn release_binding(&self) {
+        drop(self.binding.lock().take());
     }
 
     /// Completes the job: latches the VM status on failure, then signals the fence (after every
@@ -119,6 +147,9 @@ impl Job {
                 }
                 self.vm.status.record(error);
             }
+        }
+        if result.is_ok() || !engine {
+            self.release_binding();
         }
         self.fence.signal(result);
     }

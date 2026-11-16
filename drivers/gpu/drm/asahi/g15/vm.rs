@@ -13,16 +13,12 @@
 //!   whole PB range, whose backing chunks are mapped later, before the VM's prefixes are
 //!   published (`Firmware::map_pb`) and, for the VM of the flights, when a chunk is backed
 //!   ([`VmState::map_heap`], [`VmState::map_chunk`]);
-//! - bind it to an exclusive TTBAT slot ([`mmu::Uat::bind`]) for as long as its [`VmState`]
-//!   lives; at most [`super::hw::sizes::MAX_VMS`] such VMs (ENOSPC beyond, checked before
-//!   binding so the slot allocator never blocks).
+//! - leave it unbound until a runnable job needs a TTBAT slot. Each published job holds
+//!   its binding through completion; failed published jobs retain theirs until their last
+//!   reference drops (until reboot for jobs retained after a fail-stop).
 //!
-//! The [`VmState`] of a VM is shared by the [`Registry`] (while the client's VM handle exists),
-//! the VM's queues and its jobs. It cannot be owned by the [`mmu::Vm`] itself: the slot binding
-//! holds a `Vm` reference. The registry drops its reference once the shared lifetime reports the
-//! client's handle closed ([`mmu::Vm::is_closed`]), at the next VM creation; the slot returns when
-//! the last queue or job of the VM is gone (failed jobs are retained until reboot, and their
-//! VM's slot with them).
+//! The registry keeps a VM's state while its client handle is open. Queues and jobs retain
+//! closed VMs until their last reference drops.
 //!
 //! User page tables are cleaned to the point of coherency by the shared `pgtable.rs` (enabled by
 //! the adopted UAT); user objects are prepared at creation (`gpu::Gpu::prepare_new_objects`).
@@ -30,7 +26,7 @@
 //! alike.
 
 use core::ops::Range;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::Ordering;
 use kernel::{
     drm::gem::BaseObject,
     new_mutex,
@@ -39,7 +35,7 @@ use kernel::{
 };
 
 use super::{hw, object, Gpu};
-use crate::{debug::*, g17::status::VmStatus, gem, mmu, module_parameters};
+use crate::{debug::*, g17::status::VmStatus, gem, mmu};
 
 const DEBUG_CLASS: DebugFlags = DebugFlags::Mmu;
 
@@ -123,20 +119,22 @@ struct HeapMappings {
 pub(crate) struct VmState {
     /// The `mmu::Vm` identifier (`Gpu::ids.vm`).
     pub(crate) id: u64,
-    /// The VM's TTBAT slot (ASID), for the work images' context.
-    pub(crate) slot: u32,
     /// The sticky status (shared with `file.rs`).
     pub(crate) status: Arc<VmStatus>,
     /// The VM: span checks, stream reads and job guards.
     pub(crate) vm: mmu::Vm,
-    /// The exclusive slot binding, released before the live count drops.
-    bind: Option<mmu::VmBind>,
+    /// The adopted UAT, used to bind published jobs without waiting for a slot.
+    uat: Arc<mmu::Uat>,
     registry: Arc<Registry>,
     /// The PB heap chunks mapped in this VM.
     heap: Arc<HeapMappings>,
 }
 
 impl VmState {
+    pub(crate) fn try_bind(&self) -> Result<mmu::VmBind> {
+        self.uat.try_bind(&self.vm)
+    }
+
     /// Drops the registry's references to closed VMs (the queues call this when destroyed).
     pub(crate) fn prune_registry(&self) {
         self.registry.prune();
@@ -199,39 +197,11 @@ impl VmState {
     }
 }
 
-impl Drop for VmState {
-    fn drop(&mut self) {
-        mod_pr_debug!("G15: VM {} releases context {}\n", self.id, self.slot);
-        drop(self.bind.take());
-        self.registry.live.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
-/// Live-VM accounting and the VMs whose client handle is open.
+/// The VMs whose client handle is open.
 #[pin_data]
 pub(crate) struct Registry {
-    /// VMs whose client handle may still be open, oldest first.
     #[pin]
     vms: Mutex<KVec<Arc<VmState>>>,
-    /// Live [`VmState`]s (each holds a TTBAT slot) plus reservations being created.
-    live: AtomicU32,
-}
-
-/// A reserved place among the live VMs, released unless a [`VmState`] takes it over.
-struct Reservation<'a>(Option<&'a Registry>);
-
-impl Reservation<'_> {
-    fn into_state(mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for Reservation<'_> {
-    fn drop(&mut self) {
-        if let Some(registry) = self.0 {
-            registry.live.fetch_sub(1, Ordering::AcqRel);
-        }
-    }
 }
 
 impl Registry {
@@ -239,32 +209,14 @@ impl Registry {
         Arc::pin_init(
             pin_init!(Self {
                 vms <- new_mutex!(KVec::new(), "g15::Registry::vms"),
-                live: AtomicU32::new(0),
             }),
             GFP_KERNEL,
         )
     }
 
-    /// Reserves a place for a new VM after dropping the registry's references to closed VMs.
-    fn reserve(&self) -> Result<Reservation<'_>> {
-        self.prune();
-        // The shared slot allocator hands out a single slot with robust isolation.
-        let limit = if *module_parameters::robust_isolation.value() != 0 {
-            1
-        } else {
-            hw::sizes::MAX_VMS
-        };
-        self.live
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
-                (live < limit).then_some(live + 1)
-            })
-            .map_err(|_| ENOSPC)?;
-        Ok(Reservation(Some(self)))
-    }
-
     /// Drops the registry's references to VMs whose client handle is closed. Called on VM close
     /// ([`closed`]), on queue destruction and before a new VM is created: a closed VM's page
-    /// tables, bound objects and TTBAT slot go as soon as its last queue or job is gone.
+    /// tables and bound objects go as soon as its last queue or job is gone.
     fn prune(&self) {
         let mut closed = KVec::new();
         {
@@ -367,7 +319,7 @@ pub(crate) fn new_vm(gpu: &Gpu, kernel_range: Range<u64>) -> Result<mmu::Vm> {
             ClientAlias::collect(&firmware.objects)?,
         )
     };
-    let reservation = registry.reserve()?;
+    registry.prune();
     let id = gpu.ids.vm.next();
     let vm = gpu.uat.new_vm(id, kernel_range)?.with_tracked_status()?;
     let status = vm.status().ok_or(EINVAL)?.clone();
@@ -380,25 +332,19 @@ pub(crate) fn new_vm(gpu: &Gpu, kernel_range: Range<u64>) -> Result<mmu::Vm> {
         }),
         GFP_KERNEL,
     )?;
-    // The context names the root only now: everything above is already visible to the walker.
-    let bind = gpu.uat.bind(&vm)?;
-    let slot = bind.slot();
-    // From here on the state (even one that fails to allocate) gives the place back.
-    reservation.into_state();
     let state = Arc::new(
         VmState {
             id,
-            slot,
             status,
             vm: vm.clone(),
-            bind: Some(bind),
+            uat: gpu.uat.clone(),
             registry: registry.clone(),
             heap,
         },
         GFP_KERNEL,
     )?;
     registry.vms.lock().push(state, GFP_KERNEL)?;
-    mod_pr_debug!("G15: VM {} context {}\n", id, slot);
+    mod_pr_debug!("G15: VM {} created\n", id);
     Ok(vm)
 }
 

@@ -3,11 +3,21 @@
 //! Attachment overlap ordering across physical render pairs and shared images.
 //! Tile stores can overlap even when the application's pixel regions do not.
 //! Keep independent attachments concurrent; order only conflicting live spans.
+//!
+//! Within one VM, a render of another logical owner is ordered at publication:
+//! the device mutex totally orders publications, and the later render's
+//! fragment kick waits in firmware for the newest overlapping fragment kick of
+//! every other pair. Admission never waits for such an overlap. Only a
+//! cross-VM overlap through a shared object waits on the host for retirement,
+//! so that one VM's fault can never hold another VM's kick in firmware.
 
 use super::job::Order;
 
 const MAX_SPANS: usize = 24;
 pub(crate) const WAIT_MS: u32 = 1000;
+/// Firmware barriers one render publication may add for same-VM overlaps,
+/// one per other pair.
+pub(crate) const PUBLICATION_BARRIERS: usize = 7;
 
 #[derive(Clone, Copy)]
 struct Span {
@@ -56,7 +66,12 @@ impl Footprint {
         self.shared |= self.count != before;
     }
 
-    fn overlaps(&self, other: &Self) -> bool {
+    /// Whether a publication orders an overlap with `other` in firmware.
+    pub(crate) fn same_vm(&self, other: &Self) -> bool {
+        self.vm == other.vm
+    }
+
+    pub(crate) fn overlaps(&self, other: &Self) -> bool {
         if self.vm != other.vm && !(self.shared && other.shared) {
             return false;
         }
@@ -86,6 +101,13 @@ pub(crate) struct Live<'a> {
 
 /// A queue prefix already orders covered predecessors. Pending arrivals order
 /// different owners fairly without imposing order on unrelated attachments.
+///
+/// A same-VM overlap with another owner's admitted render needs no wait; its
+/// publication carries one barrier per other pair. That count stays within
+/// [`PUBLICATION_BARRIERS`] because such a render is admitted only while fewer
+/// than `PUBLICATION_BARRIERS + 1` other pairs of its VM hold admitted renders:
+/// of any set of renders overlapping one publication, the last admitted saw all
+/// the others live.
 pub(crate) fn plan<'a>(
     owner: u64,
     prefix: Option<u64>,
@@ -94,8 +116,27 @@ pub(crate) fn plan<'a>(
     live: impl IntoIterator<Item = Live<'a>>,
 ) -> Plan {
     let mut selected = None;
+    let mut ordered = false;
+    let mut pairs = [0u8; PUBLICATION_BARRIERS];
+    let mut count = 0;
+    let mut crowded = false;
     for entry in live {
+        let foreign = entry.owner != owner && footprint.same_vm(entry.footprint);
+        if let Some(slot) = entry.slot.filter(|_| foreign) {
+            if !pairs[..count].contains(&slot) {
+                if count == PUBLICATION_BARRIERS {
+                    crowded = true;
+                } else {
+                    pairs[count] = slot;
+                    count += 1;
+                }
+            }
+        }
         if entry.quarantined || !footprint.overlaps(entry.footprint) {
+            continue;
+        }
+        if foreign {
+            ordered |= entry.slot.is_some();
             continue;
         }
         let Some(slot) = entry.slot else {
@@ -115,6 +156,9 @@ pub(crate) fn plan<'a>(
             Some(prior) if prior == slot => {}
             Some(_) => return Plan::Wait,
         }
+    }
+    if ordered && crowded {
+        return Plan::Wait;
     }
     selected.map_or(Plan::Any, Plan::Pair)
 }

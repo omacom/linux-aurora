@@ -74,6 +74,7 @@ static int powerlog_report(struct apple_epic_service *service, enum epic_subtype
 	struct dcp_parse_ctx parse_ctx;
 	struct apple_dcp *dcp = service->ep->dcp;
 	int ret;
+	u32 nits;
 
 	/* Later reports must not overwrite a latched hint or Linux's target. */
 	if (dcp_backlight_active(dcp))
@@ -110,7 +111,11 @@ static int powerlog_report(struct apple_epic_service *service, enum epic_subtype
 		return 0;
 	}
 
-	dcp->brightness.nits = mnits.millinits / 1000;
+	nits = mnits.millinits / 1000;
+	/* Firmware can report the old 420-nit scale above the cap. */
+	if (dcp->brightness.maximum && nits > dcp->brightness.maximum)
+		nits = dcp->brightness.maximum;
+	dcp->brightness.nits = nits;
 
 	return 0;
 }

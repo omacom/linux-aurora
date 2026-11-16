@@ -13,10 +13,11 @@
 use crate::hw;
 use core::mem::MaybeUninit;
 use kernel::{
-    bindings, c_str,
+    bindings,
+    c_str,
     device::Core,
-    devres::Devres,
     error::{from_err_ptr, to_result},
+    devres::Devres,
     io::{
         mem::IoMem,
         Io,
@@ -222,7 +223,10 @@ impl CpuControl {
         };
         // SAFETY: pdev is live; the provider establishes the consumer device link.
         let mbox = unsafe {
-            from_err_ptr(bindings::apple_mbox_get(pdev.as_ref().as_raw(), index.try_into()?))?
+            from_err_ptr(bindings::apple_mbox_get(
+                pdev.as_ref().as_raw(),
+                index.try_into()?,
+            ))?
         };
         let mut lifecycle = MaybeUninit::uninit();
         // SAFETY: mbox is live, and lifecycle is writable storage for the C result.
@@ -235,7 +239,10 @@ impl CpuControl {
         }
         // SAFETY: This only checks the provider's matching start/stop capability.
         to_result(unsafe { bindings::apple_mbox_ascwrap_v6_require_safe_cpu_lifecycle(mbox) })?;
-        Ok(Self { dev: pdev.into(), mbox })
+        Ok(Self {
+            dev: pdev.into(),
+            mbox,
+        })
     }
 
     /// Start through the owner of the CPU registers and runtime-PM reference.
@@ -251,7 +258,11 @@ impl CpuControl {
         let result = to_result(unsafe { bindings::apple_mbox_ascwrap_v6_stop_cpu(self.mbox) });
         if let Err(error) = result {
             if error != ENODEV {
-                dev_err!(self.dev.as_ref(), "Could not stop GPU coprocessor: {:?}\n", error);
+                dev_err!(
+                    self.dev.as_ref(),
+                    "Could not stop GPU coprocessor: {:?}\n",
+                    error
+                );
             }
         }
     }
@@ -560,7 +571,10 @@ impl G17Resources {
     /// Map the required resources given our platform device.
     pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<G17Resources> {
         let sgx_req = pdev.io_request_by_name(c"sgx").ok_or(EINVAL)?;
-        let sgx = Arc::new(sgx_req.iomap_sized::<SGX_SIZE>()?.into_devres()?, GFP_KERNEL)?;
+        let sgx = Arc::new(
+            sgx_req.iomap_sized::<SGX_SIZE>()?.into_devres()?,
+            GFP_KERNEL,
+        )?;
 
         Ok(G17Resources {
             dev: pdev.into(),
@@ -693,6 +707,11 @@ impl G17Resources {
         self.sgx_read32::<G17_CORE_POWER>() & 0xf != 0
     }
 
+    /// Raw core power state, for tracing only.
+    pub(crate) fn g17_core_power(&self) -> u32 {
+        self.sgx_read32::<G17_CORE_POWER>()
+    }
+
     /// Enable dynamic power gating of idle G17 GPU cores. The firmware expects this before it is
     /// initialized.
     pub(crate) fn enable_g17_gating(&self) -> Result {
@@ -701,7 +720,6 @@ impl G17Resources {
         let val = sgx.try_read32(G17_GATING_CONTROL)?;
         sgx.try_write32(val & !G17_GATING_DISABLE, G17_GATING_CONTROL)
     }
-
 }
 
 /// Split the packed per-cluster core masks into one mask per cluster.
@@ -732,11 +750,7 @@ fn split_core_masks(
     }
 
     if core_mask_regs.iter().any(|a| *a != 0) {
-        dev_err!(
-            dev.as_ref(),
-            "Leftover core mask: {:#x?}\n",
-            core_mask_regs
-        );
+        dev_err!(dev.as_ref(), "Leftover core mask: {:#x?}\n", core_mask_regs);
         return Err(EIO);
     }
 
@@ -744,7 +758,10 @@ fn split_core_masks(
 }
 
 /// Decode the silicon revision from the ID version register.
-fn gpu_revision(dev: &platform::Device, id_version: u32) -> Result<(hw::GpuRevision, hw::GpuRevisionID)> {
+fn gpu_revision(
+    dev: &platform::Device,
+    id_version: u32,
+) -> Result<(hw::GpuRevision, hw::GpuRevisionID)> {
     Ok(match (id_version >> 8) & 0xff {
         0x00 => (hw::GpuRevision::A0, hw::GpuRevisionID::A0),
         0x01 => (hw::GpuRevision::A1, hw::GpuRevisionID::A1),
@@ -757,4 +774,30 @@ fn gpu_revision(dev: &platform::Device, id_version: u32) -> Result<(hw::GpuRevis
             return Err(ENODEV);
         }
     })
+}
+
+/// Device-managed SGX mapping retained by the G16 firmware session.
+#[cfg(CONFIG_DRM_ASAHI_G16)]
+#[derive(Clone)]
+pub(crate) struct G16Resources {
+    sgx: Arc<Devres<IoMem<'static, SGX_SIZE>>>,
+}
+
+#[cfg(CONFIG_DRM_ASAHI_G16)]
+impl G16Resources {
+    pub(crate) fn new(pdev: &platform::Device<Core<'_>>) -> Result<Self> {
+        let req = pdev.io_request_by_name(c"sgx").ok_or(EINVAL)?;
+        Ok(Self {
+            sgx: Arc::new(req.iomap_sized::<SGX_SIZE>()?.into_devres()?, GFP_KERNEL)?,
+        })
+    }
+    pub(crate) fn sgx_read32_at(&self, offset: usize) -> Result<u32> {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        (&*sgx).as_view().try_read32(offset)
+    }
+    #[allow(dead_code)]
+    pub(crate) fn sgx_write32_at(&self, offset: usize, value: u32) -> Result {
+        let sgx = self.sgx.try_access().ok_or(ENODEV)?;
+        (&*sgx).as_view().try_write32(value, offset)
+    }
 }

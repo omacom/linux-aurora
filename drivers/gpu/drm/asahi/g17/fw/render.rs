@@ -48,10 +48,53 @@ pub(crate) const RENDER_KICK_EVENT_MASK: [u64; 4] = [0; 4];
 const USER_BASE: u64 = 0x10_0000_0000;
 /// The VDM control-stream register holds a 39-bit offset from [`USER_BASE`].
 const VDM_OFFSET_LIMIT: u64 = 1 << 39;
-/// The deflake buffer holds three sub-buffers: at its start and at these
-/// offsets.
-const DEFLAKE_20: u64 = 0x20;
-const DEFLAKE_2A0: u64 = 0x2a0;
+/// The deflake (context) buffer holds three sub-buffers: at its start and at two offsets
+/// that follow the control words of each cluster.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Deflake {
+    /// Offsets of the second and third sub-buffers.
+    pub(crate) sub: [u64; 2],
+    /// The host writes the viewport words at `+0x900`; with more clusters that offset lies in
+    /// the third sub-buffer and the buffer is left to the GPU.
+    pub(crate) viewport: bool,
+}
+
+impl Deflake {
+    /// One cluster (A18 Pro).
+    pub(crate) const ONE_CLUSTER: Deflake = Deflake {
+        sub: [0x20, 0x2a0],
+        viewport: true,
+    };
+    /// Two clusters (M4 Pro).
+    pub(crate) const TWO_CLUSTERS: Deflake = Deflake {
+        sub: [0xa0, 0x820],
+        viewport: false,
+    };
+}
+
+/// The register programs of a firmware build's render descriptors.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RegisterPrograms {
+    /// The A18 Pro firmware's (26A428).
+    G17P,
+    /// The 25G83 build's: other tiling and fragment arrays, another tile-state base, and the
+    /// tiler parameter sub-buffers in the TPC object.
+    V25G83,
+}
+
+/// The 25G83 tiling and main fragment arrays.
+const TA_REGISTERS_25G83: usize = 83;
+const FRAGMENT_REGISTERS_25G83: usize = 91;
+const TA_CHECKPOINTS_25G83: [u16; 3] = [81, 83, 83];
+const FRAGMENT_CHECKPOINTS_25G83: [u16; 3] = [87, 88, 88];
+/// Index of the free-list slot register (0x14308) in the 25G83 tiling array.
+const TA_SLOT_INDEX_25G83: u8 = 79;
+/// Index of the free-list slot register (0x14048) in the 25G83 fragment array.
+const FRAGMENT_SLOT_INDEX_25G83: u8 = 84;
+/// A 25G83 stage with shader-context scratch (ray queries) also writes the SCS enable 0x017d9 = 1,
+/// which the compute program and both A18 Pro render programs carry for such work: first in the
+/// tiling array, after 0x01739 in the fragment array. Every count and index after it moves by one.
+const SCS_ENABLE: u32 = 0x017d9;
 
 const TA_REGISTERS: usize = 73;
 const TA_REGISTERS_MAX: usize = TA_REGISTERS + 1;
@@ -104,6 +147,10 @@ const LAYER_MODE_PIPE_MASK: u64 = 0x47ff;
 /// 32, the utile size bits of the tile-buffer configuration in bits 43:40,
 /// tiles in X less one from bit 44 and tiles in Y less one from bit 53.
 const TILE_STATE_BASE: u64 = 0x3717f | 1 << 37;
+/// The 25G83 build's low tile-state bits, the ones the M4 Pro has run with. With the A18 Pro's,
+/// a pass more than 80 tiles wide and with more than 4096 tiles never completes its fragment
+/// stage (the 3456x2234 panel is 108 x 70 tiles).
+const TILE_STATE_BASE_25G83: u64 = 0x36011 | 1 << 37;
 const TILE_STATE_LAYERED: u64 = 1 << 32;
 const TILE_STATE_UTILE_SHIFT: u32 = 28;
 const TILE_STATE_TILES_X_SHIFT: u32 = 44;
@@ -262,6 +309,9 @@ pub(crate) struct RenderResources {
     pub(crate) tpc_va: u64,
     /// Size of the tail-pointer cache the target needs.
     pub(crate) tpc_size: u64,
+    /// GPU addresses of the tiler parameter sub-buffers (entry 0 is the TPC); zero for
+    /// an empty one and on other GPUs.
+    pub(crate) gtp_va: [u64; 8],
     /// GPU address of the deflake buffer.
     pub(crate) deflake_va: u64,
     /// GPU address of the tiling status word.
@@ -314,6 +364,10 @@ pub(crate) struct RenderArgs<'a> {
     pub(crate) ta: RenderStage,
     /// Fragment stage.
     pub(crate) fragment: RenderStage,
+    /// Register programs of the firmware build.
+    pub(crate) programs: RegisterPrograms,
+    /// Deflake-buffer layout of the GPU.
+    pub(crate) deflake: Deflake,
 }
 
 impl RenderArgs<'_> {
@@ -357,12 +411,12 @@ impl Geometry {
         ) {
             return Err(EINVAL);
         }
-        let width = pass.width as u64;
-        let height = pass.height as u64;
+        let width = u64::from(pass.width);
+        let height = u64::from(pass.height);
         let tiles_x = width.div_ceil(TILE_SIZE);
         let tiles_y = height.div_ceil(TILE_SIZE);
-        let utiles_x = TILE_SIZE / pass.utile_width as u64;
-        let utiles_y = TILE_SIZE / pass.utile_height as u64;
+        let utiles_x = TILE_SIZE / u64::from(pass.utile_width);
+        let utiles_y = TILE_SIZE / u64::from(pass.utile_height);
         let utiles = utiles_x * utiles_y;
         let mtile_x = tiles_x.div_ceil(MACRO_TILES).next_multiple_of(4);
         let mtile_y = tiles_y.div_ceil(MACRO_TILES).next_multiple_of(4);
@@ -411,7 +465,7 @@ impl PassWords {
         // The tile configuration carries the empty-tile request for every
         // target; the tiling layer mode only for layered ones.
         let mut tile_config = TILE_CONFIG_BASE;
-        let mut layer_mode = LAYER_MODE_BASE | (pass.layers as u64 - 1);
+        let mut layer_mode = LAYER_MODE_BASE | (u64::from(pass.layers) - 1);
         if layered {
             tile_config |= TILE_CONFIG_LAYERED;
             layer_mode |= LAYER_MODE_LAYERED;
@@ -441,19 +495,19 @@ impl PassWords {
         }
         let rsrc_spec = |spec: u64| match pass.rsrc_spec_hi {
             true => spec,
-            false => spec & u32::MAX as u64,
+            false => spec & u64::from(u32::MAX),
         };
-        let usc = |offset: u32| offset_va(pass.usc_base, (offset & !USC_OFFSET_TAG_MASK) as u64);
+        let usc = |offset: u32| offset_va(pass.usc_base, u64::from(offset & !USC_OFFSET_TAG_MASK));
 
         Ok(Self {
-            utile_config: (pass.utile_width as u64 / 16) << UTILE_CONFIG_WIDTH_SHIFT
-                | (pass.utile_height as u64 / 16) << UTILE_CONFIG_HEIGHT_SHIFT
-                | pass.samples_log2 as u64,
+            utile_config: (u64::from(pass.utile_width) / 16) << UTILE_CONFIG_WIDTH_SHIFT
+                | (u64::from(pass.utile_height) / 16) << UTILE_CONFIG_HEIGHT_SHIFT
+                | u64::from(pass.samples_log2),
             tile_config,
             layer_mode,
-            tib_blocks: (pass.sample_size as u64
-                * pass.utile_width as u64
-                * pass.utile_height as u64
+            tib_blocks: (u64::from(pass.sample_size)
+                * u64::from(pass.utile_width)
+                * u64::from(pass.utile_height)
                 * samples)
                 .div_ceil(TIB_BLOCK_SIZE),
             partial_zls_control,
@@ -491,9 +545,10 @@ fn ta_registers(
     let layermeta = user_offset(r.layermeta_va)?;
     let heapmeta = user_offset(r.heapmeta_va)? | 1 << 63;
     let tpc = user_offset(r.tpc_va)?;
-    let deflake = user_offset32(r.deflake_va)? as u64;
-    let deflake_20 = user_offset32(offset_va(r.deflake_va, DEFLAKE_20)?)? as u64;
-    let deflake_2a0 = user_offset32(offset_va(r.deflake_va, DEFLAKE_2A0)?)? as u64;
+    let [deflake_20, deflake_2a0] = args.deflake.sub;
+    let deflake = u64::from(user_offset32(r.deflake_va)?);
+    let deflake_20 = u64::from(user_offset32(offset_va(r.deflake_va, deflake_20)?)?);
+    let deflake_2a0 = u64::from(user_offset32(offset_va(r.deflake_va, deflake_2a0)?)?);
     let vdm = user_offset(p.vdm_va)?;
     if vdm >= VDM_OFFSET_LIMIT {
         return Err(EINVAL);
@@ -561,7 +616,7 @@ fn ta_registers(
         RegisterWrite::new(0x0d471, rt.scratch.tail_word()),
         RegisterWrite::new(0x1a0f1, rt.scratch.stack_word()),
         RegisterWrite::new(0x10799, rt.scratch.window_word()),
-        RegisterWrite::new(0x1c830, r.pb_slot as u64),
+        RegisterWrite::new(0x1c830, u64::from(r.pb_slot)),
         RegisterWrite::new(0x1ca30, r.pm_scratch),
         RegisterWrite::new(0x16c39, r.pm_scratch),
         RegisterWrite::new(0x1c910, r.pm_metric),
@@ -573,12 +628,135 @@ fn ta_registers(
         RegisterWrite::new(0x10209, key),
         RegisterWrite::new(0x1c9f0, key),
         RegisterWrite::new(0x14320, key),
-        RegisterWrite::new(0x14308, r.free_list_slot as u64),
+        RegisterWrite::new(0x14308, u64::from(r.free_list_slot)),
         RegisterWrite::new(0x14318, r.ta_status_va | 1),
         RegisterWrite::new(0x01740, 1),
         RegisterWrite::new(0x1c880, deflake_2a0),
         RegisterWrite::new(0x1c898, 1),
     ])
+}
+
+/// The 25G83 tiling array: the A18 Pro's without 0x1748 and 0x1740 (and 0x17d9 unless the stage
+/// has SCS), with the tiler parameter sub-buffer registers and 0x10131 = 0x88, in the order the
+/// M4 Pro has run with. Returns the array and its used entry count.
+fn ta_registers_25g83(
+    args: &RenderArgs<'_>,
+    g: &Geometry,
+    w: &PassWords,
+) -> Result<([RegisterWrite; TA_REGISTERS_25G83 + 1], usize)> {
+    let a = ta_registers(args, g, w)?;
+    let r = args.resources;
+    let gtp = |index: usize| -> Result<u64> {
+        match r.gtp_va[index] {
+            0 => Ok(0),
+            va => user_offset(va),
+        }
+    };
+    let find = |reg: u32, nth: usize| -> Result<RegisterWrite> {
+        a.iter()
+            .filter(|write| write.reg == reg)
+            .nth(nth)
+            .copied()
+            .ok_or(EINVAL)
+    };
+    let gtp1 = gtp(1)?;
+    let gtp2 = gtp(2)?;
+    let gtp6 = gtp(6)? & !127;
+    let scs = usize::from(args.ray_query[0].scratch.enabled());
+    let mut out = [RegisterWrite::new(0, 0); TA_REGISTERS_25G83 + 1];
+    let mut n = 0;
+    let mut push = |write: RegisterWrite| {
+        out[n] = write;
+        n += 1;
+    };
+    if scs != 0 {
+        push(find(SCS_ENABLE, 0)?);
+    }
+    for reg in [0x10141, 0x1c039, 0x1c9c8] {
+        push(find(reg, 0)?);
+    }
+    push(RegisterWrite::new(0x1c041, gtp1));
+    push(RegisterWrite::new(0x1c9d0, gtp1));
+    for reg in [
+        0x1c0a1, 0x1c031, 0x1c9c0, 0x1c051, 0x1c061, 0x10149, 0x10139, 0x10111, 0x1c9b0, 0x10119,
+        0x1c9b8, 0x1c958, 0x1c950, 0x1c930,
+    ] {
+        push(find(reg, 0)?);
+    }
+    push(find(0x1c880, 0)?);
+    push(RegisterWrite::new(0x1c948, gtp(4)?));
+    push(RegisterWrite::new(0x1c888, gtp(5)?));
+    push(RegisterWrite::new(0x1c890, 0));
+    push(RegisterWrite::new(0x1c918, 0));
+    push(find(0x1c079, 0)?);
+    push(find(0x1c9d8, 0)?);
+    push(RegisterWrite::new(0x1c089, gtp2));
+    push(RegisterWrite::new(0x1c9e0, gtp2));
+    push(RegisterWrite::new(0x16c41, gtp6));
+    push(RegisterWrite::new(0x1ca40, gtp6));
+    push(RegisterWrite::new(0x1c9a8, 0));
+    push(RegisterWrite::new(0x1c920, gtp(7)?));
+    for reg in [0x10151, 0x1c199, 0x1c1a1, 0x1c1a9, 0x1c1b1, 0x1c1b9, 0x1c8f8, 0x1c0b1, 0x1c850] {
+        push(find(reg, 0)?);
+    }
+    push(RegisterWrite::new(0x10131, 0x88));
+    for reg in [
+        0x10121, 0x10129, 0x101b9, 0x1c069, 0x1c071, 0x1c081, 0x1c0a9, 0x10171, 0x10169, 0x0a309,
+        0x1c8e0, 0x1c8e8,
+    ] {
+        push(find(reg, 0)?);
+    }
+    push(find(0x1c898, 0)?);
+    for reg in [
+        0x101e1, 0x1c9e8, 0x1a099, 0x1a0a1, 0x1a069, 0x1a071, 0x1a0c9, 0x1a0d1, 0x101c9, 0x0d471,
+        0x1a0f1, 0x10799, 0x1c830, 0x1ca30, 0x16c39, 0x1c910, 0x0a5a1, 0x0d419, 0x1ca10, 0x014a1,
+        0x0a349, 0x10209, 0x1c9f0, 0x14320, 0x14308, 0x14318,
+    ] {
+        push(find(reg, 0)?);
+    }
+    push(find(0x1c880, 1)?);
+    push(find(0x1c898, 1)?);
+    if n != TA_REGISTERS_25G83 + scs || out[TA_SLOT_INDEX_25G83 as usize + scs].reg != 0x14308 {
+        return Err(EINVAL);
+    }
+    Ok((out, n))
+}
+
+/// The 25G83 main fragment array: the A18 Pro's (without 0x17d9 unless the stage has SCS), with
+/// 0x160b8 = 0 after the tile state and 0x160a8 = 0x20 before the closing 0x16068, as the M4
+/// Pro has run with. Returns the array and its used entry count.
+fn fragment_registers_25g83(
+    args: &RenderArgs<'_>,
+    g: &Geometry,
+    w: &PassWords,
+) -> Result<([RegisterWrite; FRAGMENT_REGISTERS_25G83 + 1], usize)> {
+    let a = fragment_registers(args, g, w);
+    let scs = usize::from(args.ray_query[1].scratch.enabled());
+    let mut out = [RegisterWrite::new(0, 0); FRAGMENT_REGISTERS_25G83 + 1];
+    let mut n = 0;
+    let mut tile_state = false;
+    for (index, write) in a.iter().enumerate() {
+        if write.reg == SCS_ENABLE && scs == 0 {
+            continue;
+        }
+        if index == a.len() - 1 {
+            *out.get_mut(n).ok_or(EINVAL)? = RegisterWrite::new(0x160a8, 0x20);
+            n += 1;
+        }
+        *out.get_mut(n).ok_or(EINVAL)? = *write;
+        n += 1;
+        if write.reg == 0x16068 && !tile_state {
+            tile_state = true;
+            *out.get_mut(n).ok_or(EINVAL)? = RegisterWrite::new(0x160b8, 0);
+            n += 1;
+        }
+    }
+    if n != FRAGMENT_REGISTERS_25G83 + scs
+        || out[FRAGMENT_SLOT_INDEX_25G83 as usize + scs].reg != 0x14048
+    {
+        return Err(EINVAL);
+    }
+    Ok((out, n))
 }
 
 fn fragment_registers(
@@ -588,7 +766,12 @@ fn fragment_registers(
 ) -> [RegisterWrite; FRAGMENT_REGISTERS_MAX] {
     let p = args.pass;
     let r = args.resources;
-    let mut tile_state = TILE_STATE_BASE
+    let tile_state_base = if args.programs == RegisterPrograms::V25G83 {
+        TILE_STATE_BASE_25G83
+    } else {
+        TILE_STATE_BASE
+    };
+    let mut tile_state = tile_state_base
         | (w.utile_config & UTILE_CONFIG_SIZE_MASK) << TILE_STATE_UTILE_SHIFT
         | (g.tiles_x - 1) << TILE_STATE_TILES_X_SHIFT
         | (g.tiles_y - 1) << TILE_STATE_TILES_Y_SHIFT;
@@ -609,8 +792,8 @@ fn fragment_registers(
         RegisterWrite::new(0x15381, w.eot_va),
         RegisterWrite::new(0x15369, w.bg_rsrc_spec),
         RegisterWrite::new(0x15371, w.bg_va),
-        RegisterWrite::new(0x15131, p.merge_upper_x as u64),
-        RegisterWrite::new(0x15139, p.merge_upper_y as u64),
+        RegisterWrite::new(0x15131, u64::from(p.merge_upper_x)),
+        RegisterWrite::new(0x15139, u64::from(p.merge_upper_y)),
         RegisterWrite::new(0x100a1, 0),
         RegisterWrite::new(0x15069, 0),
         RegisterWrite::new(0x15071, 0),
@@ -625,15 +808,15 @@ fn fragment_registers(
         RegisterWrite::new(0x15109, p.scissor_va),
         RegisterWrite::new(0x15101, p.depth_bias_va),
         RegisterWrite::new(0x15021, w.aux_fb_flags),
-        RegisterWrite::new(0x15211, (p.height as u64) << 32 | p.width as u64),
+        RegisterWrite::new(0x15211, u64::from(p.height) << 32 | u64::from(p.width)),
         RegisterWrite::new(0x15049, UNK_15049),
         RegisterWrite::new(0x10051, w.tib_blocks),
         RegisterWrite::new(0x15321, p.depth_dimensions),
-        RegisterWrite::new(0x15301, p.depth_clear as u64),
-        RegisterWrite::new(0x15309, (p.stencil_clear | STENCIL_CLEAR_BASE) as u64),
+        RegisterWrite::new(0x15301, u64::from(p.depth_clear)),
+        RegisterWrite::new(0x15309, u64::from(p.stencil_clear | STENCIL_CLEAR_BASE)),
         RegisterWrite::new(0x15311, p.occlusion_query_va),
         RegisterWrite::new(0x15319, p.zls_control),
-        RegisterWrite::new(0x15349, ZLS_SWIZZLE as u64),
+        RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
         RegisterWrite::new(0x15351, 0),
         RegisterWrite::new(0x15329, p.depth.va),
         RegisterWrite::new(0x15331, p.depth.va),
@@ -682,11 +865,11 @@ fn fragment_registers(
         RegisterWrite::new(0x160e0, ids),
         RegisterWrite::new(0x01499, ids),
         RegisterWrite::new(0x0a341, ids),
-        RegisterWrite::new(0x1c838, r.pb_slot as u64),
+        RegisterWrite::new(0x1c838, u64::from(r.pb_slot)),
         RegisterWrite::new(0x1ca28, r.pm_scratch),
         RegisterWrite::new(0x10211, key),
         RegisterWrite::new(0x10420, key),
-        RegisterWrite::new(0x14048, r.free_list_slot as u64),
+        RegisterWrite::new(0x14048, u64::from(r.free_list_slot)),
         RegisterWrite::new(0x14080, r.fragment_status_va | 1),
         RegisterWrite::new(0x01731, 1),
         RegisterWrite::new(0x16020, 1),
@@ -716,7 +899,7 @@ fn partial_store_registers(
         RegisterWrite::new(0x15221, 0),
         RegisterWrite::new(0x15229, 0),
         RegisterWrite::new(0x15319, w.partial_zls_control),
-        RegisterWrite::new(0x15349, ZLS_SWIZZLE as u64),
+        RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
     ]
 }
 
@@ -742,13 +925,13 @@ fn partial_resume_registers(
         RegisterWrite::new(0x15439, p.stencil.compression_stride),
         RegisterWrite::new(0x15221, 0),
         RegisterWrite::new(0x15229, 0),
-        RegisterWrite::new(0x15309, (p.stencil_clear | STENCIL_CLEAR_BASE) as u64),
+        RegisterWrite::new(0x15309, u64::from(p.stencil_clear | STENCIL_CLEAR_BASE)),
         RegisterWrite::new(0x15329, p.depth.va),
         RegisterWrite::new(0x153c1, p.depth.compression_va),
         RegisterWrite::new(0x15339, p.stencil.va),
         RegisterWrite::new(0x153d1, p.stencil.compression_va),
         RegisterWrite::new(0x15319, w.partial_zls_control),
-        RegisterWrite::new(0x15349, ZLS_SWIZZLE as u64),
+        RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
     ]
 }
 
@@ -760,13 +943,13 @@ fn partial_load_registers(
         RegisterWrite::new(0x15369, w.partial_bg_rsrc_spec),
         RegisterWrite::new(0x15371, w.partial_bg_va),
         RegisterWrite::new(0x10039, w.tile_config & !TILE_CONFIG_PROCESS_EMPTY_TILES),
-        RegisterWrite::new(0x15309, (p.stencil_clear | STENCIL_CLEAR_BASE) as u64),
+        RegisterWrite::new(0x15309, u64::from(p.stencil_clear | STENCIL_CLEAR_BASE)),
         RegisterWrite::new(0x15329, p.depth.va),
         RegisterWrite::new(0x153c1, p.depth.compression_va),
         RegisterWrite::new(0x15339, p.stencil.va),
         RegisterWrite::new(0x153d1, p.stencil.compression_va),
         RegisterWrite::new(0x15319, w.partial_zls_control),
-        RegisterWrite::new(0x15349, ZLS_SWIZZLE as u64),
+        RegisterWrite::new(0x15349, u64::from(ZLS_SWIZZLE)),
     ]
 }
 
@@ -840,7 +1023,11 @@ pub(crate) struct TaDescriptor {
     /// QID of the tiling queue.
     pub(crate) qid: u32,
     pub(crate) unk_8be: u32,
-    pub(crate) unk_8c2: u32,
+    /// Non-zero on the first kick of a queue pair, like the fragment descriptor's word at the
+    /// same position. Set on every kick, the firmware also notifies the host of each pass's
+    /// tiling completion, which no retirement needs. The 25G83 firmware keeps it set on every
+    /// kick until this is measured there.
+    pub(crate) first_kick: u32,
     /// Completion value of the tiling kick (see
     /// [`KickTimestamp::completion_value`]).
     pub(crate) completion: u64,
@@ -890,7 +1077,6 @@ impl TaDescriptor {
     const ARRAY_OFFSET: u64 = core::mem::offset_of!(Self, registers) as u64;
     const UNK_876: u32 = u32::MAX;
     const UNK_892: u32 = 1;
-    const UNK_8C2: u32 = 1;
     const UNK_932: u8 = 0x44;
     const UNK_93C: u8 = 1;
     const UNK_93E_FIRST_KICK: [u8; 2] = [0xd0, 0x91];
@@ -902,7 +1088,8 @@ impl TaDescriptor {
         let geometry = Geometry::new(pass)?;
         let words = PassWords::new(pass)?;
         let registers = ta_registers(args, &geometry, &words)?;
-        let deflake_2a0_offset = user_offset32(offset_va(resources.deflake_va, DEFLAKE_2A0)?)?;
+        let deflake_2a0_offset =
+            user_offset32(offset_va(resources.deflake_va, args.deflake.sub[1])?)?;
         let array_va = offset_va(args.ta.descriptor_va, Self::ARRAY_OFFSET)?;
         let sampler_max = sampler_max(pass.sampler_count)?;
         let stamp_value = args.stamp_value();
@@ -919,12 +1106,14 @@ impl TaDescriptor {
         let scs_register = args.ray_query[0].scratch.enabled();
         self.checkpoints = TA_CHECKPOINTS.map(|count| count + u16::from(scs_register));
         self.unk_48 = (args.ordinal as u32).wrapping_add((args.ordinal / 2) as u32);
-        if scs_register {
+        if args.programs == RegisterPrograms::V25G83 {
+            self.checkpoints = TA_CHECKPOINTS_25G83.map(|count| count + u16::from(scs_register));
+            let (registers, count) = ta_registers_25g83(args, &geometry, &words)?;
+            self.registers.set(array_va, &registers[..count])?;
+        } else if scs_register {
             self.registers.set(array_va, &registers)?;
         } else {
-            let mut trimmed = [registers[0]; TA_REGISTERS];
-            trimmed[TA_SCS_ENABLE_INDEX..].copy_from_slice(&registers[TA_SCS_ENABLE_INDEX + 1..]);
-            self.registers.set(array_va, &trimmed)?;
+            self.registers.set_without(array_va, &registers, TA_SCS_ENABLE_INDEX)?;
         }
         self.tpc_va = resources.tpc_va;
         self.tpc_size = resources.tpc_size;
@@ -941,11 +1130,17 @@ impl TaDescriptor {
         self.aux_stamp_va = args.ta.aux_stamp_va;
         self.stamp_value_2 = stamp_value;
         self.qid = args.ta.qid.into();
-        self.unk_8c2 = Self::UNK_8C2;
+        self.first_kick = match args.programs == RegisterPrograms::V25G83 {
+            true => 1,
+            false => u32::from(args.ordinal == 0),
+        };
         self.current_id = resources.ta_ids.current.into();
         self.ordinal = args.ordinal as u32;
         self.timestamp_start_va = resources.timestamp_va;
-        self.unk_932 = Self::UNK_932;
+        self.unk_932 = match args.programs == RegisterPrograms::V25G83 {
+            true => TA_SLOT_INDEX_25G83 + u8::from(scs_register),
+            false => Self::UNK_932,
+        };
         self.free_list_control_va = resources.free_list_control_va;
         self.unk_93c = Self::UNK_93C;
         if args.ordinal == 0 {
@@ -969,7 +1164,7 @@ impl TaDescriptor {
         pass_seq: u8,
         fragment_busy: bool,
     ) {
-        self.fragment_busy = fragment_busy as u32;
+        self.fragment_busy = u32::from(fragment_busy);
         self.fragment_kick = fragment.get();
         self.pass_seq = [pass_seq; 2];
         self.completion = ta.completion_value(pass_seq);
@@ -980,11 +1175,14 @@ impl TaDescriptor {
     pub(crate) fn register_bindings(
         descriptor_va: u64,
         scs_register: bool,
+        programs: RegisterPrograms,
     ) -> Result<[Option<RegisterArrayBinding>; 4]> {
-        let array = RegisterArrayBinding::new(
-            offset_va(descriptor_va, Self::ARRAY_OFFSET)?,
-            TA_CHECKPOINTS[0] as u8 + u8::from(scs_register),
-        )?;
+        let checkpoint = match programs == RegisterPrograms::V25G83 {
+            true => TA_CHECKPOINTS_25G83[0] as u8,
+            false => TA_CHECKPOINTS[0] as u8,
+        } + u8::from(scs_register);
+        let array =
+            RegisterArrayBinding::new(offset_va(descriptor_va, Self::ARRAY_OFFSET)?, checkpoint)?;
         Ok([Some(array), None, None, None])
     }
 }
@@ -1171,13 +1369,18 @@ impl FragmentDescriptor {
     pub(crate) fn register_bindings(
         descriptor_va: u64,
         scs_register: bool,
+        programs: RegisterPrograms,
     ) -> Result<[Option<RegisterArrayBinding>; 4]> {
         let array = |index, checkpoint: usize| -> Result<Option<RegisterArrayBinding>> {
             let va = offset_va(descriptor_va, Self::array_offset(index))?;
             Ok(Some(RegisterArrayBinding::new(va, checkpoint as u8)?))
         };
+        let checkpoint = match programs == RegisterPrograms::V25G83 {
+            true => FRAGMENT_CHECKPOINTS_25G83[0] as usize,
+            false => FRAGMENT_CHECKPOINTS[0] as usize,
+        } + usize::from(scs_register);
         Ok([
-            array(0, FRAGMENT_CHECKPOINTS[0] as usize + usize::from(scs_register))?,
+            array(0, checkpoint)?,
             array(1, PARTIAL_STORE_REGISTERS)?,
             array(2, PARTIAL_RESUME_REGISTERS)?,
             array(3, PARTIAL_LOAD_REGISTERS)?,
@@ -1249,13 +1452,15 @@ impl FragmentSlot {
         desc.checkpoints = FRAGMENT_CHECKPOINTS.map(|count| count + extra);
         desc.entries = FRAGMENT_REGISTERS as u16 + extra;
         let registers = fragment_registers(args, &geometry, &words);
-        if scs_register {
+        if args.programs == RegisterPrograms::V25G83 {
+            desc.checkpoints = FRAGMENT_CHECKPOINTS_25G83.map(|count| count + extra);
+            desc.entries = FRAGMENT_REGISTERS_25G83 as u16 + extra;
+            let (registers, count) = fragment_registers_25g83(args, &geometry, &words)?;
+            desc.arrays[0].set(arrays[0], &registers[..count])?;
+        } else if scs_register {
             desc.arrays[0].set(arrays[0], &registers)?;
         } else {
-            let mut trimmed = [registers[0]; FRAGMENT_REGISTERS];
-            trimmed[FRAGMENT_SCS_ENABLE_INDEX..]
-                .copy_from_slice(&registers[FRAGMENT_SCS_ENABLE_INDEX + 1..]);
-            desc.arrays[0].set(arrays[0], &trimmed)?;
+            desc.arrays[0].set_without(arrays[0], &registers, FRAGMENT_SCS_ENABLE_INDEX)?;
         }
         desc.arrays[1].set(arrays[1], &partial_store_registers(pass, &words))?;
         desc.arrays[2].set(arrays[2], &partial_resume_registers(pass, &words))?;
@@ -1289,12 +1494,15 @@ impl FragmentSlot {
         desc.aux_stamp_va = args.fragment.aux_stamp_va;
         desc.stamp_value = args.stamp_value();
         desc.qid = args.fragment.qid.into();
-        desc.first_kick = (args.ordinal == 0) as u32;
+        desc.first_kick = u32::from(args.ordinal == 0);
         desc.current_id = resources.fragment_ids.current.into();
         desc.ordinal = args.ordinal as u32;
         desc.timestamp_start_va = resources.timestamp_va;
         desc.timestamp_end_va = timestamp_end_va;
-        desc.unk_21cc = Self::UNK_21CC;
+        desc.unk_21cc = match args.programs == RegisterPrograms::V25G83 {
+            true => FRAGMENT_SLOT_INDEX_25G83 + u8::from(args.ray_query[1].scratch.enabled()),
+            false => Self::UNK_21CC,
+        };
         desc.free_list_control_va = resources.free_list_control_va;
         desc.unk_21d6 = Self::UNK_21D6;
         desc.status_va = resources.fragment_status_va;

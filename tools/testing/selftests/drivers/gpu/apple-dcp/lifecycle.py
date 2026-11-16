@@ -459,6 +459,25 @@ static void dcp_relink_attach(int *s, u64 generation)
 static void __attribute__((unused)) dcp_relink_link_up(int *s, u64 generation, unsigned long now)
 { (void)s; (void)generation; (void)now; assert(!"legacy relink timestamp in an H17P scenario"); }
 """
+    # Let the real helper classify an occupied display on newer trees, where
+    # -EBUSY means a transient mux/PHY failure rather than a taken pipeline.
+    if re.search(r'cd321x_display_taken\(int ret\)', pm):
+        assert shim.count('mode_error == -EBUSY') == 1
+        assert tests.count('mode_error = -EBUSY;') == 2
+        shim = shim.replace('mode_error == -EBUSY', 'cd321x_display_taken(mode_error)')
+        tests = tests.replace('mode_error = -EBUSY;', 'mode_error = -ENOSPC;')
+        busy = ' CHECK(sink.connected && !notices && !port.display_route_active);\n'
+        assert tests.count(busy) == 1
+        tests = tests.replace(busy, busy + r'''
+ CHECK(roles == 1 && port.pm.phase == CD321X_PM_RUNNING);
+ /* A transient busy mux must retry before switching the USB role. */
+ init(); port.display_route_active = false; role = USB_ROLE_NONE;
+ port.update_status.status = TPS_STATUS_PLUG_PRESENT;
+ port.update_status.data_status = TPS_DATA_STATUS_DP_CONNECTION | CD321X_DATA_STATUS_HPD_LEVEL;
+ mode_error = -EBUSY; cd321x_update_work(&port.update_work.work);
+ CHECK(!roles && port.pm.phase == CD321X_PM_REVALIDATE);
+ CHECK(sink.connected && !notices && !port.display_route_active);
+''')
     # How long a held mux has been retried is measured on the driver's clock.
     if 'jiffies_to_msecs(jiffies)' in funcs:
         shim += ('\nstatic unsigned long jiffies;\n'

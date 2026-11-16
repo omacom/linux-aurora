@@ -35,6 +35,8 @@ int dcp_audiosrv_link(struct device *dev, enum dcp_audio_link op,
 void dcpaud_release_link(struct platform_device *pdev, const u64 *gen);
 /* Whether the link prepared last is on instance @gen, still the open one */
 bool dcp_audiosrv_link_on(struct device *dev, u64 gen);
+/* The prepared link still belongs to the client of the published instance. */
+bool dcp_audiosrv_link_live(struct device *dev);
 #endif
 
 #endif /* __AUDIO_H__ */

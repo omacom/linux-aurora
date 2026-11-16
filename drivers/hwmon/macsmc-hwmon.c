@@ -106,6 +106,19 @@ static const struct macsmc_hwmon_board {
 		.die_keys = "Tf04,Tf06,Tf09,Tf0A,Tf0B,Tf14,Tf16,Tf19,Tf1A,Tf1B,Tf24,Tf26,Tf29,Tf2A,Tf2B,"
 			    "Tf34,Tf36,Tf39,Tf3A,Tf3B,Tf44,Tf46,Tf49,Tf4A,Tf4B",
 	},
+	/*
+	 * MacBook Air (13-inch, M3): the base M3 has no Tf keys. With only
+	 * the GPU busy, the six Tg keys below rose by about 50 C, the most
+	 * of any key, and each has a twin about 4.5 C lower; they read 0 C
+	 * or slightly below while the GPU is powered off. The others are the
+	 * CPU die keys of the board's device tree (the E-cluster groups and
+	 * one per P core), so the zone also follows a hot CPU.
+	 */
+	{
+		.compatible = "apple,j613",
+		.die_keys = "Tg0D,Tg0P,Tg0X,Tg0b,Tg0j,Tg0v,Te05,Te0P,Tp05,Tp0L,Tp0b,Tp0r",
+		.pressure_key = "mTPL",
+	},
 };
 
 static bool macsmc_hwmon_is_m3(void)

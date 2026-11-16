@@ -36,10 +36,11 @@ impl Pair {
             }
             *block = pointer.cast();
         }
+        let layout = self.memory.graph.pointers;
         for block in blocks {
             // SAFETY: Both complete pointer blocks were checked above. This fresh
             // graph is unpublished; only the live atomic cursors are accessed.
-            unsafe { &*block }.rebase(0);
+            unsafe { &*block }.rebase(&layout, 0)?;
         }
         fence(Ordering::SeqCst);
         self.cursors = [0; 2];

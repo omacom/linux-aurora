@@ -6,7 +6,7 @@
 //int avep_audiosrv_startlink(struct apple_dcp *dcp, struct dcp_sound_cookie *cookie);
 //int avep_audiosrv_stoplink(struct apple_dcp *dcp);
 
-/* dcp.c: the opt-in to DP/HDMI audio (appledrm.hdmi_audio). */
+/* dcp.c: DP/HDMI audio, on unless appledrm.hdmi_audio=0. */
 extern bool hdmi_audio;
 
 #if IS_ENABLED(CONFIG_DRM_APPLE_AUDIO)

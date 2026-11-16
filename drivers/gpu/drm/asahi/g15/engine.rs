@@ -155,10 +155,10 @@ pub(crate) struct Flight {
     pub(crate) fs_start: u32,
     /// Channel producers (TA, FS, compute) after the prefix's records.
     pub(crate) rec: [u32; 3],
-    /// Compute member j's FW stamp target, and the FS target it waits on directly (0: none):
+    /// Compute member j's FW stamp target, and the FS target it waits on directly:
     /// its predecessors in the prefix (for the compute-hang check).
     pub(crate) cstamp: [u32; sizes::COMPUTE_SLOTS],
-    pub(crate) cwait: [u32; sizes::COMPUTE_SLOTS],
+    pub(crate) cwait: [Option<u32>; sizes::COMPUTE_SLOTS],
     /// Compute slots, pass slots and clustering buffers it holds.
     pub(crate) claims: Claims,
     /// The prefix rebuilds the render allocators (priming); nothing is published behind it.
@@ -189,7 +189,7 @@ impl Flight {
             fs_start: 0,
             rec: [0; 3],
             cstamp: [0; sizes::COMPUTE_SLOTS],
-            cwait: [0; sizes::COMPUTE_SLOTS],
+            cwait: [None; sizes::COMPUTE_SLOTS],
             claims: Claims::new(),
             rebuild: false,
             doomed: false,
@@ -364,6 +364,12 @@ pub(crate) struct Engine {
     /// Host compute ordinal and draw ordinal of the last publication.
     pub(crate) ordinal: u64,
     pub(crate) draw: u64,
+    /// Added to the draw ordinal before computing the TA/FS stamps; moved by
+    /// `renumber_render_stamps()`.
+    pub(crate) stamp_base: u64,
+    /// Added to the compute ordinal before computing the compute stamp; moved by
+    /// `renumber_compute_stamps()`.
+    pub(crate) compute_stamp_base: u64,
     /// Newest published receipts, the tail.
     pub(crate) target: u32,
     pub(crate) head: u32,
@@ -385,9 +391,11 @@ pub(crate) struct Engine {
     pub(crate) rebuild_live: bool,
     /// A ready prefix waits only for a record's consumption: repoll sooner.
     pub(crate) chan_wait: bool,
+    /// A ready job waits for an ASID held by a completing failed job.
+    pub(crate) slot_wait: bool,
     /// Progress tracking of the oldest prefix.
     pub(crate) progress_flight: u64,
-    pub(crate) progress: [u32; 3],
+    pub(crate) progress: [Option<u32>; 3],
     pub(crate) stats: Stats,
     /// Phase timers (debug_flags bit 49).
     pub(crate) prof: Prof,
@@ -409,6 +417,8 @@ impl Engine {
             shared: None,
             ordinal: 0,
             draw: 0,
+            stamp_base: params::stamp_base(),
+            compute_stamp_base: params::compute_stamp_base(),
             target: 0,
             head: 0,
             ta_target: 0,
@@ -424,8 +434,9 @@ impl Engine {
             render_registered: false,
             rebuild_live: false,
             chan_wait: false,
+            slot_wait: false,
             progress_flight: 0,
-            progress: [0; 3],
+            progress: [None; 3],
             stats: Stats::default(),
             prof: Prof::default(),
             debugfs: None,
@@ -546,6 +557,7 @@ impl Firmware {
         let mut result = Ok(());
 
         self.engine.chan_wait = false;
+        self.engine.slot_wait = false;
         // Nothing is published while a hang request is armed.
         while self.recovery.failed().is_none()
             && !self.engine.frozen
@@ -556,12 +568,17 @@ impl Firmware {
                 break;
             };
             let job = self.engine.pending[index].clone();
+            // Inside a renumbering margin nothing is published behind a flight: the flights
+            // drain and the next publication renumbers the stamps while idle (once every ~8.7M
+            // renders or ~4.0M computes with margins of 100000).
+            let renumber_due = self.renumber_due();
             if let Some(tail) = self.engine.flights.last() {
                 if self.engine.flights.len() >= max_inflight
                     || !Arc::ptr_eq(&job.vm, &tail.job.vm)
                     || self.recovery.reinit
                     || self.recovery.fs_resync
                     || self.engine.rebuild_live
+                    || renumber_due
                 {
                     self.engine.stats.hold[0] += (self.engine.flights.len() >= max_inflight) as u64;
                     break;
@@ -592,7 +609,7 @@ impl Firmware {
                         dev_err!(
                             self.graph.dev.as_ref(),
                             "G15: publication of ctx {} failed after a queue WRITE ({:?})\n",
-                            job.vm.slot,
+                            job.slot(),
                             e
                         );
                         complete(done, &job, Err(EIO));
@@ -675,6 +692,15 @@ impl Firmware {
     /// yet (no free slot, or a channel record still unconsumed); EIO once a queue WRITE
     /// advanced; any other error means nothing was published.
     fn publish_prefix(&mut self, job: &Arc<Job>, done: &mut Completions) -> Result {
+        if let Err(error) = job.bind() {
+            if error == ENOSPC {
+                // A failed job can keep its binding until scheduler references drop after
+                // this pass. Leave healthy work pending and retry without the device lock.
+                self.engine.slot_wait = true;
+                return Err(EAGAIN);
+            }
+            return Err(error);
+        }
         let mut f = Flight::new(job.clone());
         let result = self.publish_prefix_into(job, &mut f);
         match result {
@@ -682,13 +708,105 @@ impl Firmware {
                 // Never published: its storage is free again, and horizon jobs taken into it
                 // fail with it.
                 self.slots.release(&mut f.claims);
+                if job.progress.next() == job.progress.sent() {
+                    job.release_binding();
+                }
                 for j2 in f.group.iter() {
+                    j2.release_binding();
                     complete(done, j2, Err(e));
                 }
             }
             _ => {}
         }
         result
+    }
+
+    /// The TA stamp is inside its renumbering margin.
+    fn render_renumber_due(&self) -> bool {
+        let margin = params::stamp_reseed_margin();
+        let ordinal = (self.engine.draw + self.engine.stamp_base) % encode::STAMP_PERIOD;
+        margin != 0 && ordinal + margin >= encode::RENDER_WRAP
+    }
+
+    /// The compute stamp is inside its renumbering margin.
+    fn compute_renumber_due(&self) -> bool {
+        let margin = params::compute_reseed_margin();
+        let ordinal = (self.engine.ordinal + self.engine.compute_stamp_base) % encode::STAMP_PERIOD;
+        margin != 0 && ordinal + margin >= encode::COMPUTE_WRAP
+    }
+
+    /// Either stamp is inside its renumbering margin.
+    fn renumber_due(&self) -> bool {
+        self.render_renumber_due() || self.compute_renumber_due()
+    }
+
+    /// Computes and renders the current numbering has left before its compute and TA stamps
+    /// wrap (0 once wrapped), for `asahi-g15/stats`.
+    pub(crate) fn stamps_left(&self) -> (u64, u64) {
+        let period = encode::STAMP_PERIOD;
+        let c = (self.engine.ordinal + self.engine.compute_stamp_base) % period;
+        let r = (self.engine.draw + self.engine.stamp_base) % period;
+        (
+            encode::COMPUTE_WRAP.saturating_sub(c),
+            encode::RENDER_WRAP.saturating_sub(r),
+        )
+    }
+
+    /// Renumbers the TA/FS stamps from their seeds before the TA stamp wraps, after 0x860000
+    /// renders (about six hours of desktop), where the firmware may stop. Only called with
+    /// nothing in flight: the last flight retired with every stamp equal to its target, so both
+    /// queues are idle and the next render waits on exactly the seeds written here.
+    fn renumber_render_stamps(&mut self) -> Result {
+        if !self.render_renumber_due() {
+            return Ok(());
+        }
+        let ordinal = (self.engine.draw + self.engine.stamp_base) % encode::STAMP_PERIOD;
+        let r = &self.graph.render;
+        for (e, seed) in [ids::TA_SEED, ids::FS_SEED].into_iter().enumerate() {
+            r.user_stamp[e].w32(0, seed)?;
+            r.fw_stamp[e].w32(0, seed)?;
+        }
+        // The next render (draw + 1) counts as ordinal 1 again: modulo the period of
+        // `stamp_seed`, whose ordinal 0 is the seeds just written.
+        let period = encode::STAMP_PERIOD;
+        self.engine.stamp_base = (period - self.engine.draw % period) % period;
+        self.engine.ta_target = ids::TA_SEED;
+        self.engine.fs_target = ids::FS_SEED;
+        self.engine.tail_fs = ids::FS_SEED;
+        dev_info!(
+            self.graph.dev.as_ref(),
+            "G15: TA/FS stamps renumbered from the seeds at draw {} (ordinal {:#x})\n",
+            self.engine.draw,
+            ordinal
+        );
+        Ok(())
+    }
+
+    /// Renumbers the compute stamp from its seed before it wraps, after 0x3f0000 computes,
+    /// where the firmware may stop. Like the TA/FS renumbering only with nothing in flight: the
+    /// compute queue is idle with both stamps at its target. The stamps are written back as
+    /// `ComputeGraph::init()` leaves them with no stamp base, so the next compute is ordinal 1
+    /// on the stamps of a fresh boot.
+    fn renumber_compute_stamps(&mut self) -> Result {
+        if !self.compute_renumber_due() {
+            return Ok(());
+        }
+        let ordinal = (self.engine.ordinal + self.engine.compute_stamp_base) % encode::STAMP_PERIOD;
+        let g = &self.graph.compute;
+        g.user_stamp.w32(0, ids::COMPUTE_SEED)?;
+        g.fw_stamp.w32(0, 0)?;
+        // The next compute (ordinal + 1) counts as ordinal 1 again.
+        let period = encode::STAMP_PERIOD;
+        self.engine.compute_stamp_base = (period - self.engine.ordinal % period) % period;
+        self.engine.target = 0;
+        self.engine.tail_ct = 0;
+        dev_info!(
+            self.graph.dev.as_ref(),
+            "G15: compute stamp renumbered from the seed at compute {} (ordinal {:#x})\n",
+            self.engine.ordinal,
+            ordinal
+        );
+        Ok(())
     }
 
     fn publish_prefix_into(&mut self, job: &Arc<Job>, f: &mut Flight) -> Result {
@@ -698,6 +816,10 @@ impl Firmware {
         self.map_pb(&job.vm)
             .map_err(|e| if e == EIO { EFAULT } else { e })?;
         let overlap = !self.engine.flights.is_empty();
+        if !overlap {
+            self.renumber_render_stamps()?;
+            self.renumber_compute_stamps()?;
+        }
         let mut mixed = tuning::MIXED_PREFIX;
         let mut pf = Prefix {
             n: self.engine.ordinal,
@@ -899,11 +1021,22 @@ impl Firmware {
                     hz_stop = Some(1);
                     break;
                 }
-                for k in 0..n2 {
-                    match command(&j2, k).ok_or(EINVAL)? {
-                        Command::Compute(c) => self.prefix_compute(&j2, c, &mut pf, f, false)?,
-                        Command::Render(_) => return Err(EINVAL),
+                j2.bind()?;
+                let encoded = (|| {
+                    for k in 0..n2 {
+                        match command(&j2, k).ok_or(EINVAL)? {
+                            Command::Compute(c) => {
+                                self.prefix_compute(&j2, c, &mut pf, f, false)?
+                            }
+                            Command::Render(_) => return Err(EINVAL),
+                        }
                     }
+                    Ok(())
+                })();
+                if let Err(error) = encoded {
+                    // Not in the horizon yet and nothing of it reached the firmware.
+                    j2.release_binding();
+                    return Err(error);
                 }
                 computes += n2;
                 j2.progress.set_sent(n2);
@@ -958,7 +1091,7 @@ impl Firmware {
             self.engine.head = pf.c_head;
         }
         if renders != 0 {
-            f.ta_target = encode::stamp_seed(ids::TA_SEED, pf.draw);
+            f.ta_target = encode::stamp_seed(ids::TA_SEED, pf.draw + self.engine.stamp_base);
             self.engine.ta_target = f.ta_target;
             f.fs_target = pf.last_fs;
             self.engine.fs_target = pf.last_fs;
@@ -1057,7 +1190,7 @@ impl Firmware {
             Queue,
             self.graph.dev,
             "G15: prefix ctx={} computes {} (n={} head {}) renders {} (draw {} ta/fs head {}/{}) behind {}: {:?}\n",
-            job.vm.slot,
+            job.slot(),
             computes,
             pf.n,
             pf.c_head,
@@ -1094,8 +1227,8 @@ impl Firmware {
         later_render: bool,
     ) -> Result {
         let n = pf.n + 1;
-        let t = encode::stamp(n);
-        let ctx = job.vm.slot;
+        let t = encode::stamp(n + self.engine.compute_stamp_base);
+        let ctx = job.slot();
         let ts = &cmd.timestamps;
         let mut lap = Lap::start();
         // Nothing published yet on failure.
@@ -1138,6 +1271,7 @@ impl Firmware {
             ts,
             ctx,
             n,
+            t,
             tuning::COMPUTE_FAULT_MASK,
             image(w)?,
             image(q)?,
@@ -1191,11 +1325,7 @@ impl Firmware {
         }
         let j = pf.computes as usize;
         f.cstamp[j] = t;
-        f.cwait[j] = if pf.prev == Prev::Render {
-            pf.last_fs
-        } else {
-            0
-        };
+        f.cwait[j] = (pf.prev == Prev::Render).then_some(pf.last_fs);
         g.ring.w64(8 * pf.c_head as usize, s.work.va)?;
         pf.c_head = (pf.c_head + 1) % sizes::QUEUE_CAP;
         lap.lap(&mut self.engine.prof.write_ns);
@@ -1240,9 +1370,10 @@ impl Firmware {
         let k = f.claims.pass[pf.renders as usize] as usize;
         let n = pf.draw + 1;
         let usc = job.queue.usc_base;
-        let ctx = job.vm.slot;
-        let tta = encode::stamp_seed(ids::TA_SEED, n);
-        let tfs = encode::stamp_seed(ids::FS_SEED, n);
+        let ctx = job.slot();
+        let sn = n + self.engine.stamp_base;
+        let tta = encode::stamp_seed(ids::TA_SEED, sn);
+        let tfs = encode::stamp_seed(ids::FS_SEED, sn);
         // Early tiling: a later render member after a render of the same prefix whose render
         // dependencies are fragment-only (FRAGMENT_BARRIERS) and that has no start timestamps
         // lets its TA wait for the previous TA; its FS still waits for the previous FS, then
@@ -1341,7 +1472,7 @@ impl Firmware {
         } else if early {
             let b = encode::barrier(
                 r.fw_stamp[0].va,
-                encode::stamp_seed(ids::TA_SEED, n - 1),
+                encode::stamp_seed(ids::TA_SEED, sn - 1),
                 0,
                 tta,
                 RENDER_WAIT_UUID,
@@ -1361,10 +1492,9 @@ impl Firmware {
         } else {
             let mut prev_fs = if pf.prev != Prev::None {
                 pf.last_fs
-            } else if n == 1 {
-                ids::FS_SEED
             } else {
-                encode::stamp_seed(ids::FS_SEED, n - 1)
+                // With no offset, ordinal 0 is the FS seed itself (the first render).
+                encode::stamp_seed(ids::FS_SEED, sn - 1)
             };
             // Restricted type 0: predecessor render in this prefix, no InitBM/resync.
             let internal = pf.prev == Prev::Render

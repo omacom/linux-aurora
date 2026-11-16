@@ -147,6 +147,10 @@ impl Requests {
         }
     }
 
+    /// Add a policy to the pinned requests.
+    ///
+    /// # Safety
+    ///
     /// The caller holds the policy's read or write lock and keeps it alive.
     /// Policy removal must subsequently pass through this device's notifier.
     unsafe fn add(self: Pin<&mut Self>, policy: *mut bindings::cpufreq_policy) {
@@ -179,7 +183,7 @@ impl Requests {
                 this.maxima[index] = (*policy).cpuinfo.max_freq;
             }
             this.policies[index] = policy;
-            this.applied[index] = bindings::FREQ_QOS_MIN_DEFAULT_VALUE as u32;
+            this.applied[index] = bindings::FREQ_QOS_MIN_DEFAULT_VALUE;
         }
     }
 
@@ -193,7 +197,7 @@ impl Requests {
             let value = if enabled {
                 (u64::from(this.maxima[index]) * FLOOR_PERCENT / 100) as u32
             } else {
-                bindings::FREQ_QOS_MIN_DEFAULT_VALUE as u32
+                bindings::FREQ_QOS_MIN_DEFAULT_VALUE
             };
             if this.applied[index] != value {
                 // SAFETY: This slot is registered, pinned and exclusively locked;
@@ -211,7 +215,7 @@ impl Requests {
                     this.applied[index] = value;
                 }
             }
-            applied |= this.applied[index] != bindings::FREQ_QOS_MIN_DEFAULT_VALUE as u32;
+            applied |= this.applied[index] != bindings::FREQ_QOS_MIN_DEFAULT_VALUE;
         }
         applied
     }
@@ -235,7 +239,7 @@ impl Requests {
         }
         this.policies[index] = ptr::null_mut();
         this.maxima[index] = 0;
-        this.applied[index] = bindings::FREQ_QOS_MIN_DEFAULT_VALUE as u32;
+        this.applied[index] = bindings::FREQ_QOS_MIN_DEFAULT_VALUE;
     }
 
     fn clear(mut self: Pin<&mut Self>) {
@@ -364,6 +368,13 @@ impl Feed {
         }
     }
 
+    /// Process a cpufreq policy notification.
+    ///
+    /// # Safety
+    ///
+    /// `block` must be this pinned Feed's registered notifier, and `data` must
+    /// point to the live policy supplied by the cpufreq notifier core.
+    /// CREATE must hold its write lock; REMOVE must precede policy release.
     #[cfg(CONFIG_CPU_FREQ)]
     unsafe extern "C" fn policy_event(
         block: *mut bindings::notifier_block,
@@ -387,19 +398,19 @@ impl Feed {
             // held and guarantees REMOVE before the core releases its storage.
             unsafe { requests.as_mut().add(policy) };
         } else {
-            return bindings::NOTIFY_DONE as _;
+            return bindings::NOTIFY_DONE as i32;
         }
         let enabled = feed.detector.wanted(Self::now());
         let applied = requests.as_mut().apply(enabled);
         feed.applied.store(applied, Ordering::Relaxed);
-        bindings::NOTIFY_OK as _
+        bindings::NOTIFY_OK as i32
     }
 
     fn now() -> u64 {
         Monotonic::ktime_get() as u64
     }
 
-    pub(crate) fn note_render_pass(&self, start: u64, end: u64) {
+    pub(crate) fn note_pass(&self, start: u64, end: u64) {
         if cfg!(CONFIG_CPU_FREQ) {
             self.detector.note(start, end, Self::now());
         }

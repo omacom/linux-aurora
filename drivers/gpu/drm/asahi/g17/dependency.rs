@@ -17,6 +17,14 @@ pub(crate) fn inherited_error(error: Error) -> Error {
     }
 }
 
+/// A replay's original host inputs must still be signalled. Treat an unmet
+/// input as a failed replay, never as a wait under the device mutex.
+pub(crate) fn replay_status(status: i32) -> Result {
+    if status == 0 { Err(EBUSY) }
+    else if status < 0 { Err(inherited_error(Error::from_errno(status))) }
+    else { Ok(()) }
+}
+
 pub(crate) struct Frontier {
     dependencies: [KickDependency; KICK_BARRIERS_MAX],
     sequences: [u64; KICK_BARRIERS_MAX],

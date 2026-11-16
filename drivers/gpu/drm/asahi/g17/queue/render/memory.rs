@@ -31,6 +31,9 @@ pub(super) const ANNOUNCE: [usize; 2] = [0x17000, 0x1b000];
 pub(super) const JOB_LIST: usize = 0xa000;
 pub(super) const CONFIG: [usize; 2] = [0, 0x4000];
 pub(super) const CONFIG_STRIDE: usize = 0x180;
+/// The lead command of a stage (InitBM before tiling, the barrier before fragment), after the
+/// stage's configuration record in its slot ([`crate::g17::fw::Variant::lead_commands`]).
+pub(super) const LEAD: usize = 0xc0;
 const DEPTH: usize = queues::RENDER_DEPTH as usize;
 /// Offsets of the priority pair and the policy word in a queue record.
 const PRIORITY: usize = core::mem::offset_of!(queue::QueueRecord, priority);
@@ -94,6 +97,8 @@ pub(super) struct Graph {
     pub(super) config: PooledObject,
     pub(super) support: KernelObject,
     pub(super) owners: [Option<u64>; RECORDS],
+    /// Host words of the pointer blocks in this firmware build.
+    pub(super) pointers: fw::variant::PointerLayout,
 }
 impl Graph {
     pub(super) fn new(
@@ -101,6 +106,7 @@ impl Graph {
         pool: &Arc<Pool>,
         context: &Context,
         qids: [u8; 2],
+        pointers: fw::variant::PointerLayout,
     ) -> Result<Self> {
         let prot = mmu::PROT_GPU_FW_SHARED_RW;
         let descriptors = pool.allocate(
@@ -154,7 +160,7 @@ impl Graph {
                 }),
             )?;
             queues.initialize::<queue::PointerBlock>(POINTERS[stage], |view| {
-                *view = queue::PointerBlock::new();
+                *view = queue::PointerBlock::new(&pointers)?;
                 Ok(())
             })?;
         }
@@ -166,6 +172,7 @@ impl Graph {
             config,
             support,
             owners: [None; RECORDS],
+            pointers,
         })
     }
     pub(super) fn offset(stage: usize, ordinal: u64) -> usize {
@@ -188,11 +195,13 @@ impl Graph {
         self.aliases[stage].client.iova() + (ordinal as usize % RECORDS * stride) as u64
     }
     pub(super) fn publish_recovery_targets(&self) -> Result {
+        let Some(target) = self.pointers.recovery_target else {
+            return Ok(());
+        };
         for at in POINTERS {
-            let producer = self.queues.word(at + queue::PointerBlock::PRODUCER)?
+            let producer = self.queues.word(at + self.pointers.producer)?
                 .load(Ordering::Relaxed);
-            self.queues.word(at + queue::PointerBlock::RECOVERY_TARGET)?
-                .store(producer, Ordering::Relaxed);
+            self.queues.word(at + target)?.store(producer, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -208,7 +217,7 @@ impl Graph {
             values[stage] = Cursors {
                 done: self.queues.word(at)?.load(Ordering::Relaxed),
                 read: self.queues.word(at + 0x30)?.load(Ordering::Relaxed),
-                write: self.queues.word(at + 0x40)?.load(Ordering::Relaxed),
+                write: self.queues.word(at + self.pointers.producer)?.load(Ordering::Relaxed),
             };
         }
         Ok(values)
@@ -310,24 +319,36 @@ impl Generation {
         )
         .map_err(Into::into)
     }
-    pub(super) fn prepare(&mut self, ordinal: u64, pass: &abi::RenderPass) -> Result {
+    /// With `viewport` false the deflake buffer has no room for the viewport words
+    /// ([`abi::Deflake::viewport`]).
+    pub(super) fn prepare(
+        &mut self,
+        ordinal: u64,
+        pass: &abi::RenderPass,
+        viewport: bool,
+    ) -> Result {
         if self.ordinal.is_some_and(|old| old != ordinal) {
             return Err(EBUSY);
         }
-        let viewport = storage::Viewport::new(pass.width, pass.height)?;
+        let viewport = match viewport {
+            true => Some(storage::Viewport::new(pass.width, pass.height)?),
+            false => None,
+        };
         self.state.bytes_mut()[storage::AUXILIARY..storage::AUXILIARY + storage::AUXILIARY_SIZE]
             .fill(0);
-        let destination = self
-            .state
-            .pointer(storage::DEFLAKE + 0x900, size_of::<storage::Viewport>())?
-            .cast::<storage::Viewport>();
-        if destination.align_offset(align_of::<storage::Viewport>()) != 0 {
-            return Err(EINVAL);
+        if let Some(viewport) = viewport {
+            let destination = self
+                .state
+                .pointer(storage::DEFLAKE + 0x900, size_of::<storage::Viewport>())?
+                .cast::<storage::Viewport>();
+            if destination.align_offset(align_of::<storage::Viewport>()) != 0 {
+                return Err(EINVAL);
+            }
+            // SAFETY: The complete typed integer view is in the retained CPU mapping
+            // and naturally aligned. This command generation is exclusively owned
+            // and unpublished; no prior command can access it until reassigned.
+            unsafe { viewport.apply(&mut *destination) };
         }
-        // SAFETY: The complete typed integer view is in the retained CPU mapping
-        // and naturally aligned. This command generation is exclusively owned
-        // and unpublished; no prior command can access it until reassigned.
-        unsafe { viewport.apply(&mut *destination) };
         self.fragment.bytes_mut().fill(0);
         self.ordinal = Some(ordinal);
         Ok(())
@@ -365,6 +386,10 @@ pub(super) struct Memory {
 }
 impl Memory {
     #[inline(never)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Render memory construction keeps each allocation and firmware input explicit."
+    )]
     pub(super) fn new(
         alloc: &Allocator<'_>,
         pool: &Arc<Pool>,
@@ -376,10 +401,11 @@ impl Memory {
         pm_generation: u64,
         ordinal: u64,
         word: u32,
+        variant: &'static fw::Variant,
     ) -> Result<(KBox<Self>, KVec<mmu::KernelMapping>)> {
         let storage = KBox::<Self>::new_uninit(GFP_KERNEL)?;
         let vm = context.vm();
-        let mut graph = Graph::new(alloc, pool, &context, qids)?;
+        let mut graph = Graph::new(alloc, pool, &context, qids, variant.pointers)?;
         let mut target = target::Target::new(alloc.dev, vm, layout)?;
         target.prepare(ordinal, layout)?;
         let state = Generation::allocate_state(alloc, vm)?;
@@ -502,12 +528,45 @@ impl Memory {
 }
 
 const _: () = {
+    // Every unretired render of a pair holds its own command record.
+    assert!(DEPTH <= RECORDS);
     assert!(abi::TA_DESCRIPTOR_SIZE * RECORDS <= TA_BYTES);
     assert!(abi::FRAGMENT_SLOT_SIZE * RECORDS <= FRAGMENT_BYTES);
     assert!(RECORDS * CONFIG_STRIDE <= 0x4000);
+    assert!(size_of::<queue::QueueConfig>() <= LEAD);
+    assert!(LEAD + size_of::<queue::FragmentBarrier>() <= CONFIG_STRIDE);
+    assert!(LEAD + size_of::<queue::InitBufferManager>() <= CONFIG_STRIDE);
 };
 
 impl Memory {
+    /// Requests the tiling descriptor slot and both queue configuration records of
+    /// `ordinal` for writing. The firmware accessed them for the command that used them
+    /// last, so the host no longer holds their lines; requesting them before the rest of
+    /// the preparation overlaps those transfers with it instead of stalling the writes one
+    /// line at a time.
+    pub(super) fn prefetch_descriptors(&self, ordinal: u64) {
+        let record = ordinal as usize % RECORDS;
+        let config = size_of::<queue::QueueConfig>();
+        let ranges = [
+            (&self.graph.descriptors, Graph::offset(0, ordinal), size_of::<abi::TaDescriptor>()),
+            (&self.graph.config, CONFIG[0] + record * CONFIG_STRIDE, config),
+            (&self.graph.config, CONFIG[1] + record * CONFIG_STRIDE, config),
+        ];
+        for (object, offset, size) in ranges {
+            let Ok(base) = object.pointer(offset, size) else {
+                continue;
+            };
+            for line in (0..size).step_by(64) {
+                // SAFETY: A prefetch hint inside the retained mapping; it has no
+                // architectural effect on memory.
+                unsafe {
+                    core::arch::asm!("prfm pstl1keep, [{0}]", in(reg) base.add(line),
+                        options(nostack, preserves_flags, readonly));
+                }
+            }
+        }
+    }
+
     pub(super) fn write_descriptors(
         &mut self,
         args: &abi::RenderArgs<'_>,
@@ -542,21 +601,10 @@ impl Memory {
             (&mut *tiling).write(args)?;
             let fragment = &mut *fragment;
             fragment.write(args)?;
-            self.registers.bytes_mut().fill(0);
-            for (index, array) in fragment.descriptor.arrays.iter().enumerate() {
-                for (entry, value) in array
-                    .entries
-                    .get(..(array.size & 0xffff) as usize)
-                    .ok_or(EINVAL)?
-                    .iter()
-                    .enumerate()
-                {
-                    self.registers.write(
-                        index * size_of::<fw::kick::RegisterArray>()
-                            + entry * size_of::<fw::kick::RegisterWrite>(),
-                        *value,
-                    )?;
-                }
+            // Kick entries bind the arrays embedded in this descriptor
+            // (register_bindings); the client register page is never read.
+            for array in &fragment.descriptor.arrays {
+                array.entries.get(..(array.size & 0xffff) as usize).ok_or(EINVAL)?;
             }
             fragment.set_mcache(
                 args.fragment.descriptor_va,
@@ -597,6 +645,52 @@ impl Memory {
             (&mut *fragment).set_completion_link(kicks[1], payload);
         }
         Ok(())
+    }
+
+    /// Writes the lead commands of `ordinal` from its linked descriptors: InitBM before the
+    /// tiling descriptor when `init_manager`, and the fragment barrier. Returns which stages
+    /// have one.
+    pub(super) fn write_leads(
+        &mut self,
+        ordinal: u64,
+        tiling_kick: fw::kick::KickTimestamp,
+        init_manager: bool,
+    ) -> Result<[bool; 2]> {
+        if !self.owns(ordinal) {
+            return Err(EIO);
+        }
+        let ta = self
+            .graph
+            .descriptors
+            .pointer(Graph::offset(0, ordinal), size_of::<abi::TaDescriptor>())?
+            .cast::<abi::TaDescriptor>();
+        let fragment = self
+            .graph
+            .descriptors
+            .pointer(Graph::offset(1, ordinal), size_of::<abi::FragmentSlot>())?
+            .cast::<abi::FragmentSlot>();
+        // SAFETY: Both views were checked during preparation and the ordinal still owns them;
+        // only integer fields are read.
+        let (ta, fragment_id) = unsafe { (&*ta, (*fragment).descriptor.current_id) };
+        let slot = ordinal as usize % RECORDS * CONFIG_STRIDE + LEAD;
+        let barrier = queue::FragmentBarrier::new(
+            ta.stamp_va,
+            tiling_kick,
+            ta.qid,
+            ta.stamp_value,
+            fragment_id,
+        );
+        self.graph.config.write(CONFIG[1] + slot, barrier)?;
+        if init_manager {
+            let init = queue::InitBufferManager::new(
+                ta.context_id,
+                ta.pb_slot,
+                ta.pb_va,
+                ta.stamp_value,
+            );
+            self.graph.config.write(CONFIG[0] + slot, init)?;
+        }
+        Ok([init_manager, true])
     }
 }
 

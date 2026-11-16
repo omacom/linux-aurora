@@ -23,6 +23,18 @@ __rust_helper bool rust_helper_mmget_not_zero(struct mm_struct *mm)
 	return mmget_not_zero(mm);
 }
 
+__rust_helper void rust_helper_add_mm_counter(struct mm_struct *mm, int member,
+					      long value)
+{
+	add_mm_counter(mm, member, value);
+}
+
+__rust_helper unsigned long rust_helper_get_mm_counter_sum(struct mm_struct *mm,
+							   int member)
+{
+	return get_mm_counter_sum(mm, member);
+}
+
 __rust_helper void rust_helper_mmap_read_lock(struct mm_struct *mm)
 {
 	mmap_read_lock(mm);

@@ -2821,12 +2821,26 @@ static int dm_dmub_sw_init(struct amdgpu_device *adev)
 	}
 
 	/*
+	 * Behind a non-posted BAR the buffer lives in GTT. The backdoor loader of a directly
+	 * loaded firmware converts addresses as VRAM addresses and fills the buffer with plain
+	 * CPU copies, so only PSP firmware loading is supported there.
+	 */
+	if ((pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED) &&
+	    adev->firmware.load_type != AMDGPU_FW_LOAD_PSP) {
+		drm_err(adev_to_drm(adev),
+			"Direct DMUB firmware loading is not supported behind a non-posted BAR\n");
+		return -EOPNOTSUPP;
+	}
+
+	/*
 	 * Allocate a framebuffer based on the total size of all the regions.
 	 * TODO: Move this into GART.
 	 */
 	r = amdgpu_bo_create_kernel(adev, region_info.fb_size, PAGE_SIZE,
-				    AMDGPU_GEM_DOMAIN_VRAM |
-				    AMDGPU_GEM_DOMAIN_GTT,
+				    (pci_resource_flags(adev->pdev, 0) &
+				     IORESOURCE_MEM_NONPOSTED) ?
+				    AMDGPU_GEM_DOMAIN_GTT :
+				    AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT,
 				    &adev->dm.dmub_bo,
 				    &adev->dm.dmub_bo_gpu_addr,
 				    &adev->dm.dmub_bo_cpu_addr);

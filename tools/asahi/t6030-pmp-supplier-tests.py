@@ -6,7 +6,9 @@ Actual selection, dispatch, device-link and serialized power functions are
 extracted. OF enumeration/property storage, device binding, MMIO polling,
 and locks are controlled host boundaries. The T6030 managed entry wait
 and start wait are extracted too; the firmware/workqueue boundary is controlled.
-This models ownership/error handling, not real teardown concurrency or DMA.
+The GFX-report service is modeled separately from supplier readiness; its
+transaction has its own production-body PMP-vote selftest. This models
+ownership/error handling, not real teardown concurrency or DMA.
 """
 import argparse
 import hashlib
@@ -146,6 +148,8 @@ def main():
             ("gate-config", "IS_ENABLED(CONFIG_APPLE_T6030_GPU_PMP_LINK) && gate_soc == &gate_t6030", "gate_soc == &gate_t6030"),
             ("gate-phandle-shape", 'of_property_count_u32_elems(gpu, "apple,pmp") != 1', "false"),
             ("serialized-command", "\tguard(mutex)(&pmp_lock);", "\t(void)&pmp_lock;"),
+            ("gfx-check-error", "ret = apple_pmp_report_check_t6030_gfx(pmp_device);",
+             "ret = (apple_pmp_report_check_t6030_gfx(pmp_device), 0);"),
         ]
         for name, old, new in mutations:
             assert code.count(old) == 1, (name, code.count(old))

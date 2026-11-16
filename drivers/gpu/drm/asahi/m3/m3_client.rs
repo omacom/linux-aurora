@@ -5,11 +5,11 @@
 //! Client admission: the M3 GPU runs AGX3 shaders and command streams. Userspace written for
 //! the AGX2 GPUs (G13/G14) reads the M3's parameters as those of a G14 and would submit AGX2
 //! streams, which fault the GPU; the M3 backends cannot recover from a fault, so one such client
-//! stops the GPU for the rest of the boot. Userspace that drives the M3 knows the AGX3 fields at
-//! the end of `drm_asahi_params_global` (`usc_generation`, `gpu_hal_generation`) and asks
-//! GET_PARAMS for the whole structure; older userspace asks for less. On G15 a file therefore
-//! has to ask for the whole structure before it can create a VM. Every path to the GPU needs a
-//! VM, so a refused client can still query the parameters but never reaches the hardware.
+//! stops the GPU for the rest of the boot. Userspace that drives the M3 knows the AGX3 fields
+//! of `drm_asahi_params_global` (`usc_generation`, `gpu_hal_generation`) and asks GET_PARAMS
+//! for at least the structure up to them; older userspace asks for less. On G15 a file therefore
+//! has to ask for those fields before it can create a VM. Every path to the GPU needs a VM, so a
+//! refused client can still query the parameters but never reaches the hardware.
 
 use core::sync::atomic::{
     AtomicU32,
@@ -29,15 +29,20 @@ use crate::{
     mmu,
 };
 
-/// GET_PARAMS size an AGX3-aware client asks for: the whole global parameter structure.
-const AGX3_PARAMS_SIZE: u64 = core::mem::size_of::<uapi::drm_asahi_params_global>() as u64;
+/// GET_PARAMS size an AGX3-aware client asks for: the global parameter structure up to the end
+/// of `gpu_hal_generation`. The optional tail fields that follow it are not part of the check,
+/// so growing the structure does not refuse userspace built against the shorter one.
+const AGX3_PARAMS_SIZE: u64 =
+    (core::mem::offset_of!(uapi::drm_asahi_params_global, gpu_hal_generation)
+        + core::mem::size_of::<u32>()) as u64;
+const _: () = assert!(AGX3_PARAMS_SIZE == 600);
 
 /// Refused clients that are logged per boot; later refusals only count.
 const REFUSALS_LOGGED: u32 = 16;
 static REFUSALS: AtomicU32 = AtomicU32::new(0);
 
-/// Whether a file may create a VM on the M3 runtime: it must have asked GET_PARAMS for the
-/// whole global parameter structure (so it knows this GPU runs AGX3 command streams), and pass
+/// Whether a file may create a VM on the M3 runtime: it must have asked GET_PARAMS for at least
+/// [`AGX3_PARAMS_SIZE`] bytes (so it knows this GPU runs AGX3 command streams), and pass
 /// VM_CREATE flags 0 (legacy HAL). `size` is the largest GET_PARAMS size the file asked for.
 pub(crate) fn admit_vm(device: &kernel::device::Device, size: u64, flags: u32) -> Result {
     {

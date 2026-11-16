@@ -160,61 +160,27 @@ fn templates(
 /// HardwareDataA word holding the system counter at initdata creation.
 const HWDATA_A_INIT_TIMESTAMP: usize = 0x424c;
 
-/// Board images of a SoC with a firmware file. The hardware record ([`board::hardware_record`]),
-/// Globals and Power ([`board::device_tree`]) are built from the device tree; the file, this
-/// machine's own, supplies the record's words the device tree does not carry and is otherwise
-/// a cross-check: admission ([`prepare_board`], before any firmware is touched) is refused at
-/// the first differing word. Returns the images and the top operating-point frequency in kHz.
-fn blob(
+/// Board images of a device-tree SoC: the hardware record ([`board::hardware_record`]) from the
+/// GPU node, the ADT's sensor rows and the SoC's `reference` words, Globals and Power
+/// ([`board::device_tree`]) from the GPU node and that record. Returns the images and the top
+/// operating-point frequency in kHz.
+fn device_tree_board(
     dev: &device::Device,
     cfg: &Config,
     adt: &GpuAdt,
-    name: &CStr,
-    sha256: &[u8; 32],
+    reference: &board::record::Reference,
 ) -> Result<(KVVec<u8>, KVVec<u8>, KVVec<u8>, u32)> {
-    let layout = cfg.layout;
-    let images = board::blob::load(
-        dev,
-        name,
-        sha256,
-        [layout.hwdata_size, globals::SIZE, power::SIZE],
-    )?;
-    let hw_img = board::hardware_record(dev, cfg, adt, &images.hardware)?;
+    let hw_img = board::hardware_record(dev, cfg, adt, reference)?;
     let (glob, pwr, max_power_mw) = board::device_tree(dev, &hw_img)?;
-    for (what, built, file) in [
-        ("hardware record", &hw_img, &images.hardware),
-        ("Globals", &glob, &images.globals),
-        ("Power", &pwr, &images.power),
-    ] {
-        let diff = if what == "hardware record" {
-            board::record::cross_check(built, file)
-        } else {
-            board::words::first_difference(built, file)
-        };
-        if let Some((at, b, f)) = diff {
-            dev_err!(
-                dev,
-                "board data: device-tree {} differs from {} at +{:#x}: built {:#x}, file {:#x}\n",
-                what,
-                name,
-                at,
-                b,
-                f
-            );
-            return Err(EINVAL);
-        }
-    }
     let max_mhz = adt.perf_mhz.iter().copied().max().unwrap_or(0);
     dev_info!(
         dev,
-        "board data: {} images from the device tree match {} ({} record words from the file, {} file words left zero), {} mW maximum power, {} MHz top operating point\n",
+        "board data: {} images from the device tree and the ADT sensor rows, reference maximum power {} mW and MTR masks, {} MHz top operating point\n",
         cfg.name,
-        name,
-        board::record::FROM_FILE.len(),
-        board::record::UNNEEDED.len(),
         max_power_mw,
         max_mhz
     );
+    dev_info!(dev, "board data sha256 {}\n", Hex(&glue::sha256(&hw_img)));
     let max_khz = max_mhz.checked_mul(1000).ok_or_else(|| {
         dev_err!(dev, "board data: top operating point {} MHz does not fit in kHz\n", max_mhz);
         EINVAL
@@ -225,8 +191,9 @@ fn blob(
 /// Verified board bytes, prepared before any GPU firmware is started.
 pub(crate) type BoardImages = (KVVec<u8>, KVVec<u8>, KVVec<u8>, u32);
 
-/// Check availability, digest, layout and machine-derived tables before firmware start.
-/// Keep the verified bytes so a later firmware request cannot change the admitted data.
+/// Build and check the board images before any GPU firmware is started: the templates against
+/// their digests and layout, or the device-tree record from the GPU node, the ADT and the SoC's
+/// reference words.
 pub(crate) fn prepare_board(
     dev: &device::Device,
     cfg: &Config,
@@ -234,7 +201,7 @@ pub(crate) fn prepare_board(
 ) -> Result<BoardImages> {
     match cfg.board {
         hw::Board::Templates => templates(dev, adt),
-        hw::Board::Blob { name, sha256 } => blob(dev, cfg, adt, name, &sha256),
+        hw::Board::DeviceTree(reference) => device_tree_board(dev, cfg, adt, reference),
         hw::Board::None => Err(ENODEV),
     }
 }
@@ -296,7 +263,7 @@ pub(crate) fn build(
 
     // Board images, verified, then the owned replacements.
     let (mut hw_img, mut glob, pwr, max_khz) = board_images;
-    if matches!(cfg.board, hw::Board::Blob { .. }) {
+    if matches!(cfg.board, hw::Board::DeviceTree(_)) {
         // This timestamp belongs to initdata creation, not board-data preflight.
         let now: u64;
         // SAFETY: Reading the architectural counter has no side effects.
@@ -318,10 +285,10 @@ pub(crate) fn build(
     }
     put64(&mut hw_img, hwdata::TIMESTAMPS, va::TIMESTAMPS)?;
     put32(&mut glob, globals::UNK_980, 100)?;
-    // The device tree's standby time (a machine with a firmware file; the templates' machine
+    // The device tree's standby time (a device-tree SoC; the templates' machine
     // has none).
     let dt_standby = match cfg.board {
-        hw::Board::Blob { .. } => {
+        hw::Board::DeviceTree(_) => {
             let prop = board::words::PROPS[board::words::STANDBY_TIMER];
             match dev
                 .of_node()
@@ -369,8 +336,8 @@ pub(crate) fn build(
         globals::IDLE_PREDICTIVE,
         hw::tuning::IDLE_PREDICTIVE as u32,
     )?;
-    // HardwareDataA at +0x4580: maintained S8 request (the templates' machine; a board image
-    // from a file carries its own machine's words).
+    // HardwareDataA at +0x4580: maintained S8 request (the templates' machine; a record built
+    // from the device tree carries its own state words).
     if cfg.board == hw::Board::Templates {
         for (offset, value) in [
             (0x2c, 8),

@@ -136,6 +136,9 @@ pub(crate) enum Event {
     TvbGrow(TvbGrowRequest),
     FreeListGrow(FreeListCompletion),
     ContextKilled(u64),
+    /// The firmware failed a compute command of queue `qid` and stores no completion stamp for
+    /// it: `stamp` is the value that command would have stored.
+    ComputeFault { qid: u8, stamp: u32 },
     Unknown(u32),
 }
 
@@ -145,6 +148,8 @@ impl EventRecord {
     const TVB_GROW: u32 = 6;
     const FREE_LIST_GROW: u32 = 13;
     const CONTEXT_KILLED: u32 = 12;
+    const COMPUTE_FAULT: u32 = 7;
+    const COMPUTE_QIDS: u32 = 128;
     const DIAGNOSTIC_PAIRS_MAX: u16 = 5;
     const TVB_SLOTS: u32 = 127;
     const SUBPIPES: u32 = 64;
@@ -197,6 +202,19 @@ impl EventRecord {
                     subpipe: record.subpipe,
                     halt_count: record.halt_count,
                 }))
+            }
+            Self::COMPUTE_FAULT => {
+                // SAFETY: Every constructor initializes all integer words.
+                let words = unsafe { self.words };
+                // Only compute faults are known to use this type: any other layout stays an
+                // unknown event, consumed and ignored as before.
+                if words[3] >= Self::COMPUTE_QIDS || words[4] & 0xff != 0 {
+                    return Ok(Event::Unknown(Self::COMPUTE_FAULT));
+                }
+                Ok(Event::ComputeFault {
+                    qid: words[3] as u8,
+                    stamp: words[4],
+                })
             }
             Self::CONTEXT_KILLED => {
                 // SAFETY: Every constructor initializes all integer words.
@@ -498,7 +516,7 @@ impl WorkSlot {
             data_master: data_master as u32,
             items_end,
             qid,
-            first: first as u8,
+            first: u8::from(first),
         })
     }
 }
@@ -523,5 +541,28 @@ impl ContextKill {
             cookie,
             reserved: [0; 0x2c],
         }
+    }
+}
+
+#[cfg_attr(not(test), kernel::macros::kunit_tests(asahi_g17_event_records))]
+mod tests {
+    use super::*;
+
+    fn record(words: &[u32]) -> EventRecord {
+        let mut all = [0u32; EVENT_WORDS];
+        all[..words.len()].copy_from_slice(words);
+        EventRecord::from_words(all)
+    }
+
+    #[test]
+    fn a_compute_fault_names_its_queue_and_stamp() {
+        let event = record(&[7, 1, 2, 0x39, 0x300, 0xffff_fc00, 1]).decode();
+        assert_eq!(event, Ok(Event::ComputeFault { qid: 0x39, stamp: 0x300 }));
+    }
+
+    #[test]
+    fn an_unrecognized_type_7_layout_stays_unknown() {
+        assert_eq!(record(&[7, 1, 2, 128, 0x300]).decode(), Ok(Event::Unknown(7)));
+        assert_eq!(record(&[7, 1, 2, 9, 0x301]).decode(), Ok(Event::Unknown(7)));
     }
 }

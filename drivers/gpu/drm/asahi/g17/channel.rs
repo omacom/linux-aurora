@@ -138,6 +138,7 @@ impl Rings {
             record.opcode().asserts_gpu_power(),
             next,
         )?;
+        super::trace::message(super::trace::CONTROL, record.opcode() as u64);
         Ok(next)
     }
 }

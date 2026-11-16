@@ -1957,6 +1957,10 @@ modes_done:
 	if (apple_connector->drm_edid)
 		dcp_retry_placeholder_edid(dcp, apple_connector->drm_edid);
 
+	/* EDID updates clear display_info even for panels without an EDID. */
+	if (published && dcp_has_panel(dcp))
+		dcp_update_connector_dimensions(dcp, connector);
+
 	/*
 	 * An internal panel has no EDID, so nothing fills in the refresh range
 	 * that userspace needs before it will drive VRR. Supply the range DCP

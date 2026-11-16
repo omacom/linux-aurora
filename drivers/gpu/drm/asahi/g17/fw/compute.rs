@@ -12,7 +12,7 @@ use kernel::prelude::*;
 use super::kick::{KickTimestamp, RegisterArray, RegisterArrayBinding, RegisterWrite};
 use super::queue::CommandTag;
 use super::{
-    clear, offset_va, sampler_max, stamp_value, timestamp_end_va, work_key, ObjectIds, UNK_0A599,
+    offset_va, sampler_max, stamp_value, timestamp_end_va, work_key, ObjectIds, UNK_0A599,
     UNK_0D411, UNK_101D9, UNK_10791, UNK_1A0E9, UNK_1C8F8,
 };
 
@@ -67,10 +67,10 @@ impl ScratchRequest {
     /// guard; the per-register words are the native formulas, so they are
     /// checked here against Apple's own values before they reach hardware.
     pub(crate) fn new(layout: u64) -> Result<Self> {
-        let depth = layout & u16::MAX as u64;
-        let cliques = (layout >> 24) & u8::MAX as u64;
-        let user = (layout >> 32) & u16::MAX as u64;
-        let driver = (layout >> 48) & u16::MAX as u64;
+        let depth = layout & u64::from(u16::MAX);
+        let cliques = (layout >> 24) & u64::from(u8::MAX);
+        let user = (layout >> 32) & u64::from(u16::MAX);
+        let driver = (layout >> 48) & u64::from(u16::MAX);
         if user == 0 && driver == 0 {
             return Ok(Self {
                 pages: 0,
@@ -152,13 +152,42 @@ const UNK_1A458: u64 = 0x10c0_0000 | UNK_1C8F8;
 
 /// Offsets in the preempt buffer of the four state words the program names.
 const PREEMPT_STATE: [u64; 4] = [0x1480, 0x1488, 0x1490, 0x1498];
-/// Offsets in the operand-state buffer of the regions the program names.
-const OPERAND_STATE_10229: u64 = 0x12800;
-const OPERAND_STATE_140A8: u64 = 0x13000;
-const OPERAND_STATE_10099: u64 = 0x9405;
-const OPERAND_STATE_10091: u64 = 0x12400;
-const OPERAND_STATE_0A5C1: u64 = 0x0005;
-const OPERAND_STATE_0A5C9: u64 = 0x9000;
+/// Layout of a queue's operand-state buffer, which depends on the GPU's core layout: offsets of
+/// the regions the program names (two preemption banks of three 0x800-byte records per core,
+/// tagged | 5 at their start, then their end, then the per-cluster tails) and its size.
+pub(crate) struct OperandState {
+    r10229: u64,
+    r140a8: u64,
+    r10099: u64,
+    r10091: u64,
+    r0a5c1: u64,
+    r0a5c9: u64,
+    /// Size of the buffer.
+    pub(crate) size: usize,
+}
+
+impl OperandState {
+    /// One cluster of six cores (A18 Pro).
+    pub(crate) const ONE_BY_SIX: OperandState = OperandState {
+        r10229: 0x12800,
+        r140a8: 0x13000,
+        r10099: 0x9405,
+        r10091: 0x12400,
+        r0a5c1: 0x0005,
+        r0a5c9: 0x9000,
+        size: 0x14000,
+    };
+    /// Two clusters of ten cores (M4 Pro): bank stride 0x1e400, tails 0x1000.
+    pub(crate) const TWO_BY_TEN: OperandState = OperandState {
+        r10229: 0x3c800,
+        r140a8: 0x3d800,
+        r10099: 0x1e405,
+        r10091: 0x3c400,
+        r0a5c1: 0x0005,
+        r0a5c9: 0x1e000,
+        size: 0x44000,
+    };
+}
 
 /// Checkpoints into the main register array, as entry counts: after the
 /// first 0x0a5c9 write, after the final 0x1a440 write (twice), and the full
@@ -283,6 +312,8 @@ pub(crate) struct ComputeArgs {
     pub(crate) preempt_va: u64,
     /// GPU address of the operand-state buffer, as seen by the work's VM.
     pub(crate) operand_state_va: u64,
+    /// Layout of the operand-state buffer.
+    pub(crate) operand: &'static OperandState,
     /// GPU address of the private-memory usage record, as seen by the work's
     /// VM.
     pub(crate) usage_va: u64,
@@ -305,6 +336,7 @@ pub(crate) struct ComputeArgs {
 fn compute_registers(args: &ComputeArgs) -> Result<[RegisterWrite; COMPUTE_REGISTERS_MAX]> {
     let preempt = args.preempt_va;
     let operand = args.operand_state_va;
+    let state = args.operand;
     let key = work_key(args.context_id, args.work_state);
     let ids = OBJECT_IDS.word();
     let intersection = args.intersection.words();
@@ -347,14 +379,14 @@ fn compute_registers(args: &ComputeArgs) -> Result<[RegisterWrite; COMPUTE_REGIS
         RegisterWrite::new(0x0a351, ids),
         RegisterWrite::new(0x10201, key),
         RegisterWrite::new(0x10428, key),
-        RegisterWrite::new(0x14028, args.free_list_slot as u64),
+        RegisterWrite::new(0x14028, u64::from(args.free_list_slot)),
         RegisterWrite::new(0x14070, args.usage_va | 1),
-        RegisterWrite::new(0x10229, offset_va(operand, OPERAND_STATE_10229)?),
-        RegisterWrite::new(0x140a8, offset_va(operand, OPERAND_STATE_140A8)?),
-        RegisterWrite::new(0x10099, offset_va(operand, OPERAND_STATE_10099)?),
-        RegisterWrite::new(0x10091, offset_va(operand, OPERAND_STATE_10091)?),
-        RegisterWrite::new(0x0a5c1, offset_va(operand, OPERAND_STATE_0A5C1)?),
-        RegisterWrite::new(0x0a5c9, offset_va(operand, OPERAND_STATE_0A5C9)?),
+        RegisterWrite::new(0x10229, offset_va(operand, state.r10229)?),
+        RegisterWrite::new(0x140a8, offset_va(operand, state.r140a8)?),
+        RegisterWrite::new(0x10099, offset_va(operand, state.r10099)?),
+        RegisterWrite::new(0x10091, offset_va(operand, state.r10091)?),
+        RegisterWrite::new(0x0a5c1, offset_va(operand, state.r0a5c1)?),
+        RegisterWrite::new(0x0a5c9, offset_va(operand, state.r0a5c9)?),
         RegisterWrite::new(0x1a440, UNK_1A440_FINAL),
         RegisterWrite::new(0x0a599, UNK_0A599),
     ])
@@ -364,11 +396,12 @@ fn compute_registers(args: &ComputeArgs) -> Result<[RegisterWrite; COMPUTE_REGIS
 /// 0x10099/0x0a5c1 and 0x10091/0x0a5c9.
 fn alt_registers(args: &ComputeArgs) -> Result<[RegisterWrite; ALT_REGISTERS]> {
     let operand = args.operand_state_va;
+    let state = args.operand;
     Ok([
-        RegisterWrite::new(0x10099, offset_va(operand, OPERAND_STATE_0A5C1)?),
-        RegisterWrite::new(0x10091, offset_va(operand, OPERAND_STATE_0A5C9)?),
-        RegisterWrite::new(0x0a5c1, offset_va(operand, OPERAND_STATE_10099)?),
-        RegisterWrite::new(0x0a5c9, offset_va(operand, OPERAND_STATE_10091)?),
+        RegisterWrite::new(0x10099, offset_va(operand, state.r0a5c1)?),
+        RegisterWrite::new(0x10091, offset_va(operand, state.r0a5c9)?),
+        RegisterWrite::new(0x0a5c1, offset_va(operand, state.r10099)?),
+        RegisterWrite::new(0x0a5c9, offset_va(operand, state.r10091)?),
     ])
 }
 
@@ -474,8 +507,9 @@ impl ComputeDescriptor {
     const UNK_FBA: u32 = 0xe0a0_0001;
     const UNK_FC5: u8 = 0x9f;
 
-    /// Writes the complete descriptor.
-    pub(crate) fn write(&mut self, args: &ComputeArgs) -> Result {
+    /// Fills a descriptor cleared by `Object::initialize`. The unused firmware
+    /// fields and padding retain that zero initialization.
+    pub(crate) fn write_zeroed(&mut self, args: &ComputeArgs) -> Result {
         if args.cdm_end_va < args.cdm_va
             || (args.sampler_heap_va == 0) != (args.sampler_count == 0)
             || args.sampler_heap_va & 7 != 0
@@ -489,7 +523,6 @@ impl ComputeDescriptor {
         let timestamp_end_va = timestamp_end_va(args.timestamp_va)?;
         let sampler_max = sampler_max(args.sampler_count)?;
 
-        clear(self);
         self.tag = CommandTag::Compute as u32;
         self.context_id = args.context_id.into();
         self.work_state_va = args.work_state_va;

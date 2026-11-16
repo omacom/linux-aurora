@@ -5,7 +5,8 @@
 # public repository. The two CPU-heavy jobs (package, kunit) run on the
 # repository variable KERNEL_CI_RUNNER when it is set, as a JSON runs-on value
 # such as ["namespace-profile-arm64-linux-apple-12x32"]; it defaults to
-# GitHub's arm64 runner.
+# GitHub's arm64 runner. Variables do not reach a fork's pull request run, so
+# for a trusted author's fork plan.py names the runner instead.
 
 name: Kernel CI jobs
 
@@ -47,11 +48,14 @@ jobs:
       reason: ${{ steps.plan.outputs.reason }}
       base_sha: ${{ steps.plan.outputs.base_sha }}
       head_sha: ${{ steps.plan.outputs.head_sha }}
+      runner: ${{ steps.plan.outputs.runner }}
       key: ${{ steps.lookup.outputs.key }}
       kernel_tree: ${{ steps.lookup.outputs.kernel_tree }}
       recipe_commit: ${{ steps.lookup.outputs.recipe_commit }}
       package_run: ${{ steps.lookup.outputs.package_run }}
+      package_artifact: ${{ steps.lookup.outputs.package_artifact }}
       verified_run: ${{ steps.lookup.outputs.verified_run }}
+      pull_request_run: ${{ steps.lookup.outputs.pull_request_run }}
       base_tree: ${{ steps.lookup.outputs.base_tree }}
       baseline_run: ${{ steps.lookup.outputs.baseline_run }}
     steps:
@@ -96,9 +100,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ steps.plan.outputs.base_sha }}
           FORCE: ${{ steps.plan.outputs.force }}
+          MERGE_QUEUE_REF: ${{ github.event_name == 'merge_group' && github.ref || '' }}
         run: |
           python3 -I tools/aurora-ci/lookup-build.py --kernel . \
-            --recipe-repo "$RUNNER_TEMP/omarchy-pkgs" --base-sha "$BASE_SHA" --force "$FORCE"
+            --recipe-repo "$RUNNER_TEMP/omarchy-pkgs" --base-sha "$BASE_SHA" --force "$FORCE" \
+            --merge-queue-ref "$MERGE_QUEUE_REF"
 
   commits:
     name: commits
@@ -141,15 +147,16 @@ jobs:
       - name: Check out the change
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ needs.plan.outputs.head_sha }}
           persist-credentials: false
+      # Fetch the event's named ref, not raw SHAs: the PR's merge ref contains
+      # both parents. SHA fetches exhausted this job before compilation.
       - name: Fetch history back to the target branch
         run: |
-          git fetch --quiet --no-tags --depth=1 origin "$BASE_SHA" "$HEAD_SHA"
           for depth in 64 256 1024 4096; do
-            git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null && break
-            git fetch --quiet --no-tags --depth="$depth" origin "$BASE_SHA" "$HEAD_SHA"
+            git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null 2>&1 && break
+            git fetch --quiet --no-tags --depth="$depth" origin "$GITHUB_REF"
           done
+          git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null
       - name: Install LLVM 18
         run: |
           sudo apt-get update -q
@@ -218,9 +225,9 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  # Needs nothing from plan, so it starts with it.
   host-tests:
     name: host tests (${{ matrix.group }})
-    needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -228,7 +235,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [tools, aurora-sep]
+        group: [tools, aurora-sep, aurora-sep-slow]
     env:
       GROUP: ${{ matrix.group }}
     steps:
@@ -291,7 +298,7 @@ jobs:
     if: needs.plan.outputs.tier == 'full'
     # A reused build only downloads and checks the packages; that needs no
     # build machine.
-    runs-on: ${{ needs.plan.outputs.package_run != '' && 'ubuntu-24.04' || fromJSON(vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
+    runs-on: ${{ needs.plan.outputs.package_run != '' && 'ubuntu-24.04' || fromJSON(needs.plan.outputs.runner || vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
     timeout-minutes: 180
     permissions:
       actions: read # look up and download earlier runs' artifacts
@@ -333,10 +340,20 @@ jobs:
           cp omarchy-pkgs/build-output/edge/aarch64/linux-aurora-*.pkg.tar.zst out/packages/
           ls -l out/packages
       - name: Download the packages built for this key
-        if: env.REUSE_RUN != ''
+        if: env.REUSE_RUN != '' && needs.plan.outputs.package_artifact == ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: kernel-package-${{ env.KEY }}
+          path: out
+          run-id: ${{ env.REUSE_RUN }}
+          github-token: ${{ github.token }}
+      # The very artifact plan paired with the verification; fails if a
+      # re-run of that pull request run has replaced it since.
+      - name: Download the pull request run's packages
+        if: needs.plan.outputs.package_artifact != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.plan.outputs.package_artifact }}
           path: out
           run-id: ${{ env.REUSE_RUN }}
           github-token: ${{ github.token }}
@@ -391,7 +408,7 @@ jobs:
     name: KUnit
     needs: plan
     if: needs.plan.outputs.tier == 'full' && needs.plan.outputs.verified_run == ''
-    runs-on: ${{ fromJSON(vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
+    runs-on: ${{ fromJSON(needs.plan.outputs.runner || vars.KERNEL_CI_RUNNER || '"ubuntu-24.04-arm"') }}
     timeout-minutes: 90
     permissions:
       contents: read # check out the repository

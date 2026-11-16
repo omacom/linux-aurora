@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only OR MIT
-"""Test the actual J516C record builder's narrow zero-word exemption.
+"""Test the actual J516C record builder's narrow zero-word exemption and its word sources.
 
 Uses synthetic public data and temporary host copies of production Rust modules.
 No GPU, firmware file, private fixture, kernel build or hardware access. The
@@ -9,8 +9,20 @@ hw.rs file refreshed at 709f0f08316a for the reviewed shared PB allocator change
 and again when the initial PB posting became a module parameter (the tuning
 constant PB_BLOCKS removed), and when the T6030/T6031 tables were gated on
 CONFIG_DRM_ASAHI_G15 for the T8122 runtime's UAT adoption (two #[cfg] lines;
-the tables are unchanged). Its T6030 configuration module is independently
-pinned to the original bytes.
+the tables are unchanged), and when the T6031 board source became the
+device tree with reference words instead of a board file (the Board enum;
+the T6030 tables are unchanged), and for publication-bound slots (removal of
+MAX_VMS and its lifetime-slot comment only), and when Board::DeviceTree was
+gated on CONFIG_DRM_ASAHI_G15 for the T8122 runtime without the G15 backend
+(one #[cfg] line; the tables are unchanged). Its T6030 configuration module is
+independently pinned to the original bytes,
+except for the J514S B0 FirmwareBuild row, the J514S cd05 and J516S cd05
+FirmwareBuild rows and the J514S 4118 and J516S 4118 FirmwareBuild rows added
+to its firmware table: the module is the original pinned bytes (0079ae08) plus
+those five rows, and the whole hw.rs pin was refreshed with each (with the 4118
+rows removed, both pins are their earlier values fb2118b6 and 2667963a; with
+the cd05 rows also removed, e9b80be9 and cab592b5). prepare_board() is pinned too;
+it was refreshed for the same Board change (its T6030 arm is unchanged).
 """
 
 import argparse
@@ -26,13 +38,13 @@ G15 = "drivers/gpu/drm/asahi/g15"
 GOLDEN_FILES = {
     "board/data.rs": "7c5ff1077ca3296cbfc9e7144294162b6dea78a3774c38eeed4b0f59a14d7a5c",
     "board/template.rs": "286872f5474a67534f214e83e659253299f85143f3dc59035fa80894022e2549",
-    "hw.rs": "aa043d11bad177a0aa38755d14159786ee3313c4f8432f5ed56d6967882d9f01",
+    "hw.rs": "76d91bb3cd4c4b676ac13572a756d404cad81e2dc07e5b0bf48dce7e114011e0",
     "power/idle.rs": "4928ecf7699b3ca85ff5143eb6e996efd40d47321e29a238a02c8873bc9f102c",
 }
 GOLDEN_FUNCTIONS = {
-    ("hw.rs", "pub(crate) mod t6030 {"): "0079ae08fbe0e51cbf14e48711981a81048d1a1d3fc5495ab8d5c376283a760c",
+    ("hw.rs", "pub(crate) mod t6030 {"): "4016ec0d46831482382a92791b625e10fb2f6e4e28115a9498fdde0776f82e52",
     ("initdata.rs", "fn templates("): "c3115c9926d3d7d93317cb8510e93b04f30b0c256811d7137568e822dd93b8ee",
-    ("initdata.rs", "pub(crate) fn prepare_board("): "c59f968f125397efc63f75a49d3a8543c15c1fd4d50362f15683563398e64bc6",
+    ("initdata.rs", "pub(crate) fn prepare_board("): "ebef64ab87ef7b1f994eb7fa2a2424d05bc4fc9e88cbfbf18e51570bdfc4222d",
     ("board.rs", "pub(crate) fn from_adt("): "cecd0b28db5bd94d3b75c1bbb5f35204e8bf0699f74e5b3d08228c59025f6ac2",
 }
 
@@ -53,7 +65,7 @@ mod zero_words_regressions {
     use super::*;
 
     // Frozen pre-5131caff FROM_FILE offsets from SiliconForest 9f09c85f8d3b.
-    // This list is deliberately independent of both new lists.
+    // This list is deliberately independent of the three new lists.
     const OLD: [usize; 74] = [
         224,232,244,248,252,256,260,264,268,728,732,736,740,744,748,
         992,1000,1012,1016,1024,1036,1496,1500,1504,1508,1512,1516,
@@ -64,17 +76,32 @@ mod zero_words_regressions {
         45908,45912,45932,45940,45948,45956,
     ];
 
+    const REF: Reference = Reference {
+        max_power_mw: 54321,
+        relative_power: [0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007],
+        fast_die_mask: 0x2111_2222_2333_2444,
+        alarm_mask: 0x2555_2666_2777_2888,
+    };
+
+    fn rows() -> [[u8; 12]; SENSOR_ROW_COUNT] {
+        [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"].map(|k| {
+            let mut r = [0x24u8; 12];
+            r[..4].copy_from_slice(k);
+            r
+        })
+    }
+
+    fn row_words() -> Vec<usize> {
+        (SENSOR_ROWS..SENSOR_ROWS + 12 * SENSOR_ROW_COUNT).step_by(4).collect()
+    }
+
     fn synthetic() -> (Vec<u8>, Vec<Opp>, [Opp; 1], [u32; PROPS.len()]) {
         let mut file = vec![0u8; SIZE];
         for (n, &at) in OLD.iter().enumerate() {
             put32(&mut file, at, 0x13570000 | (n as u32 + 1)).unwrap();
         }
-        put32(&mut file, MAX_POWER, 54321).unwrap();
-        for (n, key) in [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"].iter().enumerate() {
-            put32(&mut file, SENSOR_ROWS + 12*n, u32::from_le_bytes(**key)).unwrap();
-        }
         // Public, synthetic OPPs: state0 off; eight voltage groups, five paired.
-        let mut main = vec![Opp {mhz:0, mv:[125;4], cells:4, mw:0}];
+        let mut main = vec![Opp {mhz:0, mv:[125;4], cells:4}];
         for (mv, freqs) in [
             (600, &[300u32][..]), (650, &[500][..]), (700, &[700][..]),
             (750, &[800,900][..]), (800, &[950,1000][..]),
@@ -82,10 +109,10 @@ mod zero_words_regressions {
             (950, &[1250,1300][..]),
         ] {
             for &mhz in freqs {
-                main.push(Opp {mhz, mv:[mv;4], cells:4, mw:mhz*40});
+                main.push(Opp {mhz, mv:[mv;4], cells:4});
             }
         }
-        let cs = [Opp {mhz:24, mv:[635,0,0,0], cells:1, mw:0}];
+        let cs = [Opp {mhz:24, mv:[635,0,0,0], cells:1}];
         let mut props = [1u32; PROPS.len()];
         props[PERIOD_MS] = 8;
         props[AVG_TC_MS] = 32;
@@ -100,16 +127,18 @@ mod zero_words_regressions {
     }
 
     fn inputs<'a>(main: &'a [Opp], cs: &'a [Opp], props: [u32; PROPS.len()]) -> Inputs<'a> {
-        Inputs {props, zones:&[], main, cs, afr:cs, slots:&[], empty_writable:&[],
+        Inputs {chip_id:0x6031, props, zones:&[], main, cs, afr:cs, slots:&[], empty_writable:&[],
             ttbat:0x100000, usc_base:0x1000000000, user_end:0x2000000000,
-            timestamps:0xfffffc2ffc000000, max_power_mw:54321}
+            timestamps:0xfffffc2ffc000000, sensor_rows: rows(), reference: &REF}
     }
 
     #[test]
     fn old74_is_exact_disjoint_partition() {
-        assert_eq!(FROM_FILE.len(), 32);
+        assert_eq!(REFERENCE_WORDS.len(), 14);
+        assert_eq!(row_words().len(), 18);
         assert_eq!(UNNEEDED.len(), 42);
-        let mut union = FROM_FILE.to_vec();
+        let mut union = REFERENCE_WORDS.to_vec();
+        union.extend(row_words());
         union.extend_from_slice(&UNNEEDED);
         union.sort_unstable();
         assert!(union.windows(2).all(|w| w[0] < w[1]), "duplicate or overlapping offsets");
@@ -119,30 +148,30 @@ mod zero_words_regressions {
     }
 
     #[test]
-    fn actual_from_file_copies_only_retained32() {
-        let (file, _, _, _) = synthetic();
-        let mut out = vec![0u8; SIZE];
-        from_file(&mut out, &file).unwrap();
-        for at in (0..SIZE).step_by(4) {
-            let expected = if FROM_FILE.contains(&at) {get32(&file, at).unwrap()} else {0};
-            assert_eq!(get32(&out, at).unwrap(), expected, "copy offset +{at:#x}");
-        }
-    }
-
-    #[test]
-    fn actual_builder_leaves42_zero_and_preserves32() {
+    fn actual_builder_leaves42_zero_and_writes_the_32_from_their_sources() {
         let (file, main, cs, props) = synthetic();
-        let mut out = vec![0u8; SIZE];
-        from_file(&mut out, &file).unwrap();
+        // Whatever the buffer held is not carried into the record.
+        let mut out = file.clone();
         build(&mut out, &inputs(&main, &cs, props)).unwrap();
         for &at in UNNEEDED.iter() {
             assert_ne!(get32(&file, at).unwrap(), 0, "fixture must exercise a real difference");
             assert_eq!(get32(&out, at).unwrap(), 0, "built offset +{at:#x}");
         }
-        for &at in FROM_FILE.iter() {
-            assert_eq!(get32(&out, at).unwrap(), get32(&file, at).unwrap(), "retained +{at:#x}");
+        let mut reference = Vec::new();
+        for r in REF.relative_power { reference.push(r); }
+        reference.push(REF.max_power_mw);
+        for m in [REF.fast_die_mask, REF.fast_die_mask, REF.alarm_mask] {
+            reference.push(m as u32);
+            reference.push((m >> 32) as u32);
         }
-        // Model a matching board file with nonzero legacy values only at the42.
+        for (&at, &want) in REFERENCE_WORDS.iter().zip(reference.iter()) {
+            assert_eq!(get32(&out, at).unwrap(), want, "reference +{at:#x}");
+        }
+        let flat: Vec<u8> = rows().concat();
+        for (k, &at) in row_words().iter().enumerate() {
+            assert_eq!(&out[at..at + 4], &flat[4 * k..4 * k + 4], "sensor row +{at:#x}");
+        }
+        // Model a matching machine record with nonzero legacy values only at the42.
         let mut matching = out.clone();
         for &at in UNNEEDED.iter() {
             put32(&mut matching, at, get32(&file, at).unwrap()).unwrap();
@@ -172,7 +201,7 @@ mod zero_words_regressions {
 MUTANTS = {
     "broad-cross-check-exemption": ("cross_check", "UNNEEDED.contains(&at)", "true"),
     "nonzero-built-exempted": ("cross_check", "b == 0 && UNNEEDED.contains(&at)", "UNNEEDED.contains(&at)"),
-    "legacy-copy-reintroduced": ("from_file", "FROM_FILE.iter()", "FROM_FILE.iter().chain(UNNEEDED.iter())"),
+    "stale-buffer-kept": ("build", "out.fill(0);", ""),
 }
 
 
@@ -192,7 +221,12 @@ def main():
                for name in ("record.rs", "words.rs", "template.rs", "data.rs")}
     golden = {}
     for name, expected in GOLDEN_FILES.items():
-        actual = sha((root / G15 / name).read_bytes())
+        data = (root / G15 / name).read_bytes()
+        if name == 'hw.rs':
+            # New SoC module wiring does not alter the golden T6030 profile.
+            data = data.replace(b'#[cfg(CONFIG_DRM_ASAHI_G15)]\npub(crate) mod t6034;\n', b'')
+            data = data.replace(b'#[cfg(CONFIG_DRM_ASAHI_G15)]\npub(crate) mod j516m;\n', b'')
+        actual = sha(data)
         if actual != expected:
             raise SystemExit("T6030 golden file changed: " + name)
         golden[name] = actual
@@ -250,7 +284,8 @@ def main():
                 mutant = run(name, changed)
                 if not mutant.returncode:
                     raise RuntimeError("mutant survived: " + name)
-                regression = ("actual_from_file_copies_only_retained32" if func == "from_file"
+                regression = ("actual_builder_leaves42_zero_and_writes_the_32_from_their_sources"
+                              if func == "build"
                               else "actual_cross_check_exempts_only_zero_at_exact42")
                 if regression + " ... FAILED" not in mutant.stdout:
                     raise RuntimeError("new regression did not catch mutant: " + name)

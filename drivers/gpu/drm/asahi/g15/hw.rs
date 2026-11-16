@@ -9,6 +9,10 @@ use core::ops::Range;
 
 #[cfg(CONFIG_DRM_ASAHI_G15)]
 pub(crate) mod t6031;
+#[cfg(CONFIG_DRM_ASAHI_G15)]
+pub(crate) mod t6034;
+#[cfg(CONFIG_DRM_ASAHI_G15)]
+pub(crate) mod j516m;
 
 /// Identification register values of a qualified G15S.
 pub(crate) struct HwId {
@@ -47,15 +51,12 @@ pub(crate) enum Platform {
 pub(crate) enum Board {
     /// The hash-checked T6030 templates ([`super::board`]).
     Templates,
-    /// The three images built from the device tree ([`super::board::record`],
-    /// [`super::board::device_tree`]) and cross-checked against a firmware file holding the
-    /// machine's own ([`super::board::blob`], pinned by its SHA-256), which also supplies the
-    /// record's words the device tree does not carry ([`super::board::record::FROM_FILE`]); a
-    /// difference refuses admission, before any firmware is touched.
-    Blob {
-        name: &'static kernel::str::CStr,
-        sha256: [u8; 32],
-    },
+    /// The three images built from the device tree and the ADT's sensor rows
+    /// ([`super::board::record`], [`super::board::device_tree`]), with the SoC's reference
+    /// words for what neither carries ([`super::board::record::Reference`]). A value the
+    /// builder refuses stops admission, before any firmware is touched.
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
+    DeviceTree(&'static super::board::record::Reference),
     /// No board data: admission refuses the SoC before anything firmware-visible.
     None,
 }
@@ -163,6 +164,84 @@ pub(crate) mod t6030 {
                 0xa8, 0x0c, 0x85, 0x5e, 0xca, 0x91, 0x65, 0x20,
                 0x40, 0x6d, 0x1d, 0x06, 0x70, 0xf1, 0xd4, 0x70,
                 0xe7, 0x9b, 0xb9, 0xb0, 0x22, 0x09, 0xdb, 0x53,
+            ],
+          },
+          // The J514S (14-inch) boot chain loads the same B0 image: its
+          // measured TEXT digest, sizes and marker match the J516S row above.
+          FirmwareBuild {
+            name: "J514S B0 RTKit-2419.140.12 (maintained 14.x handoff)",
+            machine: Some(kernel::c_str!("apple,j514s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0xda, 0x26, 0xec, 0xca, 0xb1, 0xf8, 0x59, 0x8d,
+                0xa8, 0x0c, 0x85, 0x5e, 0xca, 0x91, 0x65, 0x20,
+                0x40, 0x6d, 0x1d, 0x06, 0x70, 0xf1, 0xd4, 0x70,
+                0xe7, 0x9b, 0xb9, 0xb0, 0x22, 0x09, 0xdb, 0x53,
+            ],
+          },
+          // J514S firmware measured on the 14.7 boot chain; desktop rendering
+          // was verified with the bring-up prefix override (issue #247).
+          FirmwareBuild {
+            name: "J514S cd05 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j514s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0xcd, 0x05, 0xaf, 0x6a, 0x82, 0x8b, 0x52, 0xe4,
+                0xc2, 0xfe, 0xd2, 0x00, 0x86, 0xd3, 0xd1, 0x8a,
+                0x7d, 0xb4, 0x2e, 0x03, 0xa8, 0xfd, 0x6f, 0x83,
+                0x54, 0xf9, 0xf0, 0x6e, 0x0a, 0x61, 0x36, 0x3e,
+            ],
+          },
+          // Some J516S units on the same 14.7 boot chain load a different B0
+          // TEXT image with identical sizes and marker. Pin its complete
+          // measured digest for the J516S only.
+          FirmwareBuild {
+            name: "J516S cd05 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j516s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0xcd, 0x05, 0xaf, 0x6a, 0x82, 0x8b, 0x52, 0xe4,
+                0xc2, 0xfe, 0xd2, 0x00, 0x86, 0xd3, 0xd1, 0x8a,
+                0x7d, 0xb4, 0x2e, 0x03, 0xa8, 0xfd, 0x6f, 0x83,
+                0x54, 0xf9, 0xf0, 0x6e, 0x0a, 0x61, 0x36, 0x3e,
+            ],
+          },
+          // J514S (14-inch) firmware measured on the 14.7 boot chain with
+          // system firmware 26.6.2; the GPU reached READY with the bring-up
+          // prefix override (issue #247).
+          FirmwareBuild {
+            name: "J514S 4118 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j514s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0x41, 0x18, 0x33, 0xa7, 0xde, 0xd7, 0x73, 0xfe,
+                0xea, 0xc4, 0xa1, 0x81, 0x55, 0x2e, 0x3f, 0xf5,
+                0x58, 0x2e, 0xaf, 0x44, 0x35, 0xf2, 0xdd, 0x8f,
+                0x62, 0x0c, 0x1e, 0xd0, 0xb3, 0x1d, 0xf1, 0xb0,
+            ],
+          },
+          // J516S (16-inch) firmware measured on the 14.7 boot chain with
+          // system firmware 26.6.2; the GPU reached READY with the bring-up
+          // prefix override (issue #247).
+          FirmwareBuild {
+            name: "J516S 4118 firmware (14.7 boot chain)",
+            machine: Some(kernel::c_str!("apple,j516s")),
+            text_size: 0x5c000,
+            data_size: 0x114000,
+            marker: 0x58e88,
+            text_sha256: [
+                0x41, 0x18, 0x33, 0xa7, 0xde, 0xd7, 0x73, 0xfe,
+                0xea, 0xc4, 0xa1, 0x81, 0x55, 0x2e, 0x3f, 0xf5,
+                0x58, 0x2e, 0xaf, 0x44, 0x35, 0xf2, 0xdd, 0x8f,
+                0x62, 0x0c, 0x1e, 0xd0, 0xb3, 0x1d, 0xf1, 0xb0,
             ],
           },
         ],
@@ -518,8 +597,6 @@ pub(crate) mod sizes {
     pub(crate) const AHEAD_RECORDS: u32 = 64;
     /// Policy bound on logical queues reported in QUEUE_LIMITS (not a firmware limit).
     pub(crate) const MAX_QUEUES: u32 = 58;
-    /// TTBAT user slots: user VMs hold one each for their lifetime (ASIDs 1..63).
-    pub(crate) const MAX_VMS: u32 = 63;
 }
 
 /// Firmware channels, doorbells, seeds and identifiers.

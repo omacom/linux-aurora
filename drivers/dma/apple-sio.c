@@ -6,9 +6,11 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/bitmap.h>
 #include <linux/bits.h>
 #include <linux/completion.h>
 #include <linux/device.h>
+#include <linux/dma/apple-sio.h>
 #include <linux/dma-mapping.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -20,6 +22,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/soc/apple/rtkit.h>
+#include <linux/wait.h>
 
 #include "dmaengine.h"
 #include "virt-dma.h"
@@ -102,6 +105,38 @@ struct sio_chan {
 	struct sio_shmem_chan_config cfg;
 
 	struct sio_tx *current_tx;
+
+	/*
+	 * Until a client sets an idle transfer, the channel keeps the old
+	 * accounting, charging ACKs and REPORTs to the current transfer; its
+	 * ISSUEs not yet acknowledged are only counted.
+	 */
+	unsigned int pending;
+
+	/*
+	 * The ring accounting, from the first idle transfer until the channel
+	 * is quiet again (sio_ring_leave_locked()): the client's idle transfer
+	 * (struct apple_sio_idle), issued while no other transfer is;
+	 * transfers ended while it is set, until their issued descriptors
+	 * completed; and the owners of the issued descriptors in issue order,
+	 * which is the order of their reports. The last one may still wait for
+	 * its ISSUE to be acknowledged.
+	 */
+	bool ring;
+	struct sio_tx *idle;
+	struct list_head retired;
+	wait_queue_head_t drained;
+	struct sio_tx *issued[SIO_MAX_NINFLIGHT];
+	unsigned int issued_head;
+	unsigned int nissued;
+	bool issuing;
+	/* Nothing is issued between a TERMINATE and the ring's reset. */
+	bool stopping;
+	/*
+	 * Ended transfers with nothing in flight, freed once no completion
+	 * callback can still be running (sio_free_dead()).
+	 */
+	struct list_head dead;
 };
 
 #define SIO_NTAGS		16
@@ -141,6 +176,7 @@ struct sio_tx {
 	struct completion done;
 
 	bool terminated;
+	bool retired;
 	size_t period_len;
 	int nperiods;
 	int ninflight;
@@ -425,23 +461,22 @@ static void sio_tx_free(struct virt_dma_desc *vd)
 	kfree(siotx);
 }
 
-static struct dma_async_tx_descriptor *sio_prep_dma_cyclic(
-		struct dma_chan *chan, dma_addr_t buf_addr, size_t buf_len,
-		size_t period_len, enum dma_transfer_direction direction,
-		unsigned long flags)
+static struct sio_tx *sio_alloc_tx(struct sio_chan *siochan, dma_addr_t buf_addr,
+				   size_t buf_len, size_t period_len, gfp_t gfp)
 {
-	struct sio_chan *siochan = to_sio_chan(chan);
 	struct sio_tx *siotx = NULL;
-	int i, nperiods = buf_len / period_len;
+	int i, nperiods;
 
-	if (direction != sio_chan_direction(siochan->no))
+	if (!period_len || buf_len < period_len)
 		return NULL;
+	nperiods = buf_len / period_len;
 
-	siotx = kzalloc(struct_size(siotx, siodesc, nperiods), GFP_NOWAIT);
+	siotx = kzalloc(struct_size(siotx, siodesc, nperiods), gfp);
 	if (!siotx)
 		return NULL;
 
 	init_completion(&siotx->done);
+	siotx->vd.tx.chan = &siochan->vc.chan;
 	siotx->period_len = period_len;
 	siotx->nperiods = nperiods;
 
@@ -450,7 +485,6 @@ static struct dma_async_tx_descriptor *sio_prep_dma_cyclic(
 
 		siotx->siodesc[i] = d = sio_alloc_desc(siochan->host);
 		if (!d) {
-			siotx->vd.tx.chan = &siochan->vc.chan;
 			sio_tx_free(&siotx->vd);
 			return NULL;
 		}
@@ -466,6 +500,24 @@ static struct dma_async_tx_descriptor *sio_prep_dma_cyclic(
 		d->size = period_len;
 	}
 	dma_wmb();
+
+	return siotx;
+}
+
+static struct dma_async_tx_descriptor *sio_prep_dma_cyclic(
+		struct dma_chan *chan, dma_addr_t buf_addr, size_t buf_len,
+		size_t period_len, enum dma_transfer_direction direction,
+		unsigned long flags)
+{
+	struct sio_chan *siochan = to_sio_chan(chan);
+	struct sio_tx *siotx;
+
+	if (direction != sio_chan_direction(siochan->no))
+		return NULL;
+
+	siotx = sio_alloc_tx(siochan, buf_addr, buf_len, period_len, GFP_NOWAIT);
+	if (!siotx)
+		return NULL;
 
 	return vchan_tx_prep(&siochan->vc, &siotx->vd, flags);
 }
@@ -511,32 +563,172 @@ static enum dma_status sio_tx_status(struct dma_chan *chan, dma_cookie_t cookie,
 
 static bool sio_fill_in_locked(struct sio_chan *siochan);
 
-static void sio_handle_issue_ack(struct sio_chan *siochan, void *cookie, bool ok)
+static struct sio_tx **sio_issued_slot(struct sio_chan *siochan, unsigned int i)
 {
-	dma_cookie_t tx_cookie = (unsigned long) cookie;
-	unsigned long flags;
-	struct sio_tx *tx;
+	return &siochan->issued[(siochan->issued_head + i) % SIO_MAX_NINFLIGHT];
+}
 
+/* Neither in flight nor waiting for its ISSUE to be acknowledged */
+static bool sio_tx_quiet_locked(struct sio_chan *siochan, struct sio_tx *tx)
+{
+	unsigned int i;
+
+	if (tx->ninflight)
+		return false;
+	for (i = 0; i < siochan->nissued; i++)
+		if (*sio_issued_slot(siochan, i) == tx)
+			return false;
+	return true;
+}
+
+/* A transfer that is freed no longer owns issued descriptors */
+static void sio_scrub_locked(struct sio_chan *siochan, struct sio_tx *tx)
+{
+	unsigned int i;
+
+	for (i = 0; i < siochan->nissued; i++)
+		if (*sio_issued_slot(siochan, i) == tx)
+			*sio_issued_slot(siochan, i) = NULL;
+}
+
+/* Descriptors are issued from the current transfer, else from the idle one. */
+static struct sio_tx *sio_source_locked(struct sio_chan *siochan)
+{
+	struct sio_tx *tx = siochan->current_tx;
+
+	if (tx)
+		return tx->terminated ? NULL : tx;
+	if (siochan->idle && !siochan->idle->terminated)
+		return siochan->idle;
+	return NULL;
+}
+
+/*
+ * The first idle transfer: the ring accounting starts from what the old one
+ * has in flight, all of it the current transfer's. It cannot place two ISSUEs
+ * still waiting for their acks, nor an ended transfer's descriptors.
+ */
+static int sio_ring_enter_locked(struct sio_chan *siochan)
+{
+	struct sio_tx *tx = siochan->current_tx;
+	unsigned int i, n = tx ? tx->ninflight : 0;
+
+	if (siochan->pending > 1 || (siochan->pending && !tx) || (tx && tx->terminated) ||
+	    n + siochan->pending > SIO_MAX_NINFLIGHT)
+		return -EBUSY;
+	siochan->issued_head = 0;
+	siochan->nissued = n + siochan->pending;
+	for (i = 0; i < siochan->nissued; i++)
+		siochan->issued[i] = tx;
+	siochan->issuing = siochan->pending;
+	siochan->pending = 0;
+	siochan->ring = true;
+	return 0;
+}
+
+/*
+ * The resync point: once the channel is quiet, with no idle, current or
+ * retired transfer and nothing issued, the old accounting resumes.
+ */
+static void sio_ring_leave_locked(struct sio_chan *siochan)
+{
+	if (!siochan->ring || siochan->idle || siochan->current_tx ||
+	    !list_empty(&siochan->retired) || siochan->nissued || siochan->issuing)
+		return;
+	siochan->ring = false;
+	siochan->issued_head = 0;
+}
+
+/*
+ * An ended transfer with no descriptor left in flight: a retired one goes to
+ * be freed, the waiter of another one is woken.
+ */
+static void sio_settle_locked(struct sio_chan *siochan, struct sio_tx *tx)
+{
+	if (!tx || !tx->terminated || !sio_tx_quiet_locked(siochan, tx))
+		return;
+	if (tx->retired) {
+		list_move_tail(&tx->vd.node, &siochan->dead);
+		wake_up(&siochan->drained);
+		return;
+	}
+	/* sio_terminate_work() or sio_clear_idle() */
+	complete(&tx->done);
+}
+
+/*
+ * The old accounting, for channels that never had an idle transfer: an ACK
+ * is the current transfer's, if its cookie still is.
+ */
+static void sio_old_issue_ack_locked(struct sio_chan *siochan, dma_cookie_t tx_cookie, bool ok)
+{
+	struct sio_tx *tx = siochan->current_tx;
+
+	if (siochan->pending)
+		siochan->pending--;
 	if (!ok) {
 		dev_err(siochan->host->dev, "nacked issue on chan %d\n", siochan->no);
 		return;
 	}
+	if (!tx || tx_cookie != tx->vd.tx.cookie || tx->terminated)
+		return;
 
-	spin_lock_irqsave(&siochan->vc.lock, flags);
-	if (!siochan->current_tx || tx_cookie != siochan->current_tx->vd.tx.cookie ||
-			siochan->current_tx->terminated)
-		goto out;
-
-	tx = siochan->current_tx;
 	tx->next = (tx->next + 1) % tx->nperiods;
 	tx->ninflight++;
 	sio_fill_in_locked(siochan);
+}
 
-out:
+/* The ring accounting: an ACK is the last issued descriptor's. */
+static void sio_ring_issue_ack_locked(struct sio_chan *siochan, bool ok)
+{
+	struct sio_tx *tx;
+
+	siochan->issuing = false;
+	if (!siochan->nissued) {
+		dev_err_ratelimited(siochan->host->dev, "chan %d: ack without an issued descriptor\n",
+				    siochan->no);
+		return;
+	}
+
+	tx = *sio_issued_slot(siochan, siochan->nissued - 1);
+	if (!ok) {
+		dev_err(siochan->host->dev, "nacked issue on chan %d\n", siochan->no);
+		siochan->nissued--;
+		if (!siochan->nissued)
+			wake_up(&siochan->drained);
+		/*
+		 * During a handover this may have been the ended transfer's
+		 * last ISSUE, and no report is left to start the next one. A
+		 * transfer whose own ISSUE was refused is not issued again.
+		 */
+		if (sio_source_locked(siochan) != tx)
+			sio_fill_in_locked(siochan);
+		sio_settle_locked(siochan, tx);
+		return;
+	}
+
+	/* An ended transfer's descriptor is in flight all the same. */
+	if (tx) {
+		tx->next = (tx->next + 1) % tx->nperiods;
+		tx->ninflight++;
+	}
+	sio_fill_in_locked(siochan);
+}
+
+static void sio_handle_issue_ack(struct sio_chan *siochan, void *cookie, bool ok)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	if (siochan->ring)
+		sio_ring_issue_ack_locked(siochan, ok);
+	else
+		sio_old_issue_ack_locked(siochan, (unsigned long)cookie, ok);
 	spin_unlock_irqrestore(&siochan->vc.lock, flags);
 }
 
-static bool sio_fill_in_locked(struct sio_chan *siochan)
+/* The old accounting: the current transfer's next descriptor */
+static bool sio_fill_in_old_locked(struct sio_chan *siochan)
 {
 	struct sio_data *sio = siochan->host;
 	struct sio_tx *tx = siochan->current_tx;
@@ -550,11 +742,48 @@ static bool sio_fill_in_locked(struct sio_chan *siochan)
 	ret = sio_send_siomsg_atomic(sio, FIELD_PREP(SIOMSG_EP, siochan->no) |
 				     FIELD_PREP(SIOMSG_TYPE, MSG_ISSUE) |
 				     FIELD_PREP(SIOMSG_DATA, sio_coproc_desc_slot(sio, d)),
-				     sio_handle_issue_ack, (void *) (uintptr_t) tx->vd.tx.cookie);
+				     sio_handle_issue_ack, (void *)(uintptr_t)tx->vd.tx.cookie);
 	if (ret < 0)
 		dev_err_ratelimited(sio->dev, "can't issue on chan %d ninflight %d: %d\n",
 				    siochan->no, tx->ninflight, ret);
+	else
+		siochan->pending++;
 	return true;
+}
+
+/* The ring accounting: one ISSUE at a time, each after the previous one's ack */
+static bool sio_fill_in_ring_locked(struct sio_chan *siochan)
+{
+	struct sio_data *sio = siochan->host;
+	struct sio_tx *tx = sio_source_locked(siochan);
+	struct sio_coproc_desc *d;
+	int ret;
+
+	if (!tx || siochan->issuing || siochan->stopping ||
+	    siochan->nissued >= SIO_MAX_NINFLIGHT)
+		return false;
+
+	d = tx->siodesc[tx->next];
+	ret = sio_send_siomsg_atomic(sio, FIELD_PREP(SIOMSG_EP, siochan->no) |
+				     FIELD_PREP(SIOMSG_TYPE, MSG_ISSUE) |
+				     FIELD_PREP(SIOMSG_DATA, sio_coproc_desc_slot(sio, d)),
+				     sio_handle_issue_ack, NULL);
+	if (ret < 0) {
+		dev_err_ratelimited(sio->dev, "can't issue on chan %d ninflight %d: %d\n",
+				    siochan->no, siochan->nissued, ret);
+		return false;
+	}
+	/* The ack takes the channel lock, held here. */
+	*sio_issued_slot(siochan, siochan->nissued++) = tx;
+	siochan->issuing = true;
+	return true;
+}
+
+static bool sio_fill_in_locked(struct sio_chan *siochan)
+{
+	if (siochan->ring)
+		return sio_fill_in_ring_locked(siochan);
+	return siochan->current_tx && sio_fill_in_old_locked(siochan);
 }
 
 static void sio_update_current_tx_locked(struct sio_chan *siochan)
@@ -582,14 +811,37 @@ static void sio_issue_pending(struct dma_chan *chan)
 static int sio_terminate_all(struct dma_chan *chan)
 {
 	struct sio_chan *siochan = to_sio_chan(chan);
+	struct sio_tx *tx;
 	unsigned long flags;
 	LIST_HEAD(to_free);
 
 	spin_lock_irqsave(&siochan->vc.lock, flags);
-	if (siochan->current_tx && !siochan->current_tx->terminated) {
-		dma_cookie_complete(&siochan->current_tx->vd.tx);
-		siochan->current_tx->terminated = true;
-		schedule_work(&siochan->terminate_wq);
+	tx = siochan->current_tx;
+	if (tx && !tx->terminated) {
+		dma_cookie_complete(&tx->vd.tx);
+		tx->terminated = true;
+		if (siochan->ring && siochan->idle && !siochan->idle->terminated) {
+			/*
+			 * No TERMINATE: the idle transfer follows the issued
+			 * descriptors, and the peripheral runs on without a gap.
+			 * sio_synchronize() waits for those to complete.
+			 */
+			if (siochan->vc.cyclic == &tx->vd)
+				siochan->vc.cyclic = NULL;
+			siochan->current_tx = NULL;
+			/* Its callback may be running: sio_free_dead() frees it. */
+			if (sio_tx_quiet_locked(siochan, tx)) {
+				list_add_tail(&tx->vd.node, &siochan->dead);
+			} else {
+				tx->retired = true;
+				list_add_tail(&tx->vd.node, &siochan->retired);
+			}
+			sio_fill_in_locked(siochan);
+		} else {
+			if (siochan->ring && sio_tx_quiet_locked(siochan, tx))
+				complete(&tx->done);
+			schedule_work(&siochan->terminate_wq);
+		}
 	}
 	vchan_get_all_descriptors(&siochan->vc, &to_free);
 	spin_unlock_irqrestore(&siochan->vc.lock, flags);
@@ -628,10 +880,118 @@ static void sio_terminate_work(struct work_struct *wq)
 	spin_lock_irqsave(&siochan->vc.lock, flags);
 	WARN_ON(siochan->current_tx != tx);
 	siochan->current_tx = NULL;
+	sio_scrub_locked(siochan, tx);
 	sio_update_current_tx_locked(siochan);
+	sio_ring_leave_locked(siochan);
 	spin_unlock_irqrestore(&siochan->vc.lock, flags);
 
 	sio_tx_free(&tx->vd);
+}
+
+static bool sio_drained(struct sio_chan *siochan)
+{
+	unsigned long flags;
+	bool drained;
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	drained = list_empty(&siochan->retired);
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	return drained;
+}
+
+static bool sio_ring_empty(struct sio_chan *siochan)
+{
+	unsigned long flags;
+	bool empty;
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	empty = !siochan->nissued && !siochan->issuing;
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	return empty;
+}
+
+/*
+ * Issued descriptors that did not complete in time: stop the channel and wait
+ * for their reports, so that their buffers are no longer read. Nothing is
+ * issued from the TERMINATE until the channel is known stopped. A channel
+ * that acknowledged TERMINATE and still reports nothing is resynced: its ring
+ * is emptied, as nothing it holds is played any more. A channel that refused
+ * TERMINATE or did not answer cannot be known to have stopped: -EIO, and its
+ * transfers stay as they are. Then the current or idle transfer is issued
+ * again.
+ */
+static int sio_stop_quiet(struct sio_chan *siochan)
+{
+	struct device *dev = siochan->host->dev;
+	unsigned long flags;
+	struct sio_tx *tx;
+	unsigned int i;
+	int ret;
+
+	dev_err(dev, "chan %d: issued descriptors did not complete, stopping it\n", siochan->no);
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	siochan->stopping = true;
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	/* 1 on ACK, 0 on NACK, negative without an answer */
+	ret = sio_call(siochan->host, FIELD_PREP(SIOMSG_EP, siochan->no) |
+				      FIELD_PREP(SIOMSG_TYPE, MSG_TERMINATE));
+	if (ret == 1)
+		wait_event_timeout(siochan->drained, sio_ring_empty(siochan),
+				   msecs_to_jiffies(500));
+	else if (!ret)
+		dev_err(dev, "chan %d: TERMINATE refused, its buffers may still be read\n",
+			siochan->no);
+	else
+		dev_err(dev, "chan %d: not stopped (%d), its buffers may still be read\n",
+			siochan->no, ret);
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	if (ret == 1 && (siochan->nissued || siochan->issuing)) {
+		dev_err(dev, "chan %d: stopped with %u descriptors unreported, ring reset\n",
+			siochan->no, siochan->nissued);
+		for (i = 0; i < siochan->nissued; i++) {
+			tx = *sio_issued_slot(siochan, i);
+			if (tx)
+				tx->ninflight = 0;
+		}
+		siochan->nissued = 0;
+		siochan->issuing = false;
+		siochan->issued_head = 0;
+	}
+	if (ret == 1) {
+		list_splice_tail_init(&siochan->retired, &siochan->dead);
+		if (siochan->idle && siochan->idle->terminated)
+			complete(&siochan->idle->done);
+	}
+	siochan->stopping = false;
+	sio_fill_in_locked(siochan);
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	return ret == 1 ? 0 : -EIO;
+}
+
+/* Frees the ended transfers once no completion callback can still use them. */
+static void sio_free_dead(struct sio_chan *siochan)
+{
+	struct sio_tx *tx, *n;
+	unsigned long flags;
+	LIST_HEAD(dead);
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	list_splice_init(&siochan->dead, &dead);
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+	if (list_empty(&dead))
+		return;
+
+	/* vchan_complete() runs a callback with its descriptor unlocked. */
+	tasklet_kill(&siochan->vc.task);
+	list_for_each_entry_safe(tx, n, &dead, vd.node) {
+		list_del(&tx->vd.node);
+		sio_tx_free(&tx->vd);
+	}
 }
 
 static void sio_synchronize(struct dma_chan *chan)
@@ -639,12 +999,104 @@ static void sio_synchronize(struct dma_chan *chan)
 	struct sio_chan *siochan = to_sio_chan(chan);
 
 	flush_work(&siochan->terminate_wq);
+	if (READ_ONCE(siochan->ring)) {
+		/* The caller frees the buffer on return; nothing can stop that. */
+		if (!wait_event_timeout(siochan->drained, sio_drained(siochan),
+					msecs_to_jiffies(500)) &&
+		    sio_stop_quiet(siochan))
+			dev_WARN_ONCE(siochan->host->dev, 1,
+				      "chan %d: synchronized without being stopped\n",
+				      siochan->no);
+		/* No callback of an ended transfer runs after this. */
+		tasklet_kill(&siochan->vc.task);
+	}
+	sio_free_dead(siochan);
+}
+
+/*
+ * Returns once the idle transfer's descriptors completed. If the channel
+ * cannot be confirmed stopped, the idle transfer stays, its buffer in use.
+ */
+static int sio_clear_idle(struct sio_chan *siochan)
+{
+	struct sio_tx *idle;
+	unsigned long flags;
+	bool quiet, stop;
+	int ret;
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	idle = siochan->idle;
+	if (!idle) {
+		spin_unlock_irqrestore(&siochan->vc.lock, flags);
+		return 0;
+	}
+	idle->terminated = true;
+	quiet = sio_tx_quiet_locked(siochan, idle);
+	/* Nothing follows the idle transfer: the channel stops. */
+	stop = !quiet && !siochan->current_tx;
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	if (stop) {
+		ret = sio_call(siochan->host, FIELD_PREP(SIOMSG_EP, siochan->no) |
+					      FIELD_PREP(SIOMSG_TYPE, MSG_TERMINATE));
+		if (ret < 0)
+			dev_err(siochan->host->dev, "terminate call on chan %d failed: %d\n",
+				siochan->no, ret);
+	}
+	if (!quiet && !wait_for_completion_timeout(&idle->done, msecs_to_jiffies(500))) {
+		ret = sio_stop_quiet(siochan);
+		if (ret)
+			return ret;
+	}
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	siochan->idle = NULL;
+	sio_scrub_locked(siochan, idle);
+	sio_ring_leave_locked(siochan);
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	sio_tx_free(&idle->vd);
+	sio_free_dead(siochan);
+	return 0;
+}
+
+/* See struct apple_sio_idle */
+static int sio_set_idle(struct sio_chan *siochan, const struct apple_sio_idle *config)
+{
+	struct sio_tx *idle;
+	unsigned long flags;
+	int ret;
+
+	if (!config->len)
+		return sio_clear_idle(siochan);
+	if (!config->period_len || config->len < config->period_len)
+		return -EINVAL;
+
+	idle = sio_alloc_tx(siochan, config->addr, config->len, config->period_len, GFP_KERNEL);
+	if (!idle)
+		return -ENOMEM;
+
+	spin_lock_irqsave(&siochan->vc.lock, flags);
+	ret = siochan->idle ? -EBUSY : 0;
+	if (!ret && !siochan->ring)
+		ret = sio_ring_enter_locked(siochan);
+	if (ret) {
+		spin_unlock_irqrestore(&siochan->vc.lock, flags);
+		sio_tx_free(&idle->vd);
+		return ret;
+	}
+	siochan->idle = idle;
+	sio_fill_in_locked(siochan);
+	spin_unlock_irqrestore(&siochan->vc.lock, flags);
+
+	return 0;
 }
 
 static void sio_free_chan_resources(struct dma_chan *chan)
 {
 	sio_terminate_all(chan);
 	sio_synchronize(chan);
+	sio_clear_idle(to_sio_chan(chan));
 	vchan_free_chan_resources(&to_sio_chan(chan)->vc);
 }
 
@@ -667,20 +1119,61 @@ static void sio_rtk_crashed(void *cookie, const void *crashlog, size_t crashlog_
 	dev_err(sio->dev, "SIO down (crashed)");
 }
 
+/* The old accounting: a report is the current transfer's. */
+static void sio_old_report_locked(struct sio_chan *siochan)
+{
+	struct sio_tx *tx = siochan->current_tx;
+
+	if (!tx)
+		return;
+	if (tx->ninflight)
+		tx->ninflight--;
+	vchan_cyclic_callback(&tx->vd);
+	if (!sio_fill_in_locked(siochan) && !tx->ninflight)
+		complete(&tx->done);
+}
+
+/* The ring accounting: the oldest issued descriptor completed. */
+static void sio_ring_report_locked(struct sio_chan *siochan)
+{
+	struct sio_tx *tx;
+
+	/* An ISSUE not yet acknowledged has no completed descriptor. */
+	if (siochan->nissued <= (siochan->issuing ? 1 : 0)) {
+		dev_warn_ratelimited(siochan->host->dev, "chan %d: report without a descriptor\n",
+				     siochan->no);
+		return;
+	}
+
+	tx = *sio_issued_slot(siochan, 0);
+	siochan->issued_head = (siochan->issued_head + 1) % SIO_MAX_NINFLIGHT;
+	siochan->nissued--;
+	if (tx) {
+		if (tx->ninflight)
+			tx->ninflight--;
+		else
+			dev_err_ratelimited(siochan->host->dev,
+					    "chan %d: report for a descriptor not in flight\n",
+					    siochan->no);
+		if (tx == siochan->current_tx && !tx->terminated)
+			vchan_cyclic_callback(&tx->vd);
+	}
+	sio_fill_in_locked(siochan);
+	sio_settle_locked(siochan, tx);
+	if (!siochan->nissued)
+		wake_up(&siochan->drained);
+	sio_ring_leave_locked(siochan);
+}
+
 static void sio_process_report(struct sio_chan *siochan)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&siochan->vc.lock, flags);
-	if (siochan->current_tx) {
-		struct sio_tx *tx = siochan->current_tx;
-
-		if (tx->ninflight)
-			tx->ninflight--;
-		vchan_cyclic_callback(&tx->vd);
-		if (!sio_fill_in_locked(siochan) && !tx->ninflight)
-			complete(&tx->done);
-	}
+	if (siochan->ring)
+		sio_ring_report_locked(siochan);
+	else
+		sio_old_report_locked(siochan);
 	spin_unlock_irqrestore(&siochan->vc.lock, flags);
 }
 
@@ -817,6 +1310,12 @@ static int sio_device_config(struct dma_chan *chan,
 	struct sio_shmem_chan_config cfg;
 	int ret;
 
+	if (config->peripheral_config) {
+		if (config->peripheral_size != sizeof(struct apple_sio_idle))
+			return -EINVAL;
+		return sio_set_idle(siochan, config->peripheral_config);
+	}
+
 	switch (is_tx ? config->dst_addr_width : config->src_addr_width) {
 	case DMA_SLAVE_BUSWIDTH_1_BYTE:
 		cfg.datashape = 0;
@@ -898,8 +1397,8 @@ static int sio_alloc_shmem(struct sio_data *sio)
 		return -ENOMEM;
 
 	sio->shmem_desc_base = (struct sio_coproc_desc *) (sio->shmem + 56);
-	sio->desc_allocated = devm_kzalloc(sio->dev, SIO_NO_DESC_SLOTS / 32,
-					   GFP_KERNEL);
+	sio->desc_allocated = devm_bitmap_zalloc(sio->dev, SIO_NO_DESC_SLOTS,
+					       GFP_KERNEL);
 	if (!sio->desc_allocated)
 		return -ENOMEM;
 
@@ -1055,6 +1554,9 @@ static int sio_probe(struct platform_device *pdev)
 		siochan->no = i;
 		siochan->vc.desc_free = sio_tx_free;
 		INIT_WORK(&siochan->terminate_wq, sio_terminate_work);
+		INIT_LIST_HEAD(&siochan->retired);
+		INIT_LIST_HEAD(&siochan->dead);
+		init_waitqueue_head(&siochan->drained);
 		vchan_init(&siochan->vc, dma);
 	}
 

@@ -34,7 +34,9 @@ int asahi_g15_adt_phram(u64 *start, u64 *size);
 void __iomem *asahi_g15_ioremap_wc(u64 start, size_t size);
 bool asahi_g15_dma_coherent(struct device *dev);
 int asahi_g15_pmp_prepare(struct device *dev);
+int asahi_g15_display_prepare(struct device *dev);
 int asahi_g15_pmp_get(struct device *dev);
+int asahi_g15_pmp_ready(void);
 void asahi_g15_pmp_put(struct device *dev);
 bool asahi_g15_reserved_uat(u32 index, u64 start, u64 size);
 
@@ -52,6 +54,7 @@ void asahi_g15_report_loader_gpu(void)
 		const char *compatible;
 	} socs[] = {
 		{ "asahi,t6031-gpu", "apple,agx-t6031" },
+		{ "asahi,t6034-gpu", "apple,agx-t6034" },
 		{ "asahi,t6030-gpu", "apple,agx-t6030" },
 	};
 	struct device_node *chosen, *np;
@@ -141,6 +144,51 @@ int asahi_g15_pmp_prepare(struct device *dev)
 	return apple_pmp_link_device(dev);
 }
 
+/*
+ * T6031/T6034 have no PMP vote, but its first firmware start follows the native
+ * display as T6030's does: defer until that display is up. The display can
+ * be off for this boot (no handoff, or not requested), so say once why. An
+ * enabled display that is not published yet is said once too: if it never
+ * comes up (its DCP refused or failed to bind), that line is why the GPU
+ * stays off.
+ */
+int asahi_g15_display_prepare(struct device *dev)
+{
+	struct device_node *np;
+	const char *compatible, *name;
+	int ret;
+
+	if (!dev->of_node)
+		return -ENODEV;
+	if (of_device_is_compatible(dev->of_node, "apple,agx-t6031")) {
+		compatible = "apple,t6031-display-subsystem";
+		name = "T6031";
+		ret = apple_drm_t6031_link_device(dev);
+	} else if (of_device_is_compatible(dev->of_node, "apple,agx-t6034")) {
+		compatible = of_machine_is_compatible("apple,j516m") ?
+			"apple,t6031-display-subsystem" : "apple,t6034-display-subsystem";
+		name = "T6034";
+		ret = apple_drm_t6034_link_device(dev);
+	} else {
+		return -ENODEV;
+	}
+	if (ret != -EPROBE_DEFER)
+		return ret;
+
+	np = of_find_compatible_node(NULL, NULL, compatible);
+	if (!np || !of_device_is_available(np))
+		dev_info_once(dev,
+			      "G15: waiting for the %s native display, which this boot did not enable (it needs the boot loader's display handoff, and an admitted native-display board)\n",
+			      name);
+	else
+		dev_info_once(dev,
+			      "G15: waiting for the %s native display to come up: the GPU firmware starts only after the display is published\n",
+			      name);
+
+	of_node_put(np);
+	return ret;
+}
+
 int asahi_g15_pmp_get(struct device *dev)
 {
 	if (!asahi_g15_board() || !dev->of_node ||
@@ -148,6 +196,11 @@ int asahi_g15_pmp_get(struct device *dev)
 		return -ENODEV;
 	return apple_pmp_set_device_power(0x0f, 5, 1);
 
+}
+
+int asahi_g15_pmp_ready(void)
+{
+	return apple_pmp_t6030_gpu_ready();
 }
 
 /*

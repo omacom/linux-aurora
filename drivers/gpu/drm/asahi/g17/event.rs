@@ -11,6 +11,8 @@ use kernel::prelude::*;
 
 /// The bounded shared-ring transport; recognized malformed entries return errors after consume.
 pub(super) trait Transport {
+    /// The firmware instances of this GPU: the primary, and the secondary where one exists.
+    fn roles(&self) -> &'static [Role];
     fn trace(&mut self, role: Role);
     fn statistics(&mut self, role: Role);
     fn drain(
@@ -34,6 +36,8 @@ pub(super) trait Queues {
     fn retain_render_completions(&mut self, masks: [u64; 2]);
     fn complete_compute(&mut self, masks: [u64; 2]) -> Result;
     fn context_killed(&mut self, cookie: u64);
+    /// The firmware failed a compute command (see [`Event::ComputeFault`]).
+    fn compute_fault(&mut self, qid: u8, stamp: u32);
 }
 
 /// Work requested after releasing the device mutex.
@@ -70,6 +74,12 @@ fn batch<H: Host>(host: &mut H, role: Role, masks: &mut [u64; 2]) -> Result {
             }
             Event::FreeListGrow(completion) => host.complete_freelist_grow(completion)?,
             Event::ContextKilled(cookie) => host.context_killed(cookie),
+            Event::ComputeFault { qid, stamp } => {
+                crate::g17::trace::teardown(1, u64::from(qid), u64::from(stamp), 0);
+                host.compute_fault(qid, stamp);
+                // Its queue retires or settles its quarantine on this pass.
+                masks[usize::from(qid) / 64] |= 1 << (qid % 64);
+            }
             Event::Unknown(_) => {}
         }
         Ok(true)
@@ -81,10 +91,10 @@ pub(super) fn service<H: Host>(host: &mut H) -> Result<Pending> {
         return Ok(Pending::default());
     }
     host.observe_render_releases()?;
-    for role in [Role::Primary, Role::Secondary] {
+    for &role in host.roles() {
         host.trace(role);
     }
-    for role in [Role::Primary, Role::Secondary] {
+    for &role in host.roles() {
         host.statistics(role);
     }
     let mut masks = [0; 2];
@@ -110,7 +120,7 @@ pub(super) fn service<H: Host>(host: &mut H) -> Result<Pending> {
             return Err(EIO);
         }
     }
-    if !host.control_backpressured() {
+    if !host.control_backpressured() && host.roles().contains(&Role::Secondary) {
         batch(host, Role::Secondary, &mut masks)?;
     }
     host.retain_render_completions(masks);

@@ -70,3 +70,41 @@
 	};
 };
 
+/*
+ * DPA2: the Type-C DisplayPort processor's (dcpext1) audio, SIO channel 0x68,
+ * as the ADT links dcpext1 to dp-audio2.
+ */
+&dcpext1 {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			dcpext1_audio: endpoint {
+				remote-endpoint = <&dpaudio2_dcpext1>;
+			};
+		};
+	};
+};
+
+&soc {
+	dpaudio2: audio-controller-2 {
+		compatible = "apple,t6030-dpaudio", "apple,dpaudio";
+		dmas = <&sio 0x68>;
+		dma-names = "tx";
+		power-domains = <&ps_dpa2>;
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				dpaudio2_dcpext1: endpoint {
+					remote-endpoint = <&dcpext1_audio>;
+				};
+			};
+		};
+	};
+};

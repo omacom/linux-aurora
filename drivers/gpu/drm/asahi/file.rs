@@ -16,6 +16,8 @@ use crate::{
         AsahiDrmDevice, //
     },
     gem,
+    memacct,
+    gpu,
     mmu,
     queue,
     util::{
@@ -43,6 +45,7 @@ use kernel::sync::{
     Mutex, //
 };
 use kernel::time::NSEC_PER_SEC;
+use kernel::types::ScopeGuard;
 use kernel::uaccess::{
     UserPtr,
     UserSlice, //
@@ -68,6 +71,7 @@ struct Vm {
     user_range: Range<u64>,
     kernel_range: Range<u64>,
     _dummy_mapping: mmu::KernelMapping,
+    gpu: Arc<dyn gpu::Gpu>,
 }
 
 impl Drop for Vm {
@@ -89,6 +93,7 @@ impl Drop for Vm {
                 pr_err!("Vm::Drop: deferred user unmap failed: {:?}\n", error);
             }
             self.vm.bo_deferred_cleanup();
+            self.gpu.vm_closed(&self.vm);
             return;
         }
         // When the user Vm is dropped, verify that no user mappings exists.
@@ -122,10 +127,18 @@ pub(crate) struct SyncItem {
     pub(crate) fence: Option<dma_fence::Fence>,
     pub(crate) chain_fence: Option<dma_fence::FenceChain>,
     pub(crate) timeline_value: u64,
+    pub(crate) cumulative: Option<crate::g17::sync_output::SignalBundle>,
+    pub(crate) timeline: bool,
 }
 
 impl SyncItem {
-    fn parse_one(file: &DrmFile, data: uapi::drm_asahi_sync, out: bool) -> Result<SyncItem> {
+    fn parse_one(file: &DrmFile, mut data: uapi::drm_asahi_sync, out: bool,
+        bundled: bool) -> Result<SyncItem>
+    {
+        if data.sync_type == crate::g17::sync_output::SYNC_CUMULATIVE {
+            if !out || !bundled || data.timeline_value == 0 { return Err(EINVAL); }
+            data.sync_type = uapi::drm_asahi_sync_type_DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ;
+        }
         match data.sync_type {
             uapi::drm_asahi_sync_type_DRM_ASAHI_SYNC_SYNCOBJ => {
                 if data.timeline_value != 0 {
@@ -146,6 +159,8 @@ impl SyncItem {
                     syncobj,
                     chain_fence: None,
                     timeline_value: data.timeline_value,
+                    cumulative: None,
+                    timeline: false,
                 })
             }
             uapi::drm_asahi_sync_type_DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ => {
@@ -168,12 +183,10 @@ impl SyncItem {
                 Ok(SyncItem {
                     fence,
                     syncobj,
-                    chain_fence: if out {
-                        Some(dma_fence::FenceChain::new()?)
-                    } else {
-                        None
-                    },
+                    chain_fence: None,
                     timeline_value: data.timeline_value,
+                    cumulative: None,
+                    timeline: true,
                 })
             }
             _ => {
@@ -188,12 +201,14 @@ impl SyncItem {
         ptr: u64,
         in_count: u32,
         out_count: u32,
+        allow_cumulative: bool,
     ) -> Result<KVec<SyncItem>> {
         let count = in_count.checked_add(out_count).ok_or(EOVERFLOW)?;
 
         const STRIDE: usize = core::mem::size_of::<uapi::drm_asahi_sync>();
         let size = STRIDE.checked_mul(count as usize).ok_or(EOVERFLOW)?;
         let mut vec = KVec::with_capacity(count as usize, GFP_KERNEL)?;
+        let mut anchor = None;
 
         // SAFETY: We only read this once, so there are no TOCTOU issues.
         let mut reader = UserSlice::new(UserPtr::from_addr(ptr as _), size).reader();
@@ -209,7 +224,25 @@ impl SyncItem {
             // SAFETY: All bit patterns in the struct are valid
             let sync = unsafe { sync.assume_init() };
 
-            vec.push(SyncItem::parse_one(file, sync, i >= in_count)?, GFP_KERNEL)?;
+            if sync.sync_type == crate::g17::sync_output::SYNC_CUMULATIVE {
+                if !allow_cumulative || i < in_count || anchor.is_some() {
+                    return Err(EINVAL);
+                }
+                anchor = Some(i as usize);
+            }
+            vec.push(Self::parse_one(file, sync, i >= in_count,
+                allow_cumulative)?, GFP_KERNEL)?;
+        }
+        if let Some(anchor) = anchor {
+            let bundle = crate::g17::sync_output::SignalBundle::new(
+                &vec[in_count as usize..], anchor - in_count as usize)?;
+            vec[anchor].cumulative = Some(bundle);
+        } else {
+            for sync in &mut vec[in_count as usize..] {
+                if sync.timeline {
+                    sync.chain_fence = Some(dma_fence::FenceChain::new()?);
+                }
+            }
         }
 
         Ok(vec)
@@ -218,7 +251,7 @@ impl SyncItem {
 
 #[derive(Clone)]
 pub(crate) enum Object {
-    TimestampBuffer(Arc<mmu::KernelMapping>),
+    TimestampBuffer(Arc<crate::timestamp::Buffer>),
 }
 
 /// State associated with a client.
@@ -236,6 +269,8 @@ pub(crate) struct File {
     /// Largest size this file has asked GET_PARAMS for the global parameters with
     /// ([`gpu::Gpu::admit_vm`]).
     params_size: core::sync::atomic::AtomicU64,
+    /// GPU memory this client created and holds.
+    mem: Arc<memacct::Client>,
 }
 
 /// Convenience type alias for our DRM `File` type.
@@ -255,9 +290,20 @@ impl drm::file::DriverFile for File {
             let gpu = &reg_data.gpu;
             let id = gpu.ids().file.next();
             let user_range = gpu.user_range();
+            let mem = memacct::Client::new()?;
 
             mod_dev_dbg!(device, "[File {}]: DRM device opened\n", id);
-            Ok(KBox::pin_init(File::new(id, user_range), GFP_KERNEL)?)
+            KBox::pin_init(File::new(id, user_range, mem), GFP_KERNEL)
+        })
+    }
+
+    /// The objects this client created, which `memacct` attributes to it, not every object it
+    /// has a handle to: an imported or shared buffer is counted once, by its creator.
+    fn memory_stats(&self) -> Option<drm::file::MemoryStats> {
+        Some(drm::file::MemoryStats {
+            private: self.mem.committed(),
+            resident: Some(self.mem.resident()),
+            ..Default::default()
         })
     }
 
@@ -270,26 +316,37 @@ impl drm::file::DriverFile for File {
 unsafe impl AnyBitPattern for uapi::drm_asahi_gem_bind_op {}
 
 impl File {
-    fn new(id: u64, user_range: Range<u64>) -> impl PinInit<Self, Error> {
+    fn new(
+        id: u64,
+        user_range: Range<u64>,
+        mem: Arc<memacct::Client>,
+    ) -> impl PinInit<Self, Error> {
         unsafe {
             pin_init::pin_init_from_closure(move |slot: *mut Self| {
                 let raw_vms = addr_of_mut!((*slot).vms);
-                xarray::XArray::<KBox<Vm>>::new(xarray::AllocKind::Alloc1)
-                    .__pinned_init(raw_vms)?;
+                crate::util::raw_try_init(
+                    raw_vms,
+                    xarray::XArray::<KBox<Vm>>::new(xarray::AllocKind::Alloc1),
+                )?;
 
                 let raw_queues = addr_of_mut!((*slot).queues);
-                xarray::XArray::<Arc<Mutex<KBox<dyn queue::Queue>>>>::new(
-                    xarray::AllocKind::Alloc1,
-                )
-                .__pinned_init(raw_queues)?;
+                crate::util::raw_try_init(
+                    raw_queues,
+                    xarray::XArray::<Arc<Mutex<KBox<dyn queue::Queue>>>>::new(
+                        xarray::AllocKind::Alloc1,
+                    ),
+                )?;
 
                 let raw_objects = addr_of_mut!((*slot).objects);
-                xarray::XArray::<KBox<Object>>::new(xarray::AllocKind::Alloc1)
-                    .__pinned_init(raw_objects)?;
+                crate::util::raw_try_init(
+                    raw_objects,
+                    xarray::XArray::<KBox<Object>>::new(xarray::AllocKind::Alloc1),
+                )?;
 
                 (*slot).id = id;
                 (*slot).user_range = user_range;
                 addr_of_mut!((*slot).params_size).write(core::sync::atomic::AtomicU64::new(0));
+                addr_of_mut!((*slot).mem).write(mem);
                 Ok(())
             })
         }
@@ -341,7 +398,7 @@ impl File {
                 let limits = gpu.queue_limits().ok_or(EINVAL)?;
                 let words = [limits.max_queues, limits.max_in_flight_per_queue, 0, 0];
                 UserSlice::new(
-                    UserPtr::from_addr(data.pointer as _),
+                    UserPtr::from_addr(data.pointer as usize),
                     core::mem::size_of_val(&words),
                 )
                 .writer()
@@ -360,8 +417,11 @@ impl File {
             return Err(ENODEV);
         }
 
+        let memory_limits = memacct::LEDGER.limits();
         let mut params = uapi::drm_asahi_params_global {
             features: 0,
+            memory_limit: memory_limits.device,
+            client_memory_limit: memory_limits.client,
 
             vm_start: file.inner().user_range.start,
             vm_end: file.inner().user_range.end,
@@ -383,7 +443,7 @@ impl File {
 
         // SAFETY: We only write to this userptr once, so there are no TOCTOU issues.
         let mut params_writer =
-            UserSlice::new(UserPtr::from_addr(data.pointer as _), size).writer();
+            UserSlice::new(UserPtr::from_addr(data.pointer as usize), size).writer();
 
         // SAFETY: `size` is at most the sizeof of `params`
         params_writer.write_slice(unsafe {
@@ -402,15 +462,18 @@ impl File {
         if data.pad != 0 || data.size < size as u64 {
             return Err(EINVAL);
         }
-        let user = UserPtr::from_addr(data.pointer as _);
+        let user = UserPtr::from_addr(data.pointer as usize);
         let [vm_id, flags, _, pad] = UserSlice::new(user, size).reader().read::<[u32; 4]>()?;
         if flags != 0 || pad != 0 {
             return Err(EINVAL);
         }
         let status = Self::vm_status(file, vm_id)?;
-        UserSlice::new(user, size)
-            .writer()
-            .write(&[vm_id, 0, status.reported_error() as u32, 0])?;
+        UserSlice::new(user, size).writer().write(&[
+            vm_id,
+            0,
+            status.reported_error() as u32,
+            0,
+        ])?;
         Ok(0)
     }
 
@@ -421,7 +484,7 @@ impl File {
             return Err(EINVAL);
         }
         let [vm_id, handle, offset, flags] =
-            UserSlice::new(UserPtr::from_addr(data.pointer as _), size)
+            UserSlice::new(UserPtr::from_addr(data.pointer as usize), size)
                 .reader()
                 .read::<[u32; 4]>()?;
         if flags != 0 || handle == 0 || offset % core::mem::align_of::<i32>() as u32 != 0 {
@@ -492,7 +555,22 @@ impl File {
 
         let gpu = &reg_data.gpu;
         let file_id = file.inner().id;
-        let vm = gpu.new_vm(kernel_range.clone())?;
+        let vm = gpu.new_vm_for_file(kernel_range.clone(), file_id)?;
+        // G16 registers a retained backend owner before returning this VM. Any later
+        // allocation can fail before file::Vm exists to run its normal close path.
+        let failed_vm = ScopeGuard::new_with_data(
+            (vm.clone(), user_range.clone(), kernel_range.clone()),
+            |(vm, user_range, kernel_range)| {
+                if gpu.tracked_submission() && vm.status().is_some() && !vm.is_closed() {
+                    vm.close_idle_reclaim();
+                    if let Err(error) = vm.unmap_user_ranges(user_range, kernel_range) {
+                        pr_err!("VM create: closing unpublished VM failed: {:?}\n", error);
+                    }
+                    vm.bo_deferred_cleanup();
+                    gpu.vm_closed(&vm);
+                }
+            },
+        );
 
         let vm_xa = file.inner().vms();
         let resv = vm_xa.lock().reserve_limit(1..=u32::MAX, GFP_KERNEL)?;
@@ -568,10 +646,12 @@ impl File {
                 user_range,
                 kernel_range,
                 _dummy_mapping: dummy_mapping,
+                gpu: gpu.clone(),
             },
             GFP_KERNEL,
         )?)?;
 
+        drop(failed_vm.dismiss());
         data.vm_id = id;
 
         Ok(0)
@@ -589,7 +669,7 @@ impl File {
             Err(ENOENT)
         } else {
             drop(vm);
-            reg_data.gpu.vm_closed();
+            reg_data.gpu.vm_destroyed();
             Ok(0)
         }
     }
@@ -632,8 +712,24 @@ impl File {
             None
         };
 
-        let gem = gem::new_object(device, data.size.try_into()?, data.flags, resv_obj, reclaim_cpu)?;
-
+        let size = gem::checked_object_size(data.size.try_into()?)?;
+        let commit = memacct::LEDGER.admit(&file.inner().mem, size as u64).inspect_err(|_| {
+            cls_pr_debug!(
+                Errors,
+                "gem_create: {:#x} bytes refused by the GPU memory limits\n",
+                size
+            );
+        })?;
+        // Large G17 user objects are populated in full by the first VM_BIND.
+        // Do not multiply direct reclaim/compaction latency by their folio
+        // count. Userspace can evict its BO cache and retry after ENOMEM.
+        let pages_no_reclaim = gem::user_pages_no_reclaim(
+            size,
+            reg_data.gpu.as_any().is::<crate::g17::Gpu>(),
+        );
+        let gem = gem::new_object(
+            device, size, data.flags, resv_obj, reclaim_cpu, pages_no_reclaim, commit,
+        )?;
         if reg_data.gpu.prepare_new_objects() {
             gem::prepare_new_object(&gem)?;
         }
@@ -713,11 +809,17 @@ impl File {
         }
 
         if let Some(limit) = reg_data.gpu.bind_batch_limit() {
-            if data.num_binds == 0 || data.num_binds > limit || data.userptr == 0
-                || data.stride % 8 != 0 || data.stride as usize > kernel::page::PAGE_SIZE {
+            if data.num_binds == 0
+                || data.num_binds > limit
+                || data.userptr == 0
+                || data.stride % 8 != 0
+                || data.stride as usize > kernel::page::PAGE_SIZE
+            {
+                cls_pr_debug!(Errors, "vm_bind: Batch outside the GPU's limits\n");
                 return Err(EINVAL);
             }
         }
+
         if reg_data.gpu.as_any().is::<crate::g17::Gpu>() || reg_data.gpu.tracked_submission() {
             return Self::vm_bind_g17(data, file);
         }
@@ -728,7 +830,7 @@ impl File {
         let size = usize::try_from(data.stride)?
             .checked_mul(usize::try_from(data.num_binds)?)
             .ok_or(EOVERFLOW)?;
-        let reader = UserSlice::new(UserPtr::from_addr(data.userptr as _), size).reader();
+        let reader = UserSlice::new(UserPtr::from_addr(data.userptr as usize), size).reader();
         reader.read_all(&mut vec, GFP_KERNEL)?;
         let mut reader = Reader::new(&vec);
 
@@ -746,7 +848,7 @@ impl File {
         let stride = usize::try_from(data.stride)?;
         let size = stride.checked_mul(count).ok_or(EOVERFLOW)?;
         let mut bytes = KVec::new();
-        UserSlice::new(UserPtr::from_addr(data.userptr as _), size)
+        UserSlice::new(UserPtr::from_addr(data.userptr as usize), size)
             .reader()
             .read_all(&mut bytes, GFP_KERNEL)?;
         let (vm, user_range, kernel_range) = {
@@ -1194,10 +1296,26 @@ impl File {
             return Err(EINVAL);
         }
 
-        // TODO: Allow with CAP_SYS_NICE
-        if data.priority >= uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH {
+        // REALTIME stays reserved. HIGH needs CAP_SYS_NICE or DRM master, as amdgpu and
+        // panthor require for raised queue priority; EACCES lets userspace fall back to MEDIUM.
+        if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME {
             cls_pr_debug!(Errors, "queue_create: Invalid priority\n");
             return Err(EINVAL);
+        }
+        // HIGH has only been run on G17; G13 and G14 keep refusing it.
+        if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
+            && !reg_data.gpu.as_any().is::<crate::g17::Gpu>()
+        {
+            cls_pr_debug!(Errors, "queue_create: HIGH priority is not supported on this GPU\n");
+            return Err(EINVAL);
+        }
+        // SAFETY: capable() only reads the calling task's credentials (ioctl process context).
+        if data.priority == uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH
+            && !unsafe { bindings::capable(bindings::CAP_SYS_NICE as _) }
+            && !file.is_current_master()
+        {
+            cls_pr_debug!(Errors, "queue_create: HIGH priority needs CAP_SYS_NICE or DRM master\n");
+            return Err(EACCES);
         }
 
         let queues_xa = file.inner().queues();
@@ -1260,6 +1378,9 @@ impl File {
         }
 
         let gpu = &reg_data.gpu;
+        if data.cmdbuf_size as usize > gpu.max_cmdbuf_size() {
+            return Err(E2BIG);
+        }
         if let Some(manager) = gpu.manager() {
             manager.update_globals();
         }
@@ -1292,7 +1413,7 @@ impl File {
         let mut vec = KVec::new();
         let copy_commands = |bytes: &mut KVec<u8>| {
             UserSlice::new(
-                UserPtr::from_addr(data.cmdbuf as _),
+                UserPtr::from_addr(data.cmdbuf as usize),
                 data.cmdbuf_size as usize,
             )
             .reader()
@@ -1305,7 +1426,8 @@ impl File {
             copy_commands(&mut vec)?;
         }
         let syncs =
-            SyncItem::parse_array(file, data.syncs, data.in_sync_count, data.out_sync_count)?;
+            SyncItem::parse_array(file, data.syncs, data.in_sync_count, data.out_sync_count,
+                gpu.as_any().is::<crate::g17::Gpu>())?;
 
         mod_dev_dbg!(
             device,
@@ -1369,7 +1491,7 @@ impl File {
 
         // TODO: Do this on device-init for perf.
         let gpu = &reg_data.gpu;
-        let frequency_hz = gpu.base_clock_hz() as u64;
+        let frequency_hz = u64::from(gpu.base_clock_hz());
         let ts_gcd = gcd(frequency_hz, NSEC_PER_SEC as u64);
 
         let num = (NSEC_PER_SEC as u64) / ts_gcd;

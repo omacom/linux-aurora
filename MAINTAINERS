@@ -2636,6 +2636,7 @@ F:	drivers/dma/apple-sio-probe-test.dtso
 F:	drivers/dma/apple-sio-t6030-test.dtso
 F:	drivers/dma/apple-sio-test.c
 F:	drivers/dma/apple-sio.c
+F:	include/linux/dma/apple-sio.h
 F:	sound/soc/apple/*
 F:	sound/soc/codecs/cs42l83-i2c.c
 F:	sound/soc/codecs/cs42l84.*

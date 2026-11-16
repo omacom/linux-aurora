@@ -96,6 +96,7 @@ int main(void) {
 #include <stdbool.h>
 #include <stddef.h>
 #include <pthread.h>
+#include <string.h>
 #include <linux/types.h>
 struct device_node { int id; }; struct device { struct device_node *of_node; bool bound; int refs; };
 struct device_link { int unused; };
@@ -117,12 +118,17 @@ static bool device_is_bound(struct device*d){return d->bound;}
 static struct device *get_device(struct device*d){d->refs++;return d;}
 static void put_device(struct device*d){d->refs--;}
 static struct device_link *device_link_add(struct device*c,struct device*s,unsigned flags){static struct device_link l;assert(flags==1);return link_fail?NULL:&l;}
+/* This harness exercises the J613/25G83 bridge, not the T6030 GFX report. */
+static bool of_machine_is_compatible(const char *name){return !strcmp(name,"apple,t8132");}
+static bool of_device_is_compatible(const struct device_node*n,const char*name){return false;}
 ''')
         write(tmp, 'bridge.c', '''#include <stdio.h>
 #include "drivers/soc/apple/pmp-export.c"
 static int ready_result,send_result,calls;
 int apple_pmp_report_wait_supplier_ready(struct device*d,unsigned timeout){assert(d==pmp_device);assert(timeout==5000);return ready_result;}
 int apple_pmp_send_power_command(const void*data,u8 command,u16 id,u32 enabled){assert(data==pmp_data);calls++;return send_result;}
+int apple_pmp_report_check_t6030_gfx(struct device*d){assert(!"unexpected T6030 report on J613");return -EIO;}
+int apple_pmp_report_set_t6030_gfx(struct device*d,bool enabled){assert(!"unexpected T6030 report on J613");return -EIO;}
 int main(void){
  struct device_node n={1},wrong={2}; struct device supplier={&n,true,0},consumer={NULL,false,0}; int data;
  assert(apple_pmp_set_device_power(0xf,8,1)==-ENODEV);

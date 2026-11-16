@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! T6031 (M3 Max, G15C) configuration, admitted on J516C only.
+//! T6031 (M3 Max, G15C) configuration, qualified on J516C only.
+//!
+//! J514C uses these reference words on normal boots after its board, firmware,
+//! and hardware checks pass. This is not J514C power/thermal qualification.
 //!
 //! One die, four clusters of ten core slots. The firmware is the same RTKit 2419 generation as
 //! the T6030's and the initdata graph keeps the T6030 canonical VAs; what differs is the SoC
@@ -8,9 +11,8 @@
 //! device tree node the boot loader fills, not an ADT export), the GPU power (its power domain;
 //! there is no PMP vote), the initdata root version, a longer HardwareData record (0xb480
 //! bytes, its fourth view at +0xb400) placed aligned and ASC-cached, the IOMapping table (17
-//! slots at the T6031 register blocks) and the board images, built from the device tree and
-//! checked against this machine's firmware file, which supplies the record's non-device-tree
-//! words. Every
+//! slots at the T6031 register blocks) and the board images, built from the device tree, the
+//! ADT's sensor rows and the J516C reference words. Every
 //! value was measured on a J516C: the SGX identification
 //! registers, the loaded firmware segment, the device tree the boot loader hands over and the
 //! initdata of that machine.
@@ -117,18 +119,6 @@ pub(crate) const LAYOUT: Layout = Layout {
     record_empty_writable: &RECORD_EMPTY_WRITABLE,
 };
 
-/// The J516C board file (`asahi/t6031-j516c-board.bin`, built into the kernel): the hardware
-/// record, Globals and the power block that this machine's firmware accepted, as the earlier
-/// J516C driver uploaded them (its device-tree-built records with the per-board words of this
-/// machine applied). Kept out of the tree; pinned by its SHA-256. The three images are built
-/// from the device tree and must match the file's; the file supplies the record's words the
-/// device tree does not carry (`board::record::FROM_FILE`).
-const BOARD_SHA256: [u8; 32] = [
-    0x4e, 0x03, 0xf2, 0x9f, 0xa4, 0x47, 0xdc, 0xeb, 0xfd, 0x4d, 0x1c, 0x22, 0x5a, 0x64, 0x7b,
-    0xfa, 0x31, 0xb3, 0x63, 0x45, 0x8f, 0x28, 0x33, 0x82, 0x3a, 0x5c, 0xa8, 0xa1, 0x0e, 0xdf,
-    0xf3, 0xfc,
-];
-
 pub(crate) const CONFIG: Config = Config {
     name: "T6031 G15C",
     chip_id: 0x6031,
@@ -149,7 +139,7 @@ pub(crate) const CONFIG: Config = Config {
     firmware: &[
         FirmwareBuild {
             name: "macOS 14.7 stub firmware (iBoot-10151.140.19.700.2), J516C",
-            machine: None,
+            machine: Some(kernel::c_str!("apple,j516c")),
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -161,7 +151,7 @@ pub(crate) const CONFIG: Config = Config {
         },
         FirmwareBuild {
             name: "macOS 14.8 stub firmware, J516C",
-            machine: None,
+            machine: Some(kernel::c_str!("apple,j516c")),
             text_size: 0x64000,
             data_size: 0x140000,
             marker: 0x5cf28,
@@ -171,16 +161,29 @@ pub(crate) const CONFIG: Config = Config {
                 0x9d, 0x6b, 0xcd, 0xa0, 0x26, 0xcf,
             ],
         },
+        // Measured by the normal driver on J514C's 14.7 boot chain (system
+        // firmware 26.5.2). Short native GL/Vulkan and normal-login checks passed;
+        // power/thermal qualification remains open. Exact board identity is required.
+        FirmwareBuild {
+            name: "J514C macOS 14.7 boot-chain firmware",
+            machine: Some(kernel::c_str!("apple,j514c")),
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x66, 0x99, 0x13, 0xfb, 0xa2, 0x73, 0x6e, 0x4b, 0x8f, 0x8a, 0x0f, 0x81,
+                0xea, 0xdc, 0x5a, 0xc0, 0x0c, 0x9d, 0xc5, 0x1f, 0xdd, 0x4c, 0x9d, 0x37,
+                0x70, 0xc6, 0x6d, 0x2b, 0x0a, 0x1e, 0x87, 0x86,
+            ],
+        },
     ],
-    // The pinned board images and measured layout belong to the J516C, not
-    // every T6031 board (in particular, not the 14-inch J514C).
+    // This is the reference board. The exact J514C/T6031 pair also uses this
+    // configuration through normal admission, with the unmeasured reference
+    // power words reported explicitly for that chassis.
     machine: kernel::c_str!("apple,j516c"),
     platform: super::Platform::DeviceTree,
     layout: &LAYOUT,
-    board: super::Board::Blob {
-        name: kernel::c_str!("asahi/t6031-j516c-board.bin"),
-        sha256: BOARD_SHA256,
-    },
+    board: super::Board::DeviceTree(&super::super::board::record::J516C),
     // Four clusters: the saved-state pointers at +0x2980 of the preemption buffer (0xd80 plus
     // 0x700 per cluster), UMA PTC 0x6000400020, DUPM 0x3c000000140 (32 N | 96 N << 32 for
     // N = 10 cores per cluster) and 0x1a0e9 = 0, with the saved-state pointers and the

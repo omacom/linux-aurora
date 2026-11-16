@@ -132,7 +132,10 @@ static bool amdgpu_read_bios_from_vram(struct amdgpu_device *adev)
 			return false;
 		}
 	} else {
-		bios = ioremap_wc(vram_base, size);
+		if (pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED)
+			bios = ioremap_np(vram_base, size);
+		else
+			bios = ioremap_wc(vram_base, size);
 		if (!bios) {
 			amdgpu_bios_release(adev);
 			return false;
@@ -154,14 +157,40 @@ static bool amdgpu_read_bios_from_vram(struct amdgpu_device *adev)
 
 bool amdgpu_read_bios(struct amdgpu_device *adev)
 {
+	struct resource *res = &adev->pdev->resource[PCI_ROM_RESOURCE];
 	uint8_t __iomem *bios;
 	size_t size;
 
 	adev->bios = NULL;
-	/* XXX: some cards may return 0 for rom size? ddx has a workaround */
-	bios = pci_map_rom(adev->pdev, &size);
-	if (!bios)
-		return false;
+	if (res->flags & IORESOURCE_MEM_NONPOSTED) {
+		if (!res->parent && pci_assign_resource(adev->pdev, PCI_ROM_RESOURCE))
+			return false;
+		size = resource_size(res);
+		if (!size || pci_enable_rom(adev->pdev))
+			return false;
+		bios = ioremap_np(res->start, size);
+		if (!bios) {
+			if (!(res->flags & IORESOURCE_ROM_ENABLE))
+				pci_disable_rom(adev->pdev);
+			return false;
+		}
+		/*
+		 * The window is larger than the image. Check the ROM signature and copy only the
+		 * image, whose length the header gives in 512-byte units.
+		 */
+		if (readw(bios) != 0xaa55) {
+			iounmap(bios);
+			if (!(res->flags & IORESOURCE_ROM_ENABLE))
+				pci_disable_rom(adev->pdev);
+			return false;
+		}
+		if (readb(bios + 2) && (size_t)readb(bios + 2) * 512 < size)
+			size = (size_t)readb(bios + 2) * 512;
+	} else {
+		bios = pci_map_rom(adev->pdev, &size);
+		if (!bios)
+			return false;
+	}
 
 	adev->bios = kzalloc(size, GFP_KERNEL);
 	if (adev->bios == NULL) {

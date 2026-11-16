@@ -136,6 +136,16 @@ class ManifestTest(TempDirTestCase):
         super().setUp()
         self.manifest = host.load_manifest()
 
+    def workflow_groups(self):
+        """The groups the host-tests job's matrix runs."""
+        workflow = (TREE / ".github/workflows/kernel-ci-jobs.yml").read_text()
+        job = workflow.split("\n  host-tests:\n", 1)[1].split("\n  self-test:\n", 1)[0]
+        return re.search(r"^ +group: \[(.*)\]$", job, re.M).group(1).replace(" ", "").split(",")
+
+    def test_the_workflow_runs_every_group(self):
+        groups = {suite.get("group", "tools") for suite in self.manifest["suites"]}
+        self.assertEqual(sorted(groups), sorted(self.workflow_groups()))
+
     def test_every_test_like_file_is_listed_or_excluded(self):
         listed = set(self.manifest["excluded"]) | set(self.manifest.get("helpers", {}))
         for suite in self.manifest["suites"]:
@@ -157,7 +167,7 @@ class ManifestTest(TempDirTestCase):
         for suite in self.manifest["suites"]:
             with self.subTest(suite=suite["name"]):
                 self.assertTrue(suite["argv"])
-                self.assertIn(suite.get("group", "tools"), ("tools", "aurora-sep"))
+                self.assertIn(suite.get("group", "tools"), self.workflow_groups())
                 for commit in suite.get("commits", []):
                     self.assertRegex(commit, r"^[0-9a-f]{40}$")
                 if "known_failure" in suite:

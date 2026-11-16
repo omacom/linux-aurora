@@ -308,7 +308,12 @@ static struct irq_chip apple_spmi_irq_chip = {
 	.irq_unmask = apple_spmi_irq_unmask,
 	.irq_ack = apple_spmi_irq_ack,
 	.irq_set_type = apple_spmi_irq_set_type,
-	.flags = IRQCHIP_ONESHOT_SAFE,
+	/*
+	 * The controller sits in an always-on block and its parent interrupt is
+	 * chained, so it stays live through suspend: a wake-armed peripheral
+	 * interrupt needs nothing more from the chip to wake the system.
+	 */
+	.flags = IRQCHIP_ONESHOT_SAFE | IRQCHIP_SKIP_SET_WAKE,
 };
 
 static int apple_spmi_irq_domain_map(struct irq_domain *irqd,

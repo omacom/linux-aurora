@@ -217,6 +217,20 @@ impl<T: SlotItem> SlotAllocator<T> {
         token: Option<SlotToken>,
         cb: impl FnOnce(&mut T::Data, &mut Guard<T>) -> Result<()>,
     ) -> Result<Guard<T>> {
+        self.get_inner_impl(token, cb, true)
+    }
+
+    /// Gets a slot without waiting; returns ENOSPC when every slot is held.
+    pub(crate) fn try_get(&self, token: Option<SlotToken>) -> Result<Guard<T>> {
+        self.get_inner_impl(token, |_a, _b| Ok(()), false)
+    }
+
+    fn get_inner_impl(
+        &self,
+        token: Option<SlotToken>,
+        cb: impl FnOnce(&mut T::Data, &mut Guard<T>) -> Result<()>,
+        wait: bool,
+    ) -> Result<Guard<T>> {
         let mut inner = self.0.inner.lock();
 
         if let Some(token) = token {
@@ -256,6 +270,9 @@ impl<T: SlotItem> SlotAllocator<T> {
             }
 
             if oldest_time == u64::MAX {
+                if !wait {
+                    return Err(ENOSPC);
+                }
                 if first && inner.slot_limit == usize::MAX {
                     pr_warn!(
                         "{}: out of slots, blocking\n",

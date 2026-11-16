@@ -30,10 +30,13 @@
 //! one cell per cluster). The same admission applies, without the DRAM bounds, and the four UAT
 //! regions may lie in System RAM: they are reserved-memory nodes without `no-map`, which the
 //! kernel maps, so the driver reaches them through its own mapping ([`super::regs::Mapping`]).
+//! The GPU's sensor rows, which the node does not carry, come from the same ADT export as on
+//! T6030: `/arm-io/aon-ptd` `ptd_data_table` ([`super::board::record::sensor_rows`]).
 
 use core::ops::Range;
 use kernel::{c_str, device, prelude::*};
 
+use super::board::record;
 use super::boot::glue;
 use super::hw;
 
@@ -57,12 +60,13 @@ pub(crate) struct GpuAdt {
     pub(crate) perf_mhz: [u32; PERF_STATES],
     pub(crate) perf_mv: [u32; PERF_STATES],
     pub(crate) sram_mv: [u32; PERF_STATES],
-    /// Per-cluster core mV of each state, rounded up from the device tree's microvolts, how
-    /// many voltage cells the node has (1 on the ADT path), and the state's power in mW (0 on
-    /// the ADT path).
+    /// Per-cluster core mV of each state, rounded up from the device tree's microvolts, and how
+    /// many voltage cells the node has (1 on the ADT path).
     pub(crate) cluster_mv: [[u32; CLUSTERS]; PERF_STATES],
     pub(crate) cluster_cells: usize,
-    pub(crate) perf_mw: [u32; PERF_STATES],
+    /// The GPU's six sensor rows of the ADT's `aon-ptd` table (T6031; zero on the T6030 path,
+    /// whose templates carry their own).
+    pub(crate) sensor_rows: [[u8; 12]; record::SENSOR_ROW_COUNT],
 }
 
 /// Voltage cells the layout keeps per state.
@@ -328,7 +332,7 @@ fn parse(dev: &device::Device, adt: &Adt<'_>) -> Result<GpuAdt> {
         sram_mv: [0; PERF_STATES],
         cluster_mv: [[0; CLUSTERS]; PERF_STATES],
         cluster_cells: 1,
-        perf_mw: [0; PERF_STATES],
+        sensor_rows: [[0; 12]; record::SENSOR_ROW_COUNT],
     };
     collect_perf(dev, adt, sgx, &mut out)?;
     for i in 0..PERF_STATES {
@@ -437,11 +441,11 @@ fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
         sram_mv: [0; PERF_STATES],
         cluster_mv: [[0; CLUSTERS]; PERF_STATES],
         cluster_cells: 0,
-        perf_mw: [0; PERF_STATES],
+        sensor_rows: [[0; 12]; record::SENSOR_ROW_COUNT],
     };
     // Operating points: MHz, the highest cluster voltage of each and the clusters' voltages
-    // (rounded up) and power for the hardware record; the SRAM voltage is not in the device
-    // tree.
+    // (rounded up) for the hardware record; the SRAM voltage is not in the device tree, and
+    // the powers are a boot-loader stand-in.
     let opps = node
         .parse_phandle(c_str!("operating-points-v2"), 0)
         .ok_or(EINVAL)
@@ -450,7 +454,6 @@ fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
     for opp in opps.children() {
         let hz: u64 = opp.get_property(c_str!("opp-hz"))?;
         let uv: KVec<u32> = opp.get_property(c_str!("opp-microvolt"))?;
-        let uw: Option<u32> = opp.get_opt_property(c_str!("opp-microwatt"))?;
         let mv = uv.iter().max().copied().unwrap_or(0) / 1000;
         if uv.is_empty() || uv.len() > CLUSTERS || (count > 0 && uv.len() != out.cluster_cells) {
             dev_err!(dev, "GPU operating point {} has {} voltage cells\n", count, uv.len());
@@ -467,7 +470,6 @@ fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
                 out.cluster_mv[count][c] = v.div_ceil(1000);
             }
             out.cluster_cells = uv.len();
-            out.perf_mw[count] = uw.unwrap_or(0) / 1000;
         }
         count += 1;
     }
@@ -480,7 +482,36 @@ fn from_device_tree(dev: &device::Device) -> Result<GpuAdt> {
         );
         return Err(EINVAL);
     }
+    out.sensor_rows = sensor_rows(dev)?;
     Ok(out)
+}
+
+/// A private copy of the boot loader's ADT export.
+fn copy() -> Result<KVVec<u8>> {
+    let (start, size) = glue::adt_phram()?;
+    if size == 0 || size > 0x200000 || start & 0x3fff != 0 {
+        return Err(EINVAL);
+    }
+    super::identity::copy_physical(start, usize::try_from(size)?)
+}
+
+/// The GPU's six sensor rows: `/arm-io/aon-ptd` `ptd_data_table` of the ADT export
+/// ([`record::sensor_rows`]), which the device tree does not carry.
+fn sensor_rows(dev: &device::Device) -> Result<[[u8; 12]; record::SENSOR_ROW_COUNT]> {
+    let copy =
+        copy().inspect_err(|_| dev_err!(dev, "no usable ADT export for the GPU sensor rows\n"))?;
+    let adt = Adt { data: &copy };
+    let table = adt
+        .node_end(0, 0)
+        .and_then(|_| adt.child(0, "arm-io"))
+        .and_then(|armio| adt.child(armio, "aon-ptd"))
+        .and_then(|ptd| adt.prop(ptd, "ptd_data_table"))
+        .ok_or(EINVAL)
+        .inspect_err(|_| dev_err!(dev, "ADT has no aon-ptd ptd_data_table\n"))?;
+    record::sensor_rows(table).map_err(|why| {
+        dev_err!(dev, "ADT aon-ptd: {}\n", why);
+        EINVAL
+    })
 }
 
 /// Reads and admits the GPU's regions, segments and performance states (read-only), from the
@@ -489,10 +520,6 @@ pub(crate) fn read(dev: &device::Device, cfg: &super::Config) -> Result<GpuAdt> 
     if cfg.platform == hw::Platform::DeviceTree {
         return from_device_tree(dev);
     }
-    let (start, size) = glue::adt_phram()?;
-    if size == 0 || size > 0x200000 || start & 0x3fff != 0 {
-        return Err(EINVAL);
-    }
-    let copy = super::identity::copy_physical(start, usize::try_from(size)?)?;
+    let copy = copy()?;
     parse(dev, &Adt { data: &copy })
 }

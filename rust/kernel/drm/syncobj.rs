@@ -15,6 +15,14 @@ pub struct SyncObj {
 }
 
 impl SyncObj {
+    /// Borrows the raw sync object for synchronous calls into DRM helpers.
+    /// The caller must not release the owned reference or retain this pointer
+    /// beyond the lifetime of `self` without taking another reference.
+    #[inline(always)]
+    pub fn as_raw(&self) -> *mut bindings::drm_syncobj {
+        self.ptr
+    }
+
     /// Looks up a sync object by its handle for a given `File`.
     pub fn lookup_handle<T: drm::file::DriverFile>(
         file: &drm::File<T>,

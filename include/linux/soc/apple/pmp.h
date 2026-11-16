@@ -8,12 +8,18 @@ struct device;
 #if IS_REACHABLE(CONFIG_APPLE_PMP)
 int apple_pmp_link_device(struct device *consumer);
 int apple_pmp_set_device_power(u8 command, u16 device_id, u32 enabled);
+/* After the acknowledged AGX vote and successful GPU firmware startup. */
+int apple_pmp_t6030_gpu_ready(void);
 #else
 static inline int apple_pmp_link_device(struct device *consumer)
 {
 	return -ENODEV;
 }
 static inline int apple_pmp_set_device_power(u8 command, u16 device_id, u32 enabled)
+{
+	return -ENODEV;
+}
+static inline int apple_pmp_t6030_gpu_ready(void)
 {
 	return -ENODEV;
 }

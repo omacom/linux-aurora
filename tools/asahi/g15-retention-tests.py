@@ -34,6 +34,8 @@ PREFIX = r'''
 use std::{cell::{Cell, RefCell, RefMut}, mem::MaybeUninit, ops::{Deref, DerefMut},
           sync::{Arc, atomic::{AtomicBool, Ordering}}};
 type Error = i32;
+trait FromErrno { fn from_errno(value: i32) -> Self; }
+impl FromErrno for Error { fn from_errno(value: i32) -> Self { value } }
 type Result<T = ()> = std::result::Result<T, Error>;
 const GFP_KERNEL: u32 = 0;
 const EINVAL: Error = -22;
@@ -43,6 +45,7 @@ thread_local! {
     static FAIL: Cell<u32> = const { Cell::new(0) };
     static OWNER_DROPS: Cell<u32> = const { Cell::new(0) };
     static BUFFER_DROPS: Cell<u32> = const { Cell::new(0) };
+    static PMP_CALLS: Cell<u32> = const { Cell::new(0) };
 }
 fn step(site: u32) -> Result {
     if FAIL.get() & (1 << site) != 0 { Err(-100 - site as i32) } else { Ok(()) }
@@ -72,8 +75,13 @@ impl<T> Deref for KBox<T> { type Target = T; fn deref(&self) -> &T { &self.0 } }
 impl<T> DerefMut for KBox<T> { fn deref_mut(&mut self) -> &mut T { &mut self.0 } }
 struct AsahiDevice;
 impl AsahiDevice { fn as_ref(&self) -> &Self { self } }
-struct Config;
-static CONFIG: Config = Config;
+mod hw {
+    #[derive(PartialEq)]
+    pub enum Platform { Adt, AdtWithPmp }
+}
+struct Config { platform: hw::Platform }
+static CONFIG: Config = Config { platform: hw::Platform::Adt };
+static PMP_CONFIG: Config = Config { platform: hw::Platform::AdtWithPmp };
 mod mmu { pub struct Uat; }
 mod regs {
     pub struct Identity;
@@ -152,6 +160,12 @@ impl Firmware {
 }
 mod boot {
     use super::*;
+    pub mod glue {
+        pub unsafe fn asahi_g15_pmp_ready() -> i32 {
+            super::PMP_CALLS.set(super::PMP_CALLS.get() + 1);
+            match super::step(13) { Ok(()) => 0, Err(e) => e }
+        }
+    }
     use super::{object::Objects, initdata::InitData, channel::Channels, event::Events};
     pub struct Session { _owner: Owner, uat: Arc<mmu::Uat>, regs: regs::Regs }
     impl Session {
@@ -185,7 +199,9 @@ fn orphan() -> boot::Orphan {
     let boot::Booted { session, init, objects, channels, events, .. } = booted();
     boot::Orphan { session, _objects: objects, channels: Some(channels), _init: Some(init), events }
 }
-fn reset(fail: u32) { FAIL.set(fail); OWNER_DROPS.set(0); BUFFER_DROPS.set(0); }
+fn reset(fail: u32) {
+    FAIL.set(fail); OWNER_DROPS.set(0); BUFFER_DROPS.set(0); PMP_CALLS.set(0);
+}
 fn retained(label: &str) {
     assert_eq!(OWNER_DROPS.get(), 0, "{label}: live session owner dropped");
     assert_eq!(BUFFER_DROPS.get(), 0, "{label}: firmware buffer dropped");
@@ -221,17 +237,32 @@ fn main() {
             std::mem::forget(shared);
         }
     }
-    reset(0);
+    for orphan_oom in [false, true] {
+        reset((1 << 13) | if orphan_oom { 1 << 7 } else { 0 });
+        let shared = Shared::new();
+        let result = Firmware::start_backend(&AsahiDevice, &PMP_CONFIG, booted(), &shared);
+        assert!(matches!(result, Err(-113)), "PMP readiness error changed");
+        assert_eq!(PMP_CALLS.get(), 1, "PMP readiness was not reported");
+        retained("PMP readiness failure");
+        assert_eq!(shared.orphan.lock().is_some(), !orphan_oom);
+        std::mem::forget(shared);
+    }
+    for cfg in [&CONFIG, &PMP_CONFIG] {
+    // A pending PMP error must be irrelevant on a platform without PMP.
+    reset(if cfg.platform == hw::Platform::Adt { 1 << 13 } else { 0 });
     let shared = Shared::new();
     let booted = boot::start(&shared).expect("normal boot");
     assert_eq!(booted.max_frequency_khz, 1234);
     let uat: Arc<mmu::Uat> = booted.session.uat();
-    let firmware = Firmware::start_backend(&AsahiDevice, &CONFIG, booted, &shared).expect("normal backend");
+    let firmware = Firmware::start_backend(&AsahiDevice, cfg, booted, &shared).expect("normal backend");
+    assert_eq!(PMP_CALLS.get(), u32::from(cfg.platform == hw::Platform::AdtWithPmp),
+               "PMP readiness used on the wrong platform");
     assert!(Arc::ptr_eq(&uat, &firmware.session.uat()));
     assert!(!shared.orphaned.load(Ordering::Acquire));
     retained("normal success");
     std::mem::forget((shared, firmware));
-    println!("PASS 23 retention cases: orphan OOM, six backend failure sites, four boot-completion sites and normal success");
+    }
+    println!("PASS 26 retention cases: orphan OOM, six backend failure sites, four boot-completion sites, PMP readiness failure and both platform success paths");
     println!("normal success owner_drops={} buffer_drops={}", OWNER_DROPS.get(), BUFFER_DROPS.get());
 }
 '''
@@ -269,11 +300,16 @@ def main():
             cwd=ROOT, text=True)
         variants["consume-orphan-before-allocation"] = source.replace(orphan, item(old, "    pub(crate) fn orphan("))
         variants["unguarded-registry-allocation"] = source.replace(backend, item(old, "    fn start_backend("))
+        variants["ignore-pmp-readiness-error"] = source.replace(
+            "let ret = unsafe { boot::glue::asahi_g15_pmp_ready() };",
+            "let _ret = unsafe { boot::glue::asahi_g15_pmp_ready() }; let ret = 0;")
+        variants["pmp-on-other-platform"] = source.replace(
+            "if cfg.platform != hw::Platform::AdtWithPmp {", "if false {")
     receipt = {"scope": __doc__, "sources": {
         name: hashlib.sha256(text.encode()).hexdigest()
         for name, text in [("mod.rs", mod), ("boot.rs", boot), ("kbox.rs", kbox)]},
         "rustc": subprocess.check_output([os.environ.get("HOSTRUSTC", "rustc"), "--version"], text=True).strip(),
-        "cases": 23, "public_old_source_control": CONTROL_REF, "variants": {}}
+        "cases": 26, "public_old_source_control": CONTROL_REF, "variants": {}}
     for name, text in variants.items():
         if name != "actual" and text == source:
             raise RuntimeError("NOT_APPLIED " + name)
@@ -290,14 +326,20 @@ def main():
                 raise RuntimeError(result.stderr)
         else:
             expected = {"consume-orphan-before-allocation": "orphan allocation: live session owner dropped",
-                        "unguarded-registry-allocation": "backend failure: live session owner dropped"}[name]
-            if result.returncode == 0 or expected not in result.stderr or "left: 5" not in result.stderr:
+                        "unguarded-registry-allocation": "backend failure: live session owner dropped",
+                        "ignore-pmp-readiness-error": "PMP readiness error changed",
+                        "pmp-on-other-platform": "normal backend: -113"}[name]
+            if result.returncode == 0 or expected not in result.stderr:
                 raise RuntimeError("INVALID mutant outcome " + name + "\n" + result.stderr)
-            receipt["variants"][name]["intended_owner_drops"] = 5
+            if name in ("consume-orphan-before-allocation", "unguarded-registry-allocation"):
+                if "left: 5" not in result.stderr:
+                    raise RuntimeError("INVALID owner-drop count " + name)
+                receipt["variants"][name]["intended_owner_drops"] = 5
+            receipt["variants"][name]["intended_assertion"] = expected
     after = subprocess.run([str(out / "actual")], capture_output=True, text=True, check=True)
     receipt["actual_after_mutants"] = {"exit": after.returncode, "stdout": after.stdout, "stderr": after.stderr}
     receipt["fixed_invariants"] = {"live_session_owner_drops": 0, "firmware_buffer_drops": 0,
-                                   "checked_cases": 23}
+                                   "checked_cases": 26}
     (out / "result.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
 

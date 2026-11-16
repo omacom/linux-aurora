@@ -948,8 +948,9 @@ static int tas2770_i2c_probe(struct i2c_client *client)
 	if (client->dev.of_node) {
 		result = tas2770_parse_dt(&client->dev, tas2770);
 		if (result) {
-			dev_err(tas2770->dev, "%s: Failed to parse devicetree\n",
-				__func__);
+			if (result != -EPROBE_DEFER)
+				dev_err(tas2770->dev, "%s: Failed to parse devicetree\n",
+					__func__);
 			return result;
 		}
 	}

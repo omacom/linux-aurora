@@ -624,6 +624,7 @@ MODEL = r'''
             pub list: Mutex<KVec<HeapMapping>>,
         }
         pub struct VmState {
+            pub id: u64,
             pub slot: u32,
             pub vm: mmu::Vm,
             pub heap: Arc<HeapMappings>,
@@ -631,6 +632,8 @@ MODEL = r'''
         impl VmState {
             pub fn new(slot: u32) -> Arc<Self> {
                 Arc::new(VmState {
+                    // Keep VM identity distinct from the modeled hardware slot.
+                    id: 0x10000 + u64::from(slot),
                     slot,
                     vm: mmu::Vm::new(slot),
                     heap: Arc::new(HeapMappings { list: Mutex::new(KVec(Vec::new())) }),
@@ -639,6 +642,11 @@ MODEL = r'''
         }
         pub struct Job {
             pub vm: Arc<VmState>,
+        }
+        impl Job {
+            pub fn slot(&self) -> u32 {
+                self.vm.slot
+            }
         }
         pub struct Flight {
             pub job: Job,

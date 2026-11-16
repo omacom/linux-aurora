@@ -298,6 +298,9 @@ pgprot_t ttm_io_prot(struct ttm_buffer_object *bo, struct ttm_resource *res,
 	struct ttm_resource_manager *man;
 	enum ttm_caching caching;
 
+	if (res->bus.is_nonposted)
+		return pgprot_noncached(tmp);
+
 	man = ttm_manager_type(bo->bdev, res->mem_type);
 	if (man->use_tt) {
 		caching = bo->ttm->caching;
@@ -325,7 +328,9 @@ static int ttm_bo_ioremap(struct ttm_buffer_object *bo,
 		resource_size_t res = mem->bus.offset + offset;
 
 		map->bo_kmap_type = ttm_bo_map_iomap;
-		if (mem->bus.caching == ttm_write_combined)
+		if (mem->bus.is_nonposted)
+			map->virtual = ioremap_np(res, size);
+		else if (mem->bus.caching == ttm_write_combined)
 			map->virtual = ioremap_wc(res, size);
 #ifdef CONFIG_X86
 		else if (mem->bus.caching == ttm_cached)
@@ -511,6 +516,8 @@ int ttm_bo_vmap(struct ttm_buffer_object *bo, struct iosys_map *map)
 
 		if (mem->bus.addr)
 			vaddr_iomem = (void __iomem *)mem->bus.addr;
+		else if (mem->bus.is_nonposted)
+			vaddr_iomem = ioremap_np(mem->bus.offset, bo->base.size);
 		else if (mem->bus.caching == ttm_write_combined)
 			vaddr_iomem = ioremap_wc(mem->bus.offset,
 						 bo->base.size);

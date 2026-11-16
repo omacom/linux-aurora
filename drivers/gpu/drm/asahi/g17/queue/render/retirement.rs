@@ -122,6 +122,17 @@ impl Snapshot {
     fn executed(self) -> bool {
         self.pass[0] != 0 && self.pass[1] != 0
     }
+
+    /// Neither the tiler start nor the fragment end was written: nothing ran.
+    pub(crate) fn untouched(self) -> bool {
+        self.pass == [0, 0]
+    }
+
+    /// The command ran (tiler start and fragment end written) and the firmware consumed both
+    /// queues' ring entries.
+    pub(crate) fn executed_and_consumed(self) -> bool {
+        self.executed() && self.cursors.iter().all(|cursors| cursors.done == cursors.write)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,8 +214,12 @@ pub(crate) fn poll_observed(
     memory: &mut impl Memory,
     snapshot: Snapshot,
 ) -> Result<Poll> {
-    let observation = observe(ticket, snapshot)?;
-    complete_poll(ticket, memory, snapshot, observation)
+    match observe(ticket, snapshot) {
+        Ok(observation) => complete_poll(ticket, memory, snapshot, observation),
+        // The borrowed snapshot can straddle a firmware cursor update like any other sample:
+        // take the ordinary poll's fresh snapshot and reread instead of failing the client.
+        Err(_) => poll(ticket, memory),
+    }
 }
 
 fn complete_poll(
@@ -344,5 +359,27 @@ impl<T> Tracker<T> {
         Iterator::chain(after.iter_mut(), before.iter_mut())
             .take(self.len)
             .filter_map(Option::as_mut)
+    }
+}
+
+#[kunit_tests(asahi_g17_render_retirement)]
+mod executed_tests {
+    use super::*;
+
+    fn snapshot(done: u32, write: u32, pass: [u64; 2]) -> Snapshot {
+        Snapshot {
+            cursors: [Cursors { done, read: done, write }; 2],
+            job_list_empty: false,
+            pass,
+        }
+    }
+
+    #[test]
+    fn executed_and_consumed_needs_both_passes_and_consumed_rings() {
+        assert!(snapshot(3, 3, [1, 2]).executed_and_consumed());
+        assert!(!snapshot(3, 3, [0, 0]).executed_and_consumed());
+        assert!(!snapshot(3, 3, [1, 0]).executed_and_consumed());
+        assert!(!snapshot(3, 3, [0, 2]).executed_and_consumed());
+        assert!(!snapshot(2, 3, [1, 2]).executed_and_consumed());
     }
 }

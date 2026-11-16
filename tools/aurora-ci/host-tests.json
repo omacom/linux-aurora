@@ -7,7 +7,8 @@
   "commits: history the suite reads; host-tests.py --fetch-commits fetches it into a shallow checkout.",
   "Every test-like file under the discovery roots is listed in suites or excluded (tests/test_host_tests.py checks).",
   "helpers: files that look like suites but are run by a listed suite.",
-  "serial: the suite measures time; it runs alone, after the parallel batch."
+  "serial: the suite measures time; it runs alone, after the parallel batch.",
+  "group: the CI job that runs the suite; aurora-sep-slow holds the longest aurora-sep suites so they run beside the rest."
  ],
  "apt": [
   "bison",
@@ -1286,7 +1287,7 @@
   },
   {
    "name": "tools/aurora-sep/tests/test_m3_air_default.py",
-   "group": "aurora-sep",
+   "group": "aurora-sep-slow",
    "argv": [
     "python3",
     "-m",
@@ -1447,7 +1448,7 @@
   },
   {
    "name": "tools/aurora-sep/tests/test_m3_pro_mesa.py",
-   "group": "aurora-sep",
+   "group": "aurora-sep-slow",
    "argv": [
     "python3",
     "-m",
@@ -1512,7 +1513,7 @@
   },
   {
    "name": "tools/aurora-sep/tests/test_m3max_kit.py",
-   "group": "aurora-sep",
+   "group": "aurora-sep-slow",
    "argv": [
     "python3",
     "-m",
@@ -2187,6 +2188,54 @@
    ],
    "rust": "1.93.1",
    "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
+  },
+  {
+   "name": "tools/asahi/g15-display-order-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-display-order-tests.py"
+   ],
+   "rust": "1.93.1",
+   "note": "Actual display publication, T6030/T6031/T6034 links and admit() bodies on OF/device-link and admission-order models; C and admit() mutants must build and fail. No hardware or private fixtures."
+  },
+  {
+   "name": "tools/asahi/g15-j514c-display-default-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-j514c-display-default-tests.py"
+   ],
+   "note": "Production J514C/J516C display default selector and owner choice with compiled missing-board, missing-SoC and lost-disable mutants; no hardware/private fixtures."
+  },
+  {
+   "name": "tools/asahi/g15-j514c-firmware-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-j514c-firmware-tests.py"
+   ],
+   "rust": "1.93.1",
+   "note": "Production full firmware lookup against T6031 rows; exact J514C identity and other-board refusal. Public synthetic inputs only; no firmware images."
+  },
+  {
+   "name": "tools/asahi/g15-t6034-profile-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-t6034-profile-tests.py"
+   ],
+   "rust": "1.93.1",
+   "note": "Production G15C profiles, exact T6034 topology/six memory channels, full J514M/J516M firmware tuples and wrong-board/field refusal; strict nonempty and empty profiles never consult prefix overrides, while older policy remains unchanged. Public identity inputs only."
+  },
+  {
+   "name": "tools/asahi/t6034-display-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/t6034-display-tests.py"
+   ],
+   "note": "Production J514M/T6034 display admission, PMP report OF table, DCP/platform matching and component enumeration; compiled board/image, report-owner/aperture, missing-component/binding and disabled-filter mutants. No hardware or private fixtures."
   },
   {
    "name": "tools/testing/selftests/drivers/gpu/asahi-g15/run.py",

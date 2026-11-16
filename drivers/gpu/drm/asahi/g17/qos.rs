@@ -2,17 +2,14 @@
 
 //! Shared QoS publication and exact-completion accounting for every engine.
 //!
-//! The device publication lock serializes this host state. Publishing identity
+//! The port's QoS lock serializes this host state. Publishing identity
 //! precedes submitted counters; retiring a final owner clears only its two row
 //! bytes. Cancellation balances host references without rewinding shared counts.
 
-use super::{
-    fw::{qos as fw, queue::Policy},
-    object::KernelObject,
-};
+use super::fw::{qos as fw, queue::Policy};
 use crate::hw::t8140::qos as cfg;
 use core::{
-    mem::{offset_of, size_of},
+    mem::offset_of,
     sync::atomic::{fence, AtomicU32, AtomicU64, AtomicU8, Ordering},
 };
 use kernel::prelude::*;
@@ -30,15 +27,17 @@ pub(crate) struct View<'a> {
     times_and_counts: &'a [AtomicU64; 7],
 }
 impl<'a> View<'a> {
-    pub(crate) fn new(object: &'a KernelObject) -> Result<Self> {
-        let ptr = object.pointer(0, size_of::<fw::Qos>())?;
+    /// # Safety
+    ///
+    /// `ptr` must span a complete QoS table that stays mapped for `'a`.
+    pub(crate) unsafe fn from_raw(ptr: *mut u8) -> Result<Self> {
         if ptr as usize & 7 != 0 {
             return Err(EINVAL);
         }
         // SAFETY: pointer spans the complete layout, whose asserted offsets
         // and size bound every array below. Integer atomics have their integer
-        // representation and alignment. The retained object borrow keeps every
-        // shared reference alive; accesses use each field's fixed width.
+        // representation and alignment. The caller keeps every shared
+        // reference alive; accesses use each field's fixed width.
         Ok(unsafe {
             Self {
                 rows: &*ptr.add(offset_of!(fw::Qos, rows)).cast(),
@@ -53,6 +52,14 @@ impl<'a> View<'a> {
     }
     fn row(&self, qid: usize) -> [u8; 8] {
         core::array::from_fn(|index| self.rows[qid][index].load(Ordering::Relaxed))
+    }
+    /// The complete row in one access. The table is uncached: a publication reads
+    /// each row once, before it stores anything.
+    fn row_word(&self, qid: usize) -> [u8; 8] {
+        let row = core::ptr::from_ref(&self.rows[qid]).cast::<AtomicU64>();
+        // SAFETY: Rows are eight bytes at eight-byte offsets of the eight-byte
+        // aligned table (checked in from_raw), so the row is one aligned word.
+        unsafe { (*row).load(Ordering::Relaxed) }.to_le_bytes()
     }
 }
 
@@ -109,66 +116,111 @@ impl Accounting {
         policy: Policy,
         clock: impl FnOnce() -> (u64, u64),
     ) -> Result<Publication> {
-        let (qid, qos, dm) = owner.indices()?;
+        let [publication] = self.publish_owners(view, [owner], scheduler, policy, clock)?;
+        Ok(publication)
+    }
+
+    /// Publishes the owners of one command's queues, in order, with the same
+    /// firmware-visible values as one `publish` per owner. The owners use
+    /// distinct queues and data masters. Every check precedes the first store,
+    /// so a refusal changes nothing; every table word is read before the first
+    /// store, so no uncached read waits for an earlier store to drain.
+    pub(crate) fn publish_owners<const N: usize>(
+        &mut self,
+        view: &View<'_>,
+        owners: [Owner; N],
+        scheduler: u64,
+        policy: Policy,
+        clock: impl FnOnce() -> (u64, u64),
+    ) -> Result<[Publication; N]> {
         if scheduler == 0 {
             return Err(EINVAL);
         }
-        let next_qid = self.in_flight[qid].checked_add(1).ok_or(EOVERFLOW)?;
-        let next_dm = self.dm_in_flight[dm].checked_add(1).ok_or(EOVERFLOW)?;
-        let starts_busy = self.dm_in_flight[dm] == 0;
-        let time = if starts_busy {
+        let mut indices = [(0, 0, 0); N];
+        for (index, owner) in owners.iter().enumerate() {
+            indices[index] = owner.indices()?;
+            let (qid, _, dm) = indices[index];
+            if indices[..index]
+                .iter()
+                .any(|&(other_qid, _, other_dm)| other_qid == qid || other_dm == dm)
+            {
+                return Err(EINVAL);
+            }
+            self.in_flight[qid].checked_add(1).ok_or(EOVERFLOW)?;
+            self.dm_in_flight[dm].checked_add(1).ok_or(EOVERFLOW)?;
+        }
+        let rows = indices.map(|(qid, _, _)| view.row_word(qid));
+        let queue_submitted = indices.map(|(qid, _, _)| view.queue_submitted[qid].load(Ordering::Relaxed));
+        let owner_submitted = indices.map(|(_, qos, _)| view.owner_submitted[qos].load(Ordering::Relaxed));
+        let dm_submitted = indices.map(|(_, _, dm)| view.times_and_counts[3 + dm].load(Ordering::Relaxed));
+        let starts_busy = indices.map(|(_, _, dm)| self.dm_in_flight[dm] == 0);
+        let busy = starts_busy.iter().any(|&starts| starts);
+        let intervals = if busy { view.intervals.load(Ordering::Relaxed) } else { 0 };
+        for (index, owner) in owners.iter().enumerate() {
+            let (qid, _, _) = indices[index];
+            if self.in_flight[qid] != 0
+                && (rows[index][0] != owner.qos || self.dm_by_qid[qid] != owner.data_master)
+            {
+                return Err(EBUSY);
+            }
+        }
+        let time = if busy {
             let (counter, frequency) = clock();
             time_from_host(counter, frequency)?
         } else {
             0
         };
-        if self.in_flight[qid] != 0
-            && (view.rows[qid][0].load(Ordering::Relaxed) != owner.qos
-                || self.dm_by_qid[qid] != owner.data_master)
-        {
-            return Err(EBUSY);
+        let class = policy.qos_class();
+        let mut first = false;
+        for (index, owner) in owners.iter().enumerate() {
+            let (qid, qos, _) = indices[index];
+            view.rows[qid][0].store(owner.qos, Ordering::Relaxed);
+            view.rows[qid][1].store(class, Ordering::Relaxed);
+            view.scheduler[qos].store(scheduler, Ordering::Relaxed);
+            view.share[qos].store(policy.qos_share(), Ordering::Relaxed);
+            first |= self.in_flight[qid] == 0;
         }
-        view.rows[qid][0].store(owner.qos, Ordering::Relaxed);
-        view.rows[qid][1].store(policy.qos_class(), Ordering::Relaxed);
-        let record = view.row(qid);
-        view.scheduler[qos].store(scheduler, Ordering::Relaxed);
-        view.share[qos].store(policy.qos_share(), Ordering::Relaxed);
-        if self.in_flight[qid] == 0 {
+        if first {
             fence(Ordering::SeqCst);
         }
-        view.queue_submitted[qid].store(
-            view.queue_submitted[qid]
-                .load(Ordering::Relaxed)
-                .wrapping_add(1),
-            Ordering::Relaxed,
-        );
-        view.owner_submitted[qos].store(
-            view.owner_submitted[qos]
-                .load(Ordering::Relaxed)
-                .wrapping_add(1),
-            Ordering::Relaxed,
-        );
-        if starts_busy {
-            view.times_and_counts[dm].store(time, Ordering::Relaxed);
-        }
-        let submitted = &view.times_and_counts[3 + dm];
-        let dm_submitted = submitted.load(Ordering::Relaxed).wrapping_add(1);
-        submitted.store(dm_submitted, Ordering::Relaxed);
-        if starts_busy {
-            view.intervals.store(
-                view.intervals.load(Ordering::Relaxed).wrapping_add(1),
+        let mut publications = [Publication {
+            record: [0; 8],
+            owner: owners[0],
+            dm_submitted: 0,
+        }; N];
+        let mut intervals = intervals;
+        for (index, owner) in owners.iter().enumerate() {
+            let (qid, qos, dm) = indices[index];
+            view.queue_submitted[qid].store(queue_submitted[index].wrapping_add(1), Ordering::Relaxed);
+            // Owners of one logical queue share their submission count.
+            let earlier = indices[..index].iter().filter(|&&(_, other, _)| other == qos).count();
+            view.owner_submitted[qos].store(
+                owner_submitted[index].wrapping_add(earlier as u32 + 1),
                 Ordering::Relaxed,
             );
+            if starts_busy[index] {
+                view.times_and_counts[dm].store(time, Ordering::Relaxed);
+            }
+            let submitted = dm_submitted[index].wrapping_add(1);
+            view.times_and_counts[3 + dm].store(submitted, Ordering::Relaxed);
+            if starts_busy[index] {
+                intervals = intervals.wrapping_add(1);
+                view.intervals.store(intervals, Ordering::Relaxed);
+            }
+            let mut record = rows[index];
+            record[0] = owner.qos;
+            record[1] = class;
+            self.in_flight[qid] += 1;
+            self.dm_in_flight[dm] += 1;
+            self.dm_by_qid[qid] = owner.data_master;
+            publications[index] = Publication {
+                record,
+                owner: *owner,
+                dm_submitted: submitted,
+            };
         }
-        self.in_flight[qid] = next_qid;
-        self.dm_in_flight[dm] = next_dm;
-        self.dm_by_qid[qid] = owner.data_master;
         fence(Ordering::SeqCst);
-        Ok(Publication {
-            record,
-            owner,
-            dm_submitted,
-        })
+        Ok(publications)
     }
 
     /// A possibly exposed producer must retain its reference until completion.

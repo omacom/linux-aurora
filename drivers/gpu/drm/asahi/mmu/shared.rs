@@ -63,7 +63,7 @@ impl Vm {
                 Binding {
                     start: address,
                     end,
-                    object: gem as *const gem::Object as usize,
+                    object: core::ptr::from_ref(gem) as usize,
                     offset,
                     bind_sequence,
                 },
@@ -99,7 +99,7 @@ impl Vm {
         if shared.count.load(Ordering::Relaxed) == 0 {
             return;
         }
-        let object = gem as *const gem::Object as usize;
+        let object = core::ptr::from_ref(gem) as usize;
         let mut bindings = shared.bindings.lock();
         bindings.retain(|entry| entry.object != object || entry.bind_sequence > sequence);
         shared.count.store(bindings.len() as u32, Ordering::Relaxed);

@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: GPL-2.0-only OR MIT
 """Actual G15 job dependency completion and G17 status/policy bodies on host services.
 
-DMA fence lookup, engine submission, queue-fence ordering and kernel mutexes are
-models. No kernel scheduling, GPU access or firmware execution is exercised.
+DMA fence lookup, engine submission, queue-fence ordering, VM slot allocation and
+kernel mutexes are models. Production job binding/completion and prefix admission
+bodies run against them. No kernel scheduling, GPU access or firmware execution
+is exercised.
 """
 import argparse
 import hashlib
@@ -33,19 +35,31 @@ impl Error { fn from_errno(n:i32)->Self {assert!(n<0);Self(n)} fn to_errno(self)
 type Result<T=()> = std::result::Result<T,Error>;
 const EIO:Error=Error(-5);const ENODEV:Error=Error(-19);const ETIMEDOUT:Error=Error(-110);
 const ECANCELED:Error=Error(-125);const EINVAL:Error=Error(-22);const ENOMEM:Error=Error(-12);
+const ENOSPC:Error=Error(-28);const EAGAIN:Error=Error(-11);const ENOENT:Error=Error(-2);
 macro_rules! pr_warn { ($($arg:tt)*)=>{{ let _=format_args!($($arg)*); }} }
+macro_rules! mod_pr_debug { ($($arg:tt)*)=>{{ let _=format_args!($($arg)*); }} }
 struct Mutex<T>(StdMutex<T>);impl<T> Mutex<T>{fn lock(&self)->MutexGuard<'_,T>{self.0.lock().unwrap()}}
 struct Mirror{word:*mut i32}
-struct VmStatus{error:AtomicI32,reported_error:AtomicI32,mirror:Mutex<Option<Mirror>>}
+struct VmStatus{error:AtomicI32,reported_error:AtomicI32,client_closed:AtomicBool,warned:AtomicBool,mirror:Mutex<Option<Mirror>>}
 impl VmStatus {
- fn new(word:*mut i32)->Self{Self{error:AtomicI32::new(0),reported_error:AtomicI32::new(0),mirror:Mutex(StdMutex::new(Some(Mirror{word})))}}
+ // The client's VM handle stays open here, as for every job these checks run.
+ fn new(word:*mut i32)->Self{Self{error:AtomicI32::new(0),reported_error:AtomicI32::new(0),client_closed:AtomicBool::new(false),warned:AtomicBool::new(false),mirror:Mutex(StdMutex::new(Some(Mirror{word})))}}
 __STATUS__
 }
 mod g17 {use super::*;__POLICY__}
 mod bindings {pub unsafe fn dma_fence_get_status(p:*const i32)->i32{unsafe{*p}}}
 struct Fence(i32);impl Fence{fn raw(&self)->*const i32{&self.0}}
-struct Vm{status:VmStatus}
-struct Progress{signaled:AtomicBool}
+struct Binding{slot:u32,drops:Arc<AtomicU32>}
+impl Binding{fn slot(&self)->u32{self.slot}}
+impl Drop for Binding{fn drop(&mut self){self.drops.fetch_add(1,Ordering::SeqCst);}}
+struct Vm{status:VmStatus,refuse_binding:AtomicBool,next_slot:AtomicU32,allocations:AtomicU32,binding_drops:Arc<AtomicU32>}
+impl Vm{fn try_bind(&self)->Result<Binding>{
+ if self.refuse_binding.load(Ordering::SeqCst){return Err(ENOSPC);}
+ self.allocations.fetch_add(1,Ordering::SeqCst);
+ Ok(Binding{slot:self.next_slot.load(Ordering::SeqCst),drops:self.binding_drops.clone()})
+}}
+struct Progress{signaled:AtomicBool,next:AtomicU32,sent:AtomicU32}
+impl Progress{fn next(&self)->u32{self.next.load(Ordering::SeqCst)}fn sent(&self)->u32{self.sent.load(Ordering::SeqCst)}}
 struct Guard{quarantines:AtomicU32}impl Guard{fn quarantine(&self){self.quarantines.fetch_add(1,Ordering::SeqCst);}}
 struct JobFence{vm:Arc<Vm>,signals:AtomicU32,result:AtomicI32,saw_sticky:AtomicI32,saw_report:AtomicI32,saw_mirror:AtomicI32}
 impl JobFence{
@@ -60,12 +74,25 @@ impl JobFence{
 }
 struct Shared{crashed:AtomicBool,submits:AtomicU32,submit_result:Result}
 impl Shared{fn submit(&self,_:Arc<Job>)->Result{self.submits.fetch_add(1,Ordering::SeqCst);self.submit_result}}
-struct Job{started:AtomicBool,vm:Arc<Vm>,progress:Progress,_guard:Guard,fence:JobFence}
+struct Job{started:AtomicBool,vm:Arc<Vm>,progress:Progress,_guard:Guard,fence:JobFence,context:AtomicU32,binding:Mutex<Option<Binding>>}
 impl Job {__JOB__}
+type Completions=Vec<Result>;
+fn complete(done:&mut Completions,_job:&Arc<Job>,result:Result){done.push(result);}
+struct Flight{claims:(),group:Vec<Arc<Job>>}
+impl Flight{fn new(_job:Arc<Job>)->Self{Self{claims:(),group:vec![]}}}
+struct Slots{releases:u32}
+impl Slots{fn release(&mut self,_claims:&mut ()){self.releases+=1;}}
+struct Engine{slot_wait:bool}
+struct HostFirmware{engine:Engine,slots:Slots,publish_result:Result,publishes:u32}
+impl HostFirmware{
+ fn new(result:Result)->Self{Self{engine:Engine{slot_wait:false},slots:Slots{releases:0},publish_result:result,publishes:0}}
+ fn publish_prefix_into(&mut self,_job:&Arc<Job>,_flight:&mut Flight)->Result{self.publishes+=1;self.publish_result}
+ __PREFIX__
+}
 fn make_job(own:Option<Error>)->(Arc<Job>,Box<AtomicI32>){
- let mut mirror=Box::new(AtomicI32::new(0));let vm=Arc::new(Vm{status:VmStatus::new((&mut *mirror as *mut AtomicI32).cast())});
+ let mut mirror=Box::new(AtomicI32::new(0));let vm=Arc::new(Vm{status:VmStatus::new((&mut *mirror as *mut AtomicI32).cast()),refuse_binding:AtomicBool::new(false),next_slot:AtomicU32::new(7),allocations:AtomicU32::new(0),binding_drops:Arc::new(AtomicU32::new(0))});
  if let Some(error)=own{vm.status.record(error);}
- let job=Arc::new(Job{started:AtomicBool::new(false),vm:vm.clone(),progress:Progress{signaled:AtomicBool::new(false)},_guard:Guard{quarantines:AtomicU32::new(0)},fence:JobFence{vm,signals:AtomicU32::new(0),result:AtomicI32::new(0),saw_sticky:AtomicI32::new(0),saw_report:AtomicI32::new(0),saw_mirror:AtomicI32::new(0)}});
+ let job=Arc::new(Job{started:AtomicBool::new(false),vm:vm.clone(),progress:Progress{signaled:AtomicBool::new(false),next:AtomicU32::new(0),sent:AtomicU32::new(0)},_guard:Guard{quarantines:AtomicU32::new(0)},fence:JobFence{vm,signals:AtomicU32::new(0),result:AtomicI32::new(0),saw_sticky:AtomicI32::new(0),saw_report:AtomicI32::new(0),saw_mirror:AtomicI32::new(0)},context:AtomicU32::new(0),binding:Mutex(StdMutex::new(None))});
  (job,mirror)
 }
 fn shared(crashed:bool,result:Result)->Arc<Shared>{Arc::new(Shared{crashed:AtomicBool::new(crashed),submits:AtomicU32::new(0),submit_result:result})}
@@ -89,7 +116,7 @@ fn main(){
   assert_eq!(job.fence.signals.load(Ordering::SeqCst),1,"dependency completion must signal once");
   assert_eq!(job.vm.status.get(),0,"duplicate completion must not poison VM");
   // A later job on the same VM is admitted despite the reported client error.
-  let later=Arc::new(Job{started:AtomicBool::new(false),vm:job.vm.clone(),progress:Progress{signaled:AtomicBool::new(false)},_guard:Guard{quarantines:AtomicU32::new(0)},fence:JobFence{vm:job.vm.clone(),signals:AtomicU32::new(0),result:AtomicI32::new(0),saw_sticky:AtomicI32::new(0),saw_report:AtomicI32::new(0),saw_mirror:AtomicI32::new(0)}});
+  let later=Arc::new(Job{started:AtomicBool::new(false),vm:job.vm.clone(),progress:Progress{signaled:AtomicBool::new(false),next:AtomicU32::new(0),sent:AtomicU32::new(0)},_guard:Guard{quarantines:AtomicU32::new(0)},fence:JobFence{vm:job.vm.clone(),signals:AtomicU32::new(0),result:AtomicI32::new(0),saw_sticky:AtomicI32::new(0),saw_report:AtomicI32::new(0),saw_mirror:AtomicI32::new(0)},context:AtomicU32::new(0),binding:Mutex(StdMutex::new(None))});
   later.start(&device,&[Fence(1)]);assert_eq!(device.submits.load(Ordering::SeqCst),1,"successful dependencies after report must submit");
  }
  for own in [EIO,EINVAL]{for input in [ECANCELED,EIO,ENODEV,ETIMEDOUT,EINVAL]{
@@ -110,8 +137,70 @@ fn main(){
  }
  // An engine-owned fault still quarantines before completion.
  let(job,_mirror)=make_job(None);job.complete(Err(EIO));assert_eq!(job._guard.quarantines.load(Ordering::SeqCst),1);assert_eq!(job.vm.status.get(),EIO.to_errno());
+ // Actual bind/release bodies: a job keeps its slot until explicitly released.
+ {
+  let(job,_mirror)=make_job(None);
+  job.vm.refuse_binding.store(true,Ordering::SeqCst);
+  assert_eq!(job.bind(),Err(ENOSPC));assert!(job.binding.lock().is_none());
+  assert_eq!(job.vm.allocations.load(Ordering::SeqCst),0);
+  job.vm.refuse_binding.store(false,Ordering::SeqCst);
+  job.bind().unwrap();assert_eq!(job.slot(),7,"binding must publish its slot");
+  job.vm.next_slot.store(9,Ordering::SeqCst);
+  job.bind().unwrap();assert_eq!(job.slot(),7,"repeated bind must keep existing binding");
+  assert_eq!(job.vm.allocations.load(Ordering::SeqCst),1);
+  job.release_binding();job.release_binding();
+  assert_eq!(job.vm.binding_drops.load(Ordering::SeqCst),1,"release_binding must drop exactly once");
+  job.bind().unwrap();assert_eq!(job.slot(),9,"released job may acquire a different slot");
+  assert_eq!(job.vm.allocations.load(Ordering::SeqCst),2);
+ }
+ // An engine failure must not recycle an ASID while retained job references live.
+ for result in [Ok(()),Err(EIO),Err(ETIMEDOUT),Err(ECANCELED)]{
+  let(job,_mirror)=make_job(None);job.bind().unwrap();let drops=job.vm.binding_drops.clone();
+  job.complete(result);
+  if result.is_err(){
+   assert!(job.binding.lock().is_some(),"failed engine completion must retain binding");
+   assert_eq!(drops.load(Ordering::SeqCst),0);
+   job.complete(Ok(()));assert!(job.binding.lock().is_some(),"duplicate completion must retain failed binding");
+   let retained=job.clone();drop(job);
+   assert_eq!(drops.load(Ordering::SeqCst),0,"a retained reference must keep the binding");
+   drop(retained);assert_eq!(drops.load(Ordering::SeqCst),1,"last reference releases failed binding");
+  }else{
+   assert!(job.binding.lock().is_none(),"successful engine completion releases binding");
+   assert_eq!(drops.load(Ordering::SeqCst),1);drop(job);assert_eq!(drops.load(Ordering::SeqCst),1);
+  }
+ }
+ // Run the real prefix admission wrapper; only firmware publication is modeled.
+ {
+  let(job,_mirror)=make_job(None);let mut fw=HostFirmware::new(Ok(()));let mut done=vec![];
+  job.vm.refuse_binding.store(true,Ordering::SeqCst);
+  assert_eq!(fw.publish_prefix(&job,&mut done),Err(EAGAIN));
+  assert!(fw.engine.slot_wait,"slot exhaustion must request retry");
+  assert_eq!(fw.publishes,0);assert!(done.is_empty());assert_eq!(job.vm.status.get(),0);
+  job.vm.refuse_binding.store(false,Ordering::SeqCst);
+  assert_eq!(fw.publish_prefix(&job,&mut done),Ok(()));assert_eq!(fw.publishes,1);
+ }
+ for published in [false,true]{
+  let(job,_mirror)=make_job(None);job.bind().unwrap();
+  job.progress.sent.store(u32::from(published),Ordering::SeqCst);
+  let mut fw=HostFirmware::new(Err(ENOMEM));let mut done=vec![];
+  assert_eq!(fw.publish_prefix(&job,&mut done),Err(ENOMEM));
+  assert_eq!(fw.slots.releases,1);assert!(done.is_empty());
+  if published{
+   assert!(job.binding.lock().is_some(),"published prefix must retain binding on append failure");
+   assert_eq!(job.vm.binding_drops.load(Ordering::SeqCst),0);
+  }else{
+   assert!(job.binding.lock().is_none(),"unpublished failure must release binding");
+   assert_eq!(job.vm.binding_drops.load(Ordering::SeqCst),1);
+  }
+ }
+ {
+  let(job,_mirror)=make_job(None);let mut fw=HostFirmware::new(Err(EIO));let mut done=vec![];
+  assert_eq!(fw.publish_prefix(&job,&mut done),Err(EIO));
+  assert!(job.binding.lock().is_some(),"firmware-visible failure must retain binding");
+  assert_eq!(fw.slots.releases,0);
+ }
  assert_eq!(unrelated.vm.status.get(),0,"unrelated VM untouched");assert_eq!(unrelated.vm.status.reported_error(),0);assert_eq!(other_mirror.load(Ordering::SeqCst),0);assert_eq!(unrelated.fence.signals.load(Ordering::SeqCst),0);
- println!("PASS: actual Job::start/completion and VmStatus/policy: healthy/failed VMs, mirror ordering, one-shot completion, successful input, device faults and isolation");
+ println!("PASS: production job/prefix/status bodies: input errors, binding reuse/release/retention, exhaustion retry, published-prefix lifetime and isolation");
 }
 '''
 
@@ -129,16 +218,25 @@ def main():
     current = (ROOT / job_path).read_text()
     status = (ROOT / "drivers/gpu/drm/asahi/g17/status.rs").read_text()
     policy = (ROOT / "drivers/gpu/drm/asahi/g17/dependency.rs").read_text()
+    engine = (ROOT / "drivers/gpu/drm/asahi/g15/engine.rs").read_text()
     methods = [extract(job, "    pub(crate) fn complete("), extract(job, "    fn finish("),
                extract(job, "    fn start(self: &Arc<Self>")]
     # The old control needs the current helper for the duplicate-completion test;
     # it still runs its actual unmodified start, which reproduces the lost input error.
     methods.append(extract(job if "fn finish_dependency(" in job else current, "    fn finish_dependency("))
+    # Historical removed-fix controls predate publication bindings. Keep their
+    # actual start/completion bodies and use current binding helpers alongside.
+    binding_source = job if "fn release_binding(" in job else current
+    methods.extend(extract(binding_source, marker) for marker in [
+        "    pub(crate) fn slot(", "    pub(crate) fn bind(",
+        "    pub(crate) fn release_binding("])
     bodies = "\n".join(methods)
     code = PRELUDE.replace("__JOB__", bodies).replace("__STATUS__", "\n".join(
         extract(status, marker) for marker in ["    pub(crate) fn get(", "    pub(crate) fn record(",
-        "    pub(crate) fn reported_error(", "    pub(crate) fn report_failure("])).replace(
-        "__POLICY__", extract(policy, "pub(crate) fn inherited_error("))
+        "    pub(crate) fn reported_error(", "    pub(crate) fn report_failure(",
+        "    fn unobserved_teardown("])).replace(
+        "__POLICY__", extract(policy, "pub(crate) fn inherited_error(")).replace(
+        "__PREFIX__", extract(engine, "    fn publish_prefix("))
     variants = {"control": code}
     expected = {}
     if args.mutations:
@@ -152,6 +250,11 @@ def main():
             "success-refused": ("if let Some(status) = failed {", "if let Some(status) = failed.or(Some(-125)) {", "successful dependencies after report must submit"),
             "dependency-completes-twice": ("    fn finish_dependency(&self, error: Error) {\n        if self.progress.signaled.swap(true, Ordering::AcqRel) {\n            return;\n        }", "    fn finish_dependency(&self, error: Error) {", "dependency completion must signal once"),
             "mirror-not-published": ("unsafe { AtomicI32::from_ptr(mirror.word) }.store(error, Ordering::SeqCst);", "let _ = mirror;", "mirror must precede fence signal"),
+            "failed-engine-releases-binding": ("if result.is_ok() || !engine {", "if true {", "failed engine completion must retain binding"),
+            "binding-release-leaks": ("drop(self.binding.lock().take());", "let _ = self;", "release_binding must drop exactly once"),
+            "bound-job-rebinds": ("if slot.is_none() {", "if true {", "repeated bind must keep existing binding"),
+            "slot-exhaustion-not-retried": ("self.engine.slot_wait = true;", "self.engine.slot_wait = false;", "slot exhaustion must request retry"),
+            "published-prefix-releases-binding": ("if job.progress.next() == job.progress.sent() {", "if true {", "published prefix must retain binding on append failure"),
         }
         for name, (old, new, message) in changes.items():
             if code.count(old) != 1:
@@ -160,7 +263,8 @@ def main():
             expected[name] = message
     variants["control-after"] = code
     receipt = {"scope": __doc__, "ref": args.ref, "sources": {name: hashlib.sha256(text.encode()).hexdigest()
-        for name, text in [(job_path, job), ("g17/status.rs", status), ("g17/dependency.rs", policy)]}, "variants": {}}
+        for name, text in [(job_path, job), ("g15/engine.rs", engine),
+                           ("g17/status.rs", status), ("g17/dependency.rs", policy)]}, "variants": {}}
     for name, source in variants.items():
         path = args.output / (name + ".rs"); path.write_text(source)
         binary = args.output / name

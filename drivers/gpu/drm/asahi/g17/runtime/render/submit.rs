@@ -8,19 +8,312 @@ use crate::g17::{
     queue::admission::{RenderLease, Request},
 };
 use core::sync::atomic::Ordering;
-use kernel::{
-    prelude::*,
-    sync::Arc,
-    time::{delay::fsleep, Delta},
-};
+use kernel::{prelude::*, sync::Arc};
+
+/// Internal result of a publication attempted from the submitting ioctl that
+/// met contention before anything became visible: the scheduler publishes the
+/// command instead. Never returned to userspace.
+pub(in crate::g17::runtime) const FALLBACK: Error = EINPROGRESS;
 
 impl Backend {
+    /// The submitting ioctl holds the logical queue's mutex and never sleeps
+    /// for contention or a closed preparation gate: it returns FALLBACK, and
+    /// the scheduler's worker publishes the command and owns the waits.
+    pub(in crate::g17::runtime) fn enter_preparation(&self, sleep: bool) -> Result<crate::g17::preparation::Lease> {
+        if sleep {
+            return self.shared.preparations.enter(false);
+        }
+        // A closed gate (recovery) is the only case enter() would sleep for.
+        self.shared.preparations.try_enter().map_err(|error| {
+            if error == EAGAIN {
+                FALLBACK
+            } else {
+                error
+            }
+        })
+    }
+
     pub(in crate::g17) fn render_packet(
         &self,
         packet: &Arc<Packet>,
         deferred: &mut DeferredBatch,
     ) -> Result {
         self.render_with_lease(packet, None, deferred)
+    }
+
+    /// Reserve identities before attaching a lease to the packet. An empty
+    /// logical slot must not hide reusable physical channels when the shared
+    /// queue-ID namespace is full.
+    /// Also reports whether the owner's installed pair is ready to take the
+    /// command, so that the publication skips graph construction.
+    fn acquire_render_with_ids(
+        &self,
+        packet: &Arc<Packet>,
+        mut next: Option<RenderLease>,
+        sleep: bool,
+    ) -> Result<(RenderLease, bool)> {
+        let pool = &self.admission;
+        let started = super::super::now_ns();
+        let deadline_ns = started.saturating_add(u64::from(crate::g17::job::TIMEOUT_MS) * 1_000_000);
+        // A capacity refusal samples the render domain and retries once; only
+        // a refusal after that sample waits, so no release can be missed.
+        let mut observed = None;
+        loop {
+            self.admission_open()?;
+            if super::super::now_ns() >= deadline_ns { return Err(EBUSY); }
+            if packet.cancel_requested() {
+                return Err(ECANCELED);
+            }
+            if packet.completion.status().get() != 0 {
+                return Err(EIO);
+            }
+            let lease = if let Some(lease) = next.take() {
+                lease
+            } else {
+                // Admission sleeps for a pick; the ioctl leaves that to the scheduler.
+                if !sleep {
+                    return Err(FALLBACK);
+                }
+                match pool.acquire_render(self.owner, Request::of(packet), deadline_ns, || {
+                    // Atomics only: the callback runs under the pool mutex.
+                    if packet.cancel_requested() || self.closed.load(Ordering::Acquire) {
+                        return Err(ECANCELED);
+                    }
+                    if packet.completion.status().get() != 0 || self.shared.crashed.load(Ordering::Acquire) {
+                        return Err(EIO);
+                    }
+                    Ok(())
+                }) {
+                    Ok(lease) => lease,
+                    Err(error) if error == ENOSPC => {
+                        let reclaimed = {
+                            let mut state = self.shared.state.lock();
+                            (*state)
+                                .as_deref_mut()
+                                .ok_or(ENODEV)?
+                                .queues
+                                .reclaim_unused_render_spare(Some(self.owner), false)?
+                        };
+                        if reclaimed.is_none() {
+                            self.wait_render_capacity(&mut observed, started, sleep)?;
+                        }
+                        drop(reclaimed);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            let slot = lease.slot();
+            let mut state = self.shared.state.lock();
+            let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
+            match firmware.queues.ensure_render_ids(slot, self.owner) {
+                Ok(()) => {
+                    let ready = firmware.queues.render_ready(slot, self.owner, &self.context)?;
+                    return Ok((lease, ready));
+                }
+                Err(error) if error == ENOSPC => {
+                    let reclaimed = firmware.queues.reclaim_unused_render_spare(None, true)?;
+                    if reclaimed.is_some() {
+                        drop(state);
+                        drop(reclaimed);
+                        next = Some(lease);
+                        continue;
+                    }
+                    // ensure_render_ids leaves no partial entry on refusal.
+                    if firmware.queues.render.entries[usize::from(slot)].is_some() {
+                        return Err(error);
+                    }
+                    if !lease.cancel_empty(self.owner) {
+                        continue;
+                    }
+                    let reclaimed = firmware
+                        .queues
+                        .reclaim_unused_render_spare(Some(self.owner), true)?;
+                    let ready = firmware.queues.has_render_ids(self.owner);
+                    drop(state);
+                    // A full queue table makes admission reuse a free killed pair instead.
+                    if reclaimed.is_none() && !ready && !pool.killed_pair_free() {
+                        self.wait_render_capacity(&mut observed, started, sleep)?;
+                    }
+                    drop(reclaimed);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Scheduler admission of a render packet. A work state of its context or
+    /// a pair admission it lacks becomes a fence that the return providing it
+    /// signals, so run_job finds both ready instead of waiting for them.
+    /// Errors, and anything else publication may wait for, are left to it.
+    pub(in crate::g17::runtime) fn admit_render(&self, packet: &Arc<Packet>) -> Option<kernel::dma_fence::Fence> {
+        if packet.early_result().is_some()
+            || packet.cancel_requested()
+            || packet.completion.status().get() != 0
+            || self.admission_open().is_err()
+        {
+            return None;
+        }
+        // Each check runs once more after sampling its domain, so the common
+        // case takes no domain lock and no return between check and wait is lost.
+        let work = packet.completion.work_state().ok()?;
+        loop {
+            match work.acquire(crate::g17::job::Engine::Render) {
+                Err(error) if error == EBUSY => {
+                    let states = work.returns().observe();
+                    match work.acquire(crate::g17::job::Engine::Render) {
+                        Err(error) if error == EBUSY => match work.returns().wait(states) {
+                            Ok(Some(fence)) => return Some(fence),
+                            Ok(None) => continue,
+                            Err(_) => return None,
+                        },
+                        Err(_) => return None,
+                        Ok(_) => {}
+                    }
+                }
+                Err(_) => return None,
+                Ok(_) => {}
+            }
+            let request = Request::of(packet);
+            if self.admission.admits_render(self.owner, request) {
+                return None;
+            }
+            let observed = self.shared.renders.observe();
+            if self.admission.admits_render(self.owner, request) {
+                return None;
+            }
+            self.shared.queue_events();
+            match self.shared.renders.wait(observed) {
+                Ok(Some(fence)) => return Some(fence),
+                Ok(None) => continue,
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Conditions which end a publication that has not become visible yet.
+    fn publication_open(&self, packet: &Packet) -> Result {
+        self.admission_open()?;
+        if packet.cancel_requested() {
+            return Err(ECANCELED);
+        }
+        if packet.completion.status().get() != 0 {
+            return Err(EIO);
+        }
+        Ok(())
+    }
+
+    /// Blocks on `domain` until a notification after `observed`, or the
+    /// deadline, which only bounds the wait. Slices of at most 10 ms let the
+    /// publisher observe cancellation, which has no notification here.
+    fn wait_domain(
+        &self,
+        domain: &crate::g17::availability::Availability,
+        observed: u64,
+        deadline_ns: u64,
+        packet: &Packet,
+    ) -> Result {
+        self.publication_open(packet)?;
+        let remaining = deadline_ns.saturating_sub(super::super::now_ns());
+        if remaining == 0 {
+            return Err(ETIMEDOUT);
+        }
+        domain.block(observed, remaining.div_ceil(1_000_000).min(10) as u32, false)
+    }
+
+    /// A pair is borrowed, still settling, waiting for firmware room or for the
+    /// release of the scheduler it last ran for. Every pair return, retirement
+    /// and teardown step signals the render domain, and each event pass does
+    /// while a publisher waits; the deadline is only the failure bound.
+    fn wait_render_busy(
+        &self,
+        since: &mut Option<u64>,
+        observed: &mut Option<u64>,
+        sleep: bool,
+        packet: &Packet,
+    ) -> Result {
+        if !sleep {
+            return Err(FALLBACK);
+        }
+        let now = super::super::now_ns();
+        let deadline = since.get_or_insert(now).saturating_add(super::super::WORK_RING_WAIT_NS);
+        // Sample, then retry once: only a refusal after the sample waits.
+        let Some(sample) = observed.take() else {
+            *observed = Some(self.shared.renders.observe());
+            return Ok(());
+        };
+        self.shared.queue_events();
+        self.wait_domain(&self.shared.renders, sample, deadline, packet)
+    }
+
+    /// Render capacity is short: return what idle owners hold, then block until
+    /// a pair, lease or owner returns. No packet is firmware-visible here, and
+    /// neither the device mutex nor a preparation lease is held while waiting.
+    fn wait_render_capacity(&self, observed: &mut Option<u64>, started: u64, sleep: bool) -> Result {
+        if !sleep {
+            return Err(FALLBACK);
+        }
+        if self.reclaim_render_capacity()? {
+            *observed = None;
+            return Ok(());
+        }
+        let Some(sample) = observed.take() else {
+            *observed = Some(self.shared.renders.observe());
+            return Ok(());
+        };
+        self.shared.queue_events();
+        self.admission_open()?;
+        let remaining = started
+            .saturating_add(super::super::WORK_RING_WAIT_NS)
+            .saturating_sub(super::super::now_ns());
+        if remaining == 0 {
+            return Err(EBUSY);
+        }
+        self.shared
+            .renders
+            .block(sample, remaining.div_ceil(1_000_000).min(10) as u32, false)
+    }
+
+    /// Gives idle render backing back under capacity pressure. Returns whether
+    /// anything was returned, in which case the caller retries at once.
+    fn reclaim_render_capacity(&self) -> Result<bool> {
+        let mut deferred = DeferredBatch::publication()?;
+        let result: Result<bool> = (|| {
+            let lease = self.shared.preparations.try_enter()?;
+            let mut state = self.shared.state.lock();
+            let firmware = (*state).as_deref_mut().ok_or(ENODEV)?;
+            if !lease.is_current() || self.shared.crashed.load(Ordering::Acquire) {
+                return Err(EAGAIN);
+            }
+            if firmware.recovery.pending()
+                || crate::g17::recovery::Memory::recovery_state(&firmware.init)? != 0
+            {
+                return Ok(false);
+            }
+            firmware.queues.observe_pool_releases(&firmware.init, &mut deferred)?;
+            firmware.queues.reclaim_idle_render_pools(&firmware.init, &mut deferred)?;
+            let mut published = 0;
+            if !firmware.render_control_backpressured() {
+                (published, _) = firmware.queues.vacate_idle_pools(
+                    &firmware.init,
+                    0,
+                    super::super::now_ns(),
+                    0,
+                )?;
+                if published != 0 {
+                    firmware.primary.notify(crate::g17::MSG_CONTROL_NOTIFY)?;
+                }
+            }
+            Ok(published != 0
+                || !deferred.render.is_empty()
+                || !deferred.vacated.is_empty()
+                || !deferred.bindings.is_empty())
+        })();
+        deferred.finish();
+        match result {
+            Err(error) if error == EAGAIN => Ok(false),
+            result => result,
+        }
     }
 
     fn render_with_lease(
@@ -30,6 +323,7 @@ impl Backend {
         deferred: &mut DeferredBatch,
     ) -> Result {
         packet.check_dependencies()?;
+        self.admission_open()?;
         if packet.cancel_requested() {
             return Err(ECANCELED);
         }
@@ -37,22 +331,47 @@ impl Backend {
             return Err(EIO);
         }
         let interruptible = early.is_none();
-        let admission = match early {
-            Some(lease) => lease,
-            None => {
-                let pool = {
-                    let state = self.shared.state.lock();
-                    (*state).as_deref().ok_or(ENODEV)?.queues.admission.clone()
-                };
-                pool.acquire_render(self.owner, Request::of(packet))?
-            }
+        // A publication from the submitting ioctl (an early lease) never
+        // sleeps for contention; it falls back to the scheduler instead.
+        let sleep = early.is_none();
+        let mut early = early;
+        // The pair this owner last published to directly: a lease on it goes
+        // straight to the direct path, whose lend checks everything the
+        // identity check would.
+        let known = self.direct_slot.load(Ordering::Relaxed);
+        let lease = match early.take() {
+            Some(lease) => Some(lease),
+            None if known != 0 => self
+                .admission
+                .try_acquire_render(self.owner, Request::of(packet))
+                .ok()
+                .flatten(),
+            None => None,
         };
+        let early = match lease {
+            Some(lease) if u32::from(lease.slot()) == known => {
+                let slot = lease.slot();
+                packet.completion.attach_render_lease(lease)?;
+                if let Some(result) = self.render_direct(packet, slot, deferred) {
+                    return result;
+                }
+                packet.completion.detach_render_lease()
+            }
+            lease => lease,
+        };
+        let (admission, mut ready) = self.acquire_render_with_ids(packet, early, sleep)?;
         let slot = admission.slot();
         packet.completion.attach_render_lease(admission)?;
-        let mut state_polls = 0;
-        let mut state_delay = 20i64;
-        let mut takeover_polls = 0;
-        let mut recovery_polls = 0;
+        if ready {
+            if let Some(result) = self.render_direct(packet, slot, deferred) {
+                return result;
+            }
+        }
+        let mut busy_since = None;
+        let capacity_started = super::super::now_ns();
+        let deadline_ns = capacity_started.saturating_add(super::super::WORK_RING_WAIT_NS);
+        let mut seen = None;
+        let mut states = None;
         loop {
             if packet.cancel_requested() {
                 return Err(ECANCELED);
@@ -65,8 +384,12 @@ impl Backend {
                 return Err(EFAULT);
             }
             let work_state = {
-                let preparation = self.shared.preparations.enter(interruptible)?;
-                let result = packet.completion.work_state().and_then(|state| state.acquire());
+                let preparation = if sleep {
+                    self.shared.preparations.enter(interruptible)?
+                } else {
+                    self.enter_preparation(false)?
+                };
+                let result = packet.completion.work_state().and_then(|state| state.acquire(crate::g17::job::Engine::Render));
                 if preparation.is_current() {
                     result
                 } else {
@@ -76,51 +399,71 @@ impl Backend {
             match work_state {
                 Err(error) if error == EAGAIN => continue,
                 Err(error) if error == EBUSY => {
-                    if state_polls == 1000 {
-                        return Err(ETIMEDOUT);
+                    if !sleep {
+                        return Err(FALLBACK);
                     }
-                    state_polls += 1;
-                    fsleep(Delta::from_micros(state_delay));
-                    state_delay = (state_delay * 2).min(1000);
+                    // Every node of this context belongs to unretired work:
+                    // sample, retry once, then wait for the next returned one.
+                    let work = packet.completion.work_state()?;
+                    match states.take() {
+                        None => states = Some(work.returns().observe()),
+                        Some(sample) => {
+                            self.wait_domain(work.returns(), sample, deadline_ns, packet)?
+                        }
+                    }
                     continue;
                 }
                 result => {
                     result?;
                 }
             }
-            match self.ensure_render(packet, slot) {
+            // A pair found ready under the identity check needs no build; any
+            // retry revalidates through ensure_render.
+            let ensured = if core::mem::take(&mut ready) {
+                Ok(())
+            } else {
+                self.ensure_render(packet, slot, sleep)
+            };
+            match ensured {
+                Err(error) if error == ENOSPC => {
+                    self.wait_render_capacity(&mut seen, capacity_started, sleep)?;
+                    continue;
+                }
                 Err(error) if error == EAGAIN => continue,
                 Err(error) if error == EBUSY => {
-                    if takeover_polls == 5000 {
-                        return Err(ETIMEDOUT);
-                    }
-                    takeover_polls += 1;
-                    fsleep(Delta::from_micros(200));
+                    self.wait_render_busy(&mut busy_since, &mut seen, sleep, packet)?;
                     continue;
                 }
                 result => result?,
             }
-            match self.prepare_render(slot, packet, deferred) {
+            match self.prepare_render(slot, packet, deferred, sleep) {
+                Err(error) if !packet.is_published() && error == ENOSPC => {
+                    self.wait_render_capacity(&mut seen, capacity_started, sleep)?;
+                    continue;
+                }
                 Err(error) if !packet.is_published() && [EAGAIN, EBUSY].contains(&error) => {
-                    let recovering = {
+                    let (recovering, gate) = {
                         let state = self.shared.state.lock();
                         let firmware = (*state).as_deref().ok_or(ENODEV)?;
-                        firmware.recovery.pending()
-                            || crate::g17::recovery::Memory::recovery_state(&firmware.init)? != 0
+                        (
+                            firmware.recovery.pending()
+                                || crate::g17::recovery::Memory::recovery_state(&firmware.init)? != 0,
+                            self.shared.preparations.snapshot(),
+                        )
                     };
                     if recovering {
-                        if recovery_polls == super::super::RECOVERY_SETTLE_POLLS {
-                            return Err(ETIMEDOUT);
+                        if !sleep {
+                            return Err(FALLBACK);
                         }
-                        recovery_polls += 1;
+                        // Recovery closes the preparation gate before touching
+                        // any queue; the next pass blocks in enter() until it
+                        // reopens. The worker raises the closure.
                         self.shared.queue_events();
-                        fsleep(Delta::from_millis(1));
+                        self.shared.preparations.wait_closure(gate, deadline_ns)?;
                     } else if error == EBUSY {
-                        if takeover_polls == 5000 {
-                            return Err(ETIMEDOUT);
-                        }
-                        takeover_polls += 1;
-                        fsleep(Delta::from_micros(200));
+                        self.wait_render_busy(&mut busy_since, &mut seen, sleep, packet)?;
+                    } else if !sleep {
+                        return Err(FALLBACK);
                     }
                 }
                 result => return result,
@@ -132,19 +475,9 @@ impl Backend {
         if self.backlog.load(Ordering::Acquire) != 0 || packet.has_dependencies() {
             return false;
         }
-        let admission = {
-            let state = self.shared.state.lock();
-            let Some(firmware) = (*state).as_deref() else {
-                return false;
-            };
-            match firmware
-                .queues
-                .admission
-                .try_acquire_render(self.owner, Request::of(packet))
-            {
-                Ok(Some(lease)) => lease,
-                _ => return false,
-            }
+        let admission = match self.admission.try_acquire_render(self.owner, Request::of(packet)) {
+            Ok(Some(lease)) => lease,
+            _ => return false,
         };
         if !packet.begin_publication() {
             packet.completion.fail_unpublished(ECANCELED);
@@ -163,6 +496,16 @@ impl Backend {
             }
         };
         let result = self.render_with_lease(packet, Some(admission), &mut deferred);
+        if matches!(result, Err(error) if error == FALLBACK) && !packet.is_published() {
+            // Contention before anything became visible: the ioctl does not
+            // sleep. Return the lease and the claim; the scheduler publishes
+            // the command, and later ones wait behind it in the backlog.
+            let lease = packet.completion.detach_render_lease();
+            deferred.finish();
+            drop(lease);
+            packet.abandon_publication();
+            return false;
+        }
         let result = self
             .finish_publication(packet, result, &mut deferred)
             .map(|_| ());
@@ -286,16 +629,37 @@ impl crate::g17::Firmware {
         if packet.completion.status().get() != 0 {
             return Err(EIO);
         }
+        let mut dependencies = self.queues.render_dependencies(owner, packet, state)?;
+        // Every render publication, with or without the device mutex, holds the
+        // port's render lock: the render work rings have one host producer at a
+        // time and attachment overlaps are ordered by publication order.
+        let port = self.port.clone();
+        let _render = port.render_lock();
         // Both outer destinations must have room before pool accounting or
-        // either inner queue becomes visible. All host producers share this lock.
+        // either inner queue becomes visible.
         let priority = packet.context.policy().priority();
         if !self.init.work_ready(priority, crate::g17::fw::queue::DataMaster::Fragment)?
             || !self.init.work_ready(priority, crate::g17::fw::queue::DataMaster::Tiling)?
         {
             return Err(EBUSY);
         }
-        let dependencies = self.queues.render_dependencies(owner, packet, state)?;
+        if let Some(footprint) = packet.footprint.as_ref() {
+            dependencies.hazard_count = self.queues.admission.publication_barriers(
+                owner,
+                slot,
+                footprint,
+                &mut dependencies.hazards,
+            )?;
+        }
         let pair = self.queues.render.entry(slot)?.pair.as_ref().ok_or(EIO)?;
+        // An owner change taken from a live owner which closed meanwhile: its
+        // first command waits until that scheduler's release has been consumed.
+        if pair
+            .owner_switch_from(&packet.context)
+            .is_some_and(|scheduler| self.queues.teardown.releasing_scheduler(scheduler))
+        {
+            return Err(EBUSY);
+        }
         let pool = pair.pool().clone();
         let buffer_id = pair.buffer_id();
         let (buffer_id, buffer_token) = self.queues.buffers.acquire_owner(buffer_id)?;

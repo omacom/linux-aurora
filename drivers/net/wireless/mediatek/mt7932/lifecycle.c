@@ -62,8 +62,7 @@ void mt_stop_host(struct mt7932 *m)
 	}
 	if (m->connected) {
 		m->connected = false;
-		cfg80211_disconnected(m->netdev, WLAN_REASON_DEAUTH_LEAVING,
-				      NULL, 0, true, GFP_KERNEL);
+		mt_report_disconnected(m, WLAN_REASON_DEAUTH_LEAVING, true, GFP_KERNEL);
 	}
 	memzero_explicit(m->connect_pmk, sizeof(m->connect_pmk));
 	memzero_explicit(m->connect_sae_pwd, sizeof(m->connect_sae_pwd));

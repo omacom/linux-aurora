@@ -15,8 +15,38 @@ use kernel::page::PAGE_SIZE;
 
 use crate::debug::*;
 use crate::mmu;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 type Asid = u8;
+
+/// Invalidate ranges page by page (`mmu::UatQuirks::page_tlbi`): never range operations.
+///
+/// The setting is global because the invalidation helpers take no UAT. It assumes one GPU per
+/// system: `Uat::new` sets it for that GPU before the GPU's first invalidation, and a second
+/// UAT with another policy would change it for both.
+static PAGE_TLBI: AtomicBool = AtomicBool::new(false);
+
+/// Ranges above this many pages are invalidated by ASID in page mode.
+const PAGE_TLBI_MAX_PAGES: usize = 2048;
+
+/// Selects page-by-page range invalidation for the system's GPU ([`PAGE_TLBI`]).
+pub(crate) fn set_page_tlbi(enabled: bool) {
+    PAGE_TLBI.store(enabled, Ordering::Relaxed);
+}
+
+/// Invalidates `len` bytes at `va` one 16 KiB page at a time, or the whole ASID above
+/// [`PAGE_TLBI_MAX_PAGES`].
+fn tlbi_pages(asid: Asid, va: usize, len: usize) {
+    let start = va >> mmu::UAT_PGBIT;
+    let end = (va + len + mmu::UAT_PGMSK) >> mmu::UAT_PGBIT;
+    if end - start > PAGE_TLBI_MAX_PAGES {
+        tlbi_asid(asid);
+        return;
+    }
+    for page in start..end {
+        tlbi_page(asid, page << mmu::UAT_PGBIT);
+    }
+}
 
 /// Invalidate the entire GPU TLB.
 #[inline(always)]
@@ -78,12 +108,16 @@ pub(crate) fn tlbi_range(asid: Asid, va: usize, len: usize) {
     if len == 0 {
         return;
     }
+    if PAGE_TLBI.load(Ordering::Relaxed) {
+        tlbi_pages(asid, va, len);
+        return;
+    }
 
     let start_pg = va >> mmu::UAT_PGBIT;
     let end_pg = (va + len + mmu::UAT_PGMSK) >> mmu::UAT_PGBIT;
 
     const BADDR_MASK: u64 = (1 << 37) - 1;
-    let mut val: u64 = ((asid as u64) << 48) | (2 << 46) | (start_pg as u64 & BADDR_MASK);
+    let mut val: u64 = (u64::from(asid) << 48) | (2 << 46) | (start_pg as u64 & BADDR_MASK);
     let pages = end_pg - start_pg;
 
     // Guess? It's possible that the page count is in terms of 4K pages
@@ -167,6 +201,10 @@ pub(crate) fn tlbi_range_or_asid(asid: Asid, va: usize, len: usize) {
     if len == 0 {
         return;
     }
+    if PAGE_TLBI.load(Ordering::Relaxed) {
+        tlbi_pages(asid, va, len);
+        return;
+    }
 
     if va == 0 || len >= TLBI_RANGE_MAX {
         tlbi_asid(asid);
@@ -185,7 +223,7 @@ pub(crate) fn tlbi_range_or_asid(asid: Asid, va: usize, len: usize) {
     };
     let num = ((len - 1) >> unit_shift) as u64;
 
-    let val = ((asid as u64) << 48)
+    let val = (u64::from(asid) << 48)
         | (TLBI_TG_16K << 46)
         | (scale << 44)
         | (num << 39)

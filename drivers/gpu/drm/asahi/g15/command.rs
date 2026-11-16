@@ -146,6 +146,11 @@ pub(crate) struct Context<'a> {
     pub(crate) usc_base: u64,
 }
 
+struct CheckedContext<'a> {
+    vm: &'a mut mmu::VmReadGuard,
+    usc_base: u64,
+}
+
 /// A stream whose timestamps and ordinals are resolved ([`prepare`]), before its spans are
 /// checked ([`Prepared::validate`]).
 pub(crate) struct Prepared<'a> {
@@ -360,7 +365,8 @@ impl Timestamps<'_> {
             .get(timestamp.handle.try_into()?)
             .ok_or(ENOENT)?
             .clone();
-        let file::Object::TimestampBuffer(mapping) = object;
+        let file::Object::TimestampBuffer(buffer) = object;
+        let mapping = buffer.firmware_mapping()?;
         let offset = timestamp.offset as usize;
         if offset % 8 != 0 || offset >= mapping.size() || mapping.size() - offset < 8 {
             return Err(EINVAL);
@@ -376,7 +382,13 @@ impl Timestamps<'_> {
 /// Checks that `[start, end)` (rounded out to pages) is user memory mapped with the requested
 /// GPU access: a driver range ENOENT, outside the user range EINVAL, an unmapped page ENOENT, a
 /// page without the access EACCES.
-pub(crate) fn cover(vm: &mmu::Vm, start: u64, end: u64, read: bool, write: bool) -> Result {
+pub(crate) fn cover(
+    vm: &mut mmu::VmReadGuard,
+    start: u64,
+    end: u64,
+    read: bool,
+    write: bool,
+) -> Result {
     let mask = mmu::UAT_PGMSK as u64;
     if end <= start {
         return Err(EINVAL);
@@ -406,7 +418,11 @@ pub(crate) fn cover(vm: &mmu::Vm, start: u64, end: u64, read: bool, write: bool)
 }
 
 /// Attachment spans, 128-byte granular, actually mapped with `write` or read access.
-fn check_attachments(vm: &mmu::Vm, list: &[uapi::drm_asahi_attachment], write: bool) -> Result {
+fn check_attachments(
+    vm: &mut mmu::VmReadGuard,
+    list: &[uapi::drm_asahi_attachment],
+    write: bool,
+) -> Result {
     for attachment in list {
         let end = attachment
             .pointer
@@ -466,8 +482,8 @@ fn geometry_bytes(cmd: &uapi::drm_asahi_cmd_render) -> (u64, u64) {
 }
 
 /// Per-command render admission.
-fn check_render(context: &Context<'_>, cmd: &uapi::drm_asahi_cmd_render) -> Result {
-    let vm = context.vm;
+fn check_render(context: &mut CheckedContext<'_>, cmd: &uapi::drm_asahi_cmd_render) -> Result {
+    let vm = &mut *context.vm;
     let allowed = PROCESS_EMPTY_TILES
         | NO_VERTEX_CLUSTERING
         | RSRC_SPEC_HI
@@ -551,11 +567,11 @@ fn check_render(context: &Context<'_>, cmd: &uapi::drm_asahi_cmd_render) -> Resu
 
 /// Per-command compute admission.
 fn check_compute(
-    context: &Context<'_>,
+    context: &mut CheckedContext<'_>,
     cmd: &uapi::drm_asahi_cmd_compute,
     attachments: &[uapi::drm_asahi_attachment],
 ) -> Result {
-    let vm = context.vm;
+    let vm = &mut *context.vm;
     let (base, end) = (cmd.cdm_ctrl_stream_base, cmd.cdm_ctrl_stream_end);
     if cmd.flags != 0
         || cmd.sampler_count != 0
@@ -649,6 +665,12 @@ impl Prepared<'_> {
             counts,
             timestamps,
         } = self;
+        // On error, unlock before the last timestamp mapping can drop and unmap.
+        let mut access = context.vm.read_lock()?;
+        let mut context = CheckedContext {
+            vm: &mut access,
+            usc_base: context.usc_base,
+        };
         let mut commands = KVec::with_capacity(resolved.len(), GFP_KERNEL)?;
         let mut compute = KVec::new();
         let mut index = 0;
@@ -657,12 +679,12 @@ impl Prepared<'_> {
             match entry.kind {
                 SET_VERTEX_ATTACHMENTS | SET_FRAGMENT_ATTACHMENTS => {
                     // Validated readable, never serialized on G15.
-                    check_attachments(context.vm, &attachment_list(entry.payload)?, false)?;
+                    check_attachments(&mut *context.vm, &attachment_list(entry.payload)?, false)?;
                 }
                 SET_COMPUTE_ATTACHMENTS => compute = attachment_list(entry.payload)?,
                 CMD_RENDER => {
                     let cmd: uapi::drm_asahi_cmd_render = payload(entry.payload)?;
-                    check_render(context, &cmd)?;
+                    check_render(&mut context, &cmd)?;
                     commands.push(
                         Command::Render(KBox::new(
                             RenderCommand {
@@ -677,7 +699,7 @@ impl Prepared<'_> {
                 }
                 CMD_COMPUTE => {
                     let cmd: uapi::drm_asahi_cmd_compute = payload(entry.payload)?;
-                    check_compute(context, &cmd, &compute)?;
+                    check_compute(&mut context, &cmd, &compute)?;
                     let slots = resolved.get(index).ok_or(EINVAL)?;
                     commands.push(
                         Command::Compute(KBox::new(

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! The J516C hardware record (0xb480 bytes) from the device tree.
+//! The J516C hardware record (0xb480 bytes) from the device tree and the ADT.
 //!
 //! The record is HardwareDataB (identity, IOMapping records, the DVFS tables) at 0, HardwareDataA
 //! (the power, performance and thermal controllers) at [`HWDATA_A`], and the G15C tail (sensor
@@ -13,12 +13,14 @@
 //!   state cap and base state;
 //! - a layout constant of the 2419 firmware's G15C record: flags, the IOMapping flag words,
 //!   the identity words, fixed factors (65536, 95, 100, 1.02, 0.8/0.2, 625, 11000, 125, 5);
-//! - a word the device tree does not carry ([`FROM_FILE`]), copied from the machine's board file
-//!   by [`from_file`] and listed with its rule in the project notes: the maximum power
-//!   (HardwareDataA +0x6a4; every other maximum-power word derives from it), the MTR sensor
-//!   masks, the relative-power table (the device tree's operating-point powers are a boot-loader
-//!   stand-in) and the tail's six sensor rows;
-//! - a word the file carries and the firmware was shown not to need ([`UNNEEDED`]): zero.
+//! - the tail's six sensor rows: entries of the ADT's `aon-ptd` sensor table ([`sensor_rows`]);
+//! - a word neither carries ([`REFERENCE_WORDS`]): the value of the J516C reference machine
+//!   ([`Reference`]), as the T6030 templates carry their reference machine's: the maximum
+//!   power (HardwareDataA +0x6a4; every other maximum-power word derives from it), the MTR
+//!   sensor masks and the relative-power table (the device tree's operating-point powers are a
+//!   boot-loader stand-in);
+//! - a word the reference machine's record carries and the firmware was shown not to need
+//!   ([`UNNEEDED`]): zero.
 //!
 //! HardwareDataA has the G15S shape of the T6030 templates with insertions ([`a`]): 8 bytes
 //! before the fast-die controller (+0x8bc), 16-wide instead of 8-wide coefficient rows (+0x200
@@ -152,14 +154,13 @@ const SE_KP1: usize = 40;
 const SE_RESET: usize = 41;
 const SE_TARGET: usize = 42;
 
-/// One operating point: MHz, the clusters' voltages in mV (rounded up from microvolts), how
-/// many voltage cells the node had, and mW.
+/// One operating point: MHz, the clusters' voltages in mV (rounded up from microvolts) and how
+/// many voltage cells the node had.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Opp {
     pub(crate) mhz: u32,
     pub(crate) mv: [u32; CLUSTERS],
     pub(crate) cells: usize,
-    pub(crate) mw: u32,
 }
 
 impl Opp {
@@ -182,6 +183,8 @@ pub(crate) struct IoSlot {
 
 /// Everything the record is built from.
 pub(crate) struct Inputs<'a> {
+    /// SoC identity of this G15C record.
+    pub(crate) chip_id: u32,
     pub(crate) props: [u32; PROPS.len()],
     /// `apple,power-zones` cells (triples).
     pub(crate) zones: &'a [u32],
@@ -198,40 +201,63 @@ pub(crate) struct Inputs<'a> {
     pub(crate) usc_base: u64,
     pub(crate) user_end: u64,
     pub(crate) timestamps: u64,
-    /// The maximum GPU power in mW ([`MAX_POWER`], a word the device tree does not carry).
-    pub(crate) max_power_mw: u32,
+    /// The six sensor rows of the ADT's `aon-ptd` table ([`sensor_rows`]).
+    pub(crate) sensor_rows: [[u8; 12]; SENSOR_ROW_COUNT],
+    /// The words neither the device tree nor the ADT carries.
+    pub(crate) reference: &'a Reference,
 }
+
+/// The record's words that neither the device tree nor the ADT carries, as one machine's
+/// driver wrote them ([`REFERENCE_WORDS`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Reference {
+    /// The maximum GPU power in mW ([`MAX_POWER`]).
+    pub(crate) max_power_mw: u32,
+    /// The relative powers of DVFS states 1..7, percent of the top state's (state 8 is 100).
+    pub(crate) relative_power: [u32; RELATIVE_STATES],
+    /// The MTR fast-die sensor mask (written twice) and alarm mask, as the u64 at each place.
+    /// The device tree's `apple,fast-die0-sensor-mask` is another value.
+    pub(crate) fast_die_mask: u64,
+    pub(crate) alarm_mask: u64,
+}
+
+/// DVFS states with a relative-power word of their own.
+pub(crate) const RELATIVE_STATES: usize = 7;
+
+/// The J516C reference machine's words (its 2419 firmware driver's values on that machine).
+/// Another J516C gets them as a J514S gets the T6030 templates' machine's: the operating
+/// points, voltages, gains and sensor rows are its own, these are the reference machine's.
+pub(crate) const J516C: Reference = Reference {
+    max_power_mw: 116739,
+    relative_power: [11, 23, 33, 44, 55, 71, 90],
+    fast_die_mask: 0x802a002b_802a002b,
+    alarm_mask: 0x902a102b_802a002b,
+};
 
 /// HardwareDataA's maximum-power word (= `fw::initdata::hwdata::MAX_POWER_A`).
 pub(crate) const MAX_POWER: usize = HWDATA_A + 0x6a4;
+const RELATIVE_POWER: usize = 0x1060;
+const FAST_DIE_MASK: usize = HWDATA_A + 0x8ac;
+const FAST_DIE_MASK_2: usize = HWDATA_A + 0x1490;
+const ALARM_MASK: usize = HWDATA_A + 0x24a8;
 
-/// Words the device tree does not carry, copied from the board file. Record offsets.
+/// The record words [`Reference`] supplies. Record offsets.
+#[cfg(test)]
 #[rustfmt::skip]
-pub(crate) const FROM_FILE: [usize; 32] = [
-    // The relative powers of states 1..7 (state 8 is 100): the device tree's operating-point
-    // powers are a boot-loader stand-in.
+pub(crate) const REFERENCE_WORDS: [usize; 14] = [
     0x1060, 0x1064, 0x1068, 0x106c, 0x1070, 0x1074, 0x1078,
-    // HardwareDataA: the maximum power, the MTR fast-die masks (+0x8ac, +0x1490) and the alarm
-    // mask (+0x24a8); the device tree's apple,fast-die0-sensor-mask is another value.
     MAX_POWER,
-    HWDATA_A + 0x8ac, HWDATA_A + 0x8b0,
-    HWDATA_A + 0x1490, HWDATA_A + 0x1494,
-    HWDATA_A + 0x24a8, HWDATA_A + 0x24ac,
-    // The tail's six sensor rows (key, id, kind; 12 bytes each; the boot loader does not export
-    // the aon-ptd table).
-    HWDATA_A + 0x6c58, HWDATA_A + 0x6c5c, HWDATA_A + 0x6c60,
-    HWDATA_A + 0x6c64, HWDATA_A + 0x6c68, HWDATA_A + 0x6c6c,
-    HWDATA_A + 0x6c70, HWDATA_A + 0x6c74, HWDATA_A + 0x6c78,
-    HWDATA_A + 0x6c7c, HWDATA_A + 0x6c80, HWDATA_A + 0x6c84,
-    HWDATA_A + 0x6c88, HWDATA_A + 0x6c8c, HWDATA_A + 0x6c90,
-    HWDATA_A + 0x6c94, HWDATA_A + 0x6c98, HWDATA_A + 0x6c9c,
+    FAST_DIE_MASK, FAST_DIE_MASK + 4,
+    FAST_DIE_MASK_2, FAST_DIE_MASK_2 + 4,
+    ALARM_MASK, ALARM_MASK + 4,
 ];
 
-/// Words the board file carries that the record leaves zero: the firmware ran, passed every
-/// check and reached its top state without them (one boot each). The cross-check accepts the
-/// file's value there. 27 words in the HardwareDataB +0x38..+0x638 block and two all-ones words
+/// Words the reference machine's record carries that this one leaves zero: the firmware ran,
+/// passed every check and reached its top state without them (one boot each). 27 words in
+/// the HardwareDataB +0x38..+0x638 block and two all-ones words
 /// after it (zero in the G15S templates); the tail's thirteen readings (a single at
 /// HardwareDataA +0x6d34, twelve singles after +0x6d80).
+#[cfg(test)]
 #[rustfmt::skip]
 pub(crate) const UNNEEDED: [usize; 42] = [
     0xe0, 0xe8, 0xf4, 0xf8, 0xfc, 0x100, 0x104, 0x108, 0x10c, 0x2d8, 0x2dc, 0x2e0, 0x2e4,
@@ -247,7 +273,7 @@ pub(crate) const UNNEEDED: [usize; 42] = [
 /// rows whose kind byte is `g`, their presence mask, then the `r` and `f` rows' keys with a
 /// count of one each.
 const SENSOR_ROWS: usize = HWDATA_A + 0x6c58;
-const SENSOR_ROW_COUNT: usize = 6;
+pub(crate) const SENSOR_ROW_COUNT: usize = 6;
 const SENSOR_G_KEYS: usize = HWDATA_A + 0x6cdc;
 const SENSOR_G_MASK: usize = HWDATA_A + 0x6cfc;
 const SENSOR_R_KEY: usize = HWDATA_A + 0x6d04;
@@ -434,7 +460,7 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         put32(out, IOMAPS + 32 * slot as usize + 0x18, 1)?;
     }
     // Identity and flags.
-    put32(out, 0xa28, 0x6031)?;
+    put32(out, 0xa28, i.chip_id)?;
     put32(out, 0xa2c, 1)?;
     put32(out, 0xa30, 2)?;
     for at in [0xa38, 0xa3c, 0xa40, 0xa50, 0xa58, 0xa60] {
@@ -492,15 +518,13 @@ fn hwdata_b(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         put32(out, 0x10dc + 4 * k, t.primary[k] as u32)?;
         put32(out, 0x111c + 4 * k, t.secondary[k] as u32)?;
         if k > 0 {
-            // Relative power (a FROM_FILE word on the J516C) and relative boost frequency.
-            if top.mw != 0 {
-                put32(
-                    out,
-                    0x105c + 4 * k,
-                    u32::try_from(100 * u64::from(ps.mw) / u64::from(top.mw))
-                        .map_err(|_| "a relative power does not fit its u32 word")?,
-                )?;
-            }
+            // Relative power (the reference machine's) and relative boost frequency.
+            let relative = match i.reference.relative_power.get(k - 1) {
+                Some(&r) if k < t.top() => r,
+                None if k == t.top() => 100,
+                _ => return Err("the reference relative powers are for another state count"),
+            };
+            put32(out, RELATIVE_POWER - 4 + 4 * k, relative)?;
             if ps.mhz > base.mhz {
                 let span = u64::from(top.mhz - base.mhz);
                 put32(
@@ -565,7 +589,7 @@ fn hwdata_a(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
         |gain: usize| f32_mul(p[gain], period_s).ok_or("a gain is not a finite normal single");
     let max_scaled = 100 * t.top() as u32;
     let base_scaled = mul(100, p[BASE_PSTATE])?;
-    let max_power = i.max_power_mw;
+    let max_power = i.reference.max_power_mw;
     let max_power_f = f32_from_u32(max_power);
     let mut w = |off: usize, v: u32| put32(out, a(off), v);
     w(0x4, p[AIC_CLKS])?;
@@ -644,7 +668,7 @@ fn hwdata_a(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
     w(0x864, max_scaled)?;
     w(0x86c, F_0_8)?;
     w(0x870, F_0_2)?;
-    // Fast-die controller (its sensor mask is a FROM_FILE word).
+    // Fast-die controller (its sensor mask follows below).
     w(0x8bc, 4)?;
     w(0x8d0, F_1)?;
     w(0x8d8, per_period(FD_KI)?)?;
@@ -737,15 +761,46 @@ fn hwdata_a(out: &mut [u8], i: &Inputs<'_>, t: &Tables) -> R<()> {
     w(SE + 0x11c, F_65536)?;
     w(SE + 0x12c, 40)?;
     w(SE + 0x130, max_scaled)?;
-    // Past the second sensor mask (FROM_FILE), the alarm mask (FROM_FILE) and the end flag.
+    // Past the second sensor mask, the alarm mask and the end flag.
     w(0x1290, 125)?;
     w(0x1294, 1)?;
     w(0x1aa0, 1)?;
     w(0x3aa4, F_5)?;
+    // The MTR sensor masks: the fast-die mask at both places, then the alarm mask.
+    put64(out, FAST_DIE_MASK, i.reference.fast_die_mask)?;
+    put64(out, FAST_DIE_MASK_2, i.reference.fast_die_mask)?;
+    put64(out, ALARM_MASK, i.reference.alarm_mask)?;
     Ok(())
 }
 
-/// The tail's sensor keys from the six rows (which [`from_file`] fills).
+/// The six sensor rows of the ADT's `aon-ptd` `ptd_data_table`: 12-byte entries of a
+/// little-endian four-character key (`RT0g` is stored as `"RT0g"`) and two words. The rows are
+/// the `RT` entries of kind `g` (four, in table order), then the one of kind `r` and the one
+/// of kind `f`; any other count is refused rather than guessed.
+pub(crate) fn sensor_rows(table: &[u8]) -> R<[[u8; 12]; SENSOR_ROW_COUNT]> {
+    if table.is_empty() || table.len() % 12 != 0 {
+        return Err("the aon-ptd sensor table is not whole 12-byte entries");
+    }
+    let mut rows = [[0u8; 12]; SENSOR_ROW_COUNT];
+    let mut n = 0;
+    for (kind, wanted) in [(b'g', 4), (b'r', 1), (b'f', 1)] {
+        let mut found = 0;
+        for e in table.chunks_exact(12) {
+            if e[..2] == *b"RT" && e[3] == kind {
+                let row = rows.get_mut(n).ok_or("too many GPU sensor rows in aon-ptd")?;
+                row.copy_from_slice(e);
+                n += 1;
+                found += 1;
+            }
+        }
+        if found != wanted {
+            return Err("aon-ptd does not hold four g, one r and one f GPU sensor row");
+        }
+    }
+    Ok(rows)
+}
+
+/// The tail's sensor keys from the six rows.
 fn tail(out: &mut [u8]) -> R<()> {
     let mut g = 0usize;
     for row in 0..SENSOR_ROW_COUNT {
@@ -775,16 +830,10 @@ fn tail(out: &mut [u8]) -> R<()> {
     Ok(())
 }
 
-/// Copies the [`FROM_FILE`] words of `file` (the board file's record) into `out`.
-pub(crate) fn from_file(out: &mut [u8], file: &[u8]) -> R<()> {
-    for &at in FROM_FILE.iter() {
-        put32(out, at, get32(file, at)?)?;
-    }
-    Ok(())
-}
-
-/// The first word at which the built record differs from the file's, except the [`UNNEEDED`]
-/// words, where the file's value is accepted as long as the built word is zero.
+/// The first word at which a built record differs from a machine's own record (a host test's
+/// fixture), except the [`UNNEEDED`] words, where the machine's value is accepted as long as
+/// the built word is zero.
+#[cfg(test)]
 pub(crate) fn cross_check(built: &[u8], file: &[u8]) -> Option<(usize, u32, u32)> {
     let word = |s: &[u8], at: usize| -> u32 {
         let mut w = [0u8; 4];
@@ -799,23 +848,23 @@ pub(crate) fn cross_check(built: &[u8], file: &[u8]) -> Option<(usize, u32, u32)
         .find(|&(at, b, f)| b != f && !(b == 0 && UNNEEDED.contains(&at)))
 }
 
-/// Builds the record into `out` (zeroed first) from the device-tree inputs; the [`FROM_FILE`]
-/// words must have been copied in first ([`from_file`]) or are left as they are.
+/// Builds the record into `out` (zeroed first) from the inputs.
 pub(crate) fn build(out: &mut [u8], i: &Inputs<'_>) -> R<()> {
+    if !matches!(i.chip_id, 0x6031 | 0x6034) {
+        return Err("unsupported G15C record SoC");
+    }
     if out.len() != SIZE {
         return Err("record of another size");
-    }
-    let mut keep = [0u32; FROM_FILE.len()];
-    for (k, &at) in FROM_FILE.iter().enumerate() {
-        keep[k] = get32(out, at)?;
     }
     out.fill(0);
     let t = tables(i.main)?;
     hwdata_b(out, i, &t)?;
     hwdata_a(out, i, &t)?;
-    // The kept words win over what the rules put there (the relative powers, the masks).
-    for (k, &at) in FROM_FILE.iter().enumerate() {
-        put32(out, at, keep[k])?;
+    for (k, row) in i.sensor_rows.iter().enumerate() {
+        let at = SENSOR_ROWS + 12 * k;
+        out.get_mut(at..at + 12)
+            .ok_or("record too short")?
+            .copy_from_slice(row);
     }
     tail(out)
 }
@@ -828,18 +877,13 @@ mod tests {
         get32(b, o).unwrap()
     }
 
-    fn opp(mhz: u32, mv: [u32; 4], mw: u32) -> Opp {
-        Opp {
-            mhz,
-            mv,
-            cells: 4,
-            mw,
-        }
+    fn opp(mhz: u32, mv: [u32; 4]) -> Opp {
+        Opp { mhz, mv, cells: 4 }
     }
 
     /// Operating points shaped like the J516C's: eight voltages, the upper five with two states.
     fn main_opps() -> Vec<Opp> {
-        let mut v = vec![opp(0, [125; 4], 0)];
+        let mut v = vec![opp(0, [125; 4])];
         let groups: [(u32, [u32; 4], &[u32]); 8] = [
             (605, [605, 605, 615, 615], &[338]),
             (680, [680, 680, 665, 665], &[618]),
@@ -852,7 +896,7 @@ mod tests {
         ];
         for (_, mv, mhz) in groups {
             for &m in mhz {
-                v.push(opp(m, mv, m * 40));
+                v.push(opp(m, mv));
             }
         }
         v
@@ -888,8 +932,30 @@ mod tests {
         p
     }
 
+    /// Arbitrary reference words, distinct from the J516C's.
+    const TEST_REFERENCE: Reference = Reference {
+        max_power_mw: 54321,
+        relative_power: [0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006],
+        fast_die_mask: 0x1111_2222_3333_4444,
+        alarm_mask: 0x5555_6666_7777_8888,
+    };
+
+    /// A sensor row: the key's characters in storage order, then two words.
+    fn row(key: &[u8; 4], id: u32, kind: u32) -> [u8; 12] {
+        let mut r = [0u8; 12];
+        r[..4].copy_from_slice(key);
+        r[4..8].copy_from_slice(&id.to_le_bytes());
+        r[8..].copy_from_slice(&kind.to_le_bytes());
+        r
+    }
+
+    fn rows() -> [[u8; 12]; SENSOR_ROW_COUNT] {
+        [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"].map(|k| row(k, 0x10001, 0x1401))
+    }
+
     fn inputs<'a>(main: &'a [Opp], cs: &'a [Opp], slots: &'a [IoSlot]) -> Inputs<'a> {
         Inputs {
+            chip_id: 0x6031,
             props: props(),
             zones: &[],
             main,
@@ -901,8 +967,34 @@ mod tests {
             usc_base: 0x10_0000_0000,
             user_end: 0x2ff_ffff_8000,
             timestamps: 0xfffffc2ffc000000,
-            max_power_mw: 54321,
+            sensor_rows: rows(),
+            reference: &TEST_REFERENCE,
         }
+    }
+
+    #[test]
+    fn t6034_identity_and_six_memory_channels() {
+        let main = main_opps();
+        let cs = [opp(24, [635; CLUSTERS])];
+        let slots = [IoSlot {
+            slot: 11,
+            pa: 0x220000000,
+            va: 0xfffffc2068000000,
+            total: 6 * 0xd8000,
+            element: 0xd8000,
+            writable: true,
+        }];
+        let mut input = inputs(&main, &cs, &slots);
+        input.chip_id = 0x6034;
+        let mut out = vec![0u8; SIZE];
+        build(&mut out, &input).unwrap();
+        assert_eq!(get(&out, 0xa28), 0x6034);
+        assert_eq!(get(&out, IOMAPS + 32 * 11 + 0x10), 6 * 0xd8000);
+        assert_eq!(get(&out, IOMAPS + 32 * 11 + 0x14), 0xd8000);
+        // The fused 30-core part still has four ten-slot physical clusters.
+        assert_eq!(get(&out, 0xb54), 40);
+        input.chip_id = 0x6030;
+        assert_eq!(build(&mut out, &input), Err("unsupported G15C record SoC"));
     }
 
     #[test]
@@ -927,9 +1019,12 @@ mod tests {
 
     #[test]
     fn unneeded() {
-        // No UNNEEDED word is a FROM_FILE word; the cross-check accepts the file's value there
-        // only against a zero built word, and nothing else.
-        assert!(UNNEEDED.iter().all(|at| !FROM_FILE.contains(at)));
+        // No UNNEEDED word is a reference or sensor-row word; the cross-check accepts the
+        // file's value there only against a zero built word, and nothing else.
+        let rows = SENSOR_ROWS..SENSOR_ROWS + 12 * SENSOR_ROW_COUNT;
+        assert!(UNNEEDED
+            .iter()
+            .all(|at| !REFERENCE_WORDS.contains(at) && !rows.contains(at)));
         assert!(UNNEEDED.iter().all(|&at| at % 4 == 0 && at + 4 <= SIZE));
         let mut file = vec![0u8; SIZE];
         for (k, &at) in UNNEEDED.iter().enumerate() {
@@ -957,9 +1052,10 @@ mod tests {
         assert_eq!(a(0x1aa0), HWDATA_A + 0x24b8);
         assert_eq!(a(0x3aa4), HWDATA_A + 0x64bc);
         assert_eq!(MAX_POWER, a(0x6a4));
-        // FROM_FILE is sorted, unique and inside the record.
-        assert!(FROM_FILE.windows(2).all(|w| w[0] < w[1]));
-        assert!(FROM_FILE.iter().all(|&o| o % 4 == 0 && o + 4 <= SIZE));
+        // REFERENCE_WORDS is sorted, unique and inside the record.
+        assert!(REFERENCE_WORDS.windows(2).all(|w| w[0] < w[1]));
+        assert!(REFERENCE_WORDS.iter().all(|&o| o % 4 == 0 && o + 4 <= SIZE));
+        assert!(SENSOR_ROWS + 12 * SENSOR_ROW_COUNT <= SENSOR_G_KEYS);
     }
 
     #[test]
@@ -995,7 +1091,6 @@ mod tests {
                 mhz,
                 mv: [mv, 0, 0, 0],
                 cells: 1,
-                mw: 0,
             })
             .collect();
         let slots = [
@@ -1017,20 +1112,23 @@ mod tests {
             },
         ];
         let i = inputs(&main, &cs, &slots);
-        let mut r = vec![0u8; SIZE];
-        // FROM_FILE words survive the build; the sensor rows feed the tail.
-        for (k, &at) in FROM_FILE.iter().enumerate() {
-            put32(&mut r, at, 0x1000 + k as u32).unwrap();
-        }
-        // The file's maximum power is what the input repeats.
-        put32(&mut r, MAX_POWER, 54321).unwrap();
-        let rows = [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"];
-        for (k, row) in rows.iter().enumerate() {
-            put32(&mut r, SENSOR_ROWS + 12 * k, u32::from_le_bytes(**row)).unwrap();
-        }
+        // Whatever the buffer held before is not part of the record.
+        let mut r = vec![0x5au8; SIZE];
         build(&mut r, &i).unwrap();
         let good = r.clone();
-        assert_eq!(get(&r, 0x1060), 0x1000);
+        // The reference words: relative powers of states 1..7, the maximum power, the masks.
+        for k in 0..RELATIVE_STATES {
+            assert_eq!(get(&r, 0x1060 + 4 * k), 0x1000 + k as u32);
+        }
+        assert_eq!(get(&r, FAST_DIE_MASK), 0x3333_4444);
+        assert_eq!(get(&r, FAST_DIE_MASK + 4), 0x1111_2222);
+        assert_eq!(get(&r, FAST_DIE_MASK_2), 0x3333_4444);
+        assert_eq!(get(&r, FAST_DIE_MASK_2 + 4), 0x1111_2222);
+        assert_eq!(get(&r, ALARM_MASK), 0x7777_8888);
+        assert_eq!(get(&r, ALARM_MASK + 4), 0x5555_6666);
+        // The sensor rows as given.
+        assert_eq!(&r[SENSOR_ROWS..SENSOR_ROWS + 12], &rows()[0]);
+        assert_eq!(&r[SENSOR_ROWS + 60..SENSOR_ROWS + 72], &rows()[5]);
         assert_eq!(get(&r, 0x30f0), 0);
         // Identity, IOMapping records, flags.
         assert_eq!(get(&r, 0xa28), 0x6031);
@@ -1099,8 +1197,15 @@ mod tests {
         let mut j = inputs(&main, &cs, &slots);
         j.empty_writable = &[0];
         assert!(build(&mut r, &j).is_err());
+        let zero = Reference {
+            max_power_mw: 0,
+            ..TEST_REFERENCE
+        };
         let mut j = inputs(&main, &cs, &slots);
-        j.max_power_mw = 0;
+        j.reference = &zero;
+        assert!(build(&mut r, &j).is_err());
+        let mut j = inputs(&main, &cs, &slots);
+        j.sensor_rows[0] = row(b"RT0x", 1, 1);
         assert!(build(&mut r, &j).is_err());
         let mut j = inputs(&main, &cs, &slots);
         j.zones = &[100, 101, 1];
@@ -1127,34 +1232,49 @@ mod tests {
         let mut j = inputs(&main, &cs, &slots);
         j.zones = &[5000, 200, 0x4000_0000];
         assert_eq!(refused(&j), Err(OVERFLOW));
-        let mut skewed = main.clone();
-        skewed[1].mw = u32::MAX;
-        skewed[13].mw = 1;
+        // The seven relative powers fit eight states above state 0 and nothing else.
+        let fewer = &main[..PERF_STATES - 2];
+        assert_eq!(tables(fewer).unwrap().top(), 7);
         assert_eq!(
-            refused(&inputs(&skewed, &cs, &slots)),
-            Err("a relative power does not fit its u32 word")
+            refused(&inputs(fewer, &cs, &slots)),
+            Err("the reference relative powers are for another state count")
         );
-        // The admission cross-check as initdata::blob() composes it: the FROM_FILE words from
-        // the file, the rest built, then the first differing word against the file. A file the
-        // inputs reproduce passes; a rule word the file holds differently is found at its
-        // offset; a FROM_FILE word follows the file and is never a difference.
-        let first_difference = super::super::words::first_difference;
-        let checked = |file: &[u8]| {
-            let mut built = vec![0u8; SIZE];
-            from_file(&mut built, file).unwrap();
-            build(&mut built, &i).unwrap();
-            (first_difference(&built, file), built)
-        };
-        assert_eq!(checked(&good).0, None);
-        let mut file = good.clone();
-        put32(&mut file, a(0x4c), 801).unwrap();
-        assert_eq!(checked(&file).0, Some((a(0x4c), 800, 801)));
-        let mut file = good.clone();
-        assert!(FROM_FILE.contains(&0x1064));
-        put32(&mut file, 0x1064, get(&good, 0x1064) ^ 0x5a).unwrap();
-        let (difference, built) = checked(&file);
-        assert_eq!(difference, None);
-        assert_eq!(get(&built, 0x1064), get(&good, 0x1064) ^ 0x5a);
+    }
+
+    #[test]
+    fn sensor_rows_from_the_ptd_table() {
+        // A table shaped like the J516C's: other sensors around the GPU's, the f row first.
+        let mut table = Vec::new();
+        for r in [
+            row(b"YD0C", 0x5e0001, 0x1040405),
+            row(b"RT0a", 0x6b0001, 0x13),
+            row(b"RT0f", 0xcb0001, 0x1601),
+            row(b"RE0g", 0xaa0001, 0xff01),
+            row(b"RT0g", 0xab0001, 0x1401),
+            row(b"RT1g", 0x8d0001, 0x1401),
+            row(b"RT2g", 0x8b0001, 0x1401),
+            row(b"RT3g", 0xad0001, 0x1401),
+            row(b"RT0p", 0x6d0001, 0x13),
+            row(b"RT0r", 0xeb0001, 0x1401),
+            row(b"XEXE", 0x3c0001, 0xff00),
+        ] {
+            table.extend_from_slice(&r);
+        }
+        let got = sensor_rows(&table).unwrap();
+        let keys: Vec<&[u8]> = got.iter().map(|r| &r[..4]).collect();
+        assert_eq!(keys, [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"]);
+        assert_eq!(got[5], row(b"RT0f", 0xcb0001, 0x1601));
+        assert_eq!(got[4], row(b"RT0r", 0xeb0001, 0x1401));
+        // Refused: no table, a partial entry, a missing row, a fifth g row, a second f row.
+        assert!(sensor_rows(&[]).is_err());
+        assert!(sensor_rows(&table[..table.len() - 1]).is_err());
+        assert!(sensor_rows(&table[12..table.len() - 12]).is_ok());
+        assert!(sensor_rows(&table[..9 * 12]).is_err());
+        for extra in [row(b"RT4g", 1, 1), row(b"RT1f", 1, 1)] {
+            let mut t = table.clone();
+            t.extend_from_slice(&extra);
+            assert!(sensor_rows(&t).is_err());
+        }
     }
 
     // --- The fixture: a saved copy of a J516C's device tree and its private board file. ---
@@ -1236,14 +1356,12 @@ mod tests {
                 for (c, m) in mv.iter_mut().enumerate().take(cells) {
                     *m = be32(uv, 4 * c).div_ceil(1000);
                 }
-                let mw = prop(props, "opp-microwatt").map_or(0, |w| be32(w, 0) / 1000);
                 (
                     p.clone(),
                     Opp {
                         mhz: (hz / 1_000_000) as u32,
                         mv,
                         cells,
-                        mw,
                     },
                 )
             })
@@ -1262,16 +1380,8 @@ mod tests {
             mhz: 24,
             mv: [635, 0, 0, 0],
             cells: 1,
-            mw: 0,
         }];
         let mut seed = vec![0u8; SIZE];
-        put32(&mut seed, MAX_POWER, 54321).unwrap();
-        for (k, key) in [b"RT0g", b"RT1g", b"RT2g", b"RT3g", b"RT0r", b"RT0f"]
-            .iter()
-            .enumerate()
-        {
-            put32(&mut seed, SENSOR_ROWS + 12 * k, u32::from_le_bytes(**key)).unwrap();
-        }
         assert_eq!(build(&mut seed, &inputs(&main, &cs, &[])), Ok(()));
         for prop in 0..PROPS.len() {
             for value in [
@@ -1289,16 +1399,59 @@ mod tests {
         }
     }
 
-    /// Builder on the saved device tree + the file's FROM_FILE words == the file's hardware
-    /// record, byte for byte. Needs `G15_J516C_FIXTURES=<dir>` with `j516c.dtb` and
-    /// `t6031-j516c-board.bin` (off the tree): ignored by default, `--ignored` runs it.
+    /// A property of an ADT node found by its path of `name`s from the root: nodes of u32
+    /// property and child counts, properties of a 32-byte name, a u32 size (top bit a flag)
+    /// and the value padded to 4 bytes.
+    fn adt_prop<'a>(adt: &'a [u8], path: &[&str], name: &str) -> Option<&'a [u8]> {
+        fn le(b: &[u8], o: usize) -> usize {
+            u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as usize
+        }
+        // The node at `at`: its properties, its children's offsets and the offset past it.
+        fn node(adt: &[u8], at: usize) -> (Vec<(&[u8], &[u8])>, Vec<usize>, usize) {
+            let (np, nc) = (le(adt, at), le(adt, at + 4));
+            let mut o = at + 8;
+            let mut props = Vec::new();
+            for _ in 0..np {
+                let n = &adt[o..o + 32];
+                let n = &n[..n.iter().position(|&b| b == 0).unwrap_or(32)];
+                let size = le(adt, o + 32) & 0x7fff_ffff;
+                props.push((n, &adt[o + 36..o + 36 + size]));
+                o += 36 + size.next_multiple_of(4);
+            }
+            let mut children = Vec::new();
+            for _ in 0..nc {
+                children.push(o);
+                o = node(adt, o).2;
+            }
+            (props, children, o)
+        }
+        let mut at = 0;
+        for want in path {
+            let (_, children, _) = node(adt, at);
+            let named = |c: usize| {
+                let (props, _, _) = node(adt, c);
+                props.iter().any(|(n, v)| {
+                    *n == b"name" && v.split(|&b| b == 0).next() == Some(want.as_bytes())
+                })
+            };
+            at = *children.iter().find(|&&c| named(c))?;
+        }
+        node(adt, at).0.into_iter().find(|(n, _)| *n == name.as_bytes()).map(|(_, v)| v)
+    }
+
+    /// Builder on the saved device tree and ADT with the J516C reference words == the J516C
+    /// reference machine's own hardware record, byte for byte except the [`UNNEEDED`] words.
+    /// Needs `G15_J516C_FIXTURES=<dir>` with `j516c.dtb` (`/sys/firmware/fdt`), `adt.bin` (the
+    /// boot loader's ADT) and `t6031-j516c-board.bin` (that machine's record), all off the
+    /// tree: ignored by default, `--ignored` runs it.
     #[test]
     #[ignore = "needs the off-tree J516C fixtures (G15_J516C_FIXTURES)"]
     fn j516c_fixture() {
         let dir = std::env::var_os("G15_J516C_FIXTURES")
-            .expect("G15_J516C_FIXTURES names the directory with j516c.dtb and the board file");
+            .expect("G15_J516C_FIXTURES names the directory with j516c.dtb, adt.bin, the record");
         let dir = std::path::Path::new(&dir);
         let dtb = std::fs::read(dir.join("j516c.dtb")).unwrap();
+        let adt = std::fs::read(dir.join("adt.bin")).unwrap();
         let blob = std::fs::read(dir.join("t6031-j516c-board.bin")).unwrap();
         assert_eq!(&blob[..8], b"T6031BRD");
         let at = 16 + 3 * 8;
@@ -1378,6 +1531,7 @@ mod tests {
             })
             .collect();
         let i = Inputs {
+            chip_id: 0x6031,
             props,
             zones: &zones,
             main: &main,
@@ -1389,10 +1543,13 @@ mod tests {
             usc_base: 0x10_0000_0000,
             user_end: 0x2ff_ffff_8000,
             timestamps: 0xfffffc2ffc000000,
-            max_power_mw: get(file, MAX_POWER),
+            sensor_rows: sensor_rows(
+                adt_prop(&adt, &["arm-io", "aon-ptd"], "ptd_data_table").expect("aon-ptd table"),
+            )
+            .unwrap(),
+            reference: &J516C,
         };
         let mut built = vec![0u8; SIZE];
-        from_file(&mut built, file).unwrap();
         build(&mut built, &i).unwrap();
         assert_eq!(cross_check(&built, file), None, "(offset, built, file)");
         for &at in UNNEEDED.iter() {

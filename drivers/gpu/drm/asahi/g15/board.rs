@@ -10,11 +10,11 @@
 //! against its hash at boot.
 //!
 //! A SoC whose board data comes from its device tree ([`super::hw::Platform::DeviceTree`]) gets
-//! its hardware record from [`hardware_record`] ([`record`]) and its Globals and Power from
-//! [`device_tree`]: the G15S templates with the GPU node's power words and the hardware
-//! record's maximum power ([`words`]).
+//! its hardware record from [`hardware_record`] ([`record`]: the GPU node, the ADT's sensor
+//! rows and the SoC's reference words) and its Globals and Power from [`device_tree`]: the G15S
+//! templates with the GPU node's power words and the hardware record's maximum power
+//! ([`words`]).
 
-pub(crate) mod blob;
 pub(crate) mod data;
 pub(crate) mod record;
 pub(crate) mod template;
@@ -98,7 +98,6 @@ fn aux_opps(
             mhz,
             mv: [uv[0].div_ceil(1000), 0, 0, 0],
             cells: 1,
-            mw: 0,
         };
         n += 1;
     }
@@ -110,13 +109,13 @@ fn aux_opps(
 }
 
 /// The hardware record of a device-tree SoC ([`record`]): built from the GPU node's properties
-/// and operating-point tables, the layout's IOMapping table and the ADT regions, with the
-/// words the device tree does not carry copied from `file`, the machine's own record.
+/// and operating-point tables, the layout's IOMapping table, the ADT regions and sensor rows,
+/// and the SoC's `reference` words, which neither carries.
 pub(crate) fn hardware_record(
     dev: &device::Device,
     cfg: &super::Config,
     adt: &GpuAdt,
-    file: &[u8],
+    reference: &record::Reference,
 ) -> Result<KVVec<u8>> {
     let layout = cfg.layout;
     let node = dev.of_node().ok_or(ENODEV)?;
@@ -136,7 +135,6 @@ pub(crate) fn hardware_record(
             mhz: adt.perf_mhz[i],
             mv: adt.cluster_mv[i],
             cells: adt.cluster_cells,
-            mw: adt.perf_mw[i],
         };
     }
     let mut cs = [record::Opp::default(); 16];
@@ -159,13 +157,8 @@ pub(crate) fn hardware_record(
             writable,
         };
     }
-    let max_power_mw = u32::from_le_bytes(
-        file.get(record::MAX_POWER..record::MAX_POWER + 4)
-            .ok_or(EINVAL)?
-            .try_into()
-            .map_err(|_| EINVAL)?,
-    );
     let inputs = record::Inputs {
+        chip_id: cfg.chip_id,
         props,
         zones: &zones,
         main: &main,
@@ -177,15 +170,14 @@ pub(crate) fn hardware_record(
         usc_base: hw::client::COMPACT_WINDOW.start,
         user_end: hw::USER_RANGE.end,
         timestamps: va::TIMESTAMPS,
-        max_power_mw,
+        sensor_rows: adt.sensor_rows,
+        reference,
     };
     let mut out = KVVec::from_elem(0u8, record::SIZE, GFP_KERNEL)?;
-    record::from_file(&mut out, file)
-        .and_then(|()| record::build(&mut out, &inputs))
-        .map_err(|why| {
-            dev_err!(dev, "hardware record from the device tree: {}\n", why);
-            EINVAL
-        })?;
+    record::build(&mut out, &inputs).map_err(|why| {
+        dev_err!(dev, "hardware record from the device tree: {}\n", why);
+        EINVAL
+    })?;
     Ok(out)
 }
 

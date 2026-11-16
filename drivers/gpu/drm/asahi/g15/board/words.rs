@@ -235,6 +235,7 @@ pub(crate) fn power(
 
 /// The first word (4-byte aligned offset) at which `a` and `b` differ, with both values; a
 /// missing word reads 0. `None` when they are equal.
+#[cfg(test)]
 pub(crate) fn first_difference(a: &[u8], b: &[u8]) -> Option<(usize, u32, u32)> {
     let word = |s: &[u8], at: usize| -> u32 {
         let mut w = [0u8; 4];
@@ -584,7 +585,7 @@ mod tests {
 
     /// Builder on the saved device tree == the private file's Globals and Power, byte for byte.
     /// Needs `G15_J516C_FIXTURES=<dir>` with `j516c.dtb` (`/sys/firmware/fdt` of the machine)
-    /// and `t6031-j516c-board.bin` (its board file); both stay off the tree, so the test is
+    /// and `t6031-j516c-board.bin` (its own images); both stay off the tree, so the test is
     /// ignored by default (`--ignored` runs it) and fails, rather than passes, without them.
     #[test]
     #[ignore = "needs the off-tree J516C fixtures (G15_J516C_FIXTURES)"]
@@ -595,7 +596,7 @@ mod tests {
         let dtb = std::fs::read(dir.join("j516c.dtb")).unwrap();
         let blob = std::fs::read(dir.join("t6031-j516c-board.bin")).unwrap();
 
-        // The board file: magic, version, count, 3 x (kind, size), images (board/blob.rs).
+        // The machine's images: magic, version, count, 3 x (kind, size), then the images.
         assert_eq!(&blob[..8], b"T6031BRD");
         assert_eq!(get32(&blob, 8), 1);
         assert_eq!(get32(&blob, 12), 3);

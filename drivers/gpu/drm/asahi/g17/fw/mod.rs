@@ -23,6 +23,9 @@ pub(crate) mod queue;
 pub(crate) mod render;
 pub(crate) mod render_rt;
 pub(crate) mod qos;
+pub(crate) mod variant;
+
+pub(crate) use variant::Variant;
 
 /// Clears a firmware structure in place.
 ///
@@ -30,7 +33,7 @@ pub(crate) mod qos;
 pub(crate) fn clear<T: Zeroable>(object: &mut T) {
     // SAFETY: `T: Zeroable` guarantees that all-zero bytes are a valid `T`,
     // and `object` is a valid, exclusive reference to one `T`.
-    unsafe { core::ptr::write_bytes(object as *mut T, 0, 1) };
+    unsafe { core::ptr::write_bytes(core::ptr::from_mut(object), 0, 1) };
 }
 
 /// Returns `va + offset`, or `EINVAL` if the sum overflows.

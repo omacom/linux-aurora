@@ -547,7 +547,7 @@ static void balanced(void) {
 int main(void) {
  (void)cd321x_pm_notifications;
  struct cd321x c;
- struct cd321x_pm_state budget;
+ struct cd321x_pm_state budget={0};
  cd321x_pm_init(&budget);assert(cd321x_pm_ready(&budget));
  assert(cd321x_display_taken(-ENOSPC,true)&&!cd321x_display_taken(-EBUSY,true)&&!cd321x_display_taken(0,true)&&cd321x_display_taken(-EBUSY,false)&&!cd321x_display_taken(-ENOSPC,false)&&!cd321x_display_taken(0,false));
  for(unsigned int i=0;i<CD321X_RESUME_ATTEMPTS;i++){
@@ -611,6 +611,19 @@ int main(void) {
  puts("PASS actual cd321x port: mux defer/reprobe, rollback, fwnode balance and ordinary scope");
 }
 '''
+
+    # Newer trees report an occupied pipeline as -ENOSPC on every SoC.
+    # Keep the old two-argument contract covered when testing an older tree.
+    if re.search(r'cd321x_display_taken\(int ret\)', pm):
+        old = ' assert(cd321x_display_taken(-ENOSPC,true)&&!cd321x_display_taken(-EBUSY,true)&&!cd321x_display_taken(0,true)&&cd321x_display_taken(-EBUSY,false)&&!cd321x_display_taken(-ENOSPC,false)&&!cd321x_display_taken(0,false));'
+        assert controls.count(old) == 1
+        controls = controls.replace(old, r'''
+ /* An occupied display permits USB progress; transient/other errors retry. */
+ assert(cd321x_display_taken(-ENOSPC));
+ assert(!cd321x_display_taken(-EBUSY)&&!cd321x_display_taken(-EAGAIN));
+ assert(!cd321x_display_taken(-ETIMEDOUT)&&!cd321x_display_taken(-EIO));
+ assert(!cd321x_display_taken(0));
+''')
 
     # A mux that holds a change up is retried outside the cable-state budget.
     if 'cd321x_pm_mux_held(' in pm:

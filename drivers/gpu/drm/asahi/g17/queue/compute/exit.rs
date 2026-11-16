@@ -83,11 +83,12 @@ impl Transaction {
 }
 
 impl Queue {
-    /// A command with ray traversal scratch is never killed. On Neo, killing a
+    /// A running command with ray traversal scratch is never killed. On Neo, killing a
     /// traversal that stopped making progress either crashed the GPU firmware
     /// when the queue's pool was then released, or stalled every later render
     /// when it was retained; left alone, the rest of the GPU kept working. Such
-    /// a queue stays quarantined and retained until its commands retire.
+    /// a queue stays quarantined and retained until its commands retire. A
+    /// traversal the firmware reported failed no longer runs (see `fault_pending`).
     fn active_traversal(&self) -> bool {
         self.active.iter().any(|active| {
             matches!(
@@ -101,7 +102,7 @@ impl Queue {
             && self.released
             && self.active.len != 0
             && self.exit.is_none()
-            && !self.active_traversal()
+            && (!self.active_traversal() || self.fault_pending())
             && (self.quarantined || self.retired_by_teardown)
             && age
                 >= if self.quarantined {
@@ -109,6 +110,10 @@ impl Queue {
                 } else {
                     CANCELLED_DELAY_NS
                 }
+    }
+    /// A kill of `context` was published through this queue.
+    pub(crate) fn exit_published(&self, context: &Arc<Context>) -> bool {
+        self.exit.is_some() && self.context().is_some_and(|bound| Arc::ptr_eq(bound, context))
     }
     pub(crate) fn exit_owner(&self, context: &Arc<Context>) -> Option<u64> {
         if !self
@@ -123,6 +128,23 @@ impl Queue {
                 .back()
                 .and_then(|active| active.ticket.map(|ticket| ticket.owner))
         })
+    }
+    /// The kill of this queue's failed context waits; returns how long it has waited, and
+    /// whether this is the first time it crossed `slow`.
+    pub(crate) fn note_kill_wait(&mut self, now: u64, slow: u64) -> (u64, bool) {
+        let (since, warned) = self.kill_wait.get_or_insert((now, false));
+        let waited = now.saturating_sub(*since);
+        let crossed = waited >= slow && !*warned;
+        *warned |= crossed;
+        (waited, crossed)
+    }
+    /// How long the kill of this queue's failed context has been waiting, if it is.
+    pub(crate) fn kill_waiting(&self, now: u64) -> Option<u64> {
+        self.kill_wait.map(|(since, _)| now.saturating_sub(since))
+    }
+    /// The kill was published: how long it waited, if it did.
+    pub(crate) fn take_kill_wait(&mut self, now: u64) -> u64 {
+        self.kill_wait.take().map_or(0, |(since, _)| now.saturating_sub(since))
     }
     pub(crate) fn record_exit(&mut self, cookie: u64, now: u64) {
         self.exit = Some(Transaction {
@@ -162,6 +184,7 @@ impl Queue {
             return false;
         }
         exit.phase = Phase::Acknowledged;
+        crate::g17::trace::teardown(4, cookie, u64::from(self.qid()), 0);
         true
     }
     pub(crate) fn settle_exit(
@@ -220,6 +243,9 @@ impl Queue {
             ))?;
             drop(self.active.pop());
         }
+        // The acknowledged kill and command settlement replace the ordinary
+        // drain witness, including a failed first publication after rebinding.
+        super::Previous::retire_witnessed(&mut self.previous);
         self.exit.as_mut().ok_or(EIO)?.phase = Phase::Released;
         self.quarantined = true;
         self.awaiting_witness = false;

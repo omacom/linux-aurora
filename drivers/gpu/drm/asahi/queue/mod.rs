@@ -262,7 +262,8 @@ impl QueueJob::ver {
 #[versions(AGX)]
 impl sched::JobImpl for QueueJob::ver {
     type TimeoutData = QueueTimeout;
-    const MODULE: Option<&'static kernel::ThisModule> = Some(&crate::THIS_MODULE);
+    const MODULE: Option<&'static kernel::ThisModule> =
+        Some(&crate::THIS_MODULE);
 
     fn timeout_data(&self) -> QueueTimeout {
         QueueTimeout { dev: self.dev.clone(), id: self.id }
@@ -754,7 +755,22 @@ impl Queue for Queue::ver {
 
         while !cmdbuf.is_empty() {
             let header: uapi::drm_asahi_cmd_header = cmdbuf.read()?;
-            cmdbuf.skip(header.size as usize);
+            let payload_size = header.size as usize;
+            match header.cmd_type as u32 {
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
+                    let render: uapi::drm_asahi_cmd_render = cmdbuf.read_up_to(payload_size)?;
+                    if render.ts_frag_end_copies.iter().any(|ts| ts.handle != 0 || ts.offset != 0) {
+                        return Err(EINVAL);
+                    }
+                }
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
+                    let compute: uapi::drm_asahi_cmd_compute = cmdbuf.read_up_to(payload_size)?;
+                    if compute.ts_end_copies.iter().any(|ts| ts.handle != 0 || ts.offset != 0) {
+                        return Err(EINVAL);
+                    }
+                }
+                _ => cmdbuf.skip(payload_size),
+            }
             nr_commands += 1;
 
             match header.cmd_type as u32 {

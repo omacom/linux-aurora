@@ -22,12 +22,16 @@ struct device {
 struct device_link {
 	int unused;
 };
-static pthread_mutex_t apple_t6030_display_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t apple_g15_display_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct device *apple_t6030_display;
+static struct device *apple_t6031_display;
+static struct device *apple_t6034_display;
 static struct device_node display_node = { "apple,t6030-display-subsystem" },
 			  gpu_node = { "apple,agx-t6030" },
-			  other_node = { "apple,t6031-display-subsystem" };
-static struct device display, duplicate, gpu;
+			  other_node = { "apple,display-subsystem" },
+			  t6031_display_node = { "apple,t6031-display-subsystem" },
+			  t6034_display_node = { "apple,t6034-display-subsystem" };
+static struct device display, duplicate, gpu, t6031_display, t6034_display;
 static const char *machine = "apple,t6030";
 static int pmp_calls, link_calls, pmp_result;
 static bool link_ok = true;
@@ -106,7 +110,8 @@ static int apple_pmp_link_device(struct device *dev)
 #include "production.h"
 static void reset(void)
 {
-	assert(!apple_t6030_display && !locked);
+	assert(!apple_t6030_display && !apple_t6031_display &&
+	       !apple_t6034_display && !locked);
 	display = (struct device){ .of_node = &display_node, .refs = 1 };
 	duplicate = (struct device){ .of_node = &display_node, .refs = 1 };
 	gpu = (struct device){ .of_node = &gpu_node, .refs = 1 };
@@ -127,7 +132,7 @@ static void *admit_thread(void *unused)
 static void *withdraw_thread(void *unused)
 {
 	(void)unused;
-	apple_t6030_display_withdraw(&display);
+	apple_g15_display_withdraw(&display);
 	atomic_store(&withdrew, true);
 	return NULL;
 }
@@ -140,18 +145,18 @@ int main(void)
 	assert(asahi_g15_pmp_prepare(&gpu) == -EPROBE_DEFER && !pmp_calls);
 	cases++;
 	/* Component platform bind alone never calls this publication. Retry succeeds only afterward. */
-	assert(apple_t6030_display_publish(&display) == 0 &&
+	assert(apple_g15_display_publish(&display) == 0 &&
 	       atomic_load(&display.refs) == 2);
 	cases++;
 	assert(asahi_g15_pmp_prepare(&gpu) == 0 && pmp_calls == 1);
 	cases++;
-	assert(apple_t6030_display_publish(&display) == 0 &&
+	assert(apple_g15_display_publish(&display) == 0 &&
 	       atomic_load(&display.refs) == 2);
 	cases++;
-	assert(apple_t6030_display_publish(&duplicate) == -EBUSY &&
+	assert(apple_g15_display_publish(&duplicate) == -EBUSY &&
 	       apple_t6030_display == &display);
 	cases++;
-	apple_t6030_display_withdraw(&duplicate);
+	apple_g15_display_withdraw(&duplicate);
 	assert(apple_t6030_display == &display &&
 	       atomic_load(&display.refs) == 2);
 	cases++;
@@ -170,17 +175,40 @@ int main(void)
 	assert(apple_drm_t6030_link_device(&gpu) == -ENODEV);
 	cases++;
 	gpu.of_node = &gpu_node;
-	apple_t6030_display_withdraw(&display);
+	apple_g15_display_withdraw(&display);
 	assert(atomic_load(&display.refs) == 1 && !apple_t6030_display);
 	cases++;
 	assert(asahi_g15_pmp_prepare(&gpu) == -EPROBE_DEFER && pmp_calls == 2);
 	cases++;
 	display.of_node = &other_node;
-	assert(apple_t6030_display_publish(&display) == 0 &&
-	       !apple_t6030_display && atomic_load(&display.refs) == 1);
+	assert(apple_g15_display_publish(&display) == 0 &&
+	       !apple_t6030_display && !apple_t6031_display && !apple_t6034_display &&
+	       atomic_load(&display.refs) == 1);
+	cases++;
+	/* The T6031 display has its own slot: it never satisfies T6030 admission. */
+	t6031_display = (struct device){ .of_node = &t6031_display_node, .refs = 1 };
+	assert(apple_g15_display_publish(&t6031_display) == 0 &&
+	       apple_t6031_display == &t6031_display && !apple_t6030_display &&
+	       atomic_load(&t6031_display.refs) == 2);
+	assert(asahi_g15_pmp_prepare(&gpu) == -EPROBE_DEFER && pmp_calls == 2);
+	/* T6034 can coexist with T6031 without satisfying T6030 admission. */
+	t6034_display = (struct device){ .of_node = &t6034_display_node, .refs = 1 };
+	assert(apple_g15_display_publish(&t6034_display) == 0 &&
+	       apple_t6034_display == &t6034_display &&
+	       apple_t6031_display == &t6031_display && !apple_t6030_display &&
+	       atomic_load(&t6034_display.refs) == 2);
+	assert(asahi_g15_pmp_prepare(&gpu) == -EPROBE_DEFER && pmp_calls == 2);
+	cases++;
+	apple_g15_display_withdraw(&t6034_display);
+	assert(!apple_t6034_display && apple_t6031_display == &t6031_display &&
+	       atomic_load(&t6034_display.refs) == 1 &&
+	       atomic_load(&t6031_display.refs) == 2);
+	cases++;
+	apple_g15_display_withdraw(&t6031_display);
+	assert(!apple_t6031_display && atomic_load(&t6031_display.refs) == 1);
 	cases++;
 	reset();
-	assert(!apple_t6030_display_publish(&display));
+	assert(!apple_g15_display_publish(&display));
 	atomic_store(&pause_link, true);
 	pthread_t admit, withdraw;
 	assert(!pthread_create(&admit, NULL, admit_thread, NULL));

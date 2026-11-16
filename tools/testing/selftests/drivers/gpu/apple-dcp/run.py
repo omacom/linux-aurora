@@ -57,6 +57,7 @@ def main():
         ('edid', 'ordered-rx', edid.rx_progress, ((),), ('-pthread',)),
         ('rate', 'parser-policy', lambda r: rate.policy(r)['unit'], ((),), ()),
         ('rate', 'publication-hpd', rate.hotplug, ((),), ()),
+        ('rate', 'panel-dimensions', rate.panel_dimensions, ((),), ()),
         ('rate', 'metadata-decoder', lambda r: rate.metadata(r, output), ((),), ('-Wno-sign-compare',)),
         ('rate', 'bounded-retry', rate.retry, ((),), ()),
         ('phy', 'pm-ownership', pm.ownership, ((),), ()),

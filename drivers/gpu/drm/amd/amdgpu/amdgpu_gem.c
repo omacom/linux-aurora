@@ -175,6 +175,16 @@ int amdgpu_gem_object_create(struct amdgpu_device *adev, unsigned long size,
 	struct amdgpu_bo_param bp;
 	int r;
 
+	/*
+	 * Non-posted VRAM requires kernel I/O accessors; userspace needs GTT.
+	 */
+	if ((flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED) &&
+	    (initial_domain & AMDGPU_GEM_DOMAIN_VRAM) &&
+	    (pci_resource_flags(adev->pdev, 0) & IORESOURCE_MEM_NONPOSTED)) {
+		flags &= ~AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+		initial_domain = AMDGPU_GEM_DOMAIN_GTT;
+	}
+
 	memset(&bp, 0, sizeof(bp));
 	*obj = NULL;
 	flags |= AMDGPU_GEM_CREATE_VRAM_WIPE_ON_RELEASE;

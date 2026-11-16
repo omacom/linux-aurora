@@ -117,6 +117,13 @@ struct apple_clpc {
 	/* Whether, and when, the PMP last limited the DCS while GPU work streamed */
 	bool gpu_limited;
 	unsigned long gpu_limited_at;
+	/*
+	 * Whether the GPU floor was released at the last sample that saw GPU work
+	 * stream, and how often it was released and came back, for debugfs.
+	 */
+	bool gpu_floor_released;
+	unsigned long gpu_floor_releases;
+	unsigned long gpu_floor_returns;
 };
 
 /* cpufreq policies can appear after probe; pick up new ones as they do. */
@@ -299,6 +306,18 @@ static bool apple_clpc_gpu_limited(struct apple_clpc *clpc, unsigned long now)
 				msecs_to_jiffies(APPLE_CLPC_GPU_BACKOFF_MS));
 }
 
+/* Count the GPU floor's releases and returns while GPU work streams. */
+static void apple_clpc_gpu_floor_count(struct apple_clpc *clpc, bool released)
+{
+	if (released == clpc->gpu_floor_released)
+		return;
+	if (released)
+		clpc->gpu_floor_releases++;
+	else
+		clpc->gpu_floor_returns++;
+	clpc->gpu_floor_released = released;
+}
+
 static void apple_clpc_sample(struct apple_clpc *clpc)
 {
 	unsigned int demand[APPLE_CLPC_RAILS] = {};
@@ -320,10 +339,15 @@ static void apple_clpc_sample(struct apple_clpc *clpc)
 		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 			demand[rail] = max(demand[rail], cl->request[rail]);
 	}
-	if (clpc->gpu_pmgr && apple_clpc_gpu_streaming(clpc, now) &&
-	    !apple_clpc_gpu_limited(clpc, now))
-		for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
-			demand[rail] = max(demand[rail], clpc->hw->gpu[rail]);
+	if (clpc->gpu_pmgr && apple_clpc_gpu_streaming(clpc, now)) {
+		bool released = apple_clpc_gpu_limited(clpc, now);
+
+		apple_clpc_gpu_floor_count(clpc, released);
+		if (!released)
+			for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
+				demand[rail] = max(demand[rail],
+						   clpc->hw->gpu[rail]);
+	}
 
 	for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)
 		state[rail] = apple_clpc_vote(&clpc->vote[rail], demand[rail],
@@ -375,6 +399,8 @@ static int apple_clpc_status_show(struct seq_file *s, void *unused)
 				   jiffies_to_msecs(jiffies - clpc->gpu_limited_at));
 		else
 			seq_puts(s, "never\n");
+		seq_printf(s, "gpu floor releases: %lu returns: %lu\n",
+			   clpc->gpu_floor_releases, clpc->gpu_floor_returns);
 	}
 	for (i = 0; i < clpc->nr_clusters; i++)
 		seq_printf(s, "cluster cpu%u: busy %u%% level %u%% -> dcs %u soc %u\n",

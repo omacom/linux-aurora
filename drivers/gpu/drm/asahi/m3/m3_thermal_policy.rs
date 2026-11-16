@@ -269,6 +269,7 @@ mod zone_tests {
         }
         assert_eq!(required_zones(b"apple,j613\0"), 1);
         assert_eq!(required_zones(b"apple,j615\0"), 1);
+        assert_eq!(required_zones(b"apple,j504\0apple,t8122\0"), 1);
     }
 
     #[test]
