@@ -29,7 +29,10 @@ EXPORT = "drivers/soc/apple/pmp-export.c"
 
 
 def function(source, signature):
+    # The definition, not a prototype: its body opens before any ';'.
     start = source.index(signature)
+    while source.find(";", start) < source.index("{", start):
+        start = source.index(signature, start + 1)
     end = source.index("{", start) + 1
     depth = 1
     while depth:

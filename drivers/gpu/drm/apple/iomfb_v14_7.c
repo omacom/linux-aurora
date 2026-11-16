@@ -59,6 +59,11 @@
 #define DCP_V14_CPU_CONTROL	0x44
 #define DCP_V14_CPU_STATUS	0x48
 #define DCP_V14_PMP_TIMEOUT	msecs_to_jiffies(30000)
+/*
+ * A running PMP acknowledges a request asserted again at once; the attach
+ * holds hpd_mutex (and on HDMI the fabric lock) while it waits.
+ */
+#define DCP_V14_PMP_REASSERT_TIMEOUT	msecs_to_jiffies(500)
 
 /*
  * The PMP report's wait-ready entry point is optional at link time: until a
@@ -75,6 +80,34 @@ static int dcp_v14_pmp_wait_ready(struct device_node *entry,
 		return -ENODEV;
 	ret = wait(entry, timeout);
 	symbol_put(apple_pmp_report_wait_ready);
+	return ret;
+}
+
+/* Withdraw the request of an external processor with no display attached. */
+static int dcp_v14_pmp_release(struct device_node *entry)
+{
+	typeof(&apple_pmp_report_idle) release;
+	int ret;
+
+	release = symbol_get(apple_pmp_report_idle);
+	if (!release)
+		return -ENODEV;
+	ret = release(entry);
+	symbol_put(apple_pmp_report_idle);
+	return ret;
+}
+
+/* As dcp_v14_pmp_wait_ready(), asserting a request withdrawn while unused. */
+static int dcp_v14_pmp_use(struct device_node *entry, unsigned long timeout)
+{
+	typeof(&apple_pmp_report_use) use;
+	int ret;
+
+	use = symbol_get(apple_pmp_report_use);
+	if (!use)
+		return dcp_v14_pmp_wait_ready(entry, timeout);
+	ret = use(entry, timeout);
+	symbol_put(apple_pmp_report_use);
 	return ret;
 }
 #define DCP_V14_RTKIT_RETRIES	4
@@ -831,8 +864,10 @@ void dcp_v14_external_hotplug(struct apple_dcp *dcp, bool connected)
 		atomic_set(&dcp->external_held, 0);
 	if (connected && dcp_is_typec_output(dcp))
 		complete_all(&dcp->typec_iomfb_hpd_ready);
-	if (!connected)
+	if (!connected) {
 		WRITE_ONCE(dcp->ext_backlight, false);
+		dcp_external_idle_schedule(dcp);
+	}
 	if (!connector)
 		return;
 	apple_connector_edid_set_live(connector, connected);
@@ -2028,6 +2063,7 @@ static void dcpext_cancel(void *data)
 	if (dcp->external_native) {
 		cancel_work_sync(&dcp->external_ready_work);
 		cancel_delayed_work_sync(&dcp->external_retry_wq);
+		disable_delayed_work_sync(&dcp->external_idle_wq);
 	}
 }
 
@@ -2081,6 +2117,7 @@ int iomfb_v14_7_external_prepare(struct apple_dcp *dcp)
 	INIT_WORK(&dcp->external_work, dcpext_bringup);
 	INIT_WORK(&dcp->external_ready_work, dcpext_ready_work);
 	INIT_DELAYED_WORK(&dcp->external_retry_wq, dcp_external_retry_work);
+	INIT_DELAYED_WORK(&dcp->external_idle_wq, dcp_external_idle_work);
 	/* Component bind enables it, once a connector can be retrained. */
 	disable_delayed_work(&dcp->external_retry_wq);
 	ret = devm_add_action_or_reset(dev, dcpext_cancel, dcp);
@@ -2119,6 +2156,61 @@ void iomfb_v14_7_external_refuse(struct apple_dcp *dcp, const char *why)
 {
 	WRITE_ONCE(dcp->external_phase, DCPEXT_FAILED);
 	dev_err(dcp->dev, "external display processor unusable: %s\n", why);
+}
+
+/*
+ * A running processor whose display went away withdrew its PMP request
+ * (dcp_external_idle_work()). Assert it again, and wait for the PMP to
+ * acknowledge it, before the next display's link. Called with hpd_mutex
+ * held up to the link, so the idle withdraw cannot slip in between.
+ */
+int iomfb_v14_7_external_pmp_reassert(struct apple_dcp *dcp)
+{
+	struct device_node *entry;
+	int ret;
+
+	lockdep_assert_held(&dcp->hpd_mutex);
+	/* Pairs with dcpext_bringup(): RUNNING is published after the endpoints. */
+	if (smp_load_acquire(&dcp->external_phase) != DCPEXT_RUNNING ||
+	    !READ_ONCE(dcp->external_pmp_released))
+		return 0;
+	entry = of_parse_phandle(dcp->dev->of_node, "apple,pmp-report", 0);
+	if (!entry)
+		return -ENODEV;
+	ret = dcp_v14_pmp_use(entry, DCP_V14_PMP_REASSERT_TIMEOUT);
+	of_node_put(entry);
+	if (ret) {
+		dev_warn(dcp->dev, "PMP request not asserted for the attach: %d\n", ret);
+		return ret;
+	}
+	WRITE_ONCE(dcp->external_pmp_released, false);
+	dev_info(dcp->dev, "display attached: PMP request asserted again\n");
+	return 0;
+}
+
+/* Under hpd_mutex, with no display attached: see dcp_external_idle_work(). */
+void iomfb_v14_7_external_pmp_release(struct apple_dcp *dcp)
+{
+	struct device_node *entry;
+	int ret;
+
+	lockdep_assert_held(&dcp->hpd_mutex);
+	/* Pairs with dcpext_bringup(): RUNNING is published after the endpoints. */
+	if (smp_load_acquire(&dcp->external_phase) != DCPEXT_RUNNING ||
+	    READ_ONCE(dcp->external_pmp_released))
+		return;
+	entry = of_parse_phandle(dcp->dev->of_node, "apple,pmp-report", 0);
+	if (!entry)
+		return;
+	ret = dcp_v14_pmp_release(entry);
+	of_node_put(entry);
+	if (ret) {
+		dev_warn(dcp->dev, "no display attached, but the PMP request was not withdrawn: %d\n",
+			 ret);
+		return;
+	}
+	WRITE_ONCE(dcp->external_pmp_released, true);
+	dev_info(dcp->dev, "no display attached: PMP request withdrawn until the next attach\n");
 }
 
 /* True once DPTX can be used; asks for the start if nothing has. */
@@ -2219,7 +2311,8 @@ static int dcpext_check_power(struct apple_dcp *dcp)
 	entry = of_parse_phandle(dev->of_node, "apple,pmp-report", 0);
 	if (!entry)
 		return -ENODEV;
-	ret = dcp_v14_pmp_wait_ready(entry, DCP_V14_PMP_TIMEOUT);
+	/* The request is withdrawn until this first start (see the gate). */
+	ret = dcp_v14_pmp_use(entry, DCP_V14_PMP_TIMEOUT);
 	of_node_put(entry);
 	return ret;
 }
@@ -2383,6 +2476,12 @@ static void dcpext_bringup(struct work_struct *work)
 	}
 	dev_info(dcp->dev, "external display processor running\n");
 	dcp_external_ready(dcp);
+	/*
+	 * The attach that started it may have been routed to the other
+	 * processor (a Thunderbolt display goes to dpin0): then no display
+	 * ever disconnects from this one, so check now whether it is in use.
+	 */
+	dcp_external_idle_schedule(dcp);
 }
 
 /*
