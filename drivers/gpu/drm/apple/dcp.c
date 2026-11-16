@@ -3151,48 +3151,82 @@ out:
 }
 
 /*
+ * Map the pages behind [@iova, @iova + @size) of @src into the fbdma domain
+ * at the same addresses, read-only. The pages are taken from @src's own
+ * translations, so this needs no scatterlist: an imported buffer's belongs
+ * to its exporter. Each step looks up one of @src's smallest pages, so a hole
+ * cannot hide inside a step; that needs both domains to share that page size.
+ * Returns 0, or a negative errno with nothing left mapped.
+ */
+static int dcp_fb_mirror_range(struct apple_dcp *dcp, struct iommu_domain *src,
+			       dma_addr_t iova, size_t size)
+{
+	unsigned long pgsize = 1UL << __ffs(src->pgsize_bitmap);
+	phys_addr_t phys, run_phys = 0;
+	size_t off, run_len = 0, mapped = 0;
+	int ret = 0;
+
+	if (pgsize != 1UL << __ffs(dcp->fb_dom->pgsize_bitmap) ||
+	    !IS_ALIGNED(iova | size, pgsize))
+		return -EINVAL;
+	for (off = 0; off <= size && !ret; off += pgsize) {
+		phys = off < size ? iommu_iova_to_phys(src, iova + off) : 0;
+		if (run_len && phys && phys == run_phys + run_len) {
+			run_len += pgsize;
+			continue;
+		}
+		/* The run of physically contiguous pages ends here. */
+		if (run_len) {
+			ret = iommu_map(dcp->fb_dom, iova + mapped, run_phys, run_len,
+					IOMMU_READ, GFP_KERNEL);
+			if (!ret)
+				mapped += run_len;
+		}
+		if (!ret && off < size && !phys)
+			ret = -EFAULT;
+		run_phys = phys;
+		run_len = pgsize;
+	}
+	if (ret && mapped)
+		iommu_unmap(dcp->fb_dom, iova, mapped);
+	return ret;
+}
+
+/*
  * Map @fb's GEM objects into the fbdma domain at their display DVAs. A
  * mapping lasts as long as its object and its DVA do: dcp_fb_unmirror()
  * removes it when the object is freed.
  */
 void dcp_fb_mirror(struct apple_dcp *dcp, struct drm_framebuffer *fb)
 {
+	struct iommu_domain *src;
 	unsigned int i;
 
 	if (!fb || !READ_ONCE(dcp->fb_dom))
 		return;
+	src = iommu_get_domain_for_dev(drm_dev_dma_dev(fb->dev));
 	guard(mutex)(&dcp->fb_mirror_lock);
-	if (!dcp->fb_dom)
+	if (!dcp->fb_dom || IS_ERR_OR_NULL(src))
 		return;
 	for (i = 0; i < fb->format->num_planes; i++) {
 		struct drm_gem_dma_object *obj = drm_fb_dma_get_gem_obj(fb, i);
 		unsigned long index = (unsigned long)obj;
-		struct sg_table *sgt;
-		ssize_t mapped;
+		int ret;
 
 		if (!obj || xa_load(&dcp->fb_mirrors, index))
 			continue;
-		/* Imported (GPU) buffers carry their pages in obj->sgt. */
-		sgt = obj->sgt ? obj->sgt : drm_gem_dma_get_sg_table(obj);
-		if (IS_ERR_OR_NULL(sgt))
-			continue;
-		mapped = iommu_map_sgtable(dcp->fb_dom, obj->dma_addr, sgt,
-					   IOMMU_READ);
-		if (mapped > 0 &&
-		    xa_err(xa_store(&dcp->fb_mirrors, index, xa_mk_value(mapped),
-				    GFP_KERNEL))) {
-			iommu_unmap(dcp->fb_dom, obj->dma_addr, mapped);
-			mapped = -ENOMEM;
+		ret = dcp_fb_mirror_range(dcp, src, obj->dma_addr, obj->base.size);
+		if (!ret) {
+			ret = xa_err(xa_store(&dcp->fb_mirrors, index,
+					      xa_mk_value(obj->base.size), GFP_KERNEL));
+			if (ret)
+				iommu_unmap(dcp->fb_dom, obj->dma_addr, obj->base.size);
 		}
-		if (mapped <= 0)
+		if (ret)
 			dev_warn_ratelimited(dcp->dev,
-				"fbdma: %pad (%zu bytes, %s) not mirrored: %zd\n",
+				"fbdma: %pad (%zu bytes, %s) not mirrored: %d\n",
 				&obj->dma_addr, obj->base.size,
-				obj->sgt ? "imported" : "native", mapped);
-		if (sgt != obj->sgt) {
-			sg_free_table(sgt);
-			kfree(sgt);
-		}
+				obj->sgt ? "imported" : "native", ret);
 	}
 }
 
