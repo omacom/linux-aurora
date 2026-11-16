@@ -3113,7 +3113,9 @@ static void dcp_release_piodma_iommu_dev(struct apple_dcp *dcp)
  * own display DART, not the internal one the display subsystem's domain
  * covers. An "fbdma" child, on that DART's stream 0 with the display
  * subsystem's DVA window, gets a domain the framebuffers are mirrored into.
- * Without the node nothing changes.
+ * Without the node nothing changes. The display gate disables the node when
+ * it shares that DART with the display subsystem instead, whose domain then
+ * already maps every framebuffer there.
  */
 static void dcp_create_fbdma_dev(struct apple_dcp *dcp)
 {
@@ -3123,7 +3125,7 @@ static void dcp_create_fbdma_dev(struct apple_dcp *dcp)
 
 	if (!dcp->ext_failsafe || dcp->fbdma)
 		return;
-	node = of_get_child_by_name(dcp->dev->of_node, "fbdma");
+	node = of_get_available_child_by_name(dcp->dev->of_node, "fbdma");
 	if (!node)
 		return;
 	dcp->fbdma = of_platform_device_create(node, NULL, dcp->dev);
