@@ -560,21 +560,30 @@ pub(crate) fn thermal_param() -> Option<ThermalMode> {
     }
 }
 
-/// Default and bounds of `asahi.m3_thermal_hot`, in degrees Celsius.
-pub(crate) const THERMAL_HOT_DEFAULT: u64 = 80;
-pub(crate) const THERMAL_HOT_MIN: u64 = 40;
-pub(crate) const THERMAL_HOT_MAX: u64 = 85;
+pub(crate) use crate::m3::m3_thermal_policy::{
+    COOL_GAP_DEFAULT, COOL_GAP_MAX, COOL_GAP_MIN, THERMAL_HOT_DEFAULT, THERMAL_HOT_MAX,
+    THERMAL_HOT_MIN,
+};
 
 /// `asahi.m3_thermal_hot`: the SoC die temperature (degrees Celsius) at or above which the thermal
-/// limit lowers the runtime cap, clamped to [`THERMAL_HOT_MIN`]..=[`THERMAL_HOT_MAX`].
+/// limit lowers the runtime cap, clamped to [`THERMAL_HOT_MIN`]..=[`THERMAL_HOT_MAX`]. Writable
+/// at runtime through sysfs. The thermal limit picks a new value up at its next update.
 static M3_THERMAL_HOT: AtomicU64 = AtomicU64::new(THERMAL_HOT_DEFAULT);
-m3_param!("m3_thermal_hot", M3_THERMAL_HOT, parse_u64);
+m3_param!("m3_thermal_hot", M3_THERMAL_HOT, parse_u64, 0o644, Some(get_atomic_param));
 
-/// The `asahi.m3_thermal_hot` setting and whether it was clamped.
-pub(crate) fn thermal_hot_param() -> (u64, bool) {
-    let value = M3_THERMAL_HOT.load(Ordering::Relaxed);
-    let clamped = value.clamp(THERMAL_HOT_MIN, THERMAL_HOT_MAX);
-    (clamped, clamped != value)
+/// `asahi.m3_thermal_cool_gap`: how far below `hot` (degrees Celsius) the die must be before the
+/// thermal limit raises the runtime cap again, clamped to [`COOL_GAP_MIN`]..=[`COOL_GAP_MAX`].
+/// Writable at runtime through sysfs, like `asahi.m3_thermal_hot`.
+static M3_THERMAL_COOL_GAP: AtomicU64 = AtomicU64::new(COOL_GAP_DEFAULT);
+m3_param!("m3_thermal_cool_gap", M3_THERMAL_COOL_GAP, parse_u64, 0o644, Some(get_atomic_param));
+
+/// The requested `asahi.m3_thermal_hot` and `asahi.m3_thermal_cool_gap`, in degrees Celsius
+/// and not yet clamped (`m3_thermal_policy::clamp_thresholds` does that).
+pub(crate) fn thermal_threshold_params() -> (u64, u64) {
+    (
+        M3_THERMAL_HOT.load(Ordering::Relaxed),
+        M3_THERMAL_COOL_GAP.load(Ordering::Relaxed),
+    )
 }
 
 /// Whether to start the runtime backend on a T8122 (`asahi.m3_backend`), and say why not.

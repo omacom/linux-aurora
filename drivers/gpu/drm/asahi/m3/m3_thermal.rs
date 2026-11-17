@@ -25,10 +25,10 @@
 //!   500 ms while the GPU is busy (every 2 s when idle) from the thermal zones in [`ZONES`]
 //!   that exist: the SMC's die sensors and the PMP's CPU cluster sensors (see [`ZONES`]):
 //!   * at or above `critical` (`hot` + 8 C): the safe cap at once;
-//!   * at or above `hot` (`asahi.m3_thermal_hot`, default 80 C): one state lower, at most every
-//!     500 ms and once per reading;
-//!   * at or below `cool` (`hot` - 10 C): one state higher, at most every 2 s and once per
-//!     reading, up to the ceiling;
+//!   * at or above `hot` (`asahi.m3_thermal_hot`, default 80 C, at most 92 C): one state
+//!     lower, at most every 500 ms and once per reading;
+//!   * at or below `cool` (`hot` minus `asahi.m3_thermal_cool_gap`, default 10 C, 3 to 10 C):
+//!     one state higher, at most every 2 s and once per reading, up to the ceiling;
 //!   * no zone, a zone that cannot be read, a reading outside 10..=125 C, one older than 3 s
 //!     or one that has not changed at all for 60 s: the safe cap at once.
 //!
@@ -37,6 +37,10 @@
 //! read cooler than the GPU's hottest spot (the PMP's are CPU cluster sensors), and this limit
 //! reacts in steps of hundreds of milliseconds while the firmware changes state within the cap
 //! much faster.
+//!
+//! `asahi.m3_thermal_hot` and `asahi.m3_thermal_cool_gap` are writable at runtime in
+//! /sys/module/asahi/parameters. The next update after a write applies the clamped values and
+//! logs them; the runtime cap itself only moves with the usual pacing.
 //!
 //! The cap is changed only by the job thread, after a job has retired, right before the state
 //! the firmware reports is checked. That check runs at a retirement with no later batch in
@@ -68,7 +72,7 @@ use kernel::{
 use crate::{
     m3::m3_adt_config::PstatePolicy,
     m3::m3_params,
-    m3::m3_thermal_policy::{Change, Policy, Reading, Source, ThermalMode, Why, S},
+    m3::m3_thermal_policy::{clamp_thresholds, Change, Policy, Reading, Source, ThermalMode, Why, S},
 };
 
 /// The thermal zones read, each the hottest of a set of SoC die sensors: the SMC's die sensors
@@ -237,22 +241,28 @@ pub(crate) struct Governor {
     /// The highest state the firmware reported since the last summary.
     peak: u32,
     lines: u32,
+    /// The `asahi.m3_thermal_hot` and `asahi.m3_thermal_cool_gap` values last applied, as
+    /// written (before clamping).
+    requested: (u64, u64),
 }
 
 impl Governor {
     /// The governor for `policy`. Starts the sensor work item unless the limit is off.
     pub(crate) fn new(dev: &device::Device, pstates: &PstatePolicy) -> Result<Self> {
-        let (hot_c, clamped) = m3_params::thermal_hot_param();
+        let requested = m3_params::thermal_threshold_params();
+        let (hot, gap, clamped) = clamp_thresholds(requested.0, requested.1);
         let base = Time::now();
+        let mut policy = Policy::new(
+            pstates.thermal == ThermalMode::On,
+            pstates.safe,
+            pstates.max,
+            hot,
+        );
+        policy.set_thresholds(hot, gap);
         let mut governor = Governor {
             mode: pstates.thermal,
             fixed: pstates.max,
-            policy: Policy::new(
-                pstates.thermal == ThermalMode::On,
-                pstates.safe,
-                pstates.max,
-                hot_c as i32 * 1000,
-            ),
+            policy,
             freqs: pstates.freqs,
             base,
             sensor: None,
@@ -260,18 +270,13 @@ impl Governor {
             last_summary: None,
             peak: 0,
             lines: 0,
+            requested,
         };
         if governor.mode == ThermalMode::Off {
             return Ok(governor);
         }
         if clamped {
-            dev_info!(
-                dev,
-                "M3: asahi.m3_thermal_hot clamped to {} C ({}..={} C)\n",
-                hot_c,
-                m3_params::THERMAL_HOT_MIN,
-                m3_params::THERMAL_HOT_MAX
-            );
+            governor.log_clamped(dev);
         }
         let sensor = Arc::pin_init(
             pin_init!(Sensor {
@@ -301,7 +306,7 @@ impl Governor {
             ),
             _ => dev_info!(
                 dev,
-                "M3: thermal limit on (asahi.m3_thermal=on): runtime cap {}..={} ({}..={} MHz) from the hottest SoC die temperature of zones macsmc_soc_die and apple_pmp_hotspot: up while at or below {}, down at or above {}, cap {} at or above {} or without a fresh reading\n",
+                "M3: thermal limit on (asahi.m3_thermal=on): runtime cap {}..={} ({}..={} MHz) from the hottest SoC die temperature of zones macsmc_soc_die and apple_pmp_hotspot: up while at or below {}, down at or above {}, cap {} at or above {} or without a fresh reading (asahi.m3_thermal_hot {}, asahi.m3_thermal_cool_gap {}, both writable at runtime)\n",
                 p.safe(),
                 p.ceiling(),
                 governor.mhz(p.safe()),
@@ -309,10 +314,58 @@ impl Governor {
                 Celsius(cool),
                 Celsius(hot),
                 p.safe(),
-                Celsius(critical)
+                Celsius(critical),
+                Celsius(hot),
+                Celsius(hot - cool)
             ),
         }
         Ok(governor)
+    }
+
+    /// Log that the requested thresholds were clamped, and to what.
+    fn log_clamped(&self, dev: &device::Device) {
+        let (cool, hot, _) = self.policy.thresholds();
+        dev_info!(
+            dev,
+            "M3: asahi.m3_thermal_hot {} and asahi.m3_thermal_cool_gap {} clamped to {} and {} ({}..={} C and {}..={} C)\n",
+            self.requested.0,
+            self.requested.1,
+            Celsius(hot),
+            Celsius(hot - cool),
+            m3_params::THERMAL_HOT_MIN,
+            m3_params::THERMAL_HOT_MAX,
+            m3_params::COOL_GAP_MIN,
+            m3_params::COOL_GAP_MAX
+        );
+    }
+
+    /// Apply `asahi.m3_thermal_hot` and `asahi.m3_thermal_cool_gap` if either was written since
+    /// they were last applied, and log the thresholds now in use.
+    fn reread_thresholds(&mut self, dev: &device::Device) {
+        let requested = m3_params::thermal_threshold_params();
+        if requested == self.requested {
+            return;
+        }
+        self.requested = requested;
+        let (hot, gap, clamped) = clamp_thresholds(requested.0, requested.1);
+        if clamped {
+            self.log_clamped(dev);
+        }
+        if !self.policy.set_thresholds(hot, gap) {
+            return;
+        }
+        let (cool, hot, critical) = self.policy.thresholds();
+        let safe = self.policy.safe();
+        dev_info!(
+            dev,
+            "M3: thermal: thresholds changed at runtime: up while at or below {}, down at or above {}, cap {} ({} MHz) at or above {}; runtime cap {} now\n",
+            Celsius(cool),
+            Celsius(hot),
+            safe,
+            self.mhz(safe),
+            Celsius(critical),
+            self.policy.cap()
+        );
     }
 
     fn mhz(&self, state: u32) -> u32 {
@@ -463,6 +516,7 @@ impl Governor {
             return None;
         };
         let reading = sensor.state.lock().reading;
+        self.reread_thresholds(dev);
         let now = ns(self.base, now);
         let (usable, change) = self.policy.update(now, reading);
         let temp = usable.ok().map(|(t, _, _)| t);

@@ -82,9 +82,29 @@ pub(crate) const IGNORED_NS: i64 = 3 * S;
 /// would otherwise keep the cap wherever it was. The sensor is read every 500 ms while the GPU
 /// is busy, so more frequent checks would not see newer readings.
 pub(crate) const CHECK_EVERY_NS: i64 = 500 * MS;
-/// Distance of `cool` below and `critical` above `hot`.
+/// Default distance of `cool` below `hot` (`asahi.m3_thermal_cool_gap`) and the fixed distance
+/// of `critical` above it.
 pub(crate) const COOL_BELOW_MC: i32 = 10_000;
 pub(crate) const CRITICAL_ABOVE_MC: i32 = 8_000;
+
+/// Default and bounds of `asahi.m3_thermal_hot`, in degrees Celsius. At the top `critical` is
+/// 100 C, still below the 110 C critical trip of the J613 and J615 CPU thermal zones.
+pub(crate) const THERMAL_HOT_DEFAULT: u64 = 80;
+pub(crate) const THERMAL_HOT_MIN: u64 = 40;
+pub(crate) const THERMAL_HOT_MAX: u64 = 92;
+/// Default and bounds of `asahi.m3_thermal_cool_gap`, in degrees Celsius. The default is the
+/// distance used before the gap could be set.
+pub(crate) const COOL_GAP_DEFAULT: u64 = 10;
+pub(crate) const COOL_GAP_MIN: u64 = 3;
+pub(crate) const COOL_GAP_MAX: u64 = 10;
+
+/// `hot` and the cool gap in millidegrees Celsius for the requested values in degrees Celsius,
+/// each clamped to its bounds, and whether either was clamped.
+pub(crate) fn clamp_thresholds(hot_c: u64, gap_c: u64) -> (i32, i32, bool) {
+    let hot = hot_c.clamp(THERMAL_HOT_MIN, THERMAL_HOT_MAX);
+    let gap = gap_c.clamp(COOL_GAP_MIN, COOL_GAP_MAX);
+    (hot as i32 * 1000, gap as i32 * 1000, hot != hot_c || gap != gap_c)
+}
 
 /// The latest sensor reading.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -190,6 +210,19 @@ impl Policy {
     }
     pub(crate) fn thresholds(&self) -> (i32, i32, i32) {
         (self.cool, self.hot, self.critical)
+    }
+
+    /// Move `hot` to `hot` millidegrees Celsius, `cool` to `gap` below it and `critical` to
+    /// [`CRITICAL_ABOVE_MC`] above it. The runtime cap stays where it is. The next update applies
+    /// the new thresholds with the usual pacing (critical at once). Returns whether anything
+    /// changed.
+    pub(crate) fn set_thresholds(&mut self, hot: i32, gap: i32) -> bool {
+        let (cool, critical) = (hot - gap, hot + CRITICAL_ABOVE_MC);
+        if (self.cool, self.hot, self.critical) == (cool, hot, critical) {
+            return false;
+        }
+        (self.cool, self.hot, self.critical) = (cool, hot, critical);
+        true
     }
     pub(crate) fn counts(&self) -> (u32, u32) {
         (self.raised, self.lowered_count)
@@ -887,5 +920,128 @@ mod pipeline_tests {
         let _ = p.note_check(S, false);
         assert!(p.overlap_allowed(S + CHECK_EVERY_NS - 1));
         assert!(!p.overlap_allowed(S + CHECK_EVERY_NS));
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::*;
+
+    fn temp(mc: i32, at: i64) -> Reading {
+        Reading::Temp { mc, at, zones: 1 }
+    }
+
+    /// A policy with `hot` and `gap` in degrees Celsius that has climbed from 5 to 8 on cool
+    /// readings; returns it with the time of the last raise.
+    fn raised(hot_c: u64, gap_c: u64) -> (Policy, i64) {
+        let (hot, gap, _) = clamp_thresholds(hot_c, gap_c);
+        let mut p = Policy::new(true, 5, 8, hot);
+        p.set_thresholds(hot, gap);
+        let mut now = 0;
+        for step in 0..3 {
+            now = i64::from(step) * UP_PACE_NS;
+            let _ = p.update(now, temp(50_000 + step, now));
+        }
+        assert_eq!(p.cap(), 8);
+        (p, now)
+    }
+
+    #[test]
+    fn the_parameters_are_clamped_to_their_bounds() {
+        assert_eq!(clamp_thresholds(THERMAL_HOT_DEFAULT, COOL_GAP_DEFAULT), (80_000, 10_000, false));
+        assert_eq!(clamp_thresholds(85, 10), (85_000, 10_000, false));
+        assert_eq!(clamp_thresholds(92, 3), (92_000, 3_000, false));
+        assert_eq!(clamp_thresholds(93, 3), (92_000, 3_000, true));
+        assert_eq!(clamp_thresholds(150, 0), (92_000, 3_000, true));
+        assert_eq!(clamp_thresholds(39, 11), (40_000, 10_000, true));
+        assert_eq!(clamp_thresholds(40, 10), (40_000, 10_000, false));
+    }
+
+    #[test]
+    fn the_default_gap_keeps_the_thresholds_of_new() {
+        for hot_c in [THERMAL_HOT_MIN, THERMAL_HOT_DEFAULT, 85, THERMAL_HOT_MAX] {
+            let (hot, gap, _) = clamp_thresholds(hot_c, COOL_GAP_DEFAULT);
+            let mut p = Policy::new(true, 5, 8, hot);
+            assert!(!p.set_thresholds(hot, gap));
+            assert_eq!(p.thresholds(), (hot - COOL_BELOW_MC, hot, hot + CRITICAL_ABOVE_MC));
+        }
+        // At the top of both ranges it is up at or below 89 C, down at or above 92 C, safe at 100 C.
+        let (hot, gap, _) = clamp_thresholds(THERMAL_HOT_MAX, COOL_GAP_MIN);
+        let mut p = Policy::new(true, 5, 8, hot);
+        assert!(p.set_thresholds(hot, gap));
+        assert_eq!(p.thresholds(), (89_000, 92_000, 100_000));
+        assert!(!p.set_thresholds(hot, gap));
+    }
+
+    #[test]
+    fn a_narrower_gap_raises_the_cap_again_at_a_higher_temperature() {
+        for (gap_c, raises_at_75) in [(10, false), (5, true), (3, true)] {
+            let (mut p, t) = raised(80, gap_c);
+            // One step down at 80 C.
+            let now = t + 500 * MS;
+            assert_eq!(p.update(now, temp(80_000, now)).1.map(|c| c.to), Some(7));
+            // 75 C, 2 s later: up again only when 75 C is at or below 80 C minus the gap.
+            let now = now + UP_PACE_NS;
+            let change = p.update(now, temp(75_000, now)).1;
+            assert_eq!(change.is_some(), raises_at_75, "gap {gap_c}");
+            assert_eq!(p.cap(), if raises_at_75 { 8 } else { 7 });
+        }
+        // With a gap of 3, 77.001 C holds and 77 C raises.
+        let (mut p, t) = raised(80, 3);
+        let now = t + 500 * MS;
+        let _ = p.update(now, temp(80_000, now));
+        assert_eq!(p.cap(), 7);
+        assert_eq!(p.update(now + UP_PACE_NS, temp(77_001, now + UP_PACE_NS)).1, None);
+        let later = now + 2 * UP_PACE_NS;
+        assert_eq!(p.update(later, temp(77_000, later)).1.map(|c| (c.to, c.why)), Some((8, Why::Cool)));
+    }
+
+    #[test]
+    fn a_higher_hot_keeps_the_cap_where_the_default_would_lower_it() {
+        for (hot_c, lowers_at_84) in [(80, true), (85, false), (88, false), (92, false)] {
+            let (mut p, t) = raised(hot_c, 10);
+            let now = t + 500 * MS;
+            assert_eq!(p.update(now, temp(84_000, now)).1.is_some(), lowers_at_84, "hot {hot_c}");
+        }
+        // Critical follows hot: 88 C is critical at the default, merely hot at 85 and nothing
+        // at 92.
+        for (hot_c, cap) in [(80, 5), (85, 7), (92, 8)] {
+            let (mut p, t) = raised(hot_c, 10);
+            let now = t + 500 * MS;
+            let _ = p.update(now, temp(88_000, now));
+            assert_eq!(p.cap(), cap, "hot {hot_c}");
+        }
+    }
+
+    #[test]
+    fn thresholds_changed_at_runtime_apply_from_the_next_reading_with_the_usual_pacing() {
+        // Running at 8 with hot 92, 86 C holds.
+        let (mut p, t) = raised(92, 10);
+        let now = t + 500 * MS;
+        assert_eq!(p.update(now, temp(86_000, now)).1, None);
+        // Hot back to 85 at runtime. The cap does not move by itself.
+        let (hot, gap, _) = clamp_thresholds(85, 10);
+        assert!(p.set_thresholds(hot, gap));
+        assert_eq!(p.cap(), 8);
+        // The next update lowers one state on that reading, which was not acted on yet. Acted
+        // on once, it is not used again. The next fresh reading 500 ms later lowers one more.
+        let (_, change) = p.update(now + MS, temp(86_000, now));
+        assert_eq!(change.map(|c| (c.to, c.why)), Some((7, Why::Hot)));
+        assert_eq!(p.update(now + 501 * MS, temp(86_000, now)).1, None);
+        let next = now + 501 * MS;
+        assert_eq!(p.update(next, temp(86_001, next)).1.map(|c| (c.to, c.why)), Some((6, Why::Hot)));
+        // Hot 80 at runtime. 88.5 C is now critical, so the safe cap at once without pacing.
+        let (hot, gap, _) = clamp_thresholds(80, 10);
+        assert!(p.set_thresholds(hot, gap));
+        let soon = next + MS;
+        assert_eq!(p.update(soon, temp(88_500, soon)).1.map(|c| (c.to, c.why)), Some((5, Why::Critical)));
+        // A gap of 3 at runtime. 77 C now raises again after 2 s.
+        let (hot, gap, _) = clamp_thresholds(80, 3);
+        assert!(p.set_thresholds(hot, gap));
+        let up = soon + UP_PACE_NS;
+        assert_eq!(p.update(up, temp(77_000, up)).1.map(|c| (c.to, c.why)), Some((6, Why::Cool)));
+        // Unusable readings still drop to the safe cap whatever the thresholds.
+        let gone = up + MS;
+        assert_eq!(p.update(gone, Reading::None).1.map(|c| c.to), Some(5));
     }
 }
