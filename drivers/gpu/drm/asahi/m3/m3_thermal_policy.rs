@@ -73,6 +73,12 @@ pub(crate) const GRACE_NS: i64 = S;
 /// firmware does not follow the runtime cap.
 pub(crate) const IGNORED_CHECKS: u32 = 20;
 pub(crate) const IGNORED_NS: i64 = 3 * S;
+/// While the ceiling is above the safe cap, a batch is published behind batches still in flight
+/// only within this time of the last check. The cap is moved and the reported state checked
+/// only at a retirement with no later batch in flight, so a client that kept the pipeline full
+/// would otherwise keep the cap wherever it was. The sensor is read every 500 ms while the GPU
+/// is busy, so more frequent checks would not see newer readings.
+pub(crate) const CHECK_EVERY_NS: i64 = 500 * MS;
 /// Distance of `cool` below and `critical` above `hot`.
 pub(crate) const COOL_BELOW_MC: i32 = 10_000;
 pub(crate) const CRITICAL_ABOVE_MC: i32 = 8_000;
@@ -141,6 +147,8 @@ pub(crate) struct Policy {
     /// Since when, and in how many consecutive checks, the firmware reported a state above the
     /// allowed cap.
     over: Option<(i64, u32)>,
+    /// When the reported state was last checked.
+    checked: Option<i64>,
     raised: u32,
     lowered_count: u32,
 }
@@ -162,6 +170,7 @@ impl Policy {
             last_change: None,
             lowered: None,
             over: None,
+            checked: None,
             raised: 0,
             lowered_count: 0,
         }
@@ -181,6 +190,24 @@ impl Policy {
     }
     pub(crate) fn counts(&self) -> (u32, u32) {
         (self.raised, self.lowered_count)
+    }
+
+    /// Whether the ceiling is above the safe cap, so that the runtime cap is what keeps the
+    /// firmware within what the temperature allows. The cap is then moved and the reported
+    /// state checked at every retirement with no later batch in flight, whatever
+    /// `asahi.m3_retire_mmio` says (`m3_runtime`). False with the thermal limit off, where the
+    /// safe cap is the ceiling.
+    pub(crate) fn above_safe(&self) -> bool {
+        self.ceiling > self.safe
+    }
+
+    /// Whether a batch may be published at `now` behind batches still in flight. Always while
+    /// the ceiling is at the safe cap. Above it, only within [`CHECK_EVERY_NS`] of the last
+    /// check: later batches are held back until the pipeline has drained, so the retirement
+    /// that checks comes at most that long, plus the run time of the batches then in flight,
+    /// after the last one.
+    pub(crate) fn overlap_allowed(&self, now: i64) -> bool {
+        !self.above_safe() || self.checked.is_some_and(|t| now - t < CHECK_EVERY_NS)
     }
 
     /// The temperature of `reading` if it may be used at `now` (with when it was taken and its
@@ -275,6 +302,7 @@ impl Policy {
     /// [`Self::allowed`]. Returns the number of consecutive checks and their span when they
     /// show that the firmware does not follow the runtime cap.
     pub(crate) fn note_check(&mut self, now: i64, over: bool) -> Option<(u32, i64)> {
+        self.checked = Some(now);
         if !over {
             self.over = None;
             return None;
@@ -631,6 +659,28 @@ mod range_tests {
     }
 
     #[test]
+    fn the_per_job_check_is_required_only_while_the_ceiling_is_above_the_safe_cap() {
+        for ceiling in 6..=8 {
+            // On and hold: only the runtime cap keeps the firmware below its ceiling.
+            assert!(Policy::new(true, 5, ceiling, HOT).above_safe());
+            assert!(Policy::new(false, 5, ceiling, HOT).above_safe());
+            // Raised, lowered or fallen back, the requirement stays for the whole boot.
+            let (mut p, t) = raised(5, ceiling);
+            assert!(p.above_safe());
+            let _ = p.update(t + S, Reading::None);
+            assert_eq!(p.cap(), 5);
+            assert!(p.above_safe());
+        }
+        // Today's boots (a ceiling of 1 to 5 equals the safe cap) and the limit off (the
+        // governor gets the fixed cap as both) keep asahi.m3_retire_mmio in charge.
+        for cap in 1..=5 {
+            assert!(!Policy::new(true, cap, cap, HOT).above_safe());
+            assert!(!Policy::new(false, cap, cap, HOT).above_safe());
+        }
+        assert!(!Policy::new(true, 5, 3, HOT).above_safe());
+    }
+
+    #[test]
     fn a_firmware_that_ignores_a_lowered_cap_is_found_after_twenty_checks_over_three_seconds() {
         let (mut p, t) = raised(5, 8);
         let fell = t + S;
@@ -654,5 +704,185 @@ mod range_tests {
             assert!(p.note_check(again + (i + 1) * S, true).is_none());
         }
         assert_eq!(p.note_check(again + 20 * S, true), Some((20, 19 * S)));
+    }
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    const HOT: i32 = 80_000;
+    const US: i64 = 1_000;
+
+    /// One check: when, the runtime cap after it, and whether it found that the firmware
+    /// does not follow the runtime cap.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    struct Check {
+        at: i64,
+        cap: u32,
+        ignored: bool,
+    }
+
+    /// A client that keeps the GPU's one lane busy with render batches of `batch` ns, as the
+    /// runtime publishes them (`m3_runtime::Inner::publish_next` and `pipeline_slot`): one
+    /// batch when none is in flight, more behind it up to `depth` while `bounded` is false or
+    /// [`Policy::overlap_allowed`] allows it. The oldest batch retires when it ends; only a
+    /// retirement with no later batch in flight runs the check (`Config::check_pstate`): the
+    /// governor's update with the latest sensor reading, then [`Policy::note_check`]. The
+    /// sensor is read every 500 ms; `temp` gives the die temperature at a time and `over`
+    /// whether the firmware then reports a state above the allowed cap. Returns every check,
+    /// the first being the one after boot at 0.
+    fn run(
+        p: &mut Policy,
+        depth: usize,
+        batch: i64,
+        until: i64,
+        bounded: bool,
+        temp: impl Fn(i64) -> i32,
+        over: impl Fn(i64) -> bool,
+    ) -> Vec<Check> {
+        let check = |p: &mut Policy, now: i64| {
+            let at = now - now % (500 * MS);
+            // A small wobble keeps a constant temperature from reading as stuck.
+            let mc = temp(at) + (at / (500 * MS) % 3) as i32;
+            let _ = p.update(now, Reading::Temp { mc, at, zones: 1 });
+            let ignored = p.note_check(now, over(now)).is_some();
+            Check { at: now, cap: p.cap(), ignored }
+        };
+        let mut checks = vec![check(p, 0)];
+        // When each batch in flight ends, oldest first.
+        let mut active: VecDeque<i64> = VecDeque::new();
+        let mut now = 0;
+        while now < until {
+            while active.len() < depth && (active.is_empty() || !bounded || p.overlap_allowed(now)) {
+                let start = active.back().copied().unwrap_or(now).max(now);
+                active.push_back(start + batch);
+            }
+            now = active.pop_front().unwrap();
+            if active.is_empty() {
+                checks.push(check(p, now));
+            }
+        }
+        checks
+    }
+
+    fn longest_gap(checks: &[Check], until: i64) -> i64 {
+        let mut gap = 0;
+        for pair in checks.windows(2) {
+            gap = gap.max(pair[1].at - pair[0].at);
+        }
+        gap.max(until - checks.last().unwrap().at)
+    }
+
+    fn cool(_: i64) -> i32 {
+        55_000
+    }
+
+    fn obeys(_: i64) -> bool {
+        false
+    }
+
+    /// Critical (90 C) from 10 s on.
+    fn hot_from_10_s(at: i64) -> i32 {
+        if at >= 10 * S { 90_000 } else { 55_000 }
+    }
+
+    #[test]
+    fn without_the_bound_a_full_pipeline_never_checks_and_the_cap_stays_up() {
+        // Today's pipelining with a ceiling of 8: after the check at boot, a client that keeps
+        // two batches in flight is never checked again, so 90 C does not lower the cap.
+        let mut p = Policy::new(true, 5, 8, HOT);
+        for i in 0..4 {
+            let at = i * UP_PACE_NS;
+            let _ = p.update(at, Reading::Temp { mc: 50_000 + i as i32, at, zones: 1 });
+        }
+        assert_eq!(p.cap(), 8);
+        let checks = run(&mut p, 2, 2 * MS, 20 * S, false, hot_from_10_s, obeys);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(p.cap(), 8);
+    }
+
+    #[test]
+    fn with_the_bound_a_full_pipeline_is_checked_every_500_ms_plus_its_batches() {
+        for depth in 1..=4usize {
+            for batch in [100 * US, 2 * MS, 4 * MS, 50 * MS] {
+                let until = 20 * S;
+                let mut p = Policy::new(true, 5, 8, HOT);
+                let checks = run(&mut p, depth, batch, until, true, cool, obeys);
+                let bound = CHECK_EVERY_NS + depth as i64 * batch;
+                let gap = longest_gap(&checks, until);
+                assert!(gap <= bound, "depth {depth} batch {batch}: gap {gap} > {bound}");
+                if depth == 1 {
+                    // No pipelining: every retirement checks, as today.
+                    assert_eq!(checks.len() as i64, until / batch + 1);
+                } else {
+                    // A drain per 500 ms or so, not one per batch.
+                    assert!((checks.len() as i64) < 2 * until / CHECK_EVERY_NS + 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn with_the_bound_a_full_pipeline_cannot_hold_a_raised_cap_when_hot() {
+        for depth in 2..=4usize {
+            for batch in [100 * US, 2 * MS, 4 * MS] {
+                let mut p = Policy::new(true, 5, 8, HOT);
+                let checks = run(&mut p, depth, batch, 20 * S, true, hot_from_10_s, obeys);
+                // The cap rose to 8 while cool.
+                assert!(checks.iter().any(|c| c.at < 10 * S && c.cap == 8));
+                // The sensor reading taken at 10 s is critical. The first check after it comes
+                // within the bound and falls straight to 5, where the cap stays.
+                let deadline = 10 * S + CHECK_EVERY_NS + depth as i64 * batch;
+                let fell = checks.iter().find(|c| c.at >= 10 * S).unwrap();
+                assert!(fell.at <= deadline, "depth {depth} batch {batch}: {} > {deadline}", fell.at);
+                assert_eq!(fell.cap, 5);
+                assert!(checks.iter().filter(|c| c.at >= fell.at).all(|c| c.cap == 5));
+            }
+        }
+    }
+
+    #[test]
+    fn with_the_bound_a_firmware_that_ignores_the_cap_is_found_in_a_full_pipeline() {
+        // Hold with a ceiling of 8 (the first qualification step): the runtime cap stays 5. A
+        // firmware that reports a state above it after boot is found after 20 checks spanning
+        // 3 s, about 10 s into a full pipeline. Without the bound it is never found.
+        for bounded in [true, false] {
+            let mut p = Policy::new(false, 5, 8, HOT);
+            let checks = run(&mut p, 2, 2 * MS, 20 * S, bounded, cool, |now| now > 0);
+            let found = checks.iter().find(|c| c.ignored);
+            if bounded {
+                let at = found.expect("never found").at;
+                assert!(at <= 20 * (CHECK_EVERY_NS + 2 * 2 * MS), "found at {at}");
+            } else {
+                assert_eq!(found, None);
+            }
+            assert!(checks.iter().all(|c| c.cap == 5));
+        }
+    }
+
+    #[test]
+    fn a_ceiling_at_the_safe_cap_keeps_todays_pipelining() {
+        // Every boot today: the bound never holds a batch back.
+        for cap in 1..=5 {
+            for depth in 1..=4usize {
+                let mut p = Policy::new(true, cap, cap, HOT);
+                let bounded = run(&mut p, depth, 2 * MS, 5 * S, true, hot_from_10_s, obeys);
+                let mut q = Policy::new(true, cap, cap, HOT);
+                let today = run(&mut q, depth, 2 * MS, 5 * S, false, hot_from_10_s, obeys);
+                assert_eq!(bounded, today);
+                for now in [0, CHECK_EVERY_NS, 100 * S] {
+                    assert!(p.overlap_allowed(now));
+                }
+            }
+        }
+        // Without any check yet, a ceiling above the safe cap allows no overlap; after one,
+        // for 500 ms.
+        assert!(!Policy::new(true, 5, 8, HOT).overlap_allowed(0));
+        let mut p = Policy::new(false, 5, 6, HOT);
+        let _ = p.note_check(S, false);
+        assert!(p.overlap_allowed(S + CHECK_EVERY_NS - 1));
+        assert!(!p.overlap_allowed(S + CHECK_EVERY_NS));
     }
 }

@@ -518,6 +518,9 @@ fn parse_retire_mmio(text: &str) -> Option<u64> {
 /// job before retiring it. Bit 0 reads the engine-busy registers (SGX+0xc020/0xc120), bit 1
 /// selects and reads each cluster's fault bank (0xd800/0xd8c0), bit 2 reads the performance
 /// state (0xe01000). Unset: the SoC's default ([`crate::m3::m3_soc::Soc::retire_mmio`]).
+/// While the thermal limit's ceiling is above its safe cap the performance state is read and
+/// the runtime cap moved at every retirement with no later batch in flight even without bit 2
+/// (`m3_thermal`); the first such retirement of a module load says so in the log.
 static M3_RETIRE_MMIO: AtomicU64 = AtomicU64::new(RETIRE_MMIO_UNSET);
 m3_param!("m3_retire_mmio", M3_RETIRE_MMIO, parse_retire_mmio, 0o644, Some(get_atomic_param));
 

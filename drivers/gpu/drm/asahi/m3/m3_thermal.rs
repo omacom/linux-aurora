@@ -39,10 +39,15 @@
 //! much faster.
 //!
 //! The cap is changed only by the job thread, after a job has retired, right before the state
-//! the firmware reports is checked. After a lowering the previous cap is tolerated for 1 s. A
-//! reported state above the runtime cap in 20 consecutive checks spanning at least 3 s means
-//! the firmware does not follow the runtime cap, so this limit cannot work: the GPU is then
-//! marked failed, as for a state above the ceiling.
+//! the firmware reports is checked. That check runs at a retirement with no later batch in
+//! flight. While the ceiling is above the safe cap it runs at every such retirement whatever
+//! `asahi.m3_retire_mmio` says, and a batch is published behind batches still in flight
+//! (`asahi.m3_pipeline_depth` above 1) only within 500 ms of the last check, so that a client
+//! that keeps the pipeline full cannot keep the check from running.
+//! After a lowering the previous cap is tolerated for 1 s. A reported state above the runtime
+//! cap in 20 consecutive checks spanning at least 3 s means the firmware does not follow the
+//! runtime cap, so this limit cannot work: the GPU is then marked failed, as for a state above
+//! the ceiling.
 //!
 //! The decisions are in `m3_thermal_policy`, which host tests drive; this module reads the
 //! sensors, publishes the cap and logs.
@@ -488,6 +493,20 @@ impl Governor {
             return Err(ERANGE);
         }
         Ok(())
+    }
+
+    /// Whether the firmware's ceiling is above the safe cap, so that only the runtime cap keeps
+    /// it within what the temperature allows: the caller must then move and check the cap at
+    /// every retirement with no later batch in flight. False with the limit off, where the cap
+    /// is fixed.
+    pub(crate) fn enforces(&self) -> bool {
+        self.mode != ThermalMode::Off && self.policy.above_safe()
+    }
+
+    /// Whether a batch may be published now behind batches still in flight: always unless
+    /// [`Self::enforces`], then only within 500 ms of the last check.
+    pub(crate) fn overlap_allowed(&self, now: Time) -> bool {
+        !self.enforces() || self.policy.overlap_allowed(ns(self.base, now))
     }
 
     /// Note that the GPU retired a job, so the sensor is read at the busy rate.

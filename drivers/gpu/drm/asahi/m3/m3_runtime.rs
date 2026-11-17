@@ -280,6 +280,11 @@ impl Inner {
     fn pipeline_slot(&mut self)->Result<Option<(usize,usize)>> {
         let Some(last)=self.active.last() else {return Ok(Some((0,crate::m3::m3_pass_layout::SLOTS)));};
         if !self.render_initialized {return Ok(None);}
+        // While the firmware's ceiling is above the runtime cap's fallback, the thermal limit
+        // moves and checks the cap only at a retirement with no later batch in flight. Let the
+        // pipeline drain once the last check is 500 ms old, so a client that keeps it full
+        // cannot hold the cap where it is.
+        if !self.config.overlap_allowed() {return Ok(None);}
         let Some((packet,next))=self.pending.first() else {return Ok(None);};
         if !matches!(packet.commands[*next],crate::m3::m3_submit::Command::Render{..})
             || self.active.iter().any(|b| b.kind!=0) || !packet.vm.same(&last.entries[0].0.vm) {return Ok(None);}
@@ -790,7 +795,15 @@ impl Inner {
                             let tick=physical_counter();
                             if let Some(batch)=self.active.first_mut() {batch.pipes_idle_tick=tick;}
                         }
-                        if retire_mmio&crate::m3::m3_params::RETIRE_MMIO_PSTATE!=0 {
+                        // With the firmware's ceiling above the runtime cap's fallback, this check
+                        // is what moves and enforces the runtime cap: it then runs whatever
+                        // asahi.m3_retire_mmio says, and the first time it overrides the
+                        // parameter the log says so.
+                        let read_pstate=retire_mmio&crate::m3::m3_params::RETIRE_MMIO_PSTATE!=0;
+                        if read_pstate || self.config.pstate_check_required() {
+                            if !read_pstate && !FORCED_PSTATE_CHECK_LOGGED.swap(true,Ordering::Relaxed) {
+                                dev_info!(self.drm.as_ref(),"M3: asahi.m3_retire_mmio={} leaves out the performance-state read (bit 2); it runs anyway at every retirement with no later batch in flight while the firmware's highest state is above the runtime cap's fallback\n",retire_mmio);
+                            }
                             if let Err(e)=self.config.check_pstate(&self.drm,&self.device,"after a job") {
                                 if crate::m3::t8122_start::is_t8122(self.device.soc()) {
                                     crate::m3::t8122_start::cap_violated_verdict(self.drm.as_ref().as_ref(),e);
@@ -986,6 +999,9 @@ impl Inner {
 pub(crate) struct Runtime { inner: ManuallyDrop<KBox<Inner>> }
 /// Claimed before this boot's first ASC start.
 static FIRMWARE_START: policy::StartLatch = policy::StartLatch::new();
+/// Whether a retirement has run the performance-state check against `asahi.m3_retire_mmio`
+/// (see `poll_active`); logged once per module load.
+static FORCED_PSTATE_CHECK_LOGGED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 /// Takes a module reference, unless the module is already being removed.
 #[cfg(CONFIG_MODULE_UNLOAD)]
 fn pin_module() -> bool {
