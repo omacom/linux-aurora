@@ -63,6 +63,9 @@
  * 0x34) does not apply: 0x34 reads zero on this controller.
  */
 #define SN201202X_REG_ACTIVE_CONTRACT	0x35
+/* Received source capabilities: a count in bits 2:0, then the PDOs. */
+#define SN201202X_REG_RX_SOURCE_CAPS	0x30
+#define SN201202X_RX_CAPS_COUNT		GENMASK(2, 0)
 
 /* TPS_REG_SYSTEM_CONF bits */
 #define TPS_SYSCONF_PORTINFO(c)		((c) & 7)
@@ -300,8 +303,71 @@ static int tps6598x_connect(struct tps6598x *tps, u32 status)
 	return 0;
 }
 
+/* Remove the partner's USB PD capabilities; before the partner goes. */
+static void tps6598x_partner_pd_drop(struct tps6598x *tps)
+{
+	if (!tps->partner_pd)
+		return;
+	if (!IS_ERR_OR_NULL(tps->partner))
+		typec_partner_set_usb_power_delivery(tps->partner, NULL);
+	usb_power_delivery_unregister_capabilities(tps->partner_src_caps);
+	tps->partner_src_caps = NULL;
+	usb_power_delivery_unregister(tps->partner_pd);
+	tps->partner_pd = NULL;
+	tps->partner_pdo_count = 0;
+}
+
+/*
+ * Publish the source PDOs the partner offered, under
+ * /sys/class/usb_power_delivery, once both they and the partner exist, and
+ * again whenever they change. Called with tps->lock held.
+ */
+static void tps6598x_partner_pd_sync(struct tps6598x *tps)
+{
+	struct usb_power_delivery_capabilities_desc caps = { .role = TYPEC_SOURCE };
+	struct usb_power_delivery_desc desc = { .revision = 0x300 };
+	unsigned int n = tps->src_pdo_count;
+	int ret;
+
+	if (IS_ERR_OR_NULL(tps->partner))
+		return;
+	if (tps->partner_pd && n == tps->partner_pdo_count &&
+	    !memcmp(tps->partner_pdo, tps->src_pdo, n * sizeof(u32)))
+		return;
+
+	tps6598x_partner_pd_drop(tps);
+	if (!n)
+		return;
+
+	tps->partner_pd = typec_partner_usb_power_delivery_register(tps->partner, &desc);
+	if (IS_ERR(tps->partner_pd)) {
+		ret = PTR_ERR(tps->partner_pd);
+		tps->partner_pd = NULL;
+		goto err;
+	}
+	memcpy(caps.pdo, tps->src_pdo, n * sizeof(u32));
+	tps->partner_src_caps = usb_power_delivery_register_capabilities(tps->partner_pd, &caps);
+	if (IS_ERR(tps->partner_src_caps)) {
+		ret = PTR_ERR(tps->partner_src_caps);
+		tps->partner_src_caps = NULL;
+		goto err_drop;
+	}
+	ret = typec_partner_set_usb_power_delivery(tps->partner, tps->partner_pd);
+	if (ret)
+		goto err_drop;
+	memcpy(tps->partner_pdo, tps->src_pdo, n * sizeof(u32));
+	tps->partner_pdo_count = n;
+	return;
+
+err_drop:
+	tps6598x_partner_pd_drop(tps);
+err:
+	dev_warn(tps->dev, "partner source capabilities not published: %d\n", ret);
+}
+
 static void tps6598x_drop_partner(struct tps6598x *tps, u32 status)
 {
+	tps6598x_partner_pd_drop(tps);
 	if (!IS_ERR(tps->partner))
 		typec_unregister_partner(tps->partner);
 	tps->partner = NULL;
@@ -612,6 +678,7 @@ static void tps6598x_update_contract(struct tps6598x *tps)
 	tps->data->read_contract(tps);
 	if (tps->psy && (rdo != tps->contract_rdo || pdo != tps->contract_pdo))
 		power_supply_changed(tps->psy);
+	tps6598x_partner_pd_sync(tps);
 }
 
 static void tps6598x_handle_plug_event(struct tps6598x *tps, u32 status)
@@ -1179,6 +1246,7 @@ static void cd321x_update_work(struct work_struct *work)
 
 	/* Process partner disconnection or change */
 	if (!new_connected || partner_changed) {
+		tps6598x_partner_pd_drop(tps);
 		if (!IS_ERR(tps->partner))
 			typec_unregister_partner(tps->partner);
 		tps->partner = NULL;
@@ -1252,6 +1320,7 @@ static void cd321x_update_work(struct work_struct *work)
 		if (desc.identity)
 			typec_partner_set_identity(tps->partner);
 	}
+	tps6598x_partner_pd_sync(tps);
 
 	/* Update the TypeC MUX/PHY state */
 	if (dp_route_was_active && dp_connected && !was_disconnected && !dp_mode_changed &&
@@ -3040,20 +3109,29 @@ static const struct tipd_data tipd_tps25750_data = {
  */
 static void sn201202x_read_contract(struct tps6598x *tps)
 {
+	u8 caps[1 + 4 * PDO_MAX_OBJECTS];
+	unsigned int i, n = 0;
 	u32 rdo = 0, pdo = 0;
 	u8 buf[8];
 
 	if (TPS_POWER_STATUS_CONNECTION(tps->pwr_status) &&
 	    TPS_POWER_STATUS_SOURCESINK(tps->pwr_status) &&
-	    TPS_POWER_STATUS_PWROPMODE(tps->pwr_status) == TYPEC_PWR_MODE_PD &&
-	    !tps6598x_block_read(tps, SN201202X_REG_ACTIVE_CONTRACT, buf, sizeof(buf))) {
-		rdo = get_unaligned_le32(buf);
-		pdo = get_unaligned_le32(buf + 4);
-		if (!rdo_index(rdo))
-			rdo = 0;
+	    TPS_POWER_STATUS_PWROPMODE(tps->pwr_status) == TYPEC_PWR_MODE_PD) {
+		if (!tps6598x_block_read(tps, SN201202X_REG_ACTIVE_CONTRACT, buf, sizeof(buf))) {
+			rdo = get_unaligned_le32(buf);
+			pdo = get_unaligned_le32(buf + 4);
+			if (!rdo_index(rdo))
+				rdo = 0;
+		}
+		if (!tps6598x_block_read(tps, SN201202X_REG_RX_SOURCE_CAPS, caps, sizeof(caps)))
+			n = min_t(unsigned int, FIELD_GET(SN201202X_RX_CAPS_COUNT, caps[0]),
+				  PDO_MAX_OBJECTS);
 	}
 	WRITE_ONCE(tps->contract_rdo, rdo);
 	WRITE_ONCE(tps->contract_pdo, pdo);
+	for (i = 0; i < n; i++)
+		tps->src_pdo[i] = get_unaligned_le32(caps + 1 + 4 * i);
+	tps->src_pdo_count = n;
 }
 
 static const struct tipd_data tipd_sn201202x_data = {

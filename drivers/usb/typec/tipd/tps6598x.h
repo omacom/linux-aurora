@@ -6,6 +6,7 @@
  * Author: Heikki Krogerus <heikki.krogerus@linux.intel.com>
  */
 
+#include <linux/usb/pd.h>
 #include <linux/atomic.h>
 #include <linux/bits.h>
 #include <linux/bitfield.h>
@@ -365,6 +366,14 @@ struct tps6598x {
 	/* Active PD contract while sinking under PD, or 0; see read_contract. */
 	u32 contract_rdo;
 	u32 contract_pdo;
+	/* The source PDOs the partner offered for that contract. */
+	u32 src_pdo[PDO_MAX_OBJECTS];
+	unsigned int src_pdo_count;
+	/* What is registered for the partner (usb_power_delivery class). */
+	struct usb_power_delivery *partner_pd;
+	struct usb_power_delivery_capabilities *partner_src_caps;
+	u32 partner_pdo[PDO_MAX_OBJECTS];
+	unsigned int partner_pdo_count;
 	struct delayed_work	wq_poll;
 
 	const struct tipd_data *data;

@@ -233,6 +233,8 @@ static int typec_mux_apply(void *m) { struct typec_mux_state s={.mode=TYPEC_STAT
 static void typec_mux_abort(void *m) { (void)m; }
 static int typec_mux_end(void *m) { (void)m;return 0; }
 static void typec_unregister_partner(void *p) { (void)p; }
+static void __attribute__((unused)) tps6598x_partner_pd_drop(struct tps6598x *t) { (void)t; }
+static void __attribute__((unused)) tps6598x_partner_pd_sync(struct tps6598x *t) { (void)t; }
 static void *typec_register_partner(void *p, struct typec_partner_desc *d)
 { (void)p; (void)d; return (void *)1; }
 static void typec_partner_set_identity(void *p) { (void)p; }
