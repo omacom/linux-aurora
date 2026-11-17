@@ -344,13 +344,29 @@ impl Governor {
                 } else {
                     ""
                 };
-                dev_info!(
-                    dev,
-                    "M3: thermal: SoC die temperature {} from zones:{}{}\n",
-                    Celsius(t),
-                    smc,
-                    pmp
-                )
+                // With a ceiling above the safe cap, a usable reading is what lets the runtime
+                // cap rise above it: say so, so the log shows when states above it are allowed.
+                if self.mode == ThermalMode::On && self.policy.above_safe() {
+                    let ceiling = self.policy.ceiling();
+                    dev_info!(
+                        dev,
+                        "M3: thermal: SoC die temperature {} from zones:{}{}; the runtime cap may rise above {} up to {} ({} MHz)\n",
+                        Celsius(t),
+                        smc,
+                        pmp,
+                        safe,
+                        ceiling,
+                        self.mhz(ceiling)
+                    )
+                } else {
+                    dev_info!(
+                        dev,
+                        "M3: thermal: SoC die temperature {} from zones:{}{}\n",
+                        Celsius(t),
+                        smc,
+                        pmp
+                    )
+                }
             }
             (Source::Failed(e), _) => dev_info!(
                 dev,

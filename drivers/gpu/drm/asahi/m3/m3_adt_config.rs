@@ -177,9 +177,10 @@ impl PstatePolicy {
     }
 
     /// Clamp the `asahi.m3_max_pstate` and `asahi.m3_boot_pstate` settings to the published table
-    /// of `hwdata` (the generated HwData object image), and to `ceiling` when given (the T8122
-    /// start experiment's `asahi.t8122_pstate_cap`).
-    fn new(dev: &device::Device, hwdata: &[u8], ceiling: Option<u32>) -> Result<Self> {
+    /// of `hwdata` (the generated HwData object image), and to the T8122 start experiment's
+    /// `asahi.t8122_pstate_cap` when given, as admitted for the thermal mode
+    /// (`t8122_knobs::admitted_cap`).
+    fn new(dev: &device::Device, hwdata: &[u8], experiment: Option<&Experiment>) -> Result<Self> {
         let hwb_max = offset_of!(raw::HwDataBG15V14_8_3, max_pstate);
         let hwb_freq = offset_of!(raw::HwDataBG15V14_8_3, frequencies);
         let table_max = read_u32(hwdata, hwb_max)?;
@@ -189,6 +190,7 @@ impl PstatePolicy {
         let freq = |i: u32| read_u32(hwdata, hwb_freq + 4 * i as usize);
         // Unset: the thermal limit is on.
         let thermal = m3_params::thermal_param().unwrap_or(ThermalMode::On);
+        let ceiling = experiment.map(|e| e.admitted_cap(thermal));
         // Unset: the whole table when the thermal limit bounds the runtime cap, the default cap
         // otherwise.
         let requested = m3_params::max_pstate_param().unwrap_or(match thermal {
@@ -300,7 +302,27 @@ impl Contents {
         storage::validate_iomaps(iomaps).map_err(|_| EINVAL)?;
         let images = build_images(dev, firmware, soc, experiment, iomaps)?;
         let hwdata = images.get(HWDATA).and_then(|i| i.as_deref()).ok_or(EINVAL)?;
-        let pstates = PstatePolicy::new(dev, hwdata, experiment.map(|e| e.pstate_cap()))?;
+        let pstates = PstatePolicy::new(dev, hwdata, experiment)?;
+        // The T8122 start experiment's cap: what was computed above must stay within what
+        // `t8122_knobs::pstate_cap_use` (which the host tests drive) gives for it. A state above
+        // the no-feedback limit is the firmware's only with the thermal limit on, and the
+        // runtime cap rises above its fallback only with it on.
+        if let Some(e) = experiment {
+            let ranges = pstates.thermal == ThermalMode::On && pstates.max > pstates.safe;
+            let u = e.cap_use(pstates.thermal);
+            let within =
+                pstates.max <= u.ceiling && pstates.safe <= u.fallback && (u.ranges || !ranges);
+            if !within {
+                dev_err!(
+                    dev,
+                    "M3 G15G start: refused: performance cap {} with runtime cap {} is more than asahi.t8122_pstate_cap={} allows\n",
+                    pstates.max,
+                    pstates.safe,
+                    e.pstate_cap()
+                );
+                return Err(EINVAL);
+            }
+        }
         let table = match soc.pstates {
             PstateTable::Fixed { states, top_mhz } => (states, top_mhz),
             PstateTable::DeviceTree => crate::m3::m3_board::opp_table_shape(pdev, soc).ok_or_else(|| {

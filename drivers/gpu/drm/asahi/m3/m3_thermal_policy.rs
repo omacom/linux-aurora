@@ -8,9 +8,12 @@
 
 /// Highest fixed cap for non-T8122 device-tree InitData, whose firmware die-temperature
 /// controller is disabled. T8122 retains its lower default cap without temperature feedback.
-const ADT_MAX_PSTATE_LIMIT: u32 = 5;
-/// T8122's unmonitored cap, independent of any experiment ceiling or future default change.
-const T8122_SAFE_PSTATE: u32 = 2;
+/// The T8122 start experiment admits a ceiling above it only with the thermal limit on
+/// (`t8122_knobs::PSTATE_CAP_NO_FEEDBACK_MAX` is this number).
+pub(crate) const ADT_MAX_PSTATE_LIMIT: u32 = 5;
+/// T8122's unmonitored cap, independent of any experiment ceiling or future default change
+/// (`t8122_knobs::PSTATE_FALLBACK` is this number).
+pub(crate) const T8122_SAFE_PSTATE: u32 = 2;
 
 /// How the runtime backend limits the GPU performance state by temperature.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]

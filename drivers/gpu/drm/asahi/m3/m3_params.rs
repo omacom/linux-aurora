@@ -651,7 +651,10 @@ m3_param!("t8122_unit_mask_a", T8122_UNIT_MASK_A, parse_t8122_number);
 /// `asahi.t8122_unit_mask_b=<u32>`: HwDataB unit mask B (+0x17c8).
 static T8122_UNIT_MASK_B: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_unit_mask_b", T8122_UNIT_MASK_B, parse_t8122_number);
-/// `asahi.t8122_pstate_cap=N`: the highest performance state the T8122 firmware may use.
+/// `asahi.t8122_pstate_cap=N`: the highest performance state the T8122 firmware may use, 1 to 8.
+/// The runtime cap starts at and falls back to 2; with `asahi.m3_thermal=on` it may rise to the
+/// cap on usable die temperatures. 6 to 8 need `on`: with `hold` or `off` they are lowered to 5
+/// (`t8122_knobs::pstate_cap_use`).
 static T8122_PSTATE_CAP: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_pstate_cap", T8122_PSTATE_CAP, parse_t8122_number);
 

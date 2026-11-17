@@ -27,9 +27,80 @@ pub(crate) const UNIT_MASK_A_LIMIT: u64 = 0x7_0000_0003;
 pub(crate) const UNIT_MASK_B_LIMIT: u64 = 0x7;
 /// The default performance-state ceiling: the lowest two states.
 pub(crate) const PSTATE_CAP: u32 = 2;
-/// The highest performance-state ceiling the experiment accepts. States above the default
-/// require the thermal governor and usable die-temperature readings, not just a higher ceiling.
-pub(crate) const PSTATE_CAP_MAX: u32 = 5;
+/// The runtime cap every T8122 boot starts at and falls back to, whatever the ceiling: at
+/// boot, before a usable SoC die temperature, without one, and at the critical temperature. A
+/// lower ceiling still wins. `m3_thermal_policy::T8122_SAFE_PSTATE`, which `t8122_start`
+/// asserts is the same number.
+pub(crate) const PSTATE_FALLBACK: u32 = 2;
+/// The highest ceiling admitted without the thermal limit on: the driver's own limit when the
+/// fast-die temperature controller is off (`m3_thermal_policy::ADT_MAX_PSTATE_LIMIT`, which
+/// `t8122_start` asserts is the same number). A higher cap with `asahi.m3_thermal=off` or `hold`
+/// is lowered to it, so the GPU still starts.
+pub(crate) const PSTATE_CAP_NO_FEEDBACK_MAX: u32 = 5;
+/// The highest performance-state ceiling the experiment accepts: the eight states of the M3
+/// Airs' table. A ceiling above [`PSTATE_CAP_NO_FEEDBACK_MAX`] needs the thermal limit on
+/// (`m3_thermal`) and is only how far it may raise the runtime cap while it reads a usable SoC
+/// die temperature; see [`pstate_cap_use`].
+pub(crate) const PSTATE_CAP_MAX: u32 = 8;
+
+/// How the thermal limit is set for this boot (`asahi.m3_thermal`), as far as the ceiling cares.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Feedback {
+    /// `off`: nothing reads a temperature, and the cap is fixed.
+    Off,
+    /// `hold`: the temperature is read and logged, the runtime cap stays at its fallback.
+    Hold,
+    /// `on` (the default): the runtime cap follows the temperature.
+    On,
+}
+
+/// What an accepted ceiling of `asahi.t8122_pstate_cap` gives the firmware.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapUse {
+    /// The highest state the firmware is told about (the InitData's highest-state words).
+    pub(crate) ceiling: u32,
+    /// The runtime cap at boot, and whenever there is no usable temperature or it is critical.
+    pub(crate) fallback: u32,
+    /// Whether the runtime cap may rise above `fallback` at all this boot.
+    pub(crate) ranges: bool,
+}
+
+/// The cap `asahi.t8122_pstate_cap` (1..=[`PSTATE_CAP_MAX`]) leaves with the thermal limit set
+/// to `feedback`: itself, except that a cap above [`PSTATE_CAP_NO_FEEDBACK_MAX`] needs the limit
+/// on and is otherwise lowered to that limit. This is the ceiling `m3_adt_config::PstatePolicy`
+/// is given.
+pub(crate) fn admitted_cap(cap: u32, feedback: Feedback) -> u32 {
+    if cap > PSTATE_CAP_NO_FEEDBACK_MAX && feedback != Feedback::On {
+        PSTATE_CAP_NO_FEEDBACK_MAX
+    } else {
+        cap
+    }
+}
+
+/// The use of the ceiling `cap` (1..=[`PSTATE_CAP_MAX`], as [`resolve`] accepts it) with the
+/// thermal limit set to `feedback`.
+///
+/// The runtime cap starts at [`PSTATE_FALLBACK`] (or a lower `cap`) and falls back to it in
+/// every mode. `On` lets the thermal limit raise it up to the ceiling `cap` while it reads a
+/// usable SoC die temperature; only `On` admits a cap above [`PSTATE_CAP_NO_FEEDBACK_MAX`].
+/// `Hold` gives the firmware the ceiling but keeps the runtime cap at the fallback (to check that
+/// the firmware follows a runtime cap below its ceiling), and lowers a cap above the no-feedback
+/// limit to that limit first. `Off` has no temperature feedback, so the fallback is also the
+/// ceiling (a cap above the no-feedback limit is lowered first): the GPU starts rather than not
+/// at all.
+///
+/// This is what `m3_adt_config::PstatePolicy::new` computes (`ThermalMode::pstate_caps` with
+/// [`admitted_cap`]) while `asahi.m3_max_pstate` is not given (that parameter can only lower the
+/// ceiling further); `m3_adt_config::Contents::select` refuses the start if it ever computes more.
+pub(crate) fn pstate_cap_use(cap: u32, feedback: Feedback) -> CapUse {
+    let ceiling = admitted_cap(cap, feedback);
+    let fallback = ceiling.min(PSTATE_FALLBACK);
+    match feedback {
+        Feedback::Off => CapUse { ceiling: fallback, fallback, ranges: false },
+        Feedback::Hold => CapUse { ceiling, fallback, ranges: false },
+        Feedback::On => CapUse { ceiling, fallback, ranges: ceiling > fallback },
+    }
+}
 
 /// Parse a decimal or `0x`-prefixed hexadecimal `u64`. A leading sign is not accepted.
 fn number(text: &str) -> Option<u64> {
@@ -207,7 +278,7 @@ pub(crate) fn resolve(raw: &Raw) -> Result<Values, Refusal> {
         .ok_or(refuse("t8122_unit_mask_b", "nonzero, no bits outside 0x7"))? as u32;
     let pstate_cap = given(raw.pstate_cap, PSTATE_CAP as u64)
         .filter(|v| (1..=u64::from(PSTATE_CAP_MAX)).contains(v))
-        .ok_or(refuse("t8122_pstate_cap", "1 to 5"))? as u32;
+        .ok_or(refuse("t8122_pstate_cap", "1 to 8"))? as u32;
     Ok(Values {
         initdata_version,
         fender,
@@ -309,7 +380,7 @@ mod tests {
             (|r| r.unit_mask_b = parse_number("0xf"), "t8122_unit_mask_b"),
             (|r| r.unit_mask_b = 0, "t8122_unit_mask_b"),
             (|r| r.pstate_cap = 0, "t8122_pstate_cap"),
-            (|r| r.pstate_cap = 6, "t8122_pstate_cap"),
+            (|r| r.pstate_cap = 9, "t8122_pstate_cap"),
             (|r| r.pstate_cap = 16, "t8122_pstate_cap"),
             (|r| r.pstate_cap = parse_number("-1"), "t8122_pstate_cap"),
         ];
@@ -318,15 +389,76 @@ mod tests {
         }
     }
 
+    const FEEDBACK: [Feedback; 3] = [Feedback::Off, Feedback::Hold, Feedback::On];
+
     #[test]
-    fn pstate_cap_accepts_one_to_five_only() {
+    fn pstate_cap_accepts_one_to_eight_only() {
         for cap in 1..=PSTATE_CAP_MAX {
             assert_eq!(resolve(&with(|r| r.pstate_cap = u64::from(cap))).unwrap().pstate_cap, cap);
         }
-        for cap in [0u64, 6, 8, 15, 16] {
+        for cap in [0u64, 9, 15, 16, u64::from(u32::MAX) + 6] {
             assert!(resolve(&with(|r| r.pstate_cap = cap)).is_err(), "cap {cap}");
         }
-        assert_eq!(PSTATE_CAP_MAX, 5);
+        assert_eq!(PSTATE_CAP_MAX, 8);
+        assert_eq!(PSTATE_CAP_NO_FEEDBACK_MAX, 5);
+        // The default is unchanged and needs no feedback.
+        let default = resolve(&with(|_| {})).unwrap().pstate_cap;
+        assert_eq!(default, 2);
+        for feedback in FEEDBACK {
+            assert_eq!(
+                pstate_cap_use(default, feedback),
+                CapUse { ceiling: 2, fallback: 2, ranges: false }
+            );
+        }
+    }
+
+    #[test]
+    fn caps_up_to_five_keep_the_state_two_fallback() {
+        for cap in 1..=PSTATE_CAP_NO_FEEDBACK_MAX {
+            let fallback = cap.min(2);
+            for feedback in FEEDBACK {
+                assert_eq!(admitted_cap(cap, feedback), cap, "cap {cap} {feedback:?}");
+            }
+            // On: the runtime cap ranges from 2 (or a lower cap) to the ceiling.
+            assert_eq!(
+                pstate_cap_use(cap, Feedback::On),
+                CapUse { ceiling: cap, fallback, ranges: cap > 2 }
+            );
+            // Hold: the firmware knows the ceiling, the runtime cap stays at the fallback.
+            assert_eq!(
+                pstate_cap_use(cap, Feedback::Hold),
+                CapUse { ceiling: cap, fallback, ranges: false }
+            );
+            // Off: a fixed cap of 2 (or lower).
+            assert_eq!(
+                pstate_cap_use(cap, Feedback::Off),
+                CapUse { ceiling: fallback, fallback, ranges: false }
+            );
+        }
+    }
+
+    #[test]
+    fn caps_six_to_eight_need_the_thermal_limit_on_and_fall_back_to_two() {
+        for cap in 6..=PSTATE_CAP_MAX {
+            // On: the runtime cap ranges from 2 to the ceiling.
+            assert_eq!(admitted_cap(cap, Feedback::On), cap);
+            assert_eq!(
+                pstate_cap_use(cap, Feedback::On),
+                CapUse { ceiling: cap, fallback: 2, ranges: true }
+            );
+            // Hold: lowered to 5; the firmware knows 5, the runtime cap stays 2.
+            assert_eq!(admitted_cap(cap, Feedback::Hold), 5);
+            assert_eq!(
+                pstate_cap_use(cap, Feedback::Hold),
+                CapUse { ceiling: 5, fallback: 2, ranges: false }
+            );
+            // Off: lowered to 5, and without temperature feedback the GPU starts at a fixed 2.
+            assert_eq!(admitted_cap(cap, Feedback::Off), 5);
+            assert_eq!(
+                pstate_cap_use(cap, Feedback::Off),
+                CapUse { ceiling: 2, fallback: 2, ranges: false }
+            );
+        }
     }
 
     #[test]

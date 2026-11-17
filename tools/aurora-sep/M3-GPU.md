@@ -129,6 +129,16 @@ zone is registered; a later read failure in any sensor fails the whole reading.
 Do not substitute a partial `macsmc_hwmon.soc_die_keys` list. These are raw sensor
 readings, not a calibration or a hardware safety certification.
 
+Caps 6 to 8 (up to 1338 MHz, the top of the T8122 table) are an experiment on top
+of this. They are admitted only with `asahi.m3_thermal=on`, which is also the
+default. With `off` or `hold` the driver lowers them to 5 with one boot line and
+the GPU still starts. Boot, missing readings and the critical temperature stay at
+state 2. The runtime range is 2 to the cap, and the firmware's highest state is
+the cap. Values of 9 or more are refused. While the firmware's highest state is
+above 2 the driver checks the reported state at every retirement with no later
+batch in flight, whatever `asahi.m3_retire_mmio` says, and lets the pipeline
+drain once the last check is 500 ms old. `air-gpu-oneshot.sh` still offers 1 to 5.
+
 First boot with `asahi.t8122_pstate_cap=5 asahi.m3_thermal=hold` and confirm that
 the firmware respects the runtime cap of 2 under GPU load. Before relying on
 `m3_thermal=on`, check the boot log for all twelve keys, a runtime range of 2..5
