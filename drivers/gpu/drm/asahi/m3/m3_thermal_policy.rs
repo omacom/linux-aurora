@@ -424,3 +424,235 @@ mod zone_tests {
         assert_eq!(required_zones(b"apple,t81220\0"), 0);
     }
 }
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    /// `hot` of the tests: the default of `asahi.m3_thermal_hot`. Cool is 70 C, critical 88 C.
+    const HOT: i32 = 80_000;
+
+    fn temp(mc: i32, at: i64) -> Reading {
+        Reading::Temp { mc, at, zones: 1 }
+    }
+
+    /// A policy that has climbed from `safe` to `ceiling` on cool readings, the last at
+    /// `2 * (ceiling - safe - 1)` s; returns it with the time of that last reading.
+    fn raised(safe: u32, ceiling: u32) -> (Policy, i64) {
+        let mut p = Policy::new(true, safe, ceiling, HOT);
+        let mut now = 0;
+        for step in 0..ceiling - safe {
+            now = i64::from(step) * UP_PACE_NS;
+            let (usable, change) = p.update(now, temp(50_000 + step as i32, now));
+            assert!(usable.is_ok());
+            assert_eq!(change.map(|c| (c.from, c.to, c.why)), Some((safe + step, safe + step + 1, Why::Cool)));
+        }
+        assert_eq!(p.cap(), ceiling);
+        (p, now)
+    }
+
+    #[test]
+    fn the_cap_starts_at_the_safe_cap_and_climbs_one_state_per_two_seconds_to_the_ceiling() {
+        for ceiling in 6..=8 {
+            let mut p = Policy::new(true, 5, ceiling, HOT);
+            assert_eq!((p.cap(), p.safe(), p.ceiling()), (5, 5, ceiling));
+            assert_eq!(p.thresholds(), (70_000, 80_000, 88_000));
+            // No reading yet: the safe cap.
+            assert_eq!(p.update(0, Reading::None), (Err(Source::NoReading), None));
+            assert_eq!(p.cap(), 5);
+            // A cool reading every 500 ms: one state every 2 s, never above the ceiling.
+            let mut caps = [0u32; 21];
+            for (i, slot) in caps.iter_mut().enumerate() {
+                let now = i as i64 * 500 * MS;
+                let _ = p.update(now, temp(60_000 + i as i32, now));
+                *slot = p.cap();
+                assert!(p.cap() <= ceiling && p.cap() >= 5);
+            }
+            // t = 0, 2, 4 s: 6, 7, 8 (as far as the ceiling allows).
+            assert_eq!(caps[0], 6);
+            assert_eq!(caps[3], 6);
+            assert_eq!(caps[4], 7.min(ceiling));
+            assert_eq!(caps[7], 7.min(ceiling));
+            assert_eq!(caps[8], 8.min(ceiling));
+            assert_eq!(caps[20], ceiling);
+            assert_eq!(p.counts(), (ceiling - 5, 0));
+            // Exactly cool (70.0 C) still raises; anything above it does not.
+            let (mut p, t) = raised(5, ceiling);
+            let _ = p.update(t + 500 * MS, temp(HOT, t + 500 * MS));
+            assert_eq!(p.cap(), ceiling - 1);
+            let _ = p.update(t + 3 * S, temp(70_001, t + 3 * S));
+            assert_eq!(p.cap(), ceiling - 1);
+            let _ = p.update(t + 4 * S, temp(70_000, t + 4 * S));
+            assert_eq!(p.cap(), ceiling);
+        }
+    }
+
+    #[test]
+    fn between_cool_and_hot_the_cap_holds() {
+        for ceiling in 6..=8 {
+            let (mut p, t) = raised(5, ceiling);
+            for (i, mc) in [70_001, 75_000, 79_999].into_iter().enumerate() {
+                let now = t + (i as i64 + 1) * 3 * S;
+                assert_eq!(p.update(now, temp(mc, now)).1, None);
+                assert_eq!(p.cap(), ceiling);
+            }
+        }
+    }
+
+    #[test]
+    fn hot_lowers_one_state_per_fresh_reading_every_500_ms_and_stops_at_the_safe_cap() {
+        for ceiling in 6..=8 {
+            let (mut p, t) = raised(5, ceiling);
+            // Less than 500 ms after the last change: not yet.
+            let now = t + 499 * MS;
+            assert_eq!(p.update(now, temp(HOT, now)).1, None);
+            let mut now = t + 500 * MS;
+            for expected in (5..ceiling).rev() {
+                let change = p.update(now, temp(HOT + (now / MS) as i32 % 7, now)).1.unwrap();
+                assert_eq!((change.to, change.why), (expected, Why::Hot));
+                // The same reading again, however much later, is not acted on twice.
+                assert_eq!(p.update(now + 400 * MS, temp(HOT, now)).1, None);
+                now += 500 * MS;
+            }
+            assert_eq!(p.cap(), 5);
+            // Hot at the safe cap: nothing lower to go to.
+            for i in 0..4 {
+                let at = now + i * 500 * MS;
+                assert_eq!(p.update(at, temp(HOT + 1_000 + i as i32, at)).1, None);
+                assert_eq!(p.cap(), 5);
+            }
+            assert_eq!(p.counts(), (ceiling - 5, ceiling - 5));
+        }
+    }
+
+    #[test]
+    fn critical_and_unusable_readings_restore_the_safe_cap_at_once() {
+        for ceiling in 6..=8 {
+            let (_, t) = raised(5, ceiling);
+            // Right after the last raise, so no pacing would allow a step yet.
+            let now = t + MS;
+            let cases = [
+                (temp(88_000, now), Why::Critical),
+                (temp(110_000, now), Why::Critical),
+                (Reading::None, Why::NoTemperature(Source::NoReading)),
+                (Reading::Failed { errno: -19, at: now }, Why::NoTemperature(Source::Failed(-19))),
+                (Reading::Failed { errno: -5, at: now }, Why::NoTemperature(Source::Failed(-5))),
+                // Older than 3 s, as a temperature and as a failure.
+                (temp(50_000, now - STALE_NS - 1), Why::NoTemperature(Source::Stale)),
+                (Reading::Failed { errno: -5, at: now - STALE_NS - 1 }, Why::NoTemperature(Source::Stale)),
+                // Outside 10..=125 C. The SMC's reading of a powered-down sensor is one of them.
+                (temp(9_999, now), Why::NoTemperature(Source::Implausible)),
+                (temp(-2_849, now), Why::NoTemperature(Source::Implausible)),
+                (temp(125_001, now), Why::NoTemperature(Source::Implausible)),
+            ];
+            for (reading, why) in cases {
+                let (mut p, _) = raised(5, ceiling);
+                let change = p.update(now, reading).1.unwrap();
+                assert_eq!((change.from, change.to, change.why), (ceiling, 5, why), "{reading:?}");
+                // The previous cap is tolerated for the grace period only.
+                assert_eq!(p.allowed(now + GRACE_NS - 1), ceiling);
+                assert_eq!(p.allowed(now + GRACE_NS), 5);
+            }
+            // A reading at exactly 3 s is still used.
+            let (mut p, _) = raised(5, ceiling);
+            assert_eq!(p.update(now, temp(60_000, now - STALE_NS)).1, None);
+            assert_eq!(p.cap(), ceiling);
+            // A reading that has not changed for 60 s is stuck, even while fresh.
+            let (mut p, t) = raised(5, ceiling);
+            let since = t + S;
+            assert_eq!(p.update(since, temp(61_234, since)).1, None);
+            assert_eq!(p.update(since + STUCK_NS - 1, temp(61_234, since + STUCK_NS - 1)).1, None);
+            assert_eq!(p.cap(), ceiling);
+            let change = p.update(since + STUCK_NS, temp(61_234, since + STUCK_NS)).1.unwrap();
+            assert_eq!((change.to, change.why), (5, Why::NoTemperature(Source::Stuck)));
+        }
+    }
+
+    #[test]
+    fn after_a_fallback_the_cap_climbs_again_one_state_per_two_seconds() {
+        for ceiling in 6..=8 {
+            let (mut p, t) = raised(5, ceiling);
+            let _ = p.update(t + S, Reading::Failed { errno: -19, at: t + S });
+            assert_eq!(p.cap(), 5);
+            // A usable reading right away does not raise before 2 s have passed since the fall.
+            let _ = p.update(t + 2 * S, temp(55_000, t + 2 * S));
+            assert_eq!(p.cap(), 5);
+            for step in 0..ceiling - 5 {
+                let now = t + 3 * S + i64::from(step) * UP_PACE_NS;
+                let _ = p.update(now, temp(55_001 + step as i32, now));
+                assert_eq!(p.cap(), 6 + step);
+            }
+            assert_eq!(p.cap(), ceiling);
+        }
+    }
+
+    #[test]
+    fn hold_never_leaves_the_safe_cap() {
+        for ceiling in 6..=8 {
+            let mut p = Policy::new(false, 5, ceiling, HOT);
+            for i in 0..40 {
+                let now = i * S;
+                let reading = match i % 4 {
+                    0 => temp(40_000 + i as i32, now),
+                    1 => temp(85_000 + i as i32, now),
+                    2 => temp(95_000 + i as i32, now),
+                    _ => Reading::Failed { errno: -19, at: now },
+                };
+                assert_eq!(p.update(now, reading).1, None);
+                assert_eq!((p.cap(), p.allowed(now)), (5, 5));
+            }
+            assert_eq!(p.ceiling(), ceiling);
+            assert_eq!(p.counts(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn a_ceiling_at_the_safe_cap_never_moves() {
+        // Today's boots: asahi.t8122_pstate_cap of 1 to 5 gives safe == ceiling.
+        for cap in 1..=5 {
+            let mut p = Policy::new(true, cap, cap, HOT);
+            for i in 0..40 {
+                let now = i * S;
+                let reading = match i % 5 {
+                    0 => temp(40_000 + i as i32, now),
+                    1 => temp(81_000 + i as i32, now),
+                    2 => temp(99_000 + i as i32, now),
+                    3 => Reading::None,
+                    _ => Reading::Failed { errno: -19, at: now },
+                };
+                assert_eq!(p.update(now, reading).1, None);
+                assert_eq!((p.cap(), p.allowed(now)), (cap, cap));
+            }
+            assert_eq!(p.counts(), (0, 0));
+        }
+        // A ceiling below the safe cap is raised to it, not the other way round.
+        let p = Policy::new(true, 5, 3, HOT);
+        assert_eq!((p.safe(), p.ceiling(), p.cap()), (5, 5, 5));
+    }
+
+    #[test]
+    fn a_firmware_that_ignores_a_lowered_cap_is_found_after_twenty_checks_over_three_seconds() {
+        let (mut p, t) = raised(5, 8);
+        let fell = t + S;
+        let _ = p.update(fell, Reading::None);
+        assert_eq!((p.cap(), p.allowed(fell)), (5, 8));
+        // Within the grace period a state of 8 is not "over".
+        assert!(p.note_check(fell + 500 * MS, false).is_none());
+        // Afterwards: 20 checks in less than 3 s are not enough; the next one 3 s after the
+        // first is.
+        let start = fell + GRACE_NS;
+        for i in 0..19 {
+            assert!(p.note_check(start + i * 100 * MS, true).is_none());
+        }
+        assert!(p.note_check(start + IGNORED_NS - 1, true).is_none());
+        assert_eq!(p.note_check(start + IGNORED_NS, true), Some((21, IGNORED_NS)));
+        // One check within the cap starts the count again.
+        let again = start + IGNORED_NS + MS;
+        assert!(p.note_check(again, false).is_none());
+        // 19 checks are not enough however long they span; the 20th then is.
+        for i in 0..19 {
+            assert!(p.note_check(again + (i + 1) * S, true).is_none());
+        }
+        assert_eq!(p.note_check(again + 20 * S, true), Some((20, 19 * S)));
+    }
+}
