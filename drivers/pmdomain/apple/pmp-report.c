@@ -930,6 +930,12 @@ struct apple_pmp_start {
 	 */
 	u64 idle_release;
 	u64 released;
+	/*
+	 * Requests apple_pmp_report_use() has written and awaits the ack of,
+	 * without apple_pmp_start_mutex. They stay in "released" until the
+	 * ack is in; meanwhile idle() and another use() of them get -EBUSY.
+	 */
+	u64 asserting;
 	struct of_changeset pmp_cs;
 	const struct apple_pmp_start_ops *ops;
 	const struct apple_pmp_start_timing *timing;
@@ -948,6 +954,8 @@ static int apple_pmp_report_set_state(struct apple_pmp_report *rep, u32 id,
 				      bool enable, bool no_ack);
 static int apple_pmp_report_request(struct apple_pmp_report *rep, u32 id,
 				    bool enable, unsigned long timeout);
+static bool apple_pmp_report_acked(struct apple_pmp_report *rep, u64 bit,
+				   bool enable);
 
 /* How long a withdrawn request may take to be acknowledged. */
 #define APPLE_PMP_IDLE_ACK_TIMEOUT	msecs_to_jiffies(100)
@@ -1756,26 +1764,34 @@ EXPORT_SYMBOL_GPL(apple_pmp_report_wait_ready);
 /**
  * apple_pmp_report_use() - ask for a request and wait for its acknowledgment
  * @entry: report entry node, as for apple_pmp_report_wait_ready()
- * @timeout: in jiffies
+ * @timeout: in jiffies, for both waits together
  *
  * As apple_pmp_report_wait_ready(), but a request that was withdrawn after
  * the PMP started because nothing used it yet (apple,release-until-used) is
- * asserted again first, and its acknowledgment awaited for up to @timeout.
- * A request withdrawn while unused is asserted again even if the PMP still
- * shows it acknowledged: its withdraw may have been acknowledged late. If the
- * new acknowledgment does not come in time, the request is withdrawn again
- * and stays marked so, and the next call writes it and waits again: the
- * request, its record here and the caller's view agree either way.
+ * asserted again first, and its acknowledgment awaited for the rest of
+ * @timeout, without apple_pmp_start_mutex held. A request withdrawn while
+ * unused is asserted again even if the PMP still shows it acknowledged: its
+ * withdraw may have been acknowledged late. If the new acknowledgment does
+ * not come in time, the request is withdrawn again and stays marked so, and
+ * the next call writes it and waits again: the request, its record here and
+ * the caller's view agree either way. The request stays marked withdrawn
+ * until it is acknowledged.
  *
  * Context: Process context; sleeps.
- * Return: as apple_pmp_report_wait_ready(); -ETIMEDOUT if a request asserted
- * again was not acknowledged in time.
+ * Return: as apple_pmp_report_wait_ready(); -EIO, with nothing written, if
+ * the PMP is not running; -EBUSY if another call is asserting it;
+ * -ETIMEDOUT if a request asserted again was not acknowledged in time;
+ * -ENODEV if the report went away meanwhile. A request asserted again is
+ * withdrawn on every error.
  */
 int apple_pmp_report_use(struct device_node *entry, unsigned long timeout)
 {
+	unsigned long deadline = jiffies + timeout;
+	struct apple_pmp_start *st = NULL, *it;
 	struct device_node *parent;
-	struct apple_pmp_start *st;
-	bool record;
+	bool record, acked;
+	ktime_t start;
+	u64 status;
 	u32 id;
 	int ret;
 
@@ -1789,26 +1805,57 @@ int apple_pmp_report_use(struct device_node *entry, unsigned long timeout)
 
 	parent = of_get_parent(entry);
 	scoped_guard(mutex, &apple_pmp_start_mutex) {
-		list_for_each_entry(st, &apple_pmp_starts, list) {
-			if (st->stopping || st->rep->dev->of_node != parent ||
-			    apple_pmp_report_bit(st, entry, &id, &record) ||
-			    !(st->released & BIT_ULL(id)))
+		list_for_each_entry(it, &apple_pmp_starts, list) {
+			if (it->stopping || it->rep->dev->of_node != parent ||
+			    apple_pmp_report_bit(it, entry, &id, &record) ||
+			    !(it->released & BIT_ULL(id)))
 				continue;
-			ret = apple_pmp_report_request(st->rep, id, true, timeout);
-			if (ret) {
-				/* Roll back, so that "released" still means withdrawn. */
-				apple_pmp_report_set_state(st->rep, id, false, true);
-				dev_warn(st->rep->dev,
-					 "request %u asserted for use, not acknowledged: %d; withdrawn again\n",
-					 id, ret);
+			if (it->asserting & BIT_ULL(id)) {
+				ret = -EBUSY;
 				break;
 			}
-			st->released &= ~BIT_ULL(id);
-			dev_info(st->rep->dev, "request %u asserted for use\n", id);
+			/* No acknowledgment can come: fail now, and leave it withdrawn. */
+			status = readq(it->rep->base + it->rep->offsets->status);
+			if (!(status & PMP_REPORT_READY)) {
+				ret = -EIO;
+				break;
+			}
+			/* A waiter keeps the report until the acknowledgment is in. */
+			apple_pmp_report_set_state(it->rep, id, true, true);
+			it->asserting |= BIT_ULL(id);
+			it->waiters++;
+			st = it;
 			break;
 		}
 	}
 	of_node_put(parent);
+	if (!st)
+		return ret;
+
+	start = ktime_get();
+	ret = read_poll_timeout(apple_pmp_report_acked, acked, acked, 1000,
+				jiffies_to_usecs(max_t(long, deadline - jiffies, 1)),
+				false, st->rep, BIT_ULL(id), true);
+
+	scoped_guard(mutex, &apple_pmp_start_mutex) {
+		st->asserting &= ~BIT_ULL(id);
+		/* The waiter keeps the report mapped while it is torn down. */
+		if (st->stopping)
+			ret = -ENODEV;
+		if (ret) {
+			/* Roll back, so that "released" still means withdrawn. */
+			apple_pmp_report_set_state(st->rep, id, false, true);
+			dev_warn(st->rep->dev,
+				 "request %u asserted for use, not acknowledged: %d; withdrawn again\n",
+				 id, ret);
+		} else {
+			st->released &= ~BIT_ULL(id);
+			dev_info(st->rep->dev, "request %u asserted for use, acknowledged in %lld us\n",
+				 id, ktime_us_delta(ktime_get(), start));
+		}
+		if (!--st->waiters && st->stopping)
+			complete(&st->waiters_done);
+	}
 	return ret;
 }
 EXPORT_SYMBOL_GPL(apple_pmp_report_use);
@@ -1827,8 +1874,9 @@ EXPORT_SYMBOL_GPL(apple_pmp_report_use);
  * One recorded as withdrawn already is withdrawn in the hardware too.
  *
  * Context: Process context; sleeps.
- * Return: 0 once the request is withdrawn, or -EINVAL if @entry is not such a
- * request of a started PMP.
+ * Return: 0 once the request is withdrawn, -EBUSY while apple_pmp_report_use()
+ * is asserting it, or -EINVAL if @entry is not such a request of a started
+ * PMP.
  */
 int apple_pmp_report_idle(struct device_node *entry)
 {
@@ -1845,6 +1893,11 @@ int apple_pmp_report_idle(struct device_node *entry)
 			    apple_pmp_report_bit(st, entry, &id, &record) ||
 			    !(st->idle_release & BIT_ULL(id)))
 				continue;
+			/* apple_pmp_report_use() is asserting it: leave it to that. */
+			if (st->asserting & BIT_ULL(id)) {
+				ret = -EBUSY;
+				break;
+			}
 			ret = 0;
 			if (st->released & BIT_ULL(id))
 				break;

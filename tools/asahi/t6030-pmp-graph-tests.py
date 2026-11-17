@@ -73,6 +73,8 @@ def main():
         names[at:at] = ['int apple_pmp_report_use(', 'int apple_pmp_report_idle(']
         m = re.search(r'static int apple_pmp_report_set_state\([^;{]*\);', source)
         prototypes += m[0] + '\n' if m else ''
+        m = re.search(r'static bool apple_pmp_report_acked\([^;{]*\);', source)
+        prototypes += m[0] + '\n' if m else ''
     offsets = re.search(r'static const struct apple_pmp_report_offsets apple_pmp_offsets_t6030 = \{.*?\n\};', source, re.S)[0]
     functions = '\n'.join(extract.function(source, n) for n in names)
     # The T8122 14.x wait (CONFIG_APPLE_T8122_GPU_PMP_LINK=0 here) precedes the dispatch; it is
@@ -160,6 +162,19 @@ def main():
                 ('reassert-clears-record-early', '/* Roll back, so that "released" still means withdrawn. */',
                  'st->released &= ~BIT_ULL(id);'),
                 ('resume-reasserts-idle', '(READ_ONCE(rep->start->released) & BIT_ULL(ent->id))', '0'),
+                ('use-writes-unready', 'if (!(status & PMP_REPORT_READY)) {', 'if ((void)status, 0) {'),
+                ('use-polls-locked', 'start = ktime_get();\n\tret = read_poll_timeout(apple_pmp_report_acked, acked, acked, 1000,\n\t\t\t\tjiffies_to_usecs(max_t(long, deadline - jiffies, 1)),\n\t\t\t\tfalse, st->rep, BIT_ULL(id), true);\n',
+                 'mutex_lock(&apple_pmp_start_mutex);\n\tstart = ktime_get();\n\tret = read_poll_timeout(apple_pmp_report_acked, acked, acked, 1000,\n\t\t\t\tjiffies_to_usecs(max_t(long, deadline - jiffies, 1)),\n\t\t\t\tfalse, st->rep, BIT_ULL(id), true);\n\tmutex_unlock(&apple_pmp_start_mutex);\n'),
+                ('use-poll-unclamped', 'max_t(long, deadline - jiffies, 1)', '(deadline - jiffies)'),
+                ('use-ignores-stop', '\t\tif (st->stopping)\n\t\t\tret = -ENODEV;\n', ''),
+                ('use-stop-not-rolled-back', '\t\tif (st->stopping)\n\t\t\tret = -ENODEV;\n\t\tif (ret) {', '\t\tif (st->stopping)\n\t\t\tret = -ENODEV;\n\t\telse if (ret) {'),
+                ('use-no-waiter', '\t\t\tit->waiters++;\n', ''),
+                ('use-polls-full-timeout', 'jiffies_to_usecs(max_t(long, deadline - jiffies, 1))', '((void)deadline, jiffies_to_usecs(timeout))'),
+                ('use-not-busy', 'if (it->asserting & BIT_ULL(id)) {', 'if (0) {'),
+                ('idle-not-busy', 'if (st->asserting & BIT_ULL(id)) {', 'if (0) {'),
+                ('use-keeps-asserting', 'st->asserting &= ~BIT_ULL(id);', '(void)0;'),
+                ('use-leaks-waiter', 'ktime_us_delta(ktime_get(), start));\n\t\t}\n\t\tif (!--st->waiters',
+                 'ktime_us_delta(ktime_get(), start));\n\t\t}\n\t\tif (!st->waiters'),
                 ('idle-rewrites-withdrawn', 'ret = 0;\n\t\t\tif (st->released & BIT_ULL(id))\n\t\t\t\tbreak;\n',
                  'ret = 0;\n'),
             ]
