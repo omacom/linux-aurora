@@ -46,7 +46,7 @@ use super::fw::initdata::runtime;
 use super::hw;
 use super::initdata::{self, InitData};
 use super::object::Objects;
-use super::{identity, params, regs, uat, Config, Shared};
+use super::{identity, regs, uat, Config, Shared};
 use crate::driver::AsahiDrmDevice as AsahiDevice;
 use crate::mmu;
 
