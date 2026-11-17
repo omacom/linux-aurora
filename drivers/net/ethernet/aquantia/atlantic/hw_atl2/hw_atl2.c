@@ -759,9 +759,16 @@ static int hw_atl2_hw_ring_tx_init(struct aq_hw_s *self,
 static int hw_atl2_hw_packet_filter_set(struct aq_hw_s *self,
 					unsigned int packet_filter)
 {
+	struct hw_atl2_priv *priv = self->priv;
+	u32 base_location = priv->l2_filters_base_index + 1;
+	u32 end_location = min_t(u32, HW_ATL2_MAC_MAX,
+				      priv->l2_filters_base_index +
+				      priv->l2_filter_count);
+
 	hw_atl2_hw_new_rx_filter_promisc(self, IS_FILTER_ENABLED(IFF_PROMISC));
 
-	return hw_atl_b0_hw_packet_filter_set(self, packet_filter);
+	return hw_atl_b0_hw_packet_filter_set_int(self, base_location,
+						  end_location, packet_filter);
 }
 
 #undef IS_FILTER_ENABLED
@@ -777,7 +784,12 @@ static int hw_atl2_hw_multicast_list_set(struct aq_hw_s *self,
 	struct aq_nic_cfg_s *cfg = self->aq_nic_cfg;
 	int err = 0;
 
-	if (count > (HW_ATL2_MAC_MAX - HW_ATL2_MAC_MIN)) {
+	/*
+	 * The firmware window is l2_filter_count slots starting at
+	 * l2_filters_base_index. Slot base holds the station MAC, so at most
+	 * l2_filter_count - 1 multicast addresses fit.
+	 */
+	if (count >= priv->l2_filter_count) {
 		err = -EBADRQC;
 		goto err_exit;
 	}
