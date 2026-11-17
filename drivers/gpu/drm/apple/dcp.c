@@ -8276,16 +8276,20 @@ static const char *dcp_external_sleep_vetoed(struct apple_dcp *dcp)
 	why = iomfb_v14_7_external_busy(dcp);
 	if (why)
 		return why;
-	if (iomfb_v14_7_external_failed(dcp)) {
-		if (dcp->v14)
-			dev_info(dcp->dev, "external display processor failed earlier: sleeping with it as it is\n");
+	if (iomfb_v14_7_external_failed(dcp))
 		return NULL;
-	}
 	if (READ_ONCE(dcp->active_typec_route) || READ_ONCE(dcp->typec_cable_connected))
 		return "a USB-C display is attached";
 	if (dcp->hdmi_hpd && gpiod_get_value_cansleep(dcp->hdmi_hpd) > 0)
 		return "an HDMI display is attached";
 	return NULL;
+}
+
+/* For system sleep, which dcp_external_sleep_vetoed() let through. */
+static void dcp_external_sleep_note(struct apple_dcp *dcp)
+{
+	if (dcp->external_native && dcp->v14 && iomfb_v14_7_external_failed(dcp))
+		dev_info(dcp->dev, "external display processor failed earlier: sleeping with it as it is\n");
 }
 
 #define DCP_EXT_IDLE_DELAY_MS	5000
@@ -8379,6 +8383,7 @@ static int dcp_platform_prepare(struct device *dev)
 			dev_warn(dev, "external firmware/scanout attempted: refusing PM prepare; reboot required for retained DMA\n");
 		return -EBUSY;
 	}
+	dcp_external_sleep_note(dcp);
 	WRITE_ONCE(dcp->external_suspended, true);
 	mutex_unlock(&dcp->hpd_mutex);
 	return 0;
@@ -9954,6 +9959,7 @@ static int dcp_platform_suspend(struct device *dev)
 				dev_warn(dev, "external firmware/scanout attempted: suspend refused; retained DMA requires reboot\n");
 			return -EBUSY;
 		}
+		dcp_external_sleep_note(dcp);
 		WRITE_ONCE(dcp->external_suspended, true);
 		mutex_unlock(&dcp->hpd_mutex);
 	}
