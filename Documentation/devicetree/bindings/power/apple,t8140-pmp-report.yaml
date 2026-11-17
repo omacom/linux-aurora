@@ -55,7 +55,9 @@ properties:
           - apple,t8122-pmp-v2-report
           - apple,t8140-pmp-v2-report
       - items:
-          - const: apple,t6031-pmp-v2-report
+          - enum:
+              - apple,t6031-pmp-v2-report
+              - apple,t6034-pmp-v2-report
           - const: apple,t6020-pmp-v2-report
 
   reg:
