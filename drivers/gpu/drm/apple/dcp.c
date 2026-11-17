@@ -4980,6 +4980,29 @@ int dcp_typec_prepare_route(struct apple_dcp *dcp)
  */
 static bool dcp_panel_handover_taken;
 
+/*
+ * J313 on DCP 13.5 finds its panel already on from the boot loader
+ * (set_device_enabled 1 -> 1), so the first power-on only sets a mode:
+ * the firmware never powers up its video interface or LTM block and
+ * logs that it could not find the Backlight service.  It then takes
+ * the levels Linux swaps in and reports them back, but the panel stays
+ * at the boot level until a DPMS cycle.  Give it that cycle once, as
+ * dcp_poweroff() runs it for an internal panel.
+ */
+static void dcp_cycle_handed_over_panel(struct apple_dcp *dcp)
+{
+	if (!dcp->panel_cold_poweron)
+		return;
+
+	dcp->panel_cold_poweron = false;
+	dcp_panel_handover_taken = true;
+	dev_info(dcp->dev, "power-cycling the panel handed over by the boot loader\n");
+	cancel_delayed_work(&dcp->swap_watchdog_wq);
+	if (dcp->avep)
+		av_service_disconnect(dcp);
+	_dcp_poweroff(dcp);
+}
+
 void dcp_poweron(struct platform_device *pdev)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
@@ -5122,24 +5145,7 @@ void dcp_poweron(struct platform_device *pdev)
 			dcp_dptx_connect(dcp, 0);
 	}
 
-	/*
-	 * J313 on DCP 13.5 finds its panel already on from the boot loader
-	 * (set_device_enabled 1 -> 1), so the first power-on only sets a mode:
-	 * the firmware never powers up its video interface or LTM block and
-	 * logs that it could not find the Backlight service.  It then takes
-	 * the levels Linux swaps in and reports them back, but the panel stays
-	 * at the boot level until a DPMS cycle.  Give it that cycle once, as
-	 * dcp_poweroff() runs it for an internal panel.
-	 */
-	if (dcp->panel_cold_poweron) {
-		dcp->panel_cold_poweron = false;
-		dcp_panel_handover_taken = true;
-		dev_info(dcp->dev, "power-cycling the panel handed over by the boot loader\n");
-		cancel_delayed_work(&dcp->swap_watchdog_wq);
-		if (dcp->avep)
-			av_service_disconnect(dcp);
-		_dcp_poweroff(dcp);
-	}
+	dcp_cycle_handed_over_panel(dcp);
 
 	switch (dcp->fw_compat) {
 	case DCP_FIRMWARE_V_12_3:

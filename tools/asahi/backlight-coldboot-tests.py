@@ -114,6 +114,7 @@ POWER_STUB(iomfb_poweron_v26_6_desktop)
 POWER_STUB(iomfb_v26_6_poweron)
 POWER_STUB(iomfb_v14_7_poweron)
 POWER_STUB(av_service_connect)
+POWER_STUB(dcp_cycle_handed_over_panel)
 static void cancel_delayed_work_sync(struct delayed_work *p) { (void)p; }
 static void cancel_delayed_work(struct delayed_work *p) { (void)p; }
 static void cancel_work_sync(struct work_struct *p) { (void)p; }
