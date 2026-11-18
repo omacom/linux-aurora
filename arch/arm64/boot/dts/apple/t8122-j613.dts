@@ -428,7 +428,10 @@
 	firmware-name = "apple/tpmtfw-j613.bin";
 };
 
+/* ADT spi2/mesa: data-ready on AP GPIO 199. */
 &mesa {
+	interrupt-parent = <&pinctrl_ap>;
+	interrupts = <199 IRQ_TYPE_EDGE_RISING>;
 	/* Per-device factory data from this Mac's own iBoot system container. */
 	firmware-name = "apple/mesacal-j613.bin";
 };

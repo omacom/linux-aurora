@@ -115,7 +115,7 @@
 	apple,temporal-filter = <1>;
 };
 
-/* Touch ID; its data-ready line (AP GPIO 199) is left out, so it polls. */
+/* Touch ID. The J613 file adds its data-ready line; the J615 polls. */
 &spi2 {
 	status = "okay";
 };
