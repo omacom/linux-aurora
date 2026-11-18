@@ -132,10 +132,12 @@ pub(crate) const CONFIG: Config = Config {
         version: 0x07041100,
         counts: 0x0021040a,
     }],
-    // The stubs the boot chains of this J516C leave loaded (RTKit-2419.140.12): the macOS 14.7
-    // chain's and the macOS 14.8 boot volume's. Same segment sizes and marker; the layout, board
-    // images and initdata below do not depend on which one is loaded. A further build can be
-    // admitted for one boot with `g15_accept_text_prefix`, which logs its digest.
+    // The stubs the boot chains of J516Cs leave loaded (RTKit-2419.140.12): the macOS 14.7
+    // chain's, the macOS 14.8 boot volume's and a third TEXT seen on two further J516Cs (omacom
+    // /linux-aurora#289). Same segment sizes and marker; the layout, board images and initdata
+    // below do not depend on which one is loaded. The names say where a digest was measured,
+    // not that it identifies one build. A further digest can be admitted for one boot with
+    // `g15_accept_text_prefix`, which logs it.
     firmware: &[
         FirmwareBuild {
             name: "macOS 14.7 stub firmware (iBoot-10151.140.19.700.2), J516C",
@@ -161,6 +163,21 @@ pub(crate) const CONFIG: Config = Config {
                 0x9d, 0x6b, 0xcd, 0xa0, 0x26, 0xcf,
             ],
         },
+        // Two J516Cs (iBoot2 iBoot-10151.140.19.700.2, OS firmware 14.7; iBoot1 mBoot-20457.1.29
+        // and mBoot-20457.41.3) load this TEXT. On the second, 10 boots, glxinfo on the M3 Max
+        // renderer and a GLES compute job with no mismatches, no GPU faults (#289).
+        FirmwareBuild {
+            name: "J516C stub firmware, TEXT 125f0497 (seen with iBoot-10151.140.19.700.2)",
+            machine: Some(kernel::c_str!("apple,j516c")),
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x12, 0x5f, 0x04, 0x97, 0xc7, 0x90, 0x4f, 0xde, 0x87, 0xb0, 0x5a, 0x92, 0x64,
+                0xa8, 0x8c, 0xf0, 0x3b, 0xdb, 0x35, 0x72, 0xa1, 0x71, 0x5c, 0xec, 0x91, 0xbd,
+                0x0f, 0x9b, 0x78, 0x24, 0x55, 0x44,
+            ],
+        },
         // Measured by the normal driver on J514C's 14.7 boot chain (system
         // firmware 26.5.2). Short native GL/Vulkan and normal-login checks passed;
         // power/thermal qualification remains open. Exact board identity is required.
@@ -174,6 +191,21 @@ pub(crate) const CONFIG: Config = Config {
                 0x66, 0x99, 0x13, 0xfb, 0xa2, 0x73, 0x6e, 0x4b, 0x8f, 0x8a, 0x0f, 0x81,
                 0xea, 0xdc, 0x5a, 0xc0, 0x0c, 0x9d, 0xc5, 0x1f, 0xdd, 0x4c, 0x9d, 0x37,
                 0x70, 0xc6, 0x6d, 0x2b, 0x0a, 0x1e, 0x87, 0x86,
+            ],
+        },
+        // The same TEXT as the J516C row above, on J514C: two 14-inch M3 Max owners load it
+        // with OS firmware 14.7 and bring the GPU up with `g15_accept_text_prefix`. Exact
+        // board identity is required; power/thermal qualification remains open.
+        FirmwareBuild {
+            name: "J514C stub firmware, TEXT 125f0497",
+            machine: Some(kernel::c_str!("apple,j514c")),
+            text_size: 0x64000,
+            data_size: 0x140000,
+            marker: 0x5cf28,
+            text_sha256: [
+                0x12, 0x5f, 0x04, 0x97, 0xc7, 0x90, 0x4f, 0xde, 0x87, 0xb0, 0x5a, 0x92, 0x64,
+                0xa8, 0x8c, 0xf0, 0x3b, 0xdb, 0x35, 0x72, 0xa1, 0x71, 0x5c, 0xec, 0x91, 0xbd,
+                0x0f, 0x9b, 0x78, 0x24, 0x55, 0x44,
             ],
         },
     ],
