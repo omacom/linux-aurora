@@ -74,7 +74,8 @@ static const struct apple_spmi_hw apple_spmi_gen1 = {
 
 /*
  * As gen1, but with 192 peripheral interrupts: macOS's nub-spmi0 numbers its
- * events from 0xc0, and with a reply waiting the pending bit is 192.
+ * events from 0xc0, and with a reply waiting the pending bit is 192. T8103's
+ * nub-spmi does the same.
  */
 static const struct apple_spmi_hw apple_spmi_t6000 = {
 	.status = SPMI_STATUS_REG,
@@ -544,7 +545,7 @@ static int apple_spmi_probe(struct platform_device *pdev)
 static const struct of_device_id apple_spmi_match_table[] = {
 	{ .compatible = "apple,t8142-spmi", .data = &apple_spmi_gen4 },
 	{ .compatible = "apple,t6000-spmi", .data = &apple_spmi_t6000 },
-	{ .compatible = "apple,t8103-spmi", .data = &apple_spmi_gen1 },
+	{ .compatible = "apple,t8103-spmi", .data = &apple_spmi_t6000 },
 	{ .compatible = "apple,spmi", .data = &apple_spmi_gen1 },
 	{}
 };
