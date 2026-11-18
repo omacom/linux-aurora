@@ -36,16 +36,26 @@ use std::{cell::{Cell, RefCell, RefMut}, mem::MaybeUninit, ops::{Deref, DerefMut
 type Error = i32;
 trait FromErrno { fn from_errno(value: i32) -> Self; }
 impl FromErrno for Error { fn from_errno(value: i32) -> Self { value } }
+trait ToErrno { fn to_errno(self) -> i32; }
+impl ToErrno for Error { fn to_errno(self) -> i32 { self } }
 type Result<T = ()> = std::result::Result<T, Error>;
 const GFP_KERNEL: u32 = 0;
 const EINVAL: Error = -22;
+const ENODEV: Error = -19;
+const HAS_T6031_REPORT: bool = false; // T6031_REPORT_SUPPORT
 macro_rules! dev_info { ($($args:tt)*) => {{}}; }
 macro_rules! dev_err { ($($args:tt)*) => {{}}; }
+#[allow(unused_macros)] // Compatibility with sources predating the T6031 report.
+macro_rules! dev_warn { ($($args:tt)*) => {{ WARNINGS.set(WARNINGS.get() + 1); }}; }
 thread_local! {
     static FAIL: Cell<u32> = const { Cell::new(0) };
     static OWNER_DROPS: Cell<u32> = const { Cell::new(0) };
     static BUFFER_DROPS: Cell<u32> = const { Cell::new(0) };
     static PMP_CALLS: Cell<u32> = const { Cell::new(0) };
+    static REPORT_RESULT: Cell<i32> = const { Cell::new(0) };
+    static REPORT_ENABLE: Cell<Option<bool>> = const { Cell::new(None) };
+    static PHASES: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    static WARNINGS: Cell<u32> = const { Cell::new(0) };
 }
 fn step(site: u32) -> Result {
     if FAIL.get() & (1 << site) != 0 { Err(-100 - site as i32) } else { Ok(()) }
@@ -77,11 +87,12 @@ struct AsahiDevice;
 impl AsahiDevice { fn as_ref(&self) -> &Self { self } }
 mod hw {
     #[derive(PartialEq)]
-    pub enum Platform { Adt, AdtWithPmp }
+    pub enum Platform { Adt, AdtWithPmp, DeviceTree }
 }
 struct Config { platform: hw::Platform }
 static CONFIG: Config = Config { platform: hw::Platform::Adt };
 static PMP_CONFIG: Config = Config { platform: hw::Platform::AdtWithPmp };
+static T6031_CONFIG: Config = Config { platform: hw::Platform::DeviceTree };
 mod mmu { pub struct Uat; }
 mod regs {
     pub struct Identity;
@@ -155,12 +166,17 @@ impl Shared {
 }
 // FIRMWARE
 impl Firmware {
-    fn init_graphs(&mut self) -> Result { step(6) }
+    fn init_graphs(&mut self) -> Result { PHASES.with_borrow_mut(|p| p.push("graphs")); step(6) }
     // BACKEND
 }
 mod boot {
     use super::*;
     pub mod glue {
+        pub unsafe fn asahi_g15_pmp_report_t6031(enable: bool) -> i32 {
+            super::PHASES.with_borrow_mut(|p| p.push("report"));
+            assert!(super::REPORT_ENABLE.replace(Some(enable)).is_none(), "duplicate T6031 report");
+            super::REPORT_RESULT.get()
+        }
         pub unsafe fn asahi_g15_pmp_ready() -> i32 {
             super::PMP_CALLS.set(super::PMP_CALLS.get() + 1);
             match super::step(13) { Ok(()) => 0, Err(e) => e }
@@ -201,6 +217,8 @@ fn orphan() -> boot::Orphan {
 }
 fn reset(fail: u32) {
     FAIL.set(fail); OWNER_DROPS.set(0); BUFFER_DROPS.set(0); PMP_CALLS.set(0);
+    REPORT_RESULT.set(0); REPORT_ENABLE.set(None); WARNINGS.set(0);
+    PHASES.with_borrow_mut(Vec::clear);
 }
 fn retained(label: &str) {
     assert_eq!(OWNER_DROPS.get(), 0, "{label}: live session owner dropped");
@@ -257,12 +275,51 @@ fn main() {
     let firmware = Firmware::start_backend(&AsahiDevice, cfg, booted, &shared).expect("normal backend");
     assert_eq!(PMP_CALLS.get(), u32::from(cfg.platform == hw::Platform::AdtWithPmp),
                "PMP readiness used on the wrong platform");
+    assert_eq!(REPORT_ENABLE.get(), None, "T6031 report used on the wrong platform");
     assert!(Arc::ptr_eq(&uat, &firmware.session.uat()));
     assert!(!shared.orphaned.load(Ordering::Acquire));
     retained("normal success");
     std::mem::forget((shared, firmware));
     }
-    println!("PASS 26 retention cases: orphan OOM, six backend failure sites, four boot-completion sites, PMP readiness failure and both platform success paths");
+    let mut cases = 26;
+    if HAS_T6031_REPORT {
+        // Setup errors must retain the session without attempting a later report.
+        for site in 1..=6 {
+            for orphan_oom in [false, true] {
+                reset((1 << site) | if orphan_oom { 1 << 7 } else { 0 });
+                REPORT_RESULT.set(-5);
+                let shared = Shared::new();
+                let result = Firmware::start_backend(&AsahiDevice, &T6031_CONFIG, booted(), &shared);
+                assert!(matches!(result, Err(e) if e == -100 - site as i32), "T6031 setup error changed");
+                assert_eq!(REPORT_ENABLE.get(), None, "T6031 report attempted after failed setup");
+                assert_eq!(WARNINGS.get(), 0, "report warning before successful setup");
+                retained("T6031 setup failure");
+                assert_eq!(shared.orphan.lock().is_some(), !orphan_oom);
+                std::mem::forget(shared);
+                cases += 1;
+            }
+        }
+        for (reply, warnings, label) in [(0, 0, "success"), (-19, 0, "ENODEV"), (-5, 1, "I/O failure")] {
+            reset(1 << 13); // The T6030 vote must remain irrelevant here.
+            REPORT_RESULT.set(reply);
+            let shared = Shared::new();
+            let booted = booted();
+            let uat = booted.session.uat();
+            let firmware = Firmware::start_backend(&AsahiDevice, &T6031_CONFIG, booted, &shared)
+                .expect("T6031 report errors are nonfatal");
+            assert_eq!(PMP_CALLS.get(), 0, "T6030 vote used on T6031");
+            assert_eq!(REPORT_ENABLE.get(), Some(true), "T6031 report must enable once");
+            PHASES.with_borrow(|p| assert_eq!(p.as_slice(), ["graphs", "report"], "T6031 report ordering"));
+            assert_eq!(WARNINGS.get(), warnings, "T6031 warning policy for {label}");
+            assert!(Arc::ptr_eq(&uat, &firmware.session.uat()));
+            assert!(!shared.orphaned.load(Ordering::Acquire));
+            assert!(shared.orphan.lock().is_none());
+            retained("T6031 report result");
+            std::mem::forget((shared, firmware));
+            cases += 1;
+        }
+    }
+    println!("PASS {cases} retention cases: existing 26 plus T6031 report cases when present");
     println!("normal success owner_drops={} buffer_drops={}", OWNER_DROPS.get(), BUFFER_DROPS.get());
 }
 '''
@@ -280,9 +337,12 @@ def main():
     kbox = (ROOT / "rust/kernel/alloc/kbox.rs").read_text()
     orphan = item(mod, "    pub(crate) fn orphan(")
     backend = item(mod, "    fn start_backend(")
+    has_t6031_report = "boot::glue::asahi_g15_pmp_report_t6031" in backend
     start = item(boot, "pub(crate) fn start(")
     tail = start[start.index("    let mut events = Events::new();"):]
     source = PREFIX.replace("    // ORPHAN\n", orphan + "\n")
+    if has_t6031_report:
+        source = source.replace("false; // T6031_REPORT_SUPPORT", "true; // T6031_REPORT_SUPPORT")
     allocator_new = item(kbox, "    pub fn new(x: T, flags: Flags)")
     allocator_new = allocator_new.replace("pub fn new(x: T, flags: Flags) -> Result<Self, AllocError>",
                                           "fn new(x: T, flags: u32) -> Result<Self>")
@@ -305,11 +365,23 @@ def main():
             "let _ret = unsafe { boot::glue::asahi_g15_pmp_ready() }; let ret = 0;")
         variants["pmp-on-other-platform"] = source.replace(
             "if cfg.platform != hw::Platform::AdtWithPmp {", "if false {")
+        if has_t6031_report:
+            report = item(backend, "        if cfg.platform == hw::Platform::DeviceTree {")
+            variants["t6031-before-graphs"] = source.replace(report, "").replace(
+                "        let result = firmware.init_graphs()", report + "\n        let result = firmware.init_graphs()")
+            variants["t6031-on-other-platform"] = source.replace(
+                "if cfg.platform == hw::Platform::DeviceTree {", "if cfg.platform != hw::Platform::DeviceTree {")
+            variants["t6031-fatal-error"] = source.replace(
+                "let ret = unsafe { boot::glue::asahi_g15_pmp_report_t6031(true) };",
+                "let ret = unsafe { boot::glue::asahi_g15_pmp_report_t6031(true) }; if ret != 0 { return Err(Error::from_errno(ret)); }")
+            variants["t6031-warn-enodev"] = source.replace("else if ret != ENODEV.to_errno() {", "else {")
+            variants["t6031-hide-warning"] = source.replace("else if ret != ENODEV.to_errno() {", "else if false {")
     receipt = {"scope": __doc__, "sources": {
         name: hashlib.sha256(text.encode()).hexdigest()
         for name, text in [("mod.rs", mod), ("boot.rs", boot), ("kbox.rs", kbox)]},
         "rustc": subprocess.check_output([os.environ.get("HOSTRUSTC", "rustc"), "--version"], text=True).strip(),
-        "cases": 26, "public_old_source_control": CONTROL_REF, "variants": {}}
+        "cases": 41 if has_t6031_report else 26,
+        "public_old_source_control": CONTROL_REF, "variants": {}}
     for name, text in variants.items():
         if name != "actual" and text == source:
             raise RuntimeError("NOT_APPLIED " + name)
@@ -328,7 +400,12 @@ def main():
             expected = {"consume-orphan-before-allocation": "orphan allocation: live session owner dropped",
                         "unguarded-registry-allocation": "backend failure: live session owner dropped",
                         "ignore-pmp-readiness-error": "PMP readiness error changed",
-                        "pmp-on-other-platform": "normal backend: -113"}[name]
+                        "pmp-on-other-platform": "normal backend: -113",
+                        "t6031-before-graphs": "T6031 report attempted after failed setup",
+                        "t6031-on-other-platform": "T6031 report used on the wrong platform",
+                        "t6031-fatal-error": "T6031 report errors are nonfatal",
+                        "t6031-warn-enodev": "T6031 warning policy for ENODEV",
+                        "t6031-hide-warning": "T6031 warning policy for I/O failure"}[name]
             if result.returncode == 0 or expected not in result.stderr:
                 raise RuntimeError("INVALID mutant outcome " + name + "\n" + result.stderr)
             if name in ("consume-orphan-before-allocation", "unguarded-registry-allocation"):
@@ -339,7 +416,7 @@ def main():
     after = subprocess.run([str(out / "actual")], capture_output=True, text=True, check=True)
     receipt["actual_after_mutants"] = {"exit": after.returncode, "stdout": after.stdout, "stderr": after.stderr}
     receipt["fixed_invariants"] = {"live_session_owner_drops": 0, "firmware_buffer_drops": 0,
-                                   "checked_cases": 26}
+                                   "checked_cases": receipt["cases"]}
     (out / "result.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print(json.dumps(receipt, indent=2))
 
