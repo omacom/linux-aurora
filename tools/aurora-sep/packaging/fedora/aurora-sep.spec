@@ -8,7 +8,7 @@
 
 Name:           aurora-sep
 Version:        1
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        Loader and desktop integration for the Apple SEP fingerprint driver
 
 License:        GPL-2.0-only
@@ -26,6 +26,7 @@ Source9:        aurora-sep-greeter-fingerprint
 Source10:       aurora-sep-greeter-fingerprint.service
 Source11:       aurora_sep.te
 Source12:       aurora_sep.fc
+Source13:       apple-sep.conf
 
 BuildArch:      noarch
 BuildRequires:  systemd-rpm-macros
@@ -35,6 +36,8 @@ Requires:       coreutils
 Requires:       fprintd
 Requires:       keyutils
 Requires:       kmod
+# Same path as aurora-touchid. A second copy passes both option lines.
+Conflicts:      aurora-touchid
 Requires:       (%{name}-selinux = %{version}-%{release} if selinux-policy-%{selinuxtype})
 # Only for aurora-sep-greeter-fingerprint.service, which is off by default.
 Suggests:       /usr/bin/gresource
@@ -90,6 +93,8 @@ sed 's|@FPRINTD@|%{_libexecdir}/fprintd|' %{SOURCE7} \
     >%{buildroot}%{_unitdir}/fprintd.service.d/50-aurora-sep-no-timeout.conf
 install -Dpm 0644 %{SOURCE8} \
     %{buildroot}%{_prefix}/lib/systemd/logind.conf.d/50-aurora-sep.conf
+install -Dpm 0644 %{SOURCE13} \
+    %{buildroot}%{_prefix}/lib/modprobe.d/apple-sep.conf
 # Load the driver at boot, so the enclave is up before the login screen asks.
 install -d %{buildroot}%{_presetdir}
 echo 'enable aurora-sep.service' >%{buildroot}%{_presetdir}/80-aurora-sep.preset
@@ -137,6 +142,7 @@ fi
 %{_unitdir}/fprintd.service.d/aurora-sep.conf
 %{_unitdir}/fprintd.service.d/50-aurora-sep-no-timeout.conf
 %{_prefix}/lib/systemd/logind.conf.d/50-aurora-sep.conf
+%{_prefix}/lib/modprobe.d/apple-sep.conf
 %{_presetdir}/80-aurora-sep.preset
 
 %files selinux
@@ -144,6 +150,10 @@ fi
 %ghost %verify(not md5 size mode mtime) %{_sharedstatedir}/selinux/%{selinuxtype}/active/modules/200/%{modulename}
 
 %changelog
+* Sat Oct 31 2026 Lucas Goossen <lucas.goossen@hey.com> - 1-8
+- Ship /usr/lib/modprobe.d/apple-sep.conf (xart_writes=1 provision_keybag=1)
+- Conflict with aurora-touchid, which installs the same path
+
 * Mon Oct 19 2026 Ryan Murray <ryan@aurorasilicon.org> - 1-7
 - XART-SAFETY.md: what the xART guard allows for restore, use, setup and
   recovery, per platform, and what a rollback does to its list

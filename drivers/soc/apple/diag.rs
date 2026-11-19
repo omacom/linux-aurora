@@ -40,6 +40,7 @@ extern "C" {
     fn sep_diag_set_touchid(started: bool);
     fn sep_diag_set_sensor_attach(state: c_int);
     fn sep_diag_set_restore(state: c_int);
+    fn sep_diag_set_xart(xart: bool);
     fn sep_diag_set_xart_guard(level: c_uint, list_loaded: bool, matching: c_int);
     fn sep_diag_xart_guard_refused(matching: c_int);
     fn sep_diag_bringup_ended();
@@ -113,6 +114,22 @@ pub(crate) fn register(
         )
     };
     kernel::error::to_result(ret)
+}
+
+/// The xART store opened after probe. Updates the cached facts. Does not
+/// register the sysfs group again.
+pub(crate) fn refresh_store(xart_writable: bool, guard: Option<(u8, bool)>) {
+    XART_WRITABLE.store(xart_writable, Relaxed);
+    let (level, list_loaded) = guard.unwrap_or((0, false));
+    GUARD_LEVEL.store(u32::from(level), Relaxed);
+    GUARD_LIST.store(list_loaded, Relaxed);
+    REFUSALS.store(0, Relaxed);
+    // SAFETY: stores the words the diag attributes read. The group already
+    // exists; this does not add it.
+    unsafe {
+        sep_diag_set_xart(xart_writable);
+        sep_diag_set_xart_guard(c_uint::from(level), list_loaded, matching() as c_int);
+    }
 }
 
 pub(crate) fn attach(attached: bool) {

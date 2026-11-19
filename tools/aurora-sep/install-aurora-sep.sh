@@ -255,8 +255,8 @@ RUN_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || RUN_ID=""
 
 # The kernel package version and the release tag move independently: a release
 # that only changes m1n1 reuses the previous kernel packages unchanged.
-VERSION=7.1.12.aurora2-12.4
-TAG=sep-7.1.12.aurora2-12.4
+VERSION=7.1.12.aurora2-12.6
+TAG=sep-7.1.12.aurora2-12.6-stable
 # Packages are fetched from this script's own tag, never from "latest": the
 # checksums below belong to this release and nothing else.
 PUBLIC_RELEASE_URL=https://github.com/omacom/linux-aurora/releases/download/$TAG
@@ -272,20 +272,20 @@ RELEASES_API=${AURORA_RELEASES_API:-$PUBLIC_RELEASES_API}
 # Where to always get the current script, whatever this copy turns out to be.
 LATEST_URL=https://github.com/omacom/linux-aurora/releases/latest/download/install-aurora-sep.sh
 PACKAGES=(
-  "linux-aurora-$VERSION-aarch64.pkg.tar.zst fded7d73e13dbe7f82722b925a257835761584203c5189337a251abab298bbde"
-  "linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst a8da8cd00a40010ebe6096ae50c53b1ae461ae6570aa437f5b79a02f10b80cca"
+  "linux-aurora-$VERSION-aarch64.pkg.tar.zst d954e8c90f57b33d19d4a166d6f70225d7377abed59b35f3e20ac6d20427a39f"
+  "linux-aurora-headers-$VERSION-aarch64.pkg.tar.zst 758c469c2eab45f87ced3f44a59d86539b1b7b53aa1040dcbe1ef52f5c36c156"
   "libfprint-1.94.100-1.1-aarch64.pkg.tar.zst bc7d9762db6644f2cfb58ddb209602c1d513845eb1498c098e01f12600fcbdf9"
-  "aurora-touchid-20261003-1-any.pkg.tar.zst 29b0360fac8c257d754e64bd1b9c33c487eb2595dd3c31e9138d7a476afa3d64"
+  "aurora-touchid-20261003-3-any.pkg.tar.zst 6cadb78378f0fb7fe068b2efd9e33896eccf5a07b19905ee9c44aac9a3b3170a"
 )
 # The one m1n1 for every Mac, as "file sha256": M1 and M2, an M3 on the handoff
 # path (see m3_plan), and the MacBook Neo once NEO_AURORA_M1N1 is 1. Macs differ
 # only in the switches /etc/m1n1.conf arms (m3_switches), never in the binary.
-M1N1_PACKAGE="m1n1-aurora-1.6.1.aurora13-1-aarch64.pkg.tar.zst 23c7aff0f7b2da5ce272bce0eab7893e01091ce4d9350e4e650af1e9195208fa"
+M1N1_PACKAGE="m1n1-aurora-1.6.1.aurora14-1-aarch64.pkg.tar.zst 4b4304a3f6e41e738e4003903084ee759fae2677162d960b6be65ccdf99de991"
 # The sha256 of the m1n1.bin in M1N1_PACKAGE: the bytes update-m1n1 puts at
 # the start of boot.bin. The script tells m1n1 builds apart by these bytes,
 # never by the version string they report: aurora8.5-1 and 8.5-2 both reported
 # v1.6.1-omarchy.aurora8.5.
-M1N1_BIN_SHA=bf7b74a4648216432ac36171d896b11fa0584da19b242b16a11aa055963091de
+M1N1_BIN_SHA=78b10efa89dcdc4aa9dfe8922e839b71ab1321ba19897ccc888b5e57eef5a6b9
 # 0: a MacBook Neo keeps its own m1n1 (its M1N1= and U_BOOT= in
 # /etc/default/update-m1n1), as before 12.0. 1: it gets M1N1_PACKAGE like every
 # other Mac, and update-m1n1 builds its boot.bin from that m1n1 and the Neo's
@@ -297,8 +297,13 @@ PIN_BEGIN="# >>> aurora-sep pin (remove with: install-aurora-sep.sh --uninstall)
 PIN_END="# <<< aurora-sep pin"
 STATE=/var/lib/aurora-sep
 FALLBACK_ID=aurora-sep-previous-kernel
-# Written only by --read-only; keeps the driver from writing to the enclave.
-MODPROBE_CONF=/etc/modprobe.d/aurora-sep.conf
+# Written only by --read-only. The name matches the file aurora-sep and
+# aurora-touchid install under /usr/lib/modprobe.d, so this file hides it.
+# A second name would pass both option lines, and the driver's set-once
+# parameters then refuse to load. Earlier installs wrote MODPROBE_CONF_OLD;
+# sep_migrate_modprobe_conf renames that onto this name.
+MODPROBE_CONF=/etc/modprobe.d/apple-sep.conf
+MODPROBE_CONF_OLD=/etc/modprobe.d/aurora-sep.conf
 READ_ONLY=0
 DESKTOP_FIXES=0
 DESKTOP_FIXES_DATA=""
@@ -3643,6 +3648,28 @@ calibration() {
     warn "could not extract the calibration; Touch ID will not work until it is present at $out"
 }
 
+# Path of a --read-only override, under either name this script has used.
+sep_read_only_conf() {
+  if [[ -f $MODPROBE_CONF ]]; then
+    printf '%s\n' "$MODPROBE_CONF"
+  elif [[ -f $MODPROBE_CONF_OLD ]]; then
+    printf '%s\n' "$MODPROBE_CONF_OLD"
+  fi
+}
+
+# An earlier --read-only install wrote MODPROBE_CONF_OLD. That name does not
+# hide /usr/lib/modprobe.d/apple-sep.conf, so modprobe passes both option
+# lines and the set-once parameters refuse to load. Rename it. If both
+# names exist, drop the old one.
+sep_migrate_modprobe_conf() {
+  [[ -e $MODPROBE_CONF_OLD ]] || return 0
+  if [[ -e $MODPROBE_CONF ]]; then
+    $sudo rm -f -- "$MODPROBE_CONF_OLD"
+  else
+    $sudo mv -- "$MODPROBE_CONF_OLD" "$MODPROBE_CONF"
+  fi
+}
+
 # The first line in modprobe.d that blacklists or redirects apple_sep, other
 # than our own file. Either spelling is the owner saying "do not load this".
 sep_block_line() {
@@ -3661,6 +3688,7 @@ sep_block_line() {
 # the owner has to be able to opt out, and a block they already set must win.
 sep_policy() {
   local block
+  sep_migrate_modprobe_conf
   block=$(sep_block_line)
   if [[ -n $block ]]; then
     warn "apple_sep is blocked on this Mac ($block).
@@ -3686,7 +3714,7 @@ sep_policy() {
 
 sep_write_notice() {
   (( READ_ONLY )) && return 0
-  [[ -f $MODPROBE_CONF || -n $(sep_block_line) ]] && return 0
+  [[ -n $(sep_read_only_conf) || -n $(sep_block_line) ]] && return 0
   warn "on the first boot of a Mac with a Touch ID profile, the SEP driver creates
     an identity keybag and writes to the enclave's anti-replay store. Use a Mac
     you can DFU-restore. If you cannot, press Ctrl-C now and run with --read-only:
@@ -4213,10 +4241,11 @@ package_database_check() {
 }
 
 install_all() {
-  local entry file sha kernel chain rc
+  local entry file sha kernel chain rc ro
   local -a entries candidate_archives=()
   release_source
   require_supported_soc
+  sep_migrate_modprobe_conf
   if ((ESP_ARCHIVE_HISTORY)); then
     ((!READ_ONLY)) || die "--archive-esp-history changes the EFI partition and cannot be combined with --read-only"
     esp_history_run archive
@@ -4472,9 +4501,9 @@ install_all() {
     say "Done. Reboot: expect the desktop on the boot framebuffer. Touch ID is not supported
     on M3 yet. How to help bring this M3 further: step 11 of the test plan that the
     --agent-prompt command below prints."
-  elif [[ -f $MODPROBE_CONF ]]; then
+  elif ro=$(sep_read_only_conf); [[ -n $ro ]]; then
     say "Done, read-only. Reboot; the SEP driver will attach and report without writing."
-    echo "   Enrolling a finger needs writes: delete $MODPROBE_CONF, reboot, then run aurora-touchid-setup."
+    echo "   Enrolling a finger needs writes: delete $ro, reboot, then run aurora-touchid-setup."
   else
     say "Done. Reboot, then run:  aurora-touchid-setup"
   fi
@@ -4615,7 +4644,7 @@ uninstall_all() {
       ;;
     handoff) m3_restore_bringup ;;
   esac
-  $sudo rm -f "$MODPROBE_CONF"
+  $sudo rm -f "$MODPROBE_CONF" "$MODPROBE_CONF_OLD"
   # Keep recovery state and modules if the checked entry cannot be removed.
   if [[ $(boot_chain) == limine ]] && m3_limine_cleanup_needed; then
     m3_limine_remove_check remove
@@ -4675,7 +4704,7 @@ sep_diag() {
 }
 
 reset_touchid() {
-  local yes=0 force=0 arg f d keybag found=0
+  local yes=0 force=0 arg f d keybag found=0 ro
   for arg in "$@"; do
     case $arg in
       --yes) yes=1 ;;
@@ -4684,8 +4713,9 @@ reset_touchid() {
     esac
   done
   grep -qa 'apple,' /proc/device-tree/compatible 2>/dev/null || die "this is not an Apple Silicon Mac"
-  [[ -f $MODPROBE_CONF ]] &&
-    die "this Mac was installed read-only ($MODPROBE_CONF): a new keybag needs enclave writes. Delete that file first if you mean to allow them."
+  ro=$(sep_read_only_conf)
+  [[ -z $ro ]] ||
+    die "this Mac was installed read-only ($ro): a new keybag needs enclave writes. Delete that file first if you mean to allow them."
   for f in "${TOUCHID_STATE_FILES[@]}"; do [[ -e $f ]] && found=1; done
   ((found)) || die "no Touch ID state on this Mac; nothing to reset"
 

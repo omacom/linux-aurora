@@ -39,12 +39,56 @@ if [ "${AURORA_SEP_SESSION:-0}" != 1 ]; then
     exec keyctl session aurora-sep-load env AURORA_SEP_SESSION=1 "$0" "$@"
 fi
 
-modprobe apple_sep xart_writes=1 provision_keybag=1
+# aurora-sep and aurora-touchid each own /usr/lib/modprobe.d/apple-sep.conf
+# and conflict. Writing it here leaves an unowned file. A --read-only
+# install hides that file with /etc/modprobe.d/apple-sep.conf.
+# Rust parameters are registered with perm 0, so
+# /sys/module/apple_sep/parameters never appears. An already-loaded module
+# is not a failure: udev loads it on the M1 family and J700 before this
+# service runs, and stopping here skips Touch ID activation and fingerprint
+# restore (aurora-sep-ready Requires this unit). diag/xart is the running
+# driver's own report of writes. AURORA_SEP_DIAG_XART overrides that file;
+# "none" skips the hint.
+module_dir=${AURORA_SEP_MODULE_DIR:-/sys/module/apple_sep}
+already_loaded=0
+if [ ! -d "$module_dir" ]; then
+    modprobe apple_sep
+else
+    already_loaded=1
+fi
 
-work=$(mktemp -d /run/aurora-sep-load.XXXXXX)
+# A module loaded read-only keeps those parameters until the next boot.
+# Said only after the trusted-key wait fails: diag xart is also "disabled"
+# while the iBoot container link is still missing, and that wait is long
+# enough for the store to open when writes are actually on.
+read_only_loaded_hint() {
+    [ "$already_loaded" = 1 ] || return 0
+    if [ -z "${AURORA_SEP_DIAG_XART+x}" ]; then
+        diag=
+        for f in /sys/bus/platform/devices/*.sep/diag/xart; do
+            if [ -r "$f" ]; then
+                diag=$f
+                break
+            fi
+        done
+    else
+        diag=$AURORA_SEP_DIAG_XART
+        if [ -z "$diag" ] || [ "$diag" = none ]; then
+            return 0
+        fi
+    fi
+    [ -n "$diag" ] && [ -r "$diag" ] || return 0
+    read -r xart_state <"$diag" || return 0
+    if [ "$xart_state" = disabled ]; then
+        log "apple_sep was already loaded read-only (diag xart=disabled). The option file applies on the next boot; reboot before expecting writes."
+    fi
+}
+
+run_dir=${AURORA_SEP_RUN_DIR:-/run}
+work=$(mktemp -d "$run_dir/aurora-sep-load.XXXXXX")
 cleanup() {
     case "$work" in
-        /run/aurora-sep-load.*) rm -rf -- "$work" ;;
+        "$run_dir"/aurora-sep-load.*) rm -rf -- "$work" ;;
     esac
 }
 trap cleanup EXIT HUP INT TERM
@@ -72,6 +116,7 @@ done
 
 if [ "$verified" != true ]; then
     log "the enclave did not seal and unseal a trusted key within ${ready_timeout} s"
+    read_only_loaded_hint
     exit 1
 fi
 log "trusted keys work after $(($(uptime_s) - start)) s"

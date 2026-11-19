@@ -16,7 +16,10 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
+#include <linux/namei.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/types.h>
 
 #include "shim.h"
@@ -173,5 +176,82 @@ int sep_store_sync_parent(void *handle)
 
 	ret = vfs_fsync(dir, 0);
 	fput(dir);
+	return ret;
+}
+
+/*
+ * Removes a driver-owned file under init's root and kernel credentials, the
+ * same way the opens above run. The parent directory stays. A negative
+ * dentry is ENOENT. Passes NULL for the delegation out-parameter: this file
+ * is not NFS-exported, and a lease break is not waited on.
+ */
+int sep_store_unlink(const char *path)
+{
+	const char *slash, *base;
+	char *dir;
+	size_t dirlen;
+	struct cred *kern;
+	const struct cred *old;
+	struct path root;
+	struct path parent;
+	struct dentry *dentry;
+	struct qstr name;
+	int ret;
+
+	if (!path || path[0] != '/')
+		return -EINVAL;
+	slash = strrchr(path, '/');
+	if (!slash || slash == path || !slash[1])
+		return -EINVAL;
+	base = slash + 1;
+	dirlen = slash - path;
+	dir = kmalloc(dirlen + 1, GFP_KERNEL);
+	if (!dir)
+		return -ENOMEM;
+	memcpy(dir, path, dirlen);
+	dir[dirlen] = '\0';
+
+	kern = prepare_kernel_cred(&init_task);
+	if (!kern) {
+		kfree(dir);
+		return -ENOMEM;
+	}
+	task_lock(&init_task);
+	get_fs_root(init_task.fs, &root);
+	task_unlock(&init_task);
+
+	old = override_creds(kern);
+	ret = vfs_path_lookup(root.dentry, root.mnt, dir, LOOKUP_DIRECTORY,
+			      &parent);
+	kfree(dir);
+	if (ret)
+		goto out_cred;
+
+	ret = mnt_want_write(parent.mnt);
+	if (ret)
+		goto out_parent;
+
+	name = QSTR(base);
+	inode_lock_nested(d_inode(parent.dentry), I_MUTEX_PARENT);
+	dentry = lookup_one(mnt_idmap(parent.mnt), &name, parent.dentry);
+	if (IS_ERR(dentry)) {
+		ret = PTR_ERR(dentry);
+		goto unlock;
+	}
+	if (d_is_negative(dentry))
+		ret = -ENOENT;
+	else
+		ret = vfs_unlink(mnt_idmap(parent.mnt), d_inode(parent.dentry),
+				 dentry, NULL);
+	dput(dentry);
+unlock:
+	inode_unlock(d_inode(parent.dentry));
+	mnt_drop_write(parent.mnt);
+out_parent:
+	path_put(&parent);
+out_cred:
+	put_cred(revert_creds(old));
+	path_put(&root);
+	put_cred(kern);
 	return ret;
 }

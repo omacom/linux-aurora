@@ -49,16 +49,39 @@ for example with `systemctl edit aurora-sep.service`:
 Environment=AURORA_SEP_READY_TIMEOUT=180
 ```
 
-The driver defaults to `xart_writes=1`. It exports no module alias, so udev
-never loads it on its own: the service above loads it, once the iBoot system
-container is reachable. Writes are accepted only when the APFS `.gl`
+The driver exports its module alias, so udev loads it where the device tree
+already enables the SEP node. That is the M1 family and J700 (MacBook Neo,
+T8140), whose device tree enables the SEP node, so it should work there too,
+but J700 has not been tested with this change. On the M1
+laptops the Secure Enclave sits in the path of the microphone data lines, and
+the microphones only work once it runs. There the service above remains
+harmless and is no longer required to load the driver. The M2, M2 Pro/Max,
+and M3 Air nodes stay disabled in the device tree and are enabled by module
+init, so those machines still need the loader. If udev loads the driver before the iBoot system
+container's partition link exists, the boot waits up to 30 s for it and then
+runs without the xART store (Touch ID and trusted keys stay unavailable until
+the next boot). A default load, including one with `xart_writes=0`, still
+creates `/var/lib/aurora-sep-host-state.bin` (2359296 bytes) the first time
+it opens that Linux-only store. That file is not an xART write.
+
+The driver defaults to `xart_writes=0 provision_keybag=0`: read-only operation,
+which boots the enclave but refuses Touch ID enrol and verify. `aurora-sep`
+and `aurora-touchid` each install `/usr/lib/modprobe.d/apple-sep.conf` with
+`options apple_sep xart_writes=1 provision_keybag=1`, and each conflicts with
+the other: that path can have only one owner. A bare `modprobe` before that
+file is installed stays read-only. A `--read-only` install hides the packaged
+file by writing the same name, `/etc/modprobe.d/apple-sep.conf`, with
+`options apple_sep xart_writes=0 provision_keybag=0`. An older install wrote
+`/etc/modprobe.d/aurora-sep.conf`; the installer and `aurora-touchid` rename
+that file onto `apple-sep.conf`. Another name in `/etc/modprobe.d` does not
+override the packaged file: modprobe passes both lines, and the set-once
+parameters abort the load. Writes are accepted only when the APFS `.gl`
 extent passes the driver's narrow ownership checks: one physical extent, no snapshots or revert
 state, and a single extent reference owned by the `.gl` inode. The kernel
 resolves that extent from checksum-validated APFS metadata; unsupported layouts
-fail closed. Set `options apple_sep xart_writes=0 provision_keybag=0` in a
-modprobe configuration to retain read-only operation. `provision_keybag=1`
-is also the default: first boot creates the Linux identity needed for trusted
-keys, and later boots recover that identity and its machine reference key.
+fail closed. With `provision_keybag=1`, the first boot creates the Linux
+identity needed for trusted keys, and later boots recover that identity and its
+machine reference key.
 An existing unreadable or invalid identity is not silently replaced.
 Enabling writes has been tested on m2 with identity-keybag provisioning,
 trusted-key seal/unseal, and reboot reload. The raw iBoot container hash did not
@@ -165,10 +188,12 @@ by the Quickshell lock screen.
 
 ## Packages
 
-`packaging/` builds `aurora-sep`, with the loader, its service and the fprintd
-policy, as a distribution package. libfprint with the aurora driver comes from
+`packaging/` builds `aurora-sep`, with the loader, its service, the modprobe
+option file and the fprintd policy, as a distribution package. libfprint with
+the aurora driver comes from
 https://github.com/aurora-silicon/aurora-sep-userspace; install both. Installing
-`aurora-sep` lets fprintd load the driver with xART writes on, as above.
+`aurora-sep` lets fprintd load the driver with xART writes on, as above. It
+conflicts with `aurora-touchid`, which ships the same modprobe file.
 
 On Fedora, `packaging/fedora/build.sh` builds `aurora-sep`. It installs build
 dependencies, so run it in a throwaway container from the top of this tree:
