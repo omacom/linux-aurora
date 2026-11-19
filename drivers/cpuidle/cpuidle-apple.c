@@ -131,8 +131,21 @@ static int apple_cpuidle_probe(struct platform_device *pdev)
 	 * the generic s2idle selector skips fallback index 0, otherwise
 	 * tick_freeze() and timekeeping suspension are never reached.
 	 */
-	if (of_machine_is_compatible("apple,t8140"))
+	if (of_machine_is_compatible("apple,t8140")) {
 		apple_idle_driver.states[STATE_PWRDOWN] = apple_idle_driver.states[STATE_WFI];
+	} else if (of_machine_is_compatible("apple,j514s")) {
+		/*
+		 * Measured on this machine (T6030): the defaults keep cores out
+		 * of CPU PD for most idle periods of a running desktop, although
+		 * it saves power from far shorter ones. 500 us takes most of
+		 * that saving (about 1.1 W in 1080p60 video playback) at half
+		 * the cost to QD1 storage reads that 100 us has, and none to
+		 * single-client database throughput. A wakeup from CPU PD takes
+		 * 10-20 us longer than one from WFI.
+		 */
+		apple_idle_driver.states[STATE_PWRDOWN].target_residency = 500;
+		apple_idle_driver.states[STATE_PWRDOWN].exit_latency = 20;
+	}
 
 	return cpuidle_register(&apple_idle_driver, NULL);
 }
