@@ -1382,6 +1382,8 @@ impl SepData {
                 bio::DEVICE_NAME,
                 e
             );
+            // No activation can follow, so a pinning first-setup window ends.
+            self.with_store(|store| store.close_first_setup());
         }
     }
 

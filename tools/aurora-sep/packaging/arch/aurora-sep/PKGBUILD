@@ -41,7 +41,7 @@ sha256sums=('abea60bb264ced349f7cf671d8d26e1609a81a60ea4c34d66ec6f7f73b847dbb'
             '5936eb76db666496a8700dade7ac6bcb3785b517958dcea10685690f1822c86f'
             'ffab97b20bfd5f0eb1ab641179a131843349cf16890fff0cf2d893f0b5681b37'
             'dbcf59cecd62c0245cf39c3c8ee41e3088e2890da89288e91d1c53ee3f02cba4'
-            '0f8f7b705d5b2589235306514ec19f7e1036709a533a505575638e27e2af6b46')
+            'f28dc9c2e875c5a311726181717d5d9d1df372940fbe86df3c31a468cc7f3f9a')
 
 # A unit and the helper it runs ($1, installed as $3), pointed at the
 # packaged helper.

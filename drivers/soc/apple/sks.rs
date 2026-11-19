@@ -47,9 +47,8 @@ impl Drop for KeybagCreateIntent<'_> {
 }
 
 /// The xART guard's first-setup window while provisioning holds it: closed on
-/// drop, so every failed exit shuts it. Only `xart_guard_pins`'s window outlasts
-/// the create, because a cold-boot Mac's enclave rewrites the shared lockers
-/// at COPY_KEYBAG and at the first activation's LOAD_KEYBAG.
+/// drop, so every failed exit shuts it. The guard decides whether it outlasts
+/// the create (`Guard::end_create`).
 pub(crate) struct SetupWindow<'a> {
     sep: &'a SepData,
     open: bool,
@@ -62,10 +61,9 @@ impl<'a> SetupWindow<'a> {
         SetupWindow { sep, open: true }
     }
 
-    fn close_unless_pinning(&mut self) {
-        if self.open && !self.sep.with_store(|store| store.window_outlasts_create()).unwrap_or(false) {
-            self.sep.with_store(|store| store.close_first_setup());
-            self.open = false;
+    fn end_create(&self) {
+        if self.open {
+            self.sep.with_store(|store| store.end_create());
         }
     }
 
@@ -707,9 +705,9 @@ impl SepData {
                 return false;
             }
         };
-        // A cold-boot Mac's create rewrites a pre-Linux record for its own
-        // reasons (XART-SAFETY.md), so the guard gives it a window only under
-        // xart_guard_pins, and then pins that record.
+        // A cold-boot Mac's first setup rewrites pre-Linux lockers
+        // (XART-SAFETY.md), so the guard gives it a window only under
+        // xart_guard_pins, and then pins those lockers.
         let first_setup = match self.with_store(|store| store.open_first_setup()) {
             Some(Ok(open)) => open,
             None => false,
@@ -727,13 +725,13 @@ impl SepData {
             // The create is sent under the guard: matching follows.
             crate::diag::xart_guard_setup_recorded();
         }
-        let mut window = SetupWindow {
+        let window = SetupWindow {
             sep: self,
             open: first_setup,
         };
         intent.sending();
         let exchanged = self.sks_exchange(request.name, request.msg, &request.img);
-        window.close_unless_pinning();
+        window.end_create();
         let Some(out) = exchanged else {
             dev_err!(
                 self.dev,

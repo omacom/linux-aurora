@@ -261,7 +261,8 @@ pub(crate) const T6000: PlatformProfile = PlatformProfile {
     // As T8103. On J316s, creating the identity keybag also rewrites a
     // session record that predates Linux. The guard refuses that, so the
     // keybag can only be created there with xart_guard=0, or under the
-    // guard with xart_guard_pins=1, which pins that one record.
+    // guard with xart_guard_pins=1, which pins it (measured on J316s; the
+    // J313 setup rewrites three such records, after the create).
     xart_guard: 1,
 };
 

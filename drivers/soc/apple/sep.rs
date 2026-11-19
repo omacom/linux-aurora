@@ -2768,7 +2768,7 @@ module! {
         },
         xart_guard_pins: u8 {
             default: 0,
-            description: "On a Mac that cold-boots its SEP (M1 family) at xart_guard=1: 1 lets the enclave rewrite the SEP-xART lockers from before Linux (up to three, read this boot) that this install's first Touch ID setup rewrites, from the keybag creation to the first activation, then and afterwards, while every other record stays guarded; 0: that rewrite is refused",
+            description: "On a Mac that cold-boots its SEP (M1 family; run on a J313 only) at xart_guard=1: 1 lets the enclave rewrite the SEP-xART lockers from before Linux (up to three, read this boot) that this install's first Touch ID setup rewrites, from the keybag creation to the first activation, then and afterwards, while every other record stays guarded; 0: that rewrite is refused",
         },
         os_uuid_hi: u64 {
             default: 0,

@@ -326,14 +326,16 @@ class DiagSensorTest(unittest.TestCase):
     def test_the_first_setup_window_brackets_the_create(self):
         # sks.rs asks the guard for the window on every platform (the guard
         # decides which get one), tells diag once it opens, holds it across
-        # the create and shuts it after the exchange unless it pins lockers.
-        # A pinning window is handed to the first activation, which shuts it
-        # after LOAD_KEYBAG; any failed exit in between shuts it on drop.
+        # the create and tells the guard when the create is over (the guard
+        # decides whether the window outlasts it: KUnit
+        # only_a_pinning_window_outlasts_the_create). A successful create
+        # hands it to the first activation, which releases it right after
+        # LOAD_KEYBAG; any failed exit in between shuts it on drop.
         source = (APPLE / 'sks.rs').read_text()
         create = function(source, 'pub(crate) fn sks_provision_identity_keybag(&self) -> bool')
         steps = ['store.open_first_setup()', 'crate::diag::xart_guard_setup_recorded()',
                  'SetupWindow {', 'intent.sending()', 'self.sks_exchange(request.name',
-                 'window.close_unless_pinning()', 'self.sks_req_copy_keybag(handle)',
+                 'window.end_create()', 'self.sks_req_copy_keybag(handle)',
                  'window.leave_open_for_activation()']
         places = [create.find(step) for step in steps]
         self.assertNotIn(-1, places, steps)
@@ -353,6 +355,10 @@ class DiagSensorTest(unittest.TestCase):
         where = [activate.find(step) for step in order]
         self.assertNotIn(-1, where, order)
         self.assertEqual(where, sorted(where), order)
+        # The window is released by the statement right after the load.
+        between = '\n'.join(line for line in activate[where[2]:where[3]].splitlines()
+                            if not line.strip().startswith('//'))
+        self.assertEqual(between.count(';'), 1, between)
 
     def test_probe_and_remove_report_the_bind(self):
         source = (APPLE / 'sensor_shim.c').read_text()

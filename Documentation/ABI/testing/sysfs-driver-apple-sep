@@ -347,7 +347,7 @@ Description:
 				"cold") whose keybag was created under the
 				guard with xart_guard_pins=1. Whether every
 				record a match rewrites is on the list, or
-				is the pinned locker, is not known until a
+				is a pinned locker, is not known until a
 				match is tried.
 		blocked		A match's write is refused or known to be:
 				xART writes are disabled (xart "disabled"),
