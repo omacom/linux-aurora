@@ -45,21 +45,23 @@
 //! locker as Linux's, and the list records the window as consumed before it
 //! opens, so no later create on this install gets it again.
 //!
-//! A cold-boot Mac cannot stay inside the rule. Its `CREATE_KEYBAG` rewrites
-//! one session record from before Linux, one of the records the enclave
-//! reads at every attach and no single OS's (seen on a J316s), and a match
-//! rewrites session records that existed before it. The guard refuses the
-//! first, so such a Mac needs the guard off, which leaves every record open
-//! to the enclave. With `xart_guard_pin=1` the owner accepts that one record
-//! instead, if it is a SEP-xART locker ([`Setup::Pin`]). The same
-//! first-setup window then opens on a cold-boot Mac, and the first existing
-//! kind-4 locker the enclave rewrites in it, provided the enclave read that
-//! locker since probe, is recorded in the list as pinned before the write
-//! lands. From then on the enclave may rewrite the pinned locker on any boot
-//! on which the parameter is set and it has read the locker. The locker is
-//! never deleted and never listed as Linux's, and every other record from
-//! before Linux stays refused. Without the parameter a cold-boot Mac gets no
-//! window and its pin is not honoured.
+//! A cold-boot Mac cannot stay inside the rule. Its first Touch ID setup
+//! rewrites session records from before Linux that the enclave reads at every
+//! attach and that belong to no single OS: on a MacBook Air M1 (J313) three
+//! SEP-xART lockers, two at the `COPY_KEYBAG` after the create and one at the
+//! first activation's `LOAD_KEYBAG`. The guard refuses them, so such a Mac
+//! needs the guard off, which leaves every record open to the enclave. With
+//! `xart_guard_pins=1` the owner accepts those lockers instead
+//! ([`Setup::Pin`]). The first-setup window then opens on a cold-boot Mac and
+//! stays open from the create to the first activation's `LOAD_KEYBAG`, closing
+//! on any failed step before it. Each existing kind-4 locker the enclave
+//! rewrites in it, provided the enclave read it since probe, is recorded in
+//! the list as pinned before the write lands, up to [`MAX_PINS`]. From then on
+//! the enclave may rewrite a pinned locker on any boot on which the parameter
+//! is set and it has read the locker. A pinned locker is never deleted and
+//! never listed as Linux's, and every other record from before Linux stays
+//! refused. Without the parameter a cold-boot Mac gets no window and its pins
+//! are not honoured.
 
 use crate::shim::StoreFile;
 use crate::xart_store::{crc32_ieee, Key};
@@ -118,7 +120,9 @@ pub(crate) fn decide(level: u8, key: &Key, existed: bool, owned: bool) -> Verdic
     }
 }
 
-/// Whether the first keybag creation of a fresh install is in progress.
+/// Whether a fresh install's first setup window is open: the keybag creation
+/// on a warm-attach Mac, from the create to the first activation's
+/// `LOAD_KEYBAG` under `xart_guard_pins`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FirstSetup {
     /// No first keybag creation is in progress.
@@ -144,13 +148,14 @@ pub(crate) enum Setup {
     Commit,
     /// Cold boot: nothing. The create's rewrite is refused.
     Refuse,
-    /// Cold boot with `xart_guard_pin=1`: pin the one SEP-xART locker the
-    /// create rewrites, which the enclave may then rewrite again.
+    /// Cold boot with `xart_guard_pins=1`: pin each SEP-xART locker the first
+    /// setup rewrites, up to [`MAX_PINS`], which the enclave may then rewrite
+    /// again.
     Pin,
 }
 
 /// The first-setup rule for a platform that cold-boots its enclave (`cold`)
-/// or attaches to a running one, with `xart_guard_pin=pin`. The parameter
+/// or attaches to a running one, with `xart_guard_pins=pin`. The parameter
 /// changes nothing on a warm-attach Mac.
 pub(crate) fn setup(cold: bool, pin: u8) -> Setup {
     match (cold, pin) {
@@ -214,14 +219,14 @@ impl MatchFacts {
     /// refused anything, when the guard has no list to allow Linux's records
     /// by, and on a cold-boot Mac whose keybag was not created under the
     /// guard: creating it there needs the guard off unless the owner set
-    /// `xart_guard_pin`, and with the guard off the records a match rewrites
+    /// `xart_guard_pins`, and with the guard off the records a match rewrites
     /// were never listed.
     ///
     /// Nothing else proves an unguarded setup. An empty list in particular
     /// does not: a guarded keybag creation on an M2 writes no record, and a
     /// rollback can empty the list. So a guarded warm-attach Mac is
     /// unverified until a refusal says otherwise, and so is a cold-boot Mac
-    /// set up under `xart_guard_pin`: which records a match rewrites there
+    /// set up under `xart_guard_pins`: which records a match rewrites there
     /// has not been established either.
     pub(crate) fn matching(&self) -> Matching {
         match self.guard {
@@ -445,36 +450,36 @@ impl<F: ListFile> Guard<F> {
             .is_some_and(|file| file.size().is_ok_and(|size| size == 0))
     }
 
-    /// Says what `xart_guard_pin` and a pinned locker come to on this boot.
+    /// Says what `xart_guard_pins` and a pinned locker come to on this boot.
     fn announce_pin(&self) {
         let honoured = self.setup == Setup::Pin && self.level == 1;
         match (honoured, self.pinned[0]) {
             (true, Some(_)) => {
                 for key in self.pinned.iter().flatten() {
                     pr_info!(
-                        "xART guard: xart_guard_pin is set: the enclave may rewrite this install's pinned SEP-xART locker (tag {:08x}) once it has read it\n",
+                        "xART guard: xart_guard_pins is set: the enclave may rewrite this install's pinned SEP-xART locker (tag {:08x}) once it has read it\n",
                         tag(key)
                     );
                 }
             }
             (true, None) if self.list_empty() => pr_info!(
-                "xART guard: xart_guard_pin is set and no locker is pinned: this install's first Touch ID setup may pin up to three\n"
+                "xART guard: xart_guard_pins is set and no locker is pinned: this install's first Touch ID setup may pin up to three\n"
             ),
             // The window that pins a locker opens only on an empty list, so
             // an earlier guarded attempt on this install shuts it for good.
             (true, None) => pr_warn!(
-                "xART guard: xart_guard_pin is set, but no locker is pinned and the list of Linux's records is not empty or did not load: the first-setup window stays shut and a keybag creation's rewrite is refused. Reset Touch ID with the list removed to set up under xart_guard_pin\n"
+                "xART guard: xart_guard_pins is set, but no locker is pinned and the list of Linux's records is not empty or did not load: the first-setup window stays shut and a keybag creation's rewrite is refused. Reset Touch ID with the list removed to set up under xart_guard_pins\n"
             ),
             (false, Some(_)) => {
                 for key in self.pinned.iter().flatten() {
                     pr_info!(
-                        "xART guard: this install pinned a SEP-xART locker (tag {:08x}), which counts only with xart_guard_pin=1 at level 1: rewrites of it are refused\n",
+                        "xART guard: this install pinned a SEP-xART locker (tag {:08x}), which counts only with xart_guard_pins=1 at level 1: rewrites of it are refused\n",
                         tag(key)
                     );
                 }
             }
             (false, None) if self.setup == Setup::Pin => pr_info!(
-                "xART guard: xart_guard_pin has no effect at level {}\n",
+                "xART guard: xart_guard_pins has no effect at level {}\n",
                 self.level
             ),
             (false, None) => {}
@@ -524,8 +529,13 @@ impl<F: ListFile> Guard<F> {
     /// Whether this install's first keybag creation was sent under the guard,
     /// as far as the list says: the list loaded and records the first-setup
     /// window, on a platform that has one. A cold-boot Mac has one only
-    /// under `xart_guard_pin`, so without the parameter this is `false` there
+    /// under `xart_guard_pins`, so without the parameter this is `false` there
     /// whatever the list holds.
+    /// Under `xart_guard_pins`, the window that pins lockers.
+    pub(crate) fn pins_lockers(&self) -> bool {
+        self.setup == Setup::Pin
+    }
+
     pub(crate) fn guarded_setup(&self) -> bool {
         self.file.is_some() && self.setup_recorded && self.setup != Setup::Refuse
     }
@@ -548,7 +558,7 @@ impl<F: ListFile> Guard<F> {
     /// Opens the first-setup window for one keybag creation, only at level 1
     /// on a fresh install: the list loaded and holding no entry, torn ones
     /// included. A cold-boot Mac has no window unless the owner set
-    /// `xart_guard_pin`. The window is recorded as consumed in the list,
+    /// `xart_guard_pins`. The window is recorded as consumed in the list,
     /// durably, before it opens, so it opens at most once per install whatever
     /// becomes of the keybag. `Ok(false)` when the install is not eligible; an
     /// error, with the window shut, when the record could not be made durable.
@@ -625,7 +635,7 @@ impl<F: ListFile> Guard<F> {
     }
 
     /// Whether a request the guard would refuse passes as the enclave's
-    /// rewrite of this install's pinned locker: under `xart_guard_pin` at
+    /// rewrite of this install's pinned locker: under `xart_guard_pins` at
     /// level 1, a rewrite (not a delete) of the locker the list pins, once
     /// the enclave has read it since probe.
     fn is_pinned(&self, key: &Key) -> bool {
@@ -682,7 +692,7 @@ impl<F: ListFile> Guard<F> {
                 }
                 Ok(())
             }
-            // Under xart_guard_pin the window passes only a locker the
+            // Under xart_guard_pins the window passes only a locker the
             // enclave read since probe, and pins it before the write lands.
             Verdict::Refuse
                 if self.setup == Setup::Pin
@@ -727,7 +737,7 @@ impl<F: ListFile> Guard<F> {
                         action,
                         key.kind
                     );
-                    // Under xart_guard_pin, which locker and whether the
+                    // Under xart_guard_pins, which locker and whether the
                     // enclave had read it tell the refusals apart: the
                     // pinned locker before a read, or another one.
                     if self.setup == Setup::Pin && key.kind == 4 {
@@ -741,6 +751,11 @@ impl<F: ListFile> Guard<F> {
                             tag(key),
                             read
                         );
+                        if self.read.contains(key) && self.setup_recorded && !self.pins_full() {
+                            pr_warn!(
+                                "xART guard: this install's first Touch ID setup ended before the enclave rewrote this locker (Touch ID not activated in the boot that created the keybag?), so it cannot be pinned now: reset Touch ID with /var/lib/aurora-sep-xart-owned.bin removed to set up again\n"
+                            );
+                        }
                     }
                 }
                 Err(EPERM)
@@ -825,7 +840,7 @@ mod tests {
 
     #[test]
     fn matching_on_a_cold_boot_mac_follows_its_setup() {
-        // Set up under the guard with xart_guard_pin: unverified, as a
+        // Set up under the guard with xart_guard_pins: unverified, as a
         // warm-attach Mac is.
         assert_eq!(
             facts_after_setup(true, true, Some((1, true)), 0),

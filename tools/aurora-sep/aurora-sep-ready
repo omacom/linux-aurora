@@ -112,7 +112,7 @@ blocked_reason() {
     elif [ "$(attr xart_guard_list)" = unavailable ]; then
         echo "the xART guard could not load its list of Linux's records, so it refuses every session write. $optout"
     elif [ "$(attr boot)" = cold ]; then
-        echo "on this cold-boot Mac no keybag was created under the xART guard, which takes xart_guard_pin=1, so the session records a match rewrites are not on the guard's list. $optout"
+        echo "on this cold-boot Mac no keybag was created under the xART guard, which takes xart_guard_pins=1, so the session records a match rewrites are not on the guard's list. $optout"
     else
         echo "the xART guard refuses a match's write. $optout"
     fi

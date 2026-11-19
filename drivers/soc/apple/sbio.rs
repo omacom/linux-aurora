@@ -1392,9 +1392,7 @@ impl SepData {
         if self.touchid_failed.load(Relaxed) {
             return Err(EIO);
         }
-        // A first-setup window provisioning opened this boot ends here.
-        let _window = crate::sks::SetupWindow { sep: self, open: true };
-
+        let window = crate::sks::SetupWindow::for_activation(self);
         let mut store = store::Store::open().inspect_err(|e| {
             dev_err!(
                 self.dev,
@@ -1444,7 +1442,11 @@ impl SepData {
             );
             return Err(ENODEV);
         }
-        let (handle, uuid) = self.sks_recover(&stored).ok_or_else(|| {
+        let recovered = self.sks_recover(&stored);
+        // A pinning first-setup window ends with this LOAD_KEYBAG, the last
+        // request that rewrites a shared locker; any earlier exit closed it too.
+        drop(window);
+        let (handle, uuid) = recovered.ok_or_else(|| {
             dev_err!(
                 self.dev,
                 "Touch ID: the persisted identity keybag did not recover\n"

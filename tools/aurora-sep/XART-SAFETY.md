@@ -23,7 +23,7 @@ a read-only gigalocker does: Touch ID may then be unavailable, but no other
 OS's record changes. The one exception is a fresh install's first keybag
 creation on a warm-attach Mac at level 1, which may rewrite one existing
 SEP-xART locker (see "Fresh installs" below). On a cold-boot Mac the owner
-can accept up to three more with `xart_guard_pin=1`: rewrites of the shared
+can accept up to three more with `xart_guard_pins=1`: rewrites of the shared
 lockers its first Touch ID setup reaches (see "Cold-boot Macs: pinning the shared
 locker" below; three on the MacBook Air M1).
 
@@ -65,7 +65,7 @@ created while the guard was on. Which records they are has not been
 established, so:
 
 - On a Mac whose Touch ID was set up with `xart_guard=0` (a cold-boot Mac
-  set up without `xart_guard_pin`, see below, and any Mac that used Touch ID
+  set up without `xart_guard_pins`, see below, and any Mac that used Touch ID
   before the guard existed), none of Linux's records are on the list. A guarded boot restores the
   fingerprints and then refuses the match's write ("xART guard: refused to
   rewrite a kind-4 record this Linux install did not create"), and the
@@ -73,7 +73,7 @@ established, so:
   set it up.
 - On a warm-attach Mac set up under the guard, whether every record a match
   rewrites is on the list has not been tested.
-- On a cold-boot Mac set up under the guard with `xart_guard_pin=1`, the
+- On a cold-boot Mac set up under the guard with `xart_guard_pins=1`, the
   record the create added is on the list and the shared locker it rewrote
   is pinned. Whether those are the two records a match rewrites has not
   been tested.
@@ -86,7 +86,7 @@ another finger into an existing keybag does not create one.
 
 | Platform | Bootstrap | Keybag creation under level 1 |
 | --- | --- | --- |
-| M1 (T8103), M1 Pro/Max (T6000/T6001) | cold boot | Refused: it rewrites a pre-Linux session record (seen on T6000; T8103 and T6001 untested). Needs `xart_guard=0`, or `xart_guard_pin=1`, which is not yet tested on hardware. |
+| M1 (T8103), M1 Pro/Max (T6000/T6001) | cold boot | Refused: it rewrites pre-Linux session records (seen on T6000; on a T8103 J313, three SEP-xART lockers; T6001 untested). Needs `xart_guard=0`, or `xart_guard_pins=1`, run on a J313 only. |
 | M2 (T8112) | warm attach | No xART writes (J413), so the guard does not affect it. |
 | M2 Max (T6021, J416c) | warm attach | On a fresh install, commits one pending SEP-xART locker; allowed once (see "Fresh installs"). Otherwise no xART writes. |
 | M2 Pro (T6020), M3 (T8122) | warm attach | Untested. |
@@ -106,9 +106,9 @@ the kernel log names the refused kind. What to do depends on the case:
   that Mac (see the next section), and treat macOS Touch ID as unverified
   until it has been checked there.
 - A cold-boot Mac that has never tried to create its keybag under the guard:
-  `options apple_sep xart_guard_pin=1` keeps the guard on and accepts the
-  rewrite of that one record only (see "Cold-boot Macs: pinning the shared
-  locker"). The same caution about macOS applies. A Mac that has tried, or
+  `options apple_sep xart_guard_pins=1` keeps the guard on and accepts the
+  rewrites of the lockers its first setup reaches, up to three, only (see
+  "Cold-boot Macs: pinning the shared locker"). The same caution about macOS applies. A Mac that has tried, or
   that already has a keybag, must reset Touch ID and remove
   `/var/lib/aurora-sep-xart-owned.bin` first: the window that pins the
   locker opens only on an empty list, and a reset alone keeps the list. The
@@ -137,7 +137,7 @@ and from those `matching`:
 | `matching` | When | `aurora-sep-ready` |
 | --- | --- | --- |
 | `usable` | xART writes enabled, no guard | ready |
-| `unverified` | guard with its list loaded and nothing refused yet, on a warm-attach Mac or on a cold-boot Mac whose keybag was created under it with `xart_guard_pin=1` | restored, matching UNVERIFIED (not called ready; exit 0) |
+| `unverified` | guard with its list loaded and nothing refused yet, on a warm-attach Mac or on a cold-boot Mac whose keybag was created under it with `xart_guard_pins=1` | restored, matching UNVERIFIED (not called ready; exit 0) |
 | `blocked` | xART writes disabled, a refusal seen, no list, or a guard on a cold-boot Mac whose keybag was not created under it | NOT ready (exit 1), with the reason and the `xart_guard=0` opt-out |
 | absent | a kernel that does not report it | restored, matching UNVERIFIED (exit 0) |
 
@@ -172,14 +172,14 @@ it:
   then looks like another OS's. Copy the file back from the old install if
   you have it. Without it, those records stay protected; resetting Touch ID
   (`install-aurora-sep.sh --reset-touchid`) creates a new keybag, which on a
-  cold-boot Mac needs `xart_guard=0` or `xart_guard_pin=1` as above.
+  cold-boot Mac needs `xart_guard=0` or `xart_guard_pins=1` as above.
 - A torn last entry, from a crash while appending, is ignored at the next
   probe and overwritten by the next new record.
 - The first entry may be a marker instead of a record: it says this
   install's first-setup window (see "Fresh installs") has been used. It
   lists no record. Resetting Touch ID keeps the list, so the new keybag gets
   no window; a reinstall or deleting the file gives the next create one.
-- On a cold-boot Mac set up with `xart_guard_pin=1`, one entry is a pin
+- On a cold-boot Mac set up with `xart_guard_pins=1`, one entry is a pin
   instead of a record: it names the shared SEP-xART locker the enclave may
   rewrite, and lists no record as Linux's. Only the first pin in the list
   counts. A kernel without pinning reports it as one unreadable entry and
@@ -215,39 +215,51 @@ unverified until macOS Touch ID unlock and keychain access have been checked
 there. The other cold-boot SoCs (T8103, T6001, T6002) probably behave the
 same way; that is untested.
 
-## Cold-boot Macs: pinning the shared locker (`xart_guard_pin`)
+## Cold-boot Macs: pinning the shared locker (`xart_guard_pins`)
 
 ### MacBook Air M1 (J313), 2026-11-19: three lockers, after the create
 
-Run on a J313 with macOS 13.5 firmware (sepOS 13.5), `xart_guard_pin=1`, guard level 1, macOS booted after the Linux install, each attempt with no keybag and no list:
+Run on a J313 with macOS 13.5 firmware (sepOS 13.5), `xart_guard_pins=1`, guard level 1, macOS booted after the Linux install, each attempt with no keybag and no list:
 
 - The create does not rewrite a pre-Linux locker on this Mac. The `COPY_KEYBAG` of the new bag rewrites two (tags `da70de89`, `140a890d`), and the first activation's `LOAD_KEYBAG` a third (`5700cc64`). The enclave had read all three since probe.
 - All three were in a raw copy of the iBoot System Container taken before Linux's first xART write. An earlier setup on the same Mac with `xart_guard=0` changed five 4 KiB blocks of the gigalocker, which are where those three lockers sat or moved.
 - With the window closed after the create, the first was refused and provisioning failed. With it held through provisioning, the second was refused. With two pins, the third was refused at `LOAD_KEYBAG`; after that refusal the enclave answered nothing more that boot (`DEVICE_STATE_TRANSITION` and the ref-key unlock got no reply, sensor registration timed out).
 - So the window now runs from the create to the first `activate_touchid()`, and pins up to three lockers. With that: `identity keybag provisioned`, three pins, `xart_guard_refusals` 0, enrol, 3 of 3 matches, then after a reboot `16 session records exist, 1 created by Linux; the other 15 are protected`, the enrolment restored, 2 of 2 matches, refusals 0. The owner reports macOS Touch ID still works afterwards.
 
-The rest of this section was written for one locker and applies to each pinned locker.
-
-Not yet run on hardware. The rule below is built from the J316s
-measurements above and is covered by KUnit tests only.
+Run on that J313 only. The rule was first built from the J316s measurements above, which saw one locker at the create.
 
 Until now a cold-boot Mac had two choices: no Touch ID, or `xart_guard=0`,
 which lets the enclave rewrite or delete any session record on the Mac.
 The J316s measurement says the create needs far less: one new record, a
 shared root, and one existing session record that the enclave reads at
-every attach. `xart_guard_pin=1` (default 0) lets the owner accept exactly
-that record, if it is a SEP-xART locker (kind 4), and keep the guard on for
-everything else. It has an effect only on a cold-boot Mac at level 1.
+every attach; the J313 needs three such lockers. `xart_guard_pins=1`
+(default 0) lets the owner accept exactly those records, if they are
+SEP-xART lockers (kind 4), up to three, and keep the guard on for everything
+else. It has an effect only on a cold-boot Mac at level 1. The parameter's
+name tells this rule apart from a kernel that pinned one locker at the
+create only (`modinfo -p apple_sep`).
 
 - The first-setup window, which cold-boot Macs otherwise never get, opens
   for the first `CREATE_KEYBAG` of an install whose list is loaded and
-  empty. The marker is written first, as on a warm-attach Mac.
-- In the window the guard passes one rewrite of an existing kind-4 locker,
-  and only of a locker the enclave read since probe (the driver notes each
-  `OP_SESSION_READ` it answers with a record). Before the write reaches the
-  gigalocker, the guard appends a pin entry naming that locker to the list
-  and flushes it. If the pin cannot be made durable, the rewrite is refused.
-- From then on the enclave may rewrite the pinned locker, on any boot where
+  empty, and stays open until the first activation's `LOAD_KEYBAG`
+  (`activate_touchid`). Any failed step of provisioning or of that
+  activation before the load closes it. The marker is written first, as on a
+  warm-attach Mac. Without the parameter the window closes right after the
+  create exchange, as on a warm-attach Mac.
+- In the window the guard passes rewrites of existing kind-4 lockers, up to
+  three, and only of lockers the enclave read since probe (the driver notes
+  each `OP_SESSION_READ` it answers with a record). Before each write reaches
+  the gigalocker, the guard appends a pin entry naming that locker to the
+  list and flushes it. If the pin cannot be made durable, the rewrite is
+  refused.
+- If the first activation does not reach `LOAD_KEYBAG` in the boot that
+  created the keybag, a locker it would have pinned cannot be pinned later:
+  the window opens once. The guard then logs a reset hint when it refuses a
+  read locker on an install with free pins. Recovery is a Touch ID reset with
+  `/var/lib/aurora-sep-xart-owned.bin` removed.
+- A pin counts only from a list that loaded whole, and a pinned locker is
+  never adopted as Linux's, even if it was absent at probe.
+- From then on the enclave may rewrite a pinned locker, on any boot where
   the parameter is set and the enclave has read the locker. That covers a
   match, if the locker is one of the two records a match rewrites, and a
   later `CREATE_KEYBAG` after a Touch ID reset.
@@ -337,7 +349,7 @@ the first existing kind-4 locker it writes (`FirstSetup` in
 record says which OS or bless it belongs to, and a size test would not prove
 it. Deletes, kind-3 lockers and a second rewrite are refused as before.
 Level 2 gets no window, and neither do cold-boot Macs unless their owner
-set `xart_guard_pin=1`: their create rewrites a pre-Linux record for a
+set `xart_guard_pins=1`: their create rewrites a pre-Linux record for a
 different reason, and the window then pins that record instead (above).
 
 The window is used once while the install keeps its list. Before the

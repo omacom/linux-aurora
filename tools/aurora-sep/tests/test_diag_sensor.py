@@ -307,7 +307,7 @@ class DiagSensorTest(unittest.TestCase):
             ((2, 1, unverified, 0, 0), '2 2 loaded 0 unverified'),
             ((1, 0, blocked, 0, 0), '2 1 unavailable 0 blocked'),   # no list
             ((1, 1, blocked, 0, 0), '2 1 loaded 0 blocked'),        # cold boot, level 1
-            # ... with xart_guard_pin, once its first keybag creation is sent
+            # ... with xart_guard_pins, once its first keybag creation is sent
             ((1, 1, blocked, 0, 0, unverified), '2 1 loaded 0 unverified'),
             # ... and the refusals counted before that stand, and win over a
             # matching value that was derived before they landed
@@ -325,22 +325,34 @@ class DiagSensorTest(unittest.TestCase):
 
     def test_the_first_setup_window_brackets_the_create(self):
         # sks.rs asks the guard for the window on every platform (the guard
-        # decides which get one), tells diag once it opens, sends the create
-        # and shuts the window again, in that order and once each.
+        # decides which get one), tells diag once it opens, holds it across
+        # the create and shuts it after the exchange unless it pins lockers.
+        # A pinning window is handed to the first activation, which shuts it
+        # after LOAD_KEYBAG; any failed exit in between shuts it on drop.
         source = (APPLE / 'sks.rs').read_text()
         create = function(source, 'pub(crate) fn sks_provision_identity_keybag(&self) -> bool')
         steps = ['store.open_first_setup()', 'crate::diag::xart_guard_setup_recorded()',
-                 'intent.sending()', 'self.sks_exchange(request.name', 'store.close_first_setup()']
+                 'SetupWindow {', 'intent.sending()', 'self.sks_exchange(request.name',
+                 'window.close_unless_pinning()', 'self.sks_req_copy_keybag(handle)',
+                 'window.leave_open_for_activation()']
         places = [create.find(step) for step in steps]
         self.assertNotIn(-1, places, steps)
         self.assertEqual(places, sorted(places), steps)
         for step in steps:
             self.assertEqual(create.count(step), 1, step)
-        # Nothing else in the key store opens, reports or shuts the window.
-        for step in (steps[0], steps[1], steps[4]):
+        self.assertNotIn('close_first_setup', create)
+        # Nothing else in the key store opens or reports the window.
+        for step in (steps[0], steps[1]):
             self.assertEqual(source.count(step), 1, step)
         # The bootstrap no longer decides here: xart_guard.rs (Setup) does.
-        self.assertNotIn('Bootstrap', create[:places[2]])
+        self.assertNotIn('Bootstrap', create[:places[3]])
+        sbio = (APPLE / 'sbio.rs').read_text()
+        activate = function(sbio, 'fn activate_touchid(&self) -> Result<()>')
+        order = ['SetupWindow::for_activation(self)', 'store::Store::open()',
+                 'self.sks_recover(&stored)', 'drop(window)']
+        where = [activate.find(step) for step in order]
+        self.assertNotIn(-1, where, order)
+        self.assertEqual(where, sorted(where), order)
 
     def test_probe_and_remove_report_the_bind(self):
         source = (APPLE / 'sensor_shim.c').read_text()

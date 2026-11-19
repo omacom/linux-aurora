@@ -466,6 +466,11 @@ impl Store {
             .map_or(Ok(false), |guard| guard.open_first_setup())
     }
 
+    /// Whether the guard's first-setup window stays open past the create.
+    pub(crate) fn window_outlasts_create(&self) -> bool {
+        self.guard.as_ref().is_some_and(|guard| guard.pins_lockers())
+    }
+
     pub(crate) fn close_first_setup(&mut self) {
         if let Some(guard) = self.guard.as_mut() {
             guard.close_first_setup();

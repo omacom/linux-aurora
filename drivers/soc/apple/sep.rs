@@ -853,7 +853,7 @@ impl SepData {
             profile::Bootstrap::Boot => true,
             profile::Bootstrap::WarmRegister => false,
         };
-        let xart_setup = xart_guard::setup(cold, *module_parameters::xart_guard_pin.value());
+        let xart_setup = xart_guard::setup(cold, *module_parameters::xart_guard_pins.value());
         let store = match xart_store::Store::open_owner(xart_writes, xart_start) {
             Ok(mut store) => {
                 match xart_guard {
@@ -2766,7 +2766,7 @@ module! {
             default: -1,
             description: "-1: the platform's level, 1 on M1, M2 and M3 Macs and 0 on the MacBook Neo; 0: off; 1: refuse the enclave's writes and deletes of xART session records this Linux install did not create; 2: also refuse writes to the shared root records",
         },
-        xart_guard_pin: u8 {
+        xart_guard_pins: u8 {
             default: 0,
             description: "On a Mac that cold-boots its SEP (M1 family) at xart_guard=1: 1 lets the enclave rewrite the SEP-xART lockers from before Linux (up to three, read this boot) that this install's first Touch ID setup rewrites, from the keybag creation to the first activation, then and afterwards, while every other record stays guarded; 0: that rewrite is refused",
         },

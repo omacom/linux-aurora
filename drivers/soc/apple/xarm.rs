@@ -176,7 +176,7 @@ pub(crate) fn service(
                     inbound[..value.len()].copy_from_slice(&value);
                     // Only a read that hands the enclave the record counts,
                     // for the lockers the guard lets it rewrite under
-                    // xart_guard_pin.
+                    // xart_guard_pins.
                     store.note_enclave_read(&key);
                     Serviced {
                         reply: Reply::ok(req, value.len() as u16),

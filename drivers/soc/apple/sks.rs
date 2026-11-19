@@ -46,12 +46,34 @@ impl Drop for KeybagCreateIntent<'_> {
     }
 }
 
-/// Closes the xART guard's first-setup window when dropped. On a 13.5 enclave
-/// (T8103) the create's COPY_KEYBAG and the first activation's LOAD_KEYBAG
-/// rewrite pre-Linux lockers, so the window spans both.
+/// The xART guard's first-setup window while provisioning holds it: closed on
+/// drop, so every failed exit shuts it. Only `xart_guard_pins`'s window outlasts
+/// the create, because a cold-boot Mac's enclave rewrites the shared lockers
+/// at COPY_KEYBAG and at the first activation's LOAD_KEYBAG.
 pub(crate) struct SetupWindow<'a> {
-    pub(crate) sep: &'a SepData,
-    pub(crate) open: bool,
+    sep: &'a SepData,
+    open: bool,
+}
+
+impl<'a> SetupWindow<'a> {
+    /// The first activation's hold on a window provisioning may have left
+    /// open; closing a shut window does nothing.
+    pub(crate) fn for_activation(sep: &'a SepData) -> Self {
+        SetupWindow { sep, open: true }
+    }
+
+    fn close_unless_pinning(&mut self) {
+        if self.open && !self.sep.with_store(|store| store.window_outlasts_create()).unwrap_or(false) {
+            self.sep.with_store(|store| store.close_first_setup());
+            self.open = false;
+        }
+    }
+
+    /// Hands a pinning window to the first activation, which closes it after
+    /// its LOAD_KEYBAG (`activate_touchid`).
+    fn leave_open_for_activation(mut self) {
+        self.open = false;
+    }
 }
 
 impl Drop for SetupWindow<'_> {
@@ -687,7 +709,7 @@ impl SepData {
         };
         // A cold-boot Mac's create rewrites a pre-Linux record for its own
         // reasons (XART-SAFETY.md), so the guard gives it a window only under
-        // xart_guard_pin, and then pins that record.
+        // xart_guard_pins, and then pins that record.
         let first_setup = match self.with_store(|store| store.open_first_setup()) {
             Some(Ok(open)) => open,
             None => false,
@@ -705,9 +727,13 @@ impl SepData {
             // The create is sent under the guard: matching follows.
             crate::diag::xart_guard_setup_recorded();
         }
-        // Left open for the first activation's LOAD_KEYBAG (activate_touchid).
+        let mut window = SetupWindow {
+            sep: self,
+            open: first_setup,
+        };
         intent.sending();
         let exchanged = self.sks_exchange(request.name, request.msg, &request.img);
+        window.close_unless_pinning();
         let Some(out) = exchanged else {
             dev_err!(
                 self.dev,
@@ -804,6 +830,7 @@ impl SepData {
             return false;
         }
         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
+        window.leave_open_for_activation();
         dev_info!(self.dev, "sks: identity keybag provisioned\n");
         true
     }

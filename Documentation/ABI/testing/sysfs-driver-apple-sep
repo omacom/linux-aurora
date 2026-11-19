@@ -345,7 +345,7 @@ Description:
 				refused nothing yet, on a warm-attach Mac
 				(boot "warm") or on a cold-boot Mac (boot
 				"cold") whose keybag was created under the
-				guard with xart_guard_pin=1. Whether every
+				guard with xart_guard_pins=1. Whether every
 				record a match rewrites is on the list, or
 				is the pinned locker, is not known until a
 				match is tried.
@@ -359,7 +359,7 @@ Description:
 				was not created under it. Creating the
 				keybag there needs xart_guard=0, which
 				leaves the records a match rewrites off the
-				list, or xart_guard_pin=1.
+				list, or xart_guard_pins=1.
 		==========	==========================================
 
 		For the guard cases the documented opt-out is xart_guard=0,
@@ -367,6 +367,6 @@ Description:
 		OS on the Mac may have created; see
 		tools/aurora-sep/XART-SAFETY.md. During a boot the value
 		moves from "unverified" to "blocked" once the guard refuses
-		a write. On a cold-boot Mac with xart_guard_pin=1 it also
+		a write. On a cold-boot Mac with xart_guard_pins=1 it also
 		moves from "blocked" to "unverified" when the first keybag
 		creation is sent under the guard, and nowhere else.
