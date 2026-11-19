@@ -105,6 +105,7 @@ static const struct dcp_v14_board dcp_v14_board_t6030 = {
 	.handoff = "apple,t6030-handoff",
 	.promotion = true,
 	.panel_nits = true,
+	.swap_timestamps = true,
 };
 
 /*
@@ -327,6 +328,12 @@ struct apple_dcp_v14 {
 	bool mode_live;
 	u32 mode_timing, mode_color;
 	u64 mode_swaps;
+	/*
+	 * Internal: the panel has the locked 60 Hz mode beside the
+	 * variable-refresh one, and swaps carry timing words unless the
+	 * locked mode is set.
+	 */
+	bool locked_mode, timed;
 	/* External: catalog generation when a chunked property started. */
 	u64 chunk_generation;
 	/* External: the parts of the display's description published now. */
@@ -2614,6 +2621,7 @@ static int dcp_v14_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
 	struct dcp_display_mode *modes, *best = NULL, *selected;
 	struct dcp_parse_ctx ctx;
 	unsigned int count, i;
+	bool split;
 	void *blob = NULL;
 	u32 size = 0;
 	int ret;
@@ -2660,14 +2668,36 @@ static int dcp_v14_mode(struct apple_dcp *dcp, struct apple_dcp_v14 *v14)
 		return -EINVAL;
 	}
 	best->mode.type |= DRM_MODE_TYPE_PREFERRED;
-	selected = kmemdup(best, sizeof(*best), GFP_KERNEL);
-	kfree(modes);
-	if (!selected)
+	/*
+	 * On a board whose swaps carry timing words, the panel's 120 Hz
+	 * ProMotion timing is offered twice, as the 26.6 path does: as the
+	 * variable-refresh mode, and as a locked 60 Hz mode whose swaps carry
+	 * none, which the firmware then shows at 60 Hz. The firmware keeps
+	 * its boot timing either way.
+	 */
+	split = v14->board->promotion && drm_mode_vrefresh(&best->mode) == 120 &&
+		dcp_v14_board_stamps_swaps(v14->board, false);
+	selected = kcalloc(split ? 2 : 1, sizeof(*selected), GFP_KERNEL);
+	if (!selected) {
+		kfree(modes);
 		return -ENOMEM;
+	}
+	selected[0] = *best;
+	kfree(modes);
+	if (split) {
+		selected[0].vrr = true;
+		selected[1] = selected[0];
+		selected[1].vrr = false;
+		selected[1].mode.clock = DIV_ROUND_CLOSEST(selected[1].mode.clock, 2);
+		selected[1].mode.type &= ~DRM_MODE_TYPE_PREFERRED;
+		drm_mode_set_name(&selected[1].mode);
+	}
+	v14->locked_mode = split;
+	WRITE_ONCE(v14->timed, true);
 	mutex_lock(&dcp->modes_lock);
 	kfree(dcp->modes);
 	dcp->modes = selected;
-	dcp->nr_modes = 1;
+	dcp->nr_modes = split ? 2 : 1;
 	dcp->modes_admitted = true;
 	mutex_unlock(&dcp->modes_lock);
 	return 0;
@@ -2904,7 +2934,7 @@ static int dcp_v14_swap_locked(struct apple_dcp_v14 *v14, const u8 *surface, u64
 	if (!ret) {
 		dcp_v14_encode_swap(swap, id, DCP_V14_BLACK, surface, iova, width, height,
 				    dst_y, DCP_V14_LAYER);
-		if (dcp_v14_board_stamps_swaps(v14->board, v14->external))
+		if (dcp_v14_board_stamps_swaps(v14->board, v14->external) && READ_ONCE(v14->timed))
 			dcp_v14_swap_timestamps(swap);
 		nits = dcp_v14_swap_nits(v14, swap, &present);
 		ret = dcp_v14_call_guarded(v14, A(407), swap, DCP_V14_SWAP_SIZE, result, sizeof(result),
@@ -3386,9 +3416,16 @@ int iomfb_v14_7_modeset(struct apple_dcp *dcp, struct drm_crtc_state *crtc_state
 {
 	if (dcp->external)
 		return dcp_v14_external_modeset(dcp, crtc_state);
-	/* The firmware keeps the timing it booted with, which is the only mode. */
-	if (!lookup_mode(dcp, &crtc_state->mode, NULL))
+	struct dcp_display_mode mode;
+
+	/*
+	 * The firmware keeps the timing it booted with, which every mode
+	 * shares: the mode only decides whether swaps carry timing words.
+	 */
+	if (!lookup_mode(dcp, &crtc_state->mode, &mode))
 		return -EINVAL;
+	if (dcp->v14)
+		WRITE_ONCE(dcp->v14->timed, !dcp->v14->locked_mode || mode.vrr);
 	scoped_guard(spinlock_irqsave, &dcp->mode_state.lock)
 		dcp->mode_state.valid = true;
 	return 0;
