@@ -38,24 +38,42 @@ properties:
               - apple,t6031-usb4-acio
               - apple,t8112-usb4-acio
               - apple,t8122-usb4-acio
+              - apple,t8152-usb4-acio
           - const: apple,t8103-usb4-acio
 
   reg:
     minItems: 2
+    maxItems: 4
     items:
       - description: Root complex and co-processor control registers
       - description: SRAM used for communication with the co-processor
       - description: |
           PCIe adapter configuration space of the USB4 router. Present where
           the root complex exposes the adapter separately, so that the tunnel
-          can be configured before a PCIe-C link is brought up.
+          can be configured before a PCIe-C link is brought up. On T8152, which
+          has no such range, this entry is the co-processor wrapper.
+      - description: |
+          Co-processor wrapper ("cpu"): run control at +0x28 and idle status at
+          +0x44. It starts the co-processor instead of the rc M3_CTRL start bit
+          on t6030 and T8152.
 
   reg-names:
-    minItems: 2
-    items:
-      - const: rc
-      - const: sram
-      - const: pcie-adapter
+    oneOf:
+      - minItems: 2
+        maxItems: 3
+        items:
+          - const: rc
+          - const: sram
+          - const: pcie-adapter
+      - items:
+          - const: rc
+          - const: sram
+          - const: pcie-adapter
+          - const: cpu
+      - items:
+          - const: rc
+          - const: sram
+          - const: cpu
 
   mboxes:
     maxItems: 1
@@ -117,8 +135,12 @@ properties:
     const: 1
 
   ranges:
-    maxItems: 1
-    description: Single 16 MiB MMIO window containing all child registers
+    minItems: 1
+    maxItems: 2
+    description: |
+      The 16 MiB MMIO window containing all child registers. apple,t8152-usb4-acio
+      adds a second window that maps the TLB invalidate doorbell page shared by
+      the Gen3 DARTs, which the DART child lists as its second register region.
 
   nonposted-mmio: true
 
@@ -167,7 +189,6 @@ required:
   - reg-names
   - mboxes
   - power-domains
-  - resets
   - thunderbolt-switch
   - '#address-cells'
   - '#size-cells'
@@ -179,6 +200,35 @@ required:
 
 allOf:
   - $ref: /schemas/usb/usb-switch.yaml#
+  # The driver does not probe without the "cpu" region on these two, and only these use it.
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - apple,t6030-usb4-acio
+              - apple,t8152-usb4-acio
+    then:
+      properties:
+        reg-names:
+          contains:
+            const: cpu
+    else:
+      properties:
+        reg-names:
+          not:
+            contains:
+              const: cpu
+  # apple,t8152-usb4-acio: the reset is not described yet (its driver is separate work).
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              const: apple,t8152-usb4-acio
+    then:
+      required:
+        - resets
 
 additionalProperties: false
 

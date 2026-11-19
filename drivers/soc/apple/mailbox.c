@@ -117,6 +117,8 @@ struct apple_mbox_hw {
 	unsigned int reg_offset;
 	bool is_ascwrap_v6;
 	bool ap_initializes_mailboxes;
+	/* The status word counts RX occupancy and free TX slots; a message is one paired access. */
+	bool counted_fifo;
 
 	unsigned int control_full;
 	unsigned int control_empty;
@@ -266,6 +268,70 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(apple_mbox_ascwrap_v6_stop_cpu);
 
+static bool apple_mbox_tx_full(struct apple_mbox *mbox, u32 status)
+{
+	if (mbox->hw->counted_fifo)
+		return !(status & mbox->hw->control_full);
+	return status & mbox->hw->control_full;
+}
+
+static bool apple_mbox_rx_empty(struct apple_mbox *mbox, u32 status)
+{
+	if (mbox->hw->counted_fifo)
+		return !(status & mbox->hw->control_empty);
+	return status & mbox->hw->control_empty;
+}
+
+static void apple_mbox_write_msg(struct apple_mbox *mbox, const struct apple_mbox_msg msg)
+{
+	u64 high = FIELD_PREP(APPLE_MBOX_MSG1_MSG, msg.msg1);
+
+#ifdef CONFIG_ARM64
+	if (mbox->hw->counted_fifo) {
+		u64 low = (__force u64)cpu_to_le64(msg.msg0);
+
+		high = (__force u64)cpu_to_le64(high);
+		/* Order the message words against the earlier writes to the shared buffers. */
+		wmb();
+		asm volatile("stp %0, %1, [%2]"
+			     : : "r" (low), "r" (high),
+				 "r" (mbox->regs + mbox->hw->a2i_send0)
+			     : "memory");
+		return;
+	}
+#endif
+	writeq_relaxed(msg.msg0, mbox->regs + mbox->hw->a2i_send0);
+	writeq_relaxed(high, mbox->regs + mbox->hw->a2i_send1);
+}
+
+static struct apple_mbox_msg apple_mbox_read_msg(struct apple_mbox *mbox)
+{
+	struct apple_mbox_msg msg;
+	bool paired = false;
+	u64 low, high;
+
+#ifdef CONFIG_ARM64
+	if (mbox->hw->counted_fifo) {
+		asm volatile("ldp %0, %1, [%2]"
+			     : "=&r" (low), "=&r" (high)
+			     : "r" (mbox->regs + mbox->hw->i2a_recv0)
+			     : "memory");
+		/* The message words must be read before the buffers they describe. */
+		rmb();
+		low = le64_to_cpu((__force __le64)low);
+		high = le64_to_cpu((__force __le64)high);
+		paired = true;
+	}
+#endif
+	if (!paired) {
+		low = readq_relaxed(mbox->regs + mbox->hw->i2a_recv0);
+		high = readq_relaxed(mbox->regs + mbox->hw->i2a_recv1);
+	}
+	msg.msg0 = low;
+	msg.msg1 = FIELD_GET(APPLE_MBOX_MSG1_MSG, high);
+	return msg;
+}
+
 int apple_mbox_send(struct apple_mbox *mbox, const struct apple_mbox_msg msg,
 		    bool atomic)
 {
@@ -281,11 +347,11 @@ int apple_mbox_send(struct apple_mbox *mbox, const struct apple_mbox_msg msg,
 	}
 	mbox_ctrl = readl_relaxed(mbox->regs + mbox->hw->a2i_control);
 
-	while (mbox_ctrl & mbox->hw->control_full) {
+	while (apple_mbox_tx_full(mbox, mbox_ctrl)) {
 		if (atomic || mbox->irq_send_empty < 0) {
 			ret = readl_poll_timeout_atomic(
 				mbox->regs + mbox->hw->a2i_control, mbox_ctrl,
-				!(mbox_ctrl & mbox->hw->control_full), 100,
+				!apple_mbox_tx_full(mbox, mbox_ctrl), 100,
 				APPLE_MBOX_TX_TIMEOUT * 1000);
 
 			if (ret) {
@@ -337,9 +403,7 @@ int apple_mbox_send(struct apple_mbox *mbox, const struct apple_mbox_msg msg,
 		mbox_ctrl = readl_relaxed(mbox->regs + mbox->hw->a2i_control);
 	}
 
-	writeq_relaxed(msg.msg0, mbox->regs + mbox->hw->a2i_send0);
-	writeq_relaxed(FIELD_PREP(APPLE_MBOX_MSG1_MSG, msg.msg1),
-		       mbox->regs + mbox->hw->a2i_send1);
+	apple_mbox_write_msg(mbox, msg);
 
 	spin_unlock_irqrestore(&mbox->tx_lock, flags);
 
@@ -380,11 +444,8 @@ static int apple_mbox_poll_locked(struct apple_mbox *mbox)
 		return 0;
 	mbox_ctrl = readl_relaxed(mbox->regs + mbox->hw->i2a_control);
 
-	while (!(mbox_ctrl & mbox->hw->control_empty)) {
-		msg.msg0 = readq_relaxed(mbox->regs + mbox->hw->i2a_recv0);
-		msg.msg1 = FIELD_GET(
-			APPLE_MBOX_MSG1_MSG,
-			readq_relaxed(mbox->regs + mbox->hw->i2a_recv1));
+	while (!apple_mbox_rx_empty(mbox, mbox_ctrl)) {
+		msg = apple_mbox_read_msg(mbox);
 
 		mbox->rx(mbox, msg, mbox->cookie);
 		ret++;
@@ -646,6 +707,8 @@ static int apple_mbox_probe(struct platform_device *pdev)
 	mbox->hw = of_device_get_match_data(dev);
 	if (!mbox->hw)
 		return -EINVAL;
+	if (mbox->hw->counted_fifo && !IS_ENABLED(CONFIG_ARM64))
+		return -EOPNOTSUPP;
 
 	if (mbox->hw->is_ascwrap_v6) {
 		/*
@@ -795,6 +858,28 @@ static const struct apple_mbox_hw apple_mbox_t8015_hw = {
 	.has_irq_controls = false,
 };
 
+/*
+ * T8152 ACIO (USB4) co-processor mailbox: RX at +0, TX at +0x10 and the status
+ * word at +0x20 of the 0x80-byte window. The status word holds the RX occupancy
+ * (bits 3:0) and the free TX slots (bits 11:8). The interrupts are not
+ * controlled per mailbox.
+ */
+static const struct apple_mbox_hw apple_mbox_t8152_acio_hw = {
+	.counted_fifo = true,
+	.control_full = GENMASK(11, 8),
+	.control_empty = GENMASK(3, 0),
+
+	.a2i_control = 0x20,
+	.a2i_send0 = 0x10,
+	.a2i_send1 = 0x18,
+
+	.i2a_control = 0x20,
+	.i2a_recv0 = 0x00,
+	.i2a_recv1 = 0x08,
+
+	.has_irq_controls = false,
+};
+
 static const struct apple_mbox_hw apple_mbox_asc_hw = {
 	.control_full = APPLE_ASC_MBOX_CONTROL_FULL,
 	.control_empty = APPLE_ASC_MBOX_CONTROL_EMPTY,
@@ -890,6 +975,7 @@ static const struct of_device_id apple_mbox_of_match[] = {
 	 * kernels without M3 GPU support leave it unbound.
 	 */
 	{ .compatible = "apple,t6030-agx-asc-mailbox", .data = &apple_mbox_asc_hw },
+	{ .compatible = "apple,t8152-acio-mailbox", .data = &apple_mbox_t8152_acio_hw },
 	{ .compatible = "apple,asc-mailbox-v4", .data = &apple_mbox_asc_hw },
 	{ .compatible = "apple,t8015-asc-mailbox", .data = &apple_mbox_t8015_hw },
 	{ .compatible = "apple,m3-mailbox-v2", .data = &apple_mbox_m3_hw },
