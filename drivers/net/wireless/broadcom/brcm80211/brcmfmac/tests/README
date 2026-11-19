@@ -16,3 +16,15 @@ do not arm the foreground timer.
 To exercise the scan entrypoints with mocked firmware and timer services:
 
   python3 tools/asahi/brcmfmac-scan-timeout-tests.py
+
+BCM4378 sleep and roam
+======================
+
+  ./tools/testing/kunit/kunit.py run \
+    --kunitconfig=drivers/net/wireless/broadcom/brcm80211/brcmfmac/tests \
+    'brcmfmac-sleep-roam*'
+
+BCM4378 does not wait for flowring txstatus. assoc_info is retried only
+after -EBADE (-52), and only while a connect or roam success is expected.
+Eight queries, seven 25 ms sleeps. Other chips keep the old wait and do
+not retry.
