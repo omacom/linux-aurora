@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <linux/delay.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/soc/apple/actuator.h>
 
 #include "hid-ids.h"
@@ -48,29 +50,88 @@ static bool apple_taptic_has_report(struct hid_device *hdev, unsigned int type,
 	return hdev->report_enum[type].report_id_hash[id] != NULL;
 }
 
-int apple_taptic_switch_modes(struct hid_device *haptic_hdev, bool enable_host_controlled)
+#define APPLE_TAPTIC_MODE_REPORT	0x21
+#define APPLE_TAPTIC_MODE_TIMEOUT_MS	300
+
+static int apple_taptic_mode_request(struct hid_device *haptic_hdev, u8 *buf,
+				     u8 value, int reqtype)
 {
-	u8 msg[] = { 0x21, enable_host_controlled };
+	buf[0] = APPLE_TAPTIC_MODE_REPORT;
+	buf[1] = value;
+	return hid_hw_raw_request(haptic_hdev, APPLE_TAPTIC_MODE_REPORT, buf, 2,
+				  HID_FEATURE_REPORT, reqtype);
+}
+
+/*
+ * Set the mode and confirm it by reading it back.
+ *
+ * A handoff asked for while the firmware is playing its own click waveform
+ * is queued: the report reads 02 until the waveform ends, then the new mode
+ * (J413: up to 160 ms). The firmware completes a queued handoff on its own,
+ * so giving up on it without cancelling would leave the actuator
+ * host-controlled with nobody driving it: no click, and no button.
+ */
+static int apple_taptic_write_mode(struct hid_device *haptic_hdev, bool host)
+{
+	u8 *buf __free(kfree) = kzalloc(2, GFP_KERNEL);
+	unsigned long timeout;
 	int ret;
 
-	/*
-	 * Report 0x21 is the MTP host actuator mode switch. The J313
-	 * SPI actuator descriptor has input 0x3f and output 0x53 only.
-	 * Sending 0x21 makes the controller return status 9c 17 e5 f8
-	 * instead of the write-ok status. The part powers up
-	 * device-controlled, which is what a false argument asks for.
-	 * A true argument has no 0x21 report to send either.
-	 */
-	if (!apple_taptic_has_report(haptic_hdev, HID_FEATURE_REPORT, 0x21) &&
-	    !apple_taptic_has_report(haptic_hdev, HID_OUTPUT_REPORT, 0x21))
-		return 0;
+	if (!buf)
+		return -ENOMEM;
 
-	ret = hid_hw_raw_request(haptic_hdev, msg[0], msg, sizeof(msg),
-				 HID_FEATURE_REPORT, HID_REQ_SET_REPORT);
-
+	ret = apple_taptic_mode_request(haptic_hdev, buf, host,
+					HID_REQ_SET_REPORT);
 	if (ret < 0)
 		return ret;
-	return 0;
+
+	timeout = jiffies + msecs_to_jiffies(APPLE_TAPTIC_MODE_TIMEOUT_MS);
+	for (;;) {
+		ret = apple_taptic_mode_request(haptic_hdev, buf, 0xff,
+						HID_REQ_GET_REPORT);
+		if (ret == 2 && buf[1] == host)
+			return 0;
+		if (ret < 0 || time_after(jiffies, timeout))
+			break;
+		usleep_range(4000, 6000);
+	}
+
+	hid_warn(haptic_hdev, "mode %u not confirmed (%d, reads %02x)\n",
+		 host, ret, buf[1]);
+
+	/* Do not leave a queued handoff behind; keep the firmware's click. */
+	if (host)
+		apple_taptic_mode_request(haptic_hdev, buf, 0,
+					  HID_REQ_SET_REPORT);
+
+	return ret < 0 ? ret : -EIO;
+}
+
+int apple_taptic_switch_modes(struct hid_device *haptic_hdev, bool enable_host_controlled)
+{
+	/*
+	 * Report 0x21 hands click feedback and the button to the host (1) or
+	 * back to the firmware (0).
+	 *
+	 * The MTP actuators do not declare it, but their firmware takes it as
+	 * a feature report and reads it back (J413: "Intercepted 0x21 click
+	 * handoff" in the RTKit log).
+	 *
+	 * The J313 SPI actuator declares only input 0x3f and output 0x53, and
+	 * its controller answers 0x21 with status 9c 17 e5 f8. That part powers
+	 * up device-controlled, so asking for that mode needs nothing sent.
+	 * Asking for host mode cannot be honoured: report it, because a caller
+	 * told it succeeded plays its own click over the firmware's and every
+	 * press clicks twice.
+	 */
+	if (haptic_hdev->bus != BUS_HOST &&
+	    !apple_taptic_has_report(haptic_hdev, HID_FEATURE_REPORT,
+				     APPLE_TAPTIC_MODE_REPORT) &&
+	    !apple_taptic_has_report(haptic_hdev, HID_OUTPUT_REPORT,
+				     APPLE_TAPTIC_MODE_REPORT))
+		return enable_host_controlled ? -EOPNOTSUPP : 0;
+
+	return apple_taptic_write_mode(haptic_hdev, enable_host_controlled);
 }
 EXPORT_SYMBOL_GPL(apple_taptic_switch_modes);
 
