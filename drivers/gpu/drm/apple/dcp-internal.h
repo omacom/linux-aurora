@@ -37,6 +37,9 @@
 #include "epic/dpavservep.h"
 #include "version_utils.h"
 
+/* dcp.c: appledrm.external_srgb module parameter */
+extern bool external_srgb;
+
 #define DCP_MAX_PLANES 4
 
 struct apple_dcp_afkep;
