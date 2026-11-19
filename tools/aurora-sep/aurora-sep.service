@@ -1,6 +1,12 @@
 [Unit]
 Description=Aurora SEP services
-After=local-fs.target
+# Nothing in the boot waits for the enclave, which can take most of a minute
+# and, after a boot policy change, does not come up at all: no ordering
+# before multi-user.target. fprintd and aurora-sep-ready still wait for it.
+DefaultDependencies=no
+After=sysinit.target basic.target local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
 RequiresMountsFor=/var/lib
 # Activate Touch ID as soon as the driver is up.
 Wants=aurora-sep-ready.service

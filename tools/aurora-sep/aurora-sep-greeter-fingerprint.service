@@ -1,10 +1,10 @@
 [Unit]
 Description=Offer fingerprint at the GNOME login screen
 Documentation=file:///usr/share/doc/aurora-sep/README.md
-# The login screen asks fprintd for the reader once, as it comes up. Hold it
-# back until Touch ID is up, so that it finds the reader and the fingerprints.
-Wants=aurora-sep-ready.service
-After=aurora-sep-ready.service
+# Only prepares the login screen's shell, so it never waits for Touch ID: the
+# enclave can take most of a minute, and the login screen must not. When
+# Touch ID comes up after the login screen has asked for the reader,
+# aurora-sep-greeter-refresh.service shows the login screen again.
 Before=gdm.service
 
 [Service]
@@ -15,3 +15,4 @@ ExecStop=/usr/local/sbin/aurora-sep-greeter-fingerprint stop
 
 [Install]
 WantedBy=gdm.service
+Also=aurora-sep-greeter-refresh.service

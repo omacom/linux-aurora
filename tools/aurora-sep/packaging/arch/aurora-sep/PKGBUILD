@@ -7,7 +7,7 @@
 
 pkgname=aurora-sep
 pkgver=1
-pkgrel=12
+pkgrel=13
 pkgdesc="Loader and desktop integration for the Apple SEP (Touch ID) driver"
 url="https://github.com/aurora-silicon/linux/tree/aurora-wip/tools/aurora-sep"
 arch=(any)
@@ -29,19 +29,23 @@ source=(load-driver
         logind-aurora-sep.conf
         aurora-sep-greeter-fingerprint
         aurora-sep-greeter-fingerprint.service
+        aurora-sep-greeter-refresh.service
+        aurora-sep-policy-change
         README.md
         XART-SAFETY.md)
-sha256sums=('abea60bb264ced349f7cf671d8d26e1609a81a60ea4c34d66ec6f7f73b847dbb'
-            '447f99cc3c7e683134f31b993aa825fadde24e4854954a3035c96e6631d4d4d0'
+sha256sums=('129225c2602290221fc38f754c486e1cba8f0b160e56c5aee2446100aa4e8a04'
+            '2f401629733d280a1b8a5a74f5b668d42307f9885f916abf9e377a811e358b9a'
             'f8d0c4b9385e6716d5ac5dd9941a57459fbc551a8238383bcde36cd929d0523f'
             '40f0d21446a85bab3e3800b31342e94e553af0fcde2c985503147519737e011d'
             'f38421360c2f885bb102bc5076d81006d352d03d12b5fb35b4da8a5132f4ccc0'
             '8d8df0ba2a6861b2edb2110e606906d84ca4848617621ad3cb48493a1522971d'
             '0695bd9ce4c207241db13c3ea07819a032d8213417021378f5015ab9317cde12'
-            '5936eb76db666496a8700dade7ac6bcb3785b517958dcea10685690f1822c86f'
-            'ffab97b20bfd5f0eb1ab641179a131843349cf16890fff0cf2d893f0b5681b37'
-            'dbcf59cecd62c0245cf39c3c8ee41e3088e2890da89288e91d1c53ee3f02cba4'
-            '393bd394471e33706253027c48c19d9c1c8a4f6c0d9891bad1bd1364f7081a16')
+            '6b51052c2df5f54f477ccace5ebb268ccc4bf77923cc0499fc3dd996810c22cf'
+            '3d1c9c0cab1b090bd6b7d3c4bacaec8719e264afba6b565ada80b1e7914f203a'
+            'fb58f07738b7654b15173fe0ffce2dff2f14b588d8edd24545e6c2c739605026'
+            '6d96cdd20bc993c00eb0b2d7f77d52f81531c72e9d7141455822690ddec348bb'
+            '7f68294f1fd9544625228bfc863f69f4962e7cabb18a9e7620816737f4f76c6b'
+            '3bf84ea5187a208ae58fa90b8fee801f41f06e3417cf6bcffc667aec73fb6984')
 
 # A unit and the helper it runs ($1, installed as $3), pointed at the
 # packaged helper.
@@ -61,6 +65,11 @@ package() {
   _unit aurora-sep-ready aurora-sep-ready.service aurora-sep-ready
   _unit aurora-sep-greeter-fingerprint aurora-sep-greeter-fingerprint.service \
     aurora-sep-greeter-fingerprint
+  install -Dm644 aurora-sep-greeter-refresh.service \
+    "$pkgdir/usr/lib/systemd/system/aurora-sep-greeter-refresh.service"
+  install -Dm755 aurora-sep-policy-change "$pkgdir/usr/bin/aurora-sep-policy-change"
+  sed -i "s|^\(Exec[A-Za-z]*=\)/usr/local/sbin/|\1/usr/lib/aurora-sep/|" \
+    "$pkgdir/usr/lib/systemd/system/aurora-sep-greeter-refresh.service"
 
   install -Dm644 fprintd-aurora.conf \
     "$pkgdir/usr/lib/systemd/system/fprintd.service.d/aurora-sep.conf"

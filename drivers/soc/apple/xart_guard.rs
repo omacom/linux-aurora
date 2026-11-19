@@ -44,16 +44,85 @@
 //! nothing identifies that locker as the pending one. It does not list the
 //! locker as Linux's, and the list records the window as consumed before it
 //! opens, so no later create on this install gets it again.
+//!
+//! A boot policy change (a new Stage 1, a different boot object) makes the
+//! enclave rewrite one existing session record the first time Linux's
+//! identity keybag is unlocked under the new policy. Linux did not create
+//! that record. On a boot under an unchanged policy that unlock rewrites no
+//! session record at all, so a rewrite inside it is the sign of a policy
+//! change. The guard lets exactly one kind-4 rewrite through in that window
+//! ([`policy_window`]): the first unlock of an identity keybag that already
+//! existed, at most once per boot, never a delete, and only once the
+//! record's previous value is saved in a host file ([`PREVIOUS_PATH`]).
+//! The record is not added to Linux's list.
+//!
+//! For a policy change the window did not cover, `aurora-sep-policy-change`
+//! backs up the gigalocker and leaves a one-time allowance in a host file
+//! ([`ALLOW_PATH`]): one record, named or the first of its kind, that the
+//! enclave may rewrite during the next boot only, on the same terms. The
+//! driver empties the file before it uses the allowance.
 
 use crate::shim::StoreFile;
 use crate::xart_store::{crc32_ieee, Key};
 use kernel::prelude::*;
+use kernel::sync::atomic::{Atomic, Relaxed};
 
 /// Host file listing the session records Linux created.
 pub(crate) const OWNED_PATH: &CStr = c"/var/lib/aurora-sep-xart-owned.bin";
+/// Host file holding the one-time allowance for a boot policy change.
+pub(crate) const ALLOW_PATH: &CStr = c"/var/lib/aurora-sep-xart-allow-once.bin";
+/// Host file keeping the previous value of every record rewritten for a
+/// boot policy change.
+pub(crate) const PREVIOUS_PATH: &CStr = c"/var/lib/aurora-sep-xart-policy-previous.bin";
+const PREVIOUS_MAGIC: &[u8; 4] = b"AXGP";
+/// The kind of session record a boot policy change rewrites.
+const POLICY_KIND: u8 = 4;
+
+/// Whether the first unlock of an existing identity keybag has started this
+/// boot, and whether it is running now.
+static WINDOW_STARTED: Atomic<bool> = Atomic::new(false);
+static WINDOW_OPEN: Atomic<bool> = Atomic::new(false);
+
+/// Runs `unlock`, the unlock of an identity keybag that already existed,
+/// with the boot policy window open if it is this boot's first. Later
+/// unlocks run with it closed.
+pub(crate) fn policy_window<T>(unlock: impl FnOnce() -> T) -> T {
+    if WINDOW_STARTED.xchg(true, Relaxed) {
+        return unlock();
+    }
+    WINDOW_OPEN.store(true, Relaxed);
+    let result = unlock();
+    WINDOW_OPEN.store(false, Relaxed);
+    result
+}
+
+/// Keeps the window shut for the rest of the boot: a keybag or ref-key
+/// created this boot is not unlocked under an older policy.
+pub(crate) fn close_policy_window() {
+    WINDOW_STARTED.store(true, Relaxed);
+}
+
+/// Saves `value`, the current value of `key`, before it is rewritten for a
+/// boot policy change. The rewrite goes ahead only once this is durable.
+pub(crate) fn save_previous(key: &Key, value: &[u8]) -> Result<()> {
+    let (file, _created) = StoreFile::open_host(PREVIOUS_PATH)?;
+    file.sync_parent()?;
+    let end = file.size()?;
+    let mut head = [0u8; 32];
+    head[..4].copy_from_slice(PREVIOUS_MAGIC);
+    head[4] = key.kind;
+    head[8..24].copy_from_slice(&key.uuid);
+    let len = u32::try_from(value.len()).map_err(|_| EINVAL)?;
+    head[24..28].copy_from_slice(&len.to_le_bytes());
+    head[28..32].copy_from_slice(&crc32_ieee(value).to_le_bytes());
+    file.write_all(end, &head)?;
+    file.write_all(end + head.len() as u64, value)?;
+    file.sync()
+}
 
 const ENTRY_SIZE: usize = 32;
 const ENTRY_MAGIC: &[u8; 4] = b"AXGO";
+const ALLOW_MAGIC: &[u8; 4] = b"AXGA";
 /// Bounds the file the driver reads at probe, counted in entries the file
 /// holds, torn and repeated ones included. The gigalocker has at most a few
 /// hundred slots, so a longer list is damaged. Appending stops at the same
@@ -168,9 +237,9 @@ impl MatchFacts {
     }
 }
 
-fn entry_bytes(kind: u8, uuid: &[u8; 16]) -> [u8; ENTRY_SIZE] {
+fn entry_bytes(magic: &[u8; 4], kind: u8, uuid: &[u8; 16]) -> [u8; ENTRY_SIZE] {
     let mut entry = [0u8; ENTRY_SIZE];
-    entry[..4].copy_from_slice(ENTRY_MAGIC);
+    entry[..4].copy_from_slice(magic);
     entry[4] = kind;
     entry[8..24].copy_from_slice(uuid);
     let crc = crc32_ieee(&entry[..24]);
@@ -180,18 +249,26 @@ fn entry_bytes(kind: u8, uuid: &[u8; 16]) -> [u8; ENTRY_SIZE] {
 
 /// Encodes one list entry.
 pub(crate) fn encode(key: &Key) -> [u8; ENTRY_SIZE] {
-    entry_bytes(key.kind, &key.uuid)
+    encode_with(ENTRY_MAGIC, key)
+}
+
+fn encode_with(magic: &[u8; 4], key: &Key) -> [u8; ENTRY_SIZE] {
+    entry_bytes(magic, key.kind, &key.uuid)
 }
 
 /// The entry that records this install's first-setup window as consumed.
 /// Kind 0 is no session record's, so it never lists a record as Linux's.
 pub(crate) fn setup_consumed() -> [u8; ENTRY_SIZE] {
-    entry_bytes(0, b"first setup used")
+    entry_bytes(ENTRY_MAGIC, 0, b"first setup used")
 }
 
 /// Decodes one list entry; `None` for a torn or foreign one.
 pub(crate) fn decode(entry: &[u8]) -> Option<Key> {
-    if entry.len() != ENTRY_SIZE || &entry[..4] != ENTRY_MAGIC || entry[5..8] != [0; 3] {
+    decode_with(ENTRY_MAGIC, entry)
+}
+
+fn decode_with(magic: &[u8; 4], entry: &[u8]) -> Option<Key> {
+    if entry.len() != ENTRY_SIZE || &entry[..4] != magic || entry[5..8] != [0; 3] {
         return None;
     }
     let crc = u32::from_le_bytes([entry[24], entry[25], entry[26], entry[27]]);
@@ -201,6 +278,89 @@ pub(crate) fn decode(entry: &[u8]) -> Option<Key> {
     let mut uuid = [0u8; 16];
     uuid.copy_from_slice(&entry[8..24]);
     Some(Key::new(entry[4], uuid))
+}
+
+/// A session id, printed the way `aurora-sep-policy-change` takes it.
+pub(crate) struct Id<'a>(pub(crate) &'a [u8; 16]);
+
+impl kernel::fmt::Display for Id<'_> {
+    fn fmt(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+/// The one existing session record the enclave may rewrite once this boot,
+/// after a boot policy change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Allowance {
+    /// This record, named by an earlier boot's refusal.
+    Record(Key),
+    /// The first existing record of this kind the enclave asks to rewrite.
+    /// An installer that changes the boot policy cannot know the record's
+    /// session id beforehand; the first identity unlock under the new policy
+    /// comes before anything else can rewrite a session record.
+    FirstOfKind(u8),
+}
+
+impl Allowance {
+    /// Decodes the allowance file; `None` for anything but one valid entry.
+    /// An all-zero session id stands for [`Allowance::FirstOfKind`].
+    pub(crate) fn decode(file: &[u8]) -> Option<Allowance> {
+        let key = decode_with(ALLOW_MAGIC, file)?;
+        Some(if key.uuid == [0; 16] {
+            Allowance::FirstOfKind(key.kind)
+        } else {
+            Allowance::Record(key)
+        })
+    }
+
+    fn covers(&self, key: &Key) -> bool {
+        match self {
+            Allowance::Record(allowed) => allowed == key,
+            Allowance::FirstOfKind(kind) => *kind == key.kind,
+        }
+    }
+}
+
+/// Reads and empties the allowance file. The allowance is for this boot
+/// only: when the file cannot be emptied, it is not used at all.
+fn take_allowance() -> Option<Allowance> {
+    let file = StoreFile::open_readonly(ALLOW_PATH).ok()?;
+    let size = file.size().ok()?;
+    if size == 0 {
+        return None;
+    }
+    let mut entry = [0u8; ENTRY_SIZE];
+    let read = if size == ENTRY_SIZE as u64 {
+        file.read_exact(0, &mut entry).is_ok()
+    } else {
+        false
+    };
+    drop(file);
+    if let Err(e) = StoreFile::open_trunc(ALLOW_PATH).and_then(|file| file.sync()) {
+        pr_warn!(
+            "xART guard: could not empty the one-time allowance ({:?}); not using it\n",
+            e
+        );
+        return None;
+    }
+    let allowance = if read { Allowance::decode(&entry) } else { None };
+    match allowance {
+        Some(Allowance::Record(key)) => pr_info!(
+            "xART guard: this boot may rewrite kind-{} record {} once, for a boot policy change\n",
+            key.kind,
+            Id(&key.uuid)
+        ),
+        Some(Allowance::FirstOfKind(kind)) => pr_info!(
+            "xART guard: this boot may rewrite the first existing kind-{} record the enclave asks for, once, for a boot policy change\n",
+            kind
+        ),
+        None => pr_warn!("xART guard: ignored a damaged one-time allowance\n"),
+    }
+    allowance
 }
 
 /// The file that holds Linux's list: the host file, or memory in the tests.
@@ -246,18 +406,29 @@ pub(crate) struct Guard<F: ListFile = StoreFile> {
     existed: KVec<Key>,
     refused: usize,
     first_setup: FirstSetup,
+    /// The one-time allowance for a boot policy change, until it is used.
+    allowance: Option<Allowance>,
+    /// The boot policy window let its one rewrite through.
+    window_used: bool,
+    /// The write just allowed is a boot policy change rewrite: its previous
+    /// value must be saved first ([`Guard::take_save_previous`]).
+    save_previous: bool,
+    /// Whether the boot policy window is open; the tests use their own.
+    window_open: fn() -> bool,
 }
 
 impl Guard {
     /// Opens Linux's list in the host file and records which keys `existing`
-    /// holds now. Never fails: a list that cannot be read protects every
-    /// existing record.
+    /// holds now, and takes this boot's one-time allowance if there is one.
+    /// Never fails: a list that cannot be read protects every existing record.
     pub(crate) fn open(level: u8, existing: KVec<Key>) -> Guard {
-        Guard::with_file(
+        let mut guard = Guard::with_file(
             level,
             existing,
             StoreFile::open_host(OWNED_PATH).map(|(file, _created)| file),
-        )
+        );
+        guard.allowance = take_allowance();
+        guard
     }
 }
 
@@ -272,6 +443,10 @@ impl<F: ListFile> Guard<F> {
             existed: existing,
             refused: 0,
             first_setup: FirstSetup::Closed,
+            allowance: None,
+            window_used: false,
+            save_previous: false,
+            window_open: || WINDOW_OPEN.load(Relaxed),
         };
         // A list created this boot (or by a crashed one) is only safe to adopt
         // into once its name is durable: fsync() of the file alone does not
@@ -430,20 +605,58 @@ impl<F: ListFile> Guard<F> {
                 );
                 Ok(())
             }
+            Verdict::Refuse if write && self.take_allowance_for(key) => {
+                self.save_previous = true;
+                Ok(())
+            }
             Verdict::Refuse => {
                 crate::diag::xart_guard_refused();
                 self.refused += 1;
                 if self.refused <= LOGGED_REFUSALS {
                     let action = if write { "rewrite" } else { "delete" };
                     pr_warn!(
-                        "xART guard: refused to {} a kind-{} record this Linux install did not create\n",
+                        "xART guard: refused to {} kind-{} record {}, which this Linux install did not create\n",
                         action,
-                        key.kind
+                        key.kind,
+                        Id(&key.uuid)
                     );
                 }
                 Err(EPERM)
             }
         }
+    }
+
+    /// Uses up the one-time allowance if it covers `key`, or else the boot
+    /// policy window's one rewrite.
+    fn take_allowance_for(&mut self, key: &Key) -> bool {
+        if self.allowance.is_some_and(|allowance| allowance.covers(key)) {
+            self.allowance = None;
+            return true;
+        }
+        if key.kind == POLICY_KIND && !self.window_used && (self.window_open)() {
+            self.window_used = true;
+            return true;
+        }
+        false
+    }
+
+    /// Whether the write [`Guard::check`] just allowed rewrites a record for
+    /// a boot policy change, whose previous value must be saved first.
+    pub(crate) fn take_save_previous(&mut self) -> bool {
+        core::mem::take(&mut self.save_previous)
+    }
+
+    /// The previous value could not be saved: the rewrite is refused after
+    /// all.
+    pub(crate) fn refuse_unsaved(&mut self, key: &Key, e: Error) {
+        crate::diag::xart_guard_refused();
+        self.refused += 1;
+        pr_warn!(
+            "xART guard: could not save kind-{} record {} before its boot policy rewrite ({:?}); refusing it\n",
+            key.kind,
+            Id(&key.uuid),
+            e
+        );
     }
 }
 
@@ -1015,5 +1228,91 @@ mod tests {
         assert_eq!(level(1, 0), Some(1));
         assert_eq!(level(2, 1), Some(2));
         assert_eq!(level(i8::MAX, 0), Some(2));
+    }
+
+    /// What `aurora-sep-policy-change` writes.
+    fn allowance_entry(allowance: &Allowance) -> [u8; ENTRY_SIZE] {
+        match allowance {
+            Allowance::Record(key) => encode_with(ALLOW_MAGIC, key),
+            Allowance::FirstOfKind(kind) => encode_with(ALLOW_MAGIC, &Key::new(*kind, [0; 16])),
+        }
+    }
+
+    #[test]
+    fn allowances_round_trip() {
+        let named = Allowance::Record(session(9));
+        assert_eq!(Allowance::decode(&allowance_entry(&named)), Some(named));
+        let first = Allowance::FirstOfKind(4);
+        assert_eq!(Allowance::decode(&allowance_entry(&first)), Some(first));
+        // A list entry is not an allowance, and roots cannot be allowed.
+        assert_eq!(Allowance::decode(&encode(&session(9))), None);
+        assert_eq!(Allowance::decode(&encode_with(ALLOW_MAGIC, &Key::root(1))), None);
+        let mut torn = allowance_entry(&named);
+        torn[12] ^= 1;
+        assert_eq!(Allowance::decode(&torn), None);
+    }
+
+    #[test]
+    fn a_named_allowance_rewrites_that_record_once() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let (policy, other) = (session(1), session(2));
+        let mut guard = Guard::with_file(1, keys(&[policy, other])?, Ok(mem(&bytes)));
+        guard.allowance = Some(Allowance::Record(policy));
+        // Never a delete, and never another record.
+        assert_eq!(guard.check(&policy, false), Err(EPERM));
+        assert_eq!(guard.check(&other, true), Err(EPERM));
+        assert_eq!(guard.check(&policy, true), Ok(()));
+        assert!(guard.take_save_previous());
+        assert_eq!(guard.check(&policy, true), Err(EPERM));
+        // The record is not adopted.
+        assert!(bytes.borrow().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_first_of_kind_allowance_covers_one_record() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let (a, b) = (session(1), session(2));
+        let mut guard = Guard::with_file(1, keys(&[a, b, Key::new(3, [3; 16])])?, Ok(mem(&bytes)));
+        guard.allowance = Some(Allowance::FirstOfKind(4));
+        assert_eq!(guard.check(&Key::new(3, [3; 16]), true), Err(EPERM));
+        assert_eq!(guard.check(&b, true), Ok(()));
+        assert_eq!(guard.check(&a, true), Err(EPERM));
+        assert_eq!(guard.check(&b, true), Err(EPERM));
+        Ok(())
+    }
+
+    #[test]
+    fn an_allowance_leaves_new_and_listed_records_alone() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let (old, new) = (session(1), session(2));
+        let mut guard = Guard::with_file(1, keys(&[old])?, Ok(mem(&bytes)));
+        guard.allowance = Some(Allowance::FirstOfKind(4));
+        // A new record is adopted as usual and does not use the allowance.
+        assert_eq!(guard.check(&new, true), Ok(()));
+        assert_eq!(guard.check(&old, true), Ok(()));
+        assert_eq!(guard.allowance, None);
+        Ok(())
+    }
+
+    #[test]
+    fn the_policy_window_lets_one_kind_4_rewrite_through() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let (a, b, c) = (session(1), session(2), Key::new(3, [3; 16]));
+        let mut guard = Guard::with_file(1, keys(&[a, b, c])?, Ok(mem(&bytes)));
+        // Outside the window nothing changes.
+        guard.window_open = || false;
+        assert_eq!(guard.check(&a, true), Err(EPERM));
+        guard.window_open = || true;
+        assert_eq!(guard.check(&c, true), Err(EPERM));
+        assert_eq!(guard.check(&a, false), Err(EPERM));
+        assert_eq!(guard.check(&a, true), Ok(()));
+        assert!(guard.take_save_previous());
+        assert!(!guard.take_save_previous());
+        assert_eq!(guard.check(&b, true), Err(EPERM));
+        assert_eq!(guard.check(&a, true), Err(EPERM));
+        // Not adopted.
+        assert!(bytes.borrow().is_empty());
+        Ok(())
     }
 }
