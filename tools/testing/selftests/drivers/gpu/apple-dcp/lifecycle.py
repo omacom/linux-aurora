@@ -1059,7 +1059,7 @@ def teardown(root):
         while definition[-1].endswith('\\'):
             definition.append(next(lines))
         definitions.append('\n'.join(definition))
-    definitions = '\n'.join(definitions)
+    definitions = '\n'.join(definitions + [l for l in files['apple'].splitlines() if l.startswith('#define T8152_PIPE_')])
     here = Path(__file__).resolve().parent
     fallback = '' if 'dwc3_core_remove_no_shutdown' in names['core'] else '#define dwc3_core_remove_no_shutdown dwc3_core_remove\n'
     unit = ((here / 'dwc3/prefix.c').read_text() + '\n' + definitions + '\n' +

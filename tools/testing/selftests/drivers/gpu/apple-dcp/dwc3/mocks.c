@@ -77,6 +77,8 @@ struct dwc3_apple {
 	void *dev;
 	struct phy *usb2_phy, *usb3_phy;
 	bool fixed_hub, core_active, core_exit_pending, reset_pending;
+	bool t8152_usb2, fixed_peripheral;
+	void *tunable_regs[6];
 	unsigned long usb2_power_off_pending, usb3_power_off_pending;
 };
 static unsigned int polls, fail_poll, reset_calls, reset_writes, core_writes;
