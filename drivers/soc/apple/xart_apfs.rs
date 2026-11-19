@@ -255,18 +255,55 @@ fn validate_write_ownership(
         || le32(&tree, 28)? != 0x0f
         || le16(&tree, 32)? != 3
         || le16(&tree, 34)? != 0
-        || le32(&tree, 36)? != 1
     {
         return Err(ENOTSUPP);
     }
-    let (key, val) = node_entry(&tree, 0, false)?;
-    if key.len() != 8
-        || val.len() < 20
-        || le64(key, 0)? != ((2u64 << 60) | physical)
-        || le64(val, 0)? != ((1u64 << 60) | (FILE_SIZE / BLOCK as u64))
-        || le64(val, 8)? != private_id
-        || le32(val, 16)? != 1
-    {
+    // This is a volume-wide extent-reference tree, not a per-file tree.
+    // Other files can have disjoint records alongside the gigalocker's.
+    let count = le32(&tree, 36)? as usize;
+    if count == 0 || count > 512 {
+        return Err(ENOTSUPP);
+    }
+    let target_blocks = FILE_SIZE / BLOCK as u64;
+    let target_end = physical.checked_add(target_blocks).ok_or(EINVAL)?;
+    let mut previous_end = None;
+    let mut matched = false;
+    for i in 0..count {
+        let (key, val) = node_entry(&tree, i, false)?;
+        if key.len() != 8 || val.len() < 20 {
+            return Err(ENOTSUPP);
+        }
+        let raw_key = le64(key, 0)?;
+        let raw_len = le64(val, 0)?;
+        let start = raw_key & ((1u64 << 60) - 1);
+        let blocks = raw_len & ((1u64 << 60) - 1);
+        let end = start.checked_add(blocks).ok_or(EINVAL)?;
+        // Keep support narrow: ordinary allocated extents, sorted and
+        // non-overlapping, wholly inside this checksummed container.
+        if raw_key >> 60 != 2
+            || raw_len >> 60 != 1
+            || blocks == 0
+            || end > size / BLOCK as u64
+            || previous_end.is_some_and(|previous| start < previous)
+            || le32(val, 16)? == 0
+            || le32(val, 16)? > i32::MAX as u32
+        {
+            return Err(ENOTSUPP);
+        }
+        previous_end = Some(end);
+        if start < target_end && physical < end {
+            if matched
+                || start != physical
+                || blocks != target_blocks
+                || le64(val, 8)? != private_id
+                || le32(val, 16)? != 1
+            {
+                return Err(ENOTSUPP);
+            }
+            matched = true;
+        }
+    }
+    if !matched {
         return Err(ENOTSUPP);
     }
     Ok(())
