@@ -1038,8 +1038,10 @@ int hw_atl_b0_hw_irq_read(struct aq_hw_s *self, u64 *mask)
 
 #define IS_FILTER_ENABLED(_F_) ((packet_filter & (_F_)) ? 1U : 0U)
 
-int hw_atl_b0_hw_packet_filter_set(struct aq_hw_s *self,
-				   unsigned int packet_filter)
+int hw_atl_b0_hw_packet_filter_set_int(struct aq_hw_s *self,
+				       unsigned int base_location,
+				       unsigned int end_location,
+				       unsigned int packet_filter)
 {
 	struct aq_nic_cfg_s *cfg = self->aq_nic_cfg;
 	unsigned int i = 0U;
@@ -1065,16 +1067,32 @@ int hw_atl_b0_hw_packet_filter_set(struct aq_hw_s *self,
 	hw_atl_rpfl2broadcast_en_set(self, IS_FILTER_ENABLED(IFF_BROADCAST));
 
 
-	for (i = HW_ATL_B0_MAC_MIN; i < HW_ATL_B0_MAC_MAX; ++i)
-		hw_atl_rpfl2_uc_flr_en_set(self,
-					   (cfg->is_mc_list_enabled &&
-					    (i <= cfg->mc_list_count)) ?
-					   1U : 0U, i);
+	/*
+	 * base_location is the first multicast slot. On A1 that is
+	 * HW_ATL_B0_MAC_MIN. On A2, slots below the base index are not ours
+	 * and the station MAC occupies that index, so the walk must not
+	 * disable them. mc_list_count is a count, not an absolute slot
+	 * number.
+	 */
+	for (i = base_location; i < end_location; ++i) {
+		bool enable = cfg->is_mc_list_enabled &&
+			      (i - base_location) < cfg->mc_list_count;
+
+		hw_atl_rpfl2_uc_flr_en_set(self, enable ? 1U : 0U, i);
+	}
 
 	return aq_hw_err_from_flags(self);
 }
 
 #undef IS_FILTER_ENABLED
+
+static int hw_atl_b0_hw_packet_filter_set(struct aq_hw_s *self,
+					  unsigned int packet_filter)
+{
+	return hw_atl_b0_hw_packet_filter_set_int(self, HW_ATL_B0_MAC_MIN,
+						  HW_ATL_B0_MAC_MAX,
+						  packet_filter);
+}
 
 static int hw_atl_b0_hw_multicast_list_set(struct aq_hw_s *self,
 					   u8 ar_mac
