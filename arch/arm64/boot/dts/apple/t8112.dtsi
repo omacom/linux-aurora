@@ -1393,6 +1393,10 @@
 			reg = <0x2 0x3d714000 0x0 0x100>;
 			#address-cells = <2>;
 			#size-cells = <0>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 384 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
 
 			pmic1: pmic@e {
 				compatible = "apple,stowe-pmic", "apple,spmi-nvmem";
@@ -1434,8 +1438,24 @@
 						bits = <3 1>;
 					};
 
+					rtc_ctrl: rtc-ctrl@f800 {
+						reg = <0xf800 0x1>;
+					};
+
 					pm_setting: pm-setting@f801 {
 						reg = <0xf801 0x1>;
+					};
+
+					rtc_alarm: rtc-alarm@f808 {
+						reg = <0xf808 0x4>;
+					};
+
+					rtc_alarm_event: rtc-alarm-event@f80c {
+						reg = <0xf80c 0x1>;
+					};
+
+					rtc_alarm_mask: rtc-alarm-mask@f80e {
+						reg = <0xf80e 0x1>;
 					};
 
 					rtc_offset: rtc-offset@f900 {
@@ -1472,8 +1492,13 @@
 
 			rtc {
 				compatible = "apple,smc-rtc";
-				nvmem-cells = <&rtc_offset>;
-				nvmem-cell-names = "rtc_offset";
+				nvmem-cells = <&rtc_offset>, <&rtc_ctrl>, <&rtc_alarm>,
+					<&rtc_alarm_mask>, <&rtc_alarm_event>;
+				nvmem-cell-names = "rtc_offset", "rtc_ctrl", "rtc_alarm",
+					"rtc_alarm_mask", "rtc_alarm_event";
+				/* The PMU's RTC alarm, peripheral interrupt 2 of nub-spmi0 */
+				interrupts-extended = <&nub_spmi 2 IRQ_TYPE_EDGE_RISING>;
+				wakeup-source;
 			};
 		};
 
