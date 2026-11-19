@@ -45,6 +45,15 @@
 	power-domains = <&ps_dispext0_cpu0_die1>, <&ps_dptx_phy_ps_die1>;
 };
 
+/*
+ * HDMI scans out through dispext0 on die 1, and the rear USB-C ports through
+ * dcpext1/dispext1 on die 0 (see t602x-j474-j475.dtsi).
+ */
+&display {
+	iommus = <&dispext0_dart_die1 0 0x100 0x0 0x10 0x0>,
+		 <&dispext1_dart 0 0x100 0x0 0x10 0x0>;
+};
+
 &dcpext0_die1 {
 	// J180 misses "function-dp2hdmi_pwr_en"
 	dp2hdmi-pwren-gpios = <&smc_gpio 25 GPIO_ACTIVE_HIGH>;
