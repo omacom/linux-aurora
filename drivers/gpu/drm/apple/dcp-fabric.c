@@ -2311,11 +2311,25 @@ static int dcp_tb_release_locked(struct apple_dcp_typec_port *port,
 			return ret;
 	}
 	dcp = (*slot)->dcp;
-	/* A refused display release keeps the route and its binding owned. */
+	/*
+	 * A refused display release keeps the route and its binding owned.
+	 * A timed-out one frees them: apple_dpin_release_binding() does not
+	 * retry after an unplug.
+	 */
 	if (port->hpd || dcp->typec_cable_connected) {
 		ret = dcp_dptx_disconnect_oob(to_platform_device(dcp->dev), 0);
-		if (ret)
+		if (ret == -ETIMEDOUT) {
+			dev_warn(dcp->dev,
+				 "DP tunnel dpin%u: HPD release timed out, releasing its pipeline anyway\n",
+				 dpin);
+			ret = dcp_dptx_disconnect(dcp, 0);
+			if (ret)
+				dev_warn(dcp->dev,
+					 "DP tunnel dpin%u: DPTX release failed: %d\n",
+					 dpin, ret);
+		} else if (ret) {
 			return ret;
+		}
 	}
 	ret = dcp_typec_route_deactivate(*slot);
 	if (ret) {
