@@ -115,6 +115,9 @@ struct macsmc_power {
 	bool orderly_shutdown_triggered;
 
 	struct delayed_work dbg_log_work;
+
+	/* Set from PM prepare until PM complete, i.e. while suspending/suspended */
+	bool suspended;
 };
 
 static int macsmc_log_power_set(const char *val, const struct kernel_param *kp);
@@ -943,6 +946,22 @@ static int macsmc_power_event(struct notifier_block *nb, unsigned long event, vo
 	struct macsmc_power *power = container_of(nb, struct macsmc_power, nb);
 
 	/*
+	 * Connector insert/remove events keep arriving while the system is in
+	 * s2idle. If userspace has enabled wakeup for this device, use them to
+	 * wake the system, so a charger being plugged in or removed with the
+	 * lid closed can be acted on (e.g. play a sound, like macOS does).
+	 */
+	if (READ_ONCE(power->suspended)) {
+		bool wake = (event & 0xffff0000) == 0x71130000 &&
+			    device_may_wakeup(power->dev);
+
+		dev_dbg(power->dev, "SMC event %08lx while suspended%s\n",
+			event, wake ? ", waking" : "");
+		if (wake)
+			pm_wakeup_dev_event(power->dev, 0, true);
+	}
+
+	/*
 	 * SMC Event IDs are correlated to physical events (e.g. charger
 	 * connect/disconnect) but the exact meaning of each ID is predicted.
 	 * 0x71... indicates power/battery events.
@@ -1214,6 +1233,9 @@ static int macsmc_power_probe(struct platform_device *pdev)
 
 	g_power = power;
 
+	/* Wake on charger connect/disconnect is opt-in via power/wakeup */
+	device_set_wakeup_capable(dev, true);
+
 	if (log_power)
 		schedule_delayed_work(&power->dbg_log_work, 0);
 
@@ -1229,8 +1251,29 @@ static void macsmc_power_remove(struct platform_device *pdev)
 
 	g_power = NULL;
 
+	device_init_wakeup(&pdev->dev, false);
 	blocking_notifier_chain_unregister(&power->smc->event_handlers, &power->nb);
 }
+
+static int macsmc_power_pm_prepare(struct device *dev)
+{
+	struct macsmc_power *power = dev_get_drvdata(dev);
+
+	WRITE_ONCE(power->suspended, true);
+	return 0;
+}
+
+static void macsmc_power_pm_complete(struct device *dev)
+{
+	struct macsmc_power *power = dev_get_drvdata(dev);
+
+	WRITE_ONCE(power->suspended, false);
+}
+
+static const struct dev_pm_ops macsmc_power_pm_ops = {
+	.prepare = macsmc_power_pm_prepare,
+	.complete = macsmc_power_pm_complete,
+};
 
 static const struct platform_device_id macsmc_power_id[] = {
 	{ .name = "macsmc-power" },
@@ -1241,6 +1284,7 @@ MODULE_DEVICE_TABLE(platform, macsmc_power_id);
 static struct platform_driver macsmc_power_driver = {
 	.driver = {
 		.name = "macsmc-power",
+		.pm = &macsmc_power_pm_ops,
 	},
 	.id_table = macsmc_power_id,
 	.probe = macsmc_power_probe,
