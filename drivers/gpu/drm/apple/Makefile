@@ -5,6 +5,7 @@ CFLAGS_trace.o = -I$(src)
 appledrm-y := apple_drv.o apple_resume.o
 appledrm-y += afk.o dcp.o dcp-fabric.o dcp_backlight.o dptxep.o iomfb.o parser.o systemep.o
 appledrm-y += dcp-hdmi.o
+appledrm-y += ddc.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += audio.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += av.o
 appledrm-y += connector.o dcp-display-metadata.o dcp-180hz.o dcp-panel-edid.o

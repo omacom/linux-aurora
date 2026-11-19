@@ -49,6 +49,7 @@
 #include "dcp-fabric-effects.h"
 #include "dcp-fabric.h"
 #include "dcp-hdmi.h"
+#include "ddc.h"
 #include "dcpext_scanout.h"
 #include "dcp-internal.h"
 #include "dcp-external-bw.h"
@@ -4723,8 +4724,12 @@ static int dcp_platform_probe(struct platform_device *pdev)
 	void *group;
 	int ret;
 
-	if (!of_device_is_compatible(dev->of_node, "apple,t8122-dcpext"))
-		return dcp_platform_probe_pipe(pdev);
+	if (!of_device_is_compatible(dev->of_node, "apple,t8122-dcpext")) {
+		ret = dcp_platform_probe_pipe(pdev);
+		if (!ret)
+			dcp_ddc_register(platform_get_drvdata(pdev));
+		return ret;
+	}
 
 	ret = dcp_ext_route_suppliers(dev);
 	if (ret)
@@ -4770,6 +4775,7 @@ static void dcp_platform_remove(struct platform_device *pdev)
 {
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 
+	dcp_ddc_unregister(dcp);
 	if (dcp && dcp->external && !dcp->external_native) {
 		/* Enabled for the external start at probe. No component unbind. */
 		disable_delayed_work_sync(&dcp->typec_reconnect_wq);
