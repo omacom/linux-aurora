@@ -35,6 +35,9 @@ properties:
               - apple,t8112-spmi
           - const: apple,spmi
       - const: apple,t8142-spmi
+      - items:
+          - const: apple,t6050-spmi
+          - const: apple,t8142-spmi
 
   reg:
     maxItems: 1

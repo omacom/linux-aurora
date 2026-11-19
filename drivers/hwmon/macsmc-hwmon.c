@@ -865,6 +865,8 @@ static int macsmc_hwmon_create_fan(struct device *dev, struct apple_smc *smc,
 				   struct macsmc_hwmon_fan *fan)
 {
 	const char *label, *now, *min, *max, *set, *mode;
+	char missing[64] = "";
+	int len = 0;
 	int ret;
 
 	ret = of_property_read_string(fan_node, "apple,key-id", &now);
@@ -887,36 +889,53 @@ static int macsmc_hwmon_create_fan(struct device *dev, struct apple_smc *smc,
 		fan->attrs |= HWMON_F_LABEL;
 	}
 
-	/* The following keys are not required to simply monitor fan speed */
+	/*
+	 * The following keys are not required to simply monitor fan speed.
+	 * A key the firmware lacks (the T6050 SMC spells the mode key F0md,
+	 * not F0Md) drops only that attribute, not the whole fan; the missing
+	 * keys are reported together below.
+	 */
 	if (!of_property_read_string(fan_node, "apple,fan-minimum", &min)) {
-		ret = macsmc_hwmon_parse_key(dev, smc, &fan->min, min);
-		if (ret)
-			return ret;
-
-		fan->attrs |= HWMON_F_MIN;
+		if (macsmc_hwmon_parse_key(dev, smc, &fan->min, min))
+			len += scnprintf(missing + len, sizeof(missing) - len,
+					 " minimum %s", min);
+		else
+			fan->attrs |= HWMON_F_MIN;
 	}
 
 	if (!of_property_read_string(fan_node, "apple,fan-maximum", &max)) {
-		ret = macsmc_hwmon_parse_key(dev, smc, &fan->max, max);
-		if (ret)
-			return ret;
-
-		fan->attrs |= HWMON_F_MAX;
+		if (macsmc_hwmon_parse_key(dev, smc, &fan->max, max))
+			len += scnprintf(missing + len, sizeof(missing) - len,
+					 " maximum %s", max);
+		else
+			fan->attrs |= HWMON_F_MAX;
 	}
 
 	if (!of_property_read_string(fan_node, "apple,fan-target", &set)) {
-		ret = macsmc_hwmon_parse_key(dev, smc, &fan->set, set);
-		if (ret)
-			return ret;
-
-		fan->attrs |= HWMON_F_TARGET;
+		if (macsmc_hwmon_parse_key(dev, smc, &fan->set, set))
+			len += scnprintf(missing + len, sizeof(missing) - len,
+					 " target %s", set);
+		else
+			fan->attrs |= HWMON_F_TARGET;
 	}
 
 	if (!of_property_read_string(fan_node, "apple,fan-mode", &mode)) {
-		ret = macsmc_hwmon_parse_key(dev, smc, &fan->mode, mode);
-		if (ret)
-			return ret;
+		if (macsmc_hwmon_parse_key(dev, smc, &fan->mode, mode))
+			len += scnprintf(missing + len, sizeof(missing) - len,
+					 " mode %s", mode);
 	}
+
+	if (len)
+		dev_info(dev, "Fan %s: optional keys not found:%s\n", now, missing);
+
+	/*
+	 * Manual control (fan_control) writes the mode key and checks the
+	 * request against the minimum and maximum keys before writing the
+	 * target: it needs all four.
+	 */
+	if ((fan->attrs & (HWMON_F_MIN | HWMON_F_MAX | HWMON_F_TARGET)) !=
+	    (HWMON_F_MIN | HWMON_F_MAX | HWMON_F_TARGET))
+		fan->mode.macsmc_key = 0;
 
 	/* Initialise fan control mode to automatic */
 	fan->manual = false;

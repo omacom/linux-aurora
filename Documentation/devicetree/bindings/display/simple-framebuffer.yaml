@@ -142,6 +142,12 @@ properties:
       - mixer1-lcd1-hdmi
       - mixer1-lcd1-tve
 
+  apple,internal-panel:
+    type: boolean
+    description:
+      The framebuffer is the built-in panel of an Apple laptop, which the
+      boot loader hands over before the display coprocessor driver runs.
+
   amlogic,pipeline:
     description: Pipeline used by the framebuffer on Amlogic SoCs
     enum:

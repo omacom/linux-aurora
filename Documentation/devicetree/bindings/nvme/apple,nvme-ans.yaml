@@ -23,6 +23,9 @@ properties:
           - const: apple,t8140-nvme-ans2
           - const: apple,t8132-nvme-ans2
       - items:
+          - const: apple,t6050-nvme-ans2
+          - const: apple,t8140-nvme-ans2
+      - items:
           - enum:
               # Do not add additional SoC to this list.
               - apple,t8103-nvme-ans2
@@ -52,7 +55,7 @@ properties:
       SError, so it cannot be used to restart the co-processor there.
 
   power-domains:
-    # two domains for t8103, three for t6000, t6020 and t8140
+    # two domains for t8103, three for t6000, t6020 and t8140, four for t6050
     minItems: 2
     items:
       - description: power domain for the NVMe controller.
@@ -60,7 +63,10 @@ properties:
           controller to the storage modules.
       - description: optional power domain for the second PCIe bus
           connecting the NVMe controller to the storage modules (T6000,
-          T6020), or for the PCIe PHY of the link to the storage (T8140).
+          T6020), or for the PCIe PHY of the link to the storage (T8140,
+          T6050).
+      - description: power domain for the PCIe lane PHY of the link to the
+          storage (T6050).
 
   power-domain-names:
     minItems: 2
@@ -70,6 +76,7 @@ properties:
       - enum:
           - apcie1
           - apcie_phy
+      - const: aphy_st0
 
   mboxes:
     maxItems: 1
@@ -111,7 +118,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: apple,t8132-nvme-ans2
+            enum:
+              - apple,t6050-nvme-ans2
+              - apple,t8132-nvme-ans2
     then:
       properties:
         reg:

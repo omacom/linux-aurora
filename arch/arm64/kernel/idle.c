@@ -46,12 +46,38 @@ early_param("idle", setup_idle);
  * patched-out branch.
  */
 static DEFINE_STATIC_KEY_FALSE(apple_wfi_loses_regs);
+static bool apple_keep_idle_nop __initdata;
+
+/*
+ * The boot loader appends idle=nop after the user's arguments, so it cannot
+ * be overridden on the command line. This flag keeps it anyway.
+ */
+static int __init setup_apple_keep_idle_nop(char *arg)
+{
+	apple_keep_idle_nop = true;
+	return 0;
+}
+early_param("apple_keep_idle_nop", setup_apple_keep_idle_nop);
 
 static int __init apple_wfi_quirk_init(void)
 {
+	u32 model = read_cpuid_id() & MIDR_CPU_MODEL_MASK;
+
 	if (midr_is_apple_m4_or_later(read_cpuid_id())) {
 		static_branch_enable(&apple_wfi_loses_regs);
 		pr_info("Apple: preserving registers across WFI\n");
+	}
+	/*
+	 * m1n1 passes idle=nop on M4 and later for kernels that do not
+	 * preserve the registers WFI loses there. This one does, from here
+	 * on, so on T6050 spinning only keeps every idle core busy: the
+	 * system draws about 7 W more at idle. The secondary CPUs are not up
+	 * yet, and the boot CPU has spun until now, so WFI is safe from here.
+	 */
+	if (idle == ARM64_IDLE_NOP && !apple_keep_idle_nop &&
+	    (model == MIDR_APPLE_T6050_M || model == MIDR_APPLE_T6050_P)) {
+		idle = ARM64_IDLE_WFI;
+		pr_info("Apple: idling in WFI, ignoring idle=nop\n");
 	}
 	return 0;
 }

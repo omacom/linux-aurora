@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple T6050 "M5 Max" SoC
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+#include <dt-bindings/interrupt-controller/apple-aic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+#include "t6050-base.dtsi"
+
+/ {
+	compatible = "apple,t6050", "apple,arm-platform";
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	soc: soc {
+		compatible = "simple-bus";
+		ranges;
+		#address-cells = <2>;
+		/* Required to get >32-bit DMA via DARTs */
+		dma-ranges = <0 0 0 0 0xffffffff 0xffffc000>;
+		nonposted-mmio;
+		#size-cells = <2>;
+	};
+};
+
+/* T6050 is a single die: no multi-die templating. */
+#include "t6050-die0.dtsi"
+#include "t6050-pmgr.dtsi"
+#include "t6050-nvme.dtsi"

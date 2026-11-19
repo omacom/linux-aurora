@@ -47,6 +47,8 @@ struct apple_rtkit {
 
 	int boot_result;
 	int version;
+	/* How long to wait for each handshake reply from the co-processor. */
+	unsigned int handshake_timeout_ms;
 
 	unsigned int iop_power_state;
 	unsigned int ap_power_state;

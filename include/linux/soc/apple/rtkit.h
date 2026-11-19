@@ -156,6 +156,18 @@ void apple_rtkit_free_retaining_buffers(struct apple_rtkit *rtk);
 int apple_rtkit_reinit(struct apple_rtkit *rtk);
 
 /*
+ * Set how long each handshake step (power state and endpoint map replies)
+ * waits for the co-processor, for one that is known to answer slowly. Call
+ * before apple_rtkit_boot() or apple_rtkit_wake(). Zero restores the default
+ * of 1000 ms.
+ *
+ * @rtk:        Internal RTKit state initialized by apple_rtkit_init()
+ * @timeout_ms: Timeout in milliseconds
+ */
+void apple_rtkit_set_handshake_timeout(struct apple_rtkit *rtk,
+				       unsigned int timeout_ms);
+
+/*
  * Handle RTKit's boot process. Should be called after the CPU of the
  * co-processor has been started.
  */

@@ -839,8 +839,10 @@ static struct simpledrm_device *simpledrm_device_create(struct drm_driver *drv,
 	/* Connector */
 
 	connector = &sdev->connector;
+	/* A built-in laptop panel the loader hands over (Apple, before DCP). */
 	ret = drm_connector_init(dev, connector, &simpledrm_connector_funcs,
-				 DRM_MODE_CONNECTOR_Unknown);
+				 of_property_read_bool(dev->dev->of_node, "apple,internal-panel") ?
+				 DRM_MODE_CONNECTOR_eDP : DRM_MODE_CONNECTOR_Unknown);
 	if (ret)
 		return ERR_PTR(ret);
 	drm_connector_helper_add(connector, &simpledrm_connector_helper_funcs);

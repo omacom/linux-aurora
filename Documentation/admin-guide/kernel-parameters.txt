@@ -549,6 +549,13 @@ Kernel parameters
 	apm=		[APM] Advanced Power Management
 			See header of arch/x86/kernel/apm_32.c.
 
+	apple_keep_idle_nop
+			[ARM64,EARLY] On T6050, keep idle=nop. These cores
+			idle in WFI by default, and an idle=nop that the boot
+			loader appends is ignored, because the kernel
+			preserves the registers WFI loses there. With this
+			flag idle=nop spins the idle loop as elsewhere.
+
 	apparmor=	[APPARMOR] Disable or enable AppArmor at boot time
 			Format: { "0" | "1" }
 			See security/apparmor/Kconfig help text
