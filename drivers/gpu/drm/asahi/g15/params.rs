@@ -93,6 +93,12 @@ pub(crate) fn recovery() -> bool {
     *module_parameters::g15_recovery.value() != 0
 }
 
+/// Whether the T6031 GFX domain is held through system sleep too, the device being left out of
+/// it (else genpd may power the domain off under the firmware in the noirq phase).
+pub(crate) fn sleep_hold() -> bool {
+    *module_parameters::g15_sleep_hold.value() != 0
+}
+
 /// Whether the CDM/VDM stream gates are on.
 pub(crate) fn stream_gate() -> bool {
     *module_parameters::g15_stream_gate.value() != 0
