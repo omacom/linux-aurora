@@ -24,7 +24,6 @@
 #ifdef APPLE_T602X_NON_ULTRA
 / {
 	aliases {
-		dcpext1 = &dcpext1;
 		/* Same Thunderbolt aliases as the 14/16-inch boards. This mini
 		 * brings up a fourth controller.
 		 */
@@ -66,6 +65,19 @@
 &display {
 	iommus = <&dispext0_dart 0 0x100 0x0 0x10 0x0>,
 		 <&dispext1_dart 0 0x100 0x0 0x10 0x0>;
+};
+#endif
+
+/*
+ * dcpext1 on die 0 drives the rear USB-C ports through the display crossbar
+ * on all of these boards, M2 Ultra included: macOS routes a DP alt mode
+ * display on the J475d's rear ports to DCPEXT1 as well. Only the USB4 and
+ * PCIe-C wiring below stays non-Ultra.
+ */
+/ {
+	aliases {
+		dcpext1 = &dcpext1;
+	};
 };
 
 &dispext1_dart {
@@ -229,6 +241,7 @@
 	apple,always-on;
 };
 
+#ifdef APPLE_T602X_NON_ULTRA
 &usb4_0_acio {
 	apple,pcie-tunnel = <&usb4_0_pcie_tunnel>;
 };
