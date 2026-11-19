@@ -84,6 +84,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e01: cpu@1 {
@@ -98,6 +99,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e02: cpu@2 {
@@ -112,6 +114,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e03: cpu@3 {
@@ -126,6 +129,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e04: cpu@4 {
@@ -140,6 +144,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_e05: cpu@5 {
@@ -154,6 +159,7 @@
 			operating-points-v2 = <&sawtooth_opp>;
 			capacity-dmips-mhz = <851>;
 			performance-domains = <&cpufreq_e>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p00: cpu@10100 {
@@ -168,6 +174,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p01: cpu@10101 {
@@ -182,6 +189,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p02: cpu@10102 {
@@ -196,6 +204,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p03: cpu@10103 {
@@ -210,6 +219,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p04: cpu@10104 {
@@ -224,6 +234,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		cpu_p05: cpu@10105 {
@@ -238,6 +249,7 @@
 			operating-points-v2 = <&everest_opp>;
 			capacity-dmips-mhz = <1024>;
 			performance-domains = <&cpufreq_p>;
+			#cooling-cells = <2>;
 		};
 
 		l2_cache_0: l2-cache-0 {
@@ -255,6 +267,23 @@
 		};
 	};
 
+	/*
+	 * opp-microwatt is the power one busy CPU adds at each state, measured
+	 * on a J514S (11-core M3 Pro) with the SMC's cluster power keys (PPMC
+	 * for the E cluster, PP0C for the P cluster): the cluster pinned to
+	 * the state, all of its CPUs busy minus the cluster idle, divided by
+	 * the number of CPUs, each state starting at 56-66 C. The values are
+	 * curves fitted to the measurements so that they rise monotonically,
+	 * ln(P/mW) = a + b ln f + c (ln f)^2 with f in GHz:
+	 * E: a = 4.760, b = 1.046, c = 0.946 (rms deviation 11 mW),
+	 * P: a = 5.591, b = 1.250, c = 0.499 (rms deviation 80 mW).
+	 *
+	 * From 3576 MHz up, the P cluster's power stops rising at about
+	 * 19.5 W with all five CPUs busy, and the E cluster's at 2748 MHz is
+	 * that of 2640 MHz: the hardware limits the top states by itself.
+	 * Their values are the fitted curves extrapolated, the power these
+	 * states would draw unlimited.
+	 */
 	sawtooth_opp: opp-table-0 {
 		compatible = "operating-points-v2";
 		opp-shared;
@@ -263,41 +292,49 @@
 			opp-hz = /bits/ 64 <744000000>;
 			opp-level = <1>;
 			clock-latency-ns = <7700>;
+			opp-microwatt = <93000>;
 		};
 		opp02 {
 			opp-hz = /bits/ 64 <1044000000>;
 			opp-level = <2>;
 			clock-latency-ns = <21200>;
+			opp-microwatt = <122000>;
 		};
 		opp03 {
 			opp-hz = /bits/ 64 <1476000000>;
 			opp-level = <3>;
 			clock-latency-ns = <26400>;
+			opp-microwatt = <202000>;
 		};
 		opp04 {
 			opp-hz = /bits/ 64 <2004000000>;
 			opp-level = <4>;
 			clock-latency-ns = <40500>;
+			opp-microwatt = <381000>;
 		};
 		opp05 {
 			opp-hz = /bits/ 64 <2268000000>;
 			opp-level = <5>;
 			clock-latency-ns = <44400>;
+			opp-microwatt = <518000>;
 		};
 		opp06 {
 			opp-hz = /bits/ 64 <2448000000>;
 			opp-level = <6>;
 			clock-latency-ns = <47200>;
+			opp-microwatt = <635000>;
 		};
 		opp07 {
 			opp-hz = /bits/ 64 <2640000000>;
 			opp-level = <7>;
 			clock-latency-ns = <52000>;
+			opp-microwatt = <785000>;
 		};
 		opp08 {
 			opp-hz = /bits/ 64 <2748000000>;
 			opp-level = <8>;
 			clock-latency-ns = <52000>;
+			opp-microwatt = <883000>;
 		};
 	};
 
@@ -309,101 +346,121 @@
 			opp-hz = /bits/ 64 <696000000>;
 			opp-level = <1>;
 			clock-latency-ns = <8600>;
+			opp-microwatt = <182000>;
 		};
 		opp02 {
 			opp-hz = /bits/ 64 <1092000000>;
 			opp-level = <2>;
 			clock-latency-ns = <18700>;
+			opp-microwatt = <300000>;
 		};
 		opp03 {
 			opp-hz = /bits/ 64 <1356000000>;
 			opp-level = <3>;
 			clock-latency-ns = <20700>;
+			opp-microwatt = <411000>;
 		};
 		opp04 {
 			opp-hz = /bits/ 64 <1596000000>;
 			opp-level = <4>;
 			clock-latency-ns = <24800>;
+			opp-microwatt = <536000>;
 		};
 		opp05 {
 			opp-hz = /bits/ 64 <1884000000>;
 			opp-level = <5>;
 			clock-latency-ns = <30700>;
+			opp-microwatt = <723000>;
 		};
 		opp06 {
 			opp-hz = /bits/ 64 <2172000000>;
 			opp-level = <6>;
 			clock-latency-ns = <34400>;
+			opp-microwatt = <954000>;
 		};
 		opp07 {
 			opp-hz = /bits/ 64 <2424000000>;
 			opp-level = <7>;
 			clock-latency-ns = <39600>;
+			opp-microwatt = <1199000>;
 		};
 		opp08 {
 			opp-hz = /bits/ 64 <2616000000>;
 			opp-level = <8>;
 			clock-latency-ns = <40000>;
+			opp-microwatt = <1414000>;
 		};
 		opp09 {
 			opp-hz = /bits/ 64 <2808000000>;
 			opp-level = <9>;
 			clock-latency-ns = <41800>;
+			opp-microwatt = <1658000>;
 		};
 		opp10 {
 			opp-hz = /bits/ 64 <2988000000>;
 			opp-level = <10>;
 			clock-latency-ns = <45300>;
+			opp-microwatt = <1914000>;
 		};
 		opp11 {
 			opp-hz = /bits/ 64 <3144000000>;
 			opp-level = <11>;
 			clock-latency-ns = <46700>;
+			opp-microwatt = <2160000>;
 		};
 		opp12 {
 			opp-hz = /bits/ 64 <3288000000>;
 			opp-level = <12>;
 			clock-latency-ns = <49200>;
+			opp-microwatt = <2406000>;
 		};
 		opp13 {
 			opp-hz = /bits/ 64 <3420000000>;
 			opp-level = <13>;
 			clock-latency-ns = <53900>;
+			opp-microwatt = <2651000>;
 		};
 		opp14 {
 			opp-hz = /bits/ 64 <3576000000>;
 			opp-level = <14>;
 			clock-latency-ns = <53700>;
+			opp-microwatt = <2964000>;
 		};
 		opp15 {
 			opp-hz = /bits/ 64 <3624000000>;
 			opp-level = <15>;
 			clock-latency-ns = <54000>;
+			opp-microwatt = <3065000>;
 		};
 		opp16 {
 			opp-hz = /bits/ 64 <3708000000>;
 			opp-level = <16>;
 			clock-latency-ns = <54000>;
+			opp-microwatt = <3250000>;
 		};
 		opp17 {
 			opp-hz = /bits/ 64 <3780000000>;
 			opp-level = <17>;
 			clock-latency-ns = <54100>;
+			opp-microwatt = <3414000>;
 		};
 		opp18 {
 			opp-hz = /bits/ 64 <3864000000>;
 			opp-level = <18>;
 			clock-latency-ns = <54300>;
+			opp-microwatt = <3614000>;
 		};
 		opp19 {
 			opp-hz = /bits/ 64 <3960000000>;
 			opp-level = <19>;
 			clock-latency-ns = <58400>;
+			opp-microwatt = <3853000>;
 		};
 		opp20 {
 			opp-hz = /bits/ 64 <4056000000>;
 			opp-level = <20>;
 			clock-latency-ns = <58700>;
+			opp-microwatt = <4105000>;
 		};
 	};
 
@@ -1184,6 +1241,55 @@
 
 			smc_hwmon: hwmon {
 				compatible = "apple,smc-hwmon";
+				#thermal-sensor-cells = <1>;
+
+				/*
+				 * CPU die temperatures: two for the E cluster and
+				 * one per P core, the key that rose most with only
+				 * that core busy on a J514S (11-core M3 Pro: about
+				 * 25 C, 10-15 C more than with any other core busy).
+				 * Single E cores barely warm their sensors, so the
+				 * E cluster is covered by the two keys that rose
+				 * most with the whole cluster busy. cpu_p05 is
+				 * absent on the 11-core part and its key is not
+				 * identified. Board thermal zones refer to these by
+				 * channel index, so keep them first and in this
+				 * order.
+				 */
+				temperature-Te05 {
+					apple,key-id = "Te05";
+					label = "E-cluster Temperature 1";
+				};
+
+				temperature-Te0P {
+					apple,key-id = "Te0P";
+					label = "E-cluster Temperature 2";
+				};
+
+				temperature-Tp0U {
+					apple,key-id = "Tp0U";
+					label = "P-core 0 Temperature";
+				};
+
+				temperature-Tp0a {
+					apple,key-id = "Tp0a";
+					label = "P-core 1 Temperature";
+				};
+
+				temperature-Tp1I {
+					apple,key-id = "Tp1I";
+					label = "P-core 2 Temperature";
+				};
+
+				temperature-Tp1Q {
+					apple,key-id = "Tp1Q";
+					label = "P-core 3 Temperature";
+				};
+
+				temperature-Tp0g {
+					apple,key-id = "Tp0g";
+					label = "P-core 4 Temperature";
+				};
 			};
 
 			smc_reboot: reboot {
