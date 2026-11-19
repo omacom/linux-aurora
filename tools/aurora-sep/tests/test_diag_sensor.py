@@ -343,6 +343,9 @@ class DiagSensorTest(unittest.TestCase):
         for step in steps:
             self.assertEqual(create.count(step), 1, step)
         self.assertNotIn('close_first_setup', create)
+        # The holder's end_create hands the decision to the guard.
+        holder = function(source, 'fn end_create(&self)')
+        self.assertIn('store.end_create()', holder)
         # Nothing else in the key store opens or reports the window.
         for step in (steps[0], steps[1]):
             self.assertEqual(source.count(step), 1, step)

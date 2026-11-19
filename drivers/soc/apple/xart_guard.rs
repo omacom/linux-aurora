@@ -51,7 +51,8 @@
 //! SEP-xART lockers, two at the `COPY_KEYBAG` after the create and one at the
 //! first activation's `LOAD_KEYBAG`. The guard refuses them, so such a Mac
 //! needs the guard off, which leaves every record open to the enclave. With
-//! `xart_guard_pins=1` the owner accepts those lockers instead
+//! `xart_guard_pins=1` (run on a J313 only) the owner accepts those lockers
+//! instead
 //! ([`Setup::Pin`]). The first-setup window then opens on a cold-boot Mac and
 //! stays open from the create to the first activation's `LOAD_KEYBAG`, closing
 //! on any failed step before it. Each existing kind-4 locker the enclave
@@ -79,7 +80,7 @@ const ENTRY_MAGIC: &[u8; 4] = b"AXGO";
 const MAX_ENTRIES: usize = 4096;
 /// Refusals are logged individually up to this count, then only counted.
 const LOGGED_REFUSALS: usize = 8;
-/// Marks a list entry as the pinned locker's. It sits in the first of the
+/// Marks a list entry as a pinned locker's. It sits in the first of the
 /// three bytes an owned entry keeps zero, so a kernel without pinning reads
 /// the entry as unreadable and lists nothing by it.
 const ENTRY_PINNED: u8 = 1;
@@ -494,6 +495,7 @@ impl<F: ListFile> Guard<F> {
             return Err(EFBIG);
         }
         let mut torn = 0usize;
+        let mut extra_pins = 0usize;
         let mut entry = [0u8; ENTRY_SIZE];
         for i in 0..whole {
             file.read_exact((i * ENTRY_SIZE) as u64, &mut entry)?;
@@ -505,12 +507,20 @@ impl<F: ListFile> Guard<F> {
                     // At most MAX_PINS lockers per install: the first-setup
                     // window pins them, and that window opens once.
                     Some(key) if !self.is_pinned(&key) && !self.pins_full() => self.add_pin(key),
-                    _ => torn += 1,
+                    Some(_) => extra_pins += 1,
+                    None => torn += 1,
                 },
             }
         }
         if torn != 0 {
             pr_warn!("xART guard: ignored {} unreadable list entries\n", torn);
+        }
+        if extra_pins != 0 {
+            pr_warn!(
+                "xART guard: ignored {} pin entries past the first {} or repeated\n",
+                extra_pins,
+                MAX_PINS
+            );
         }
         // A torn tail entry is overwritten by the next adoption.
         self.end = (whole * ENTRY_SIZE) as u64;
@@ -528,8 +538,8 @@ impl<F: ListFile> Guard<F> {
     }
 
     /// The create exchange is over. Only a pinning window outlasts it, to the
-    /// first activation's LOAD_KEYBAG: a cold-boot Mac's enclave rewrites the
-    /// shared lockers at COPY_KEYBAG and at that load.
+    /// first activation's LOAD_KEYBAG: on a J313 the enclave rewrites the
+    /// shared lockers at COPY_KEYBAG and at that load, not at the create.
     pub(crate) fn end_create(&mut self) {
         if self.setup != Setup::Pin {
             self.close_first_setup();
@@ -764,7 +774,9 @@ impl<F: ListFile> Guard<F> {
                             && !self.pins_full()
                         {
                             pr_warn!(
-                                "xART guard: if Touch ID was not activated in the boot that created its keybag, this locker missed the first-setup window and cannot be pinned now; to set up again, reset Touch ID (install-aurora-sep.sh --reset-touchid) and also remove /var/lib/aurora-sep-xart-owned.bin, which the reset keeps\n"
+                                "xART guard: this install's first-setup window is spent with {} of {} lockers pinned, so this rewrite stays refused and Touch ID may fail. If the first setup did not reach Touch ID's first activation, set up again: install-aurora-sep.sh --reset-touchid --force, then remove /var/lib/aurora-sep-xart-owned.bin, which the reset keeps (Linux's earlier records are then treated as another OS's)\n",
+                                self.pinned.iter().flatten().count(),
+                                MAX_PINS
                             );
                         }
                     }
@@ -1397,15 +1409,15 @@ mod tests {
         assert_eq!(guard.check(&locker, true), Ok(()));
         // Pin: the window still pins a read locker after the create.
         let bytes = RefCell::new(KVec::new());
-        let mut guard =
-            Guard::with_file(1, keys(&[locker])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        let other = session(2);
+        let mut guard = Guard::with_file(1, keys(&[locker, other])?, Ok(mem(&bytes)))
+            .with_setup(Setup::Pin);
         guard.note_read(&locker);
         assert_eq!(guard.open_first_setup(), Ok(true));
         guard.end_create();
         assert_eq!(guard.check(&locker, true), Ok(()));
         assert_eq!(pins(&bytes)[..], [None, Some(locker)]);
         guard.close_first_setup();
-        let other = session(2);
         guard.note_read(&other);
         assert_eq!(guard.check(&other, true), Err(EPERM));
         Ok(())

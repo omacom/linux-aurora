@@ -359,7 +359,8 @@ Description:
 				was not created under it. Creating the
 				keybag there needs xart_guard=0, which
 				leaves the records a match rewrites off the
-				list, or xart_guard_pins=1.
+				list, or xart_guard_pins=1 (run on a J313
+				only).
 		==========	==========================================
 
 		For the guard cases the documented opt-out is xart_guard=0,

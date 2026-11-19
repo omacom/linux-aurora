@@ -67,8 +67,8 @@ impl<'a> SetupWindow<'a> {
         }
     }
 
-    /// Hands a pinning window to the first activation, which closes it after
-    /// its LOAD_KEYBAG (`activate_touchid`).
+    /// Hands the window, still open only if it pins lockers, to the first
+    /// activation, which closes it after its LOAD_KEYBAG (`activate_touchid`).
     fn leave_open_for_activation(mut self) {
         self.open = false;
     }

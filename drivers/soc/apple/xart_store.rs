@@ -466,6 +466,7 @@ impl Store {
             .map_or(Ok(false), |guard| guard.open_first_setup())
     }
 
+    /// Tells the guard the create exchange is over ([`Guard::end_create`]).
     pub(crate) fn end_create(&mut self) {
         if let Some(guard) = self.guard.as_mut() {
             guard.end_create();

@@ -23,7 +23,7 @@ a read-only gigalocker does: Touch ID may then be unavailable, but no other
 OS's record changes. The one exception is a fresh install's first keybag
 creation on a warm-attach Mac at level 1, which may rewrite one existing
 SEP-xART locker (see "Fresh installs" below). On a cold-boot Mac the owner
-can accept up to three more with `xart_guard_pins=1`: rewrites of the shared
+can accept up to three more with `xart_guard_pins=1` (run on a J313 only): rewrites of the shared
 lockers its first Touch ID setup reaches (see "Cold-boot Macs: pinning the shared
 locker" below; three on the MacBook Air M1).
 
@@ -76,8 +76,9 @@ established, so:
 - On a cold-boot Mac set up under the guard with `xart_guard_pins=1`, the
   record the create added is on the list and the shared lockers the first
   setup rewrote are pinned (three on a J313). On that J313, matches before
-  and after a reboot rewrote only those records (no refusal); other boards
-  are untested.
+  and after a reboot had no refusal: every pre-Linux record they rewrote
+  was pinned or listed (writes to the shared roots are allowed at level 1
+  and not logged). Other boards are untested.
 
 ### Setting up Touch ID: creating the keybag
 
@@ -108,7 +109,8 @@ the kernel log names the refused kind. What to do depends on the case:
   until it has been checked there.
 - A cold-boot Mac that has never tried to create its keybag under the guard:
   `options apple_sep xart_guard_pins=1` keeps the guard on and accepts the
-  rewrites of the lockers its first setup reaches, up to three, only (see
+  rewrites of the lockers its first setup reaches, up to three, only (run on
+  a J313 only) (see
   "Cold-boot Macs: pinning the shared locker"). The same caution about macOS applies. A Mac that has tried, or
   that already has a keybag, must reset Touch ID and remove
   `/var/lib/aurora-sep-xart-owned.bin` first: the window that pins the
@@ -249,8 +251,7 @@ only and did not work on a J313.
   empty, and stays open until the first activation's `LOAD_KEYBAG`
   (`activate_touchid`). Any failed step of provisioning or of that
   activation before the load closes it. The marker is written first, as on a
-  warm-attach Mac. Without the parameter the window closes right after the
-  create exchange, as on a warm-attach Mac.
+  warm-attach Mac. Without the parameter a cold-boot Mac gets no window.
 - In the window the guard passes rewrites of existing kind-4 lockers, up to
   three, and only of lockers the enclave read since probe (the driver notes
   each `OP_SESSION_READ` it answers with a record). Before each write reaches
@@ -258,9 +259,10 @@ only and did not work on a J313.
   list and flushes it. If the pin cannot be made durable, the rewrite is
   refused.
 - If the first activation does not reach `LOAD_KEYBAG` in the boot that
-  created the keybag (nothing opens `/dev/sep-bio` that boot, or an early
-  step of the activation fails), the window stays open until then or until
-  the boot ends, and a locker it would have pinned cannot be pinned later:
+  created the keybag, a locker it would have pinned cannot be pinned later.
+  If nothing opens `/dev/sep-bio` that boot, the window stays open until
+  the boot ends; if `/dev/sep-bio` cannot be published, or an early step of
+  the activation fails, the window closes then. Either way:
   the window opens once. The guard then logs a reset hint when it refuses a
   read locker on an install with free pins. Recovery is a Touch ID reset with
   `/var/lib/aurora-sep-xart-owned.bin` removed.
@@ -268,13 +270,13 @@ only and did not work on a J313.
   never adopted as Linux's, even if it was absent at probe.
 - From then on the enclave may rewrite a pinned locker, on any boot where
   the parameter is set and the enclave has read the locker. That covers a
-  match, if the locker is one of the two records a match rewrites, and a
-  later `CREATE_KEYBAG` after a Touch ID reset.
-- The pinned locker is never deleted and never listed as Linux's. Every
+  match, if the locker is one of the records a match rewrites, and should
+  cover a later `CREATE_KEYBAG` after a Touch ID reset (untested).
+- A pinned locker is never deleted and never listed as Linux's. Every
   other record from before Linux, kind 3 or 4, stays refused. Level 2 gets
   none of this.
 - Without the parameter the pin stays in the list and is not honoured, so
-  the Mac is back to refusing that locker.
+  the Mac is back to refusing those lockers.
 - The record the create adds is listed as Linux's, as on any guarded Mac,
   so a match's rewrite of it passes. `matching` then reads `unverified`
   rather than `blocked`.
@@ -301,19 +303,20 @@ What the pin does not establish:
   records Linux can change, not what a change to this one does. Treat macOS
   Touch ID as unverified until unlock and keychain access have been checked
   after a Linux keybag creation and after Linux matches.
-- That a match rewrites only the listed record and the pinned locker. If it
+- That a match rewrites only listed records and pinned lockers. If it
   rewrites another record from before Linux, the guard refuses it and logs
   the refused locker's tag and whether the enclave had read it, next to the
-  pinned locker's tag in the earlier log lines, so the two can be compared.
-- That the locker keeps its session id. If another OS replaces it under a
-  new id, the pin names a record that no longer exists and the new locker
-  is refused; the tags in the log show the difference. The window does not
-  open twice, so recovering means resetting Touch ID with the list removed.
+  pinned lockers' tags in the earlier log lines, so the two can be compared.
+- That each pinned locker keeps its session id. If another OS replaces one
+  under a new id, its pin names a record that no longer exists and the new
+  locker is refused; the tags in the log show the difference. The window
+  does not open twice, so recovering means resetting Touch ID with the list
+  removed.
 - That the pin survives a driver reload. The allowance needs the enclave's
   reads of the locker since probe. If the driver is bound again while the
   enclave keeps running and does not repeat its attach reads, the pinned
   locker is refused until a restart.
-- That T8103 and T6001 behave as T6000 does.
+- That T6001 and T6002 behave as T6000 or T8103 does.
 
 The tags in those log lines are a CRC-32 of the session id. They identify a
 locker across boots in the log without printing its id.
