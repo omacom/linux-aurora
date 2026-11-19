@@ -810,6 +810,18 @@ int main(void)
 	assert(g15_vote() == -EINVAL && commands == 0 && !enables);
 	cases++;
 	cleanup();
+	/* An entry that is not always-on still holds its request for a wakeup-path consumer. */
+	setup();
+	entries[2].always_on = false;
+	assert(apple_pmp_report_probe(&report_dev) == 0);
+	struct apple_pmp_report_entry *plain = entry_devs[2].dev.data;
+	struct apple_pmp_report_entry *seeded = entry_devs[0].dev.data;
+
+	assert((regs[0x1180 / 8] & BIT_ULL(7)) && !(regs[0x1180 / 8] & BIT_ULL(9)));
+	assert((plain->genpd.flags & GENPD_FLAG_ACTIVE_WAKEUP) &&
+	       (seeded->genpd.flags & GENPD_FLAG_ACTIVE_WAKEUP));
+	cases++;
+	cleanup();
 #ifdef HAVE_SLEEP_RELEASE
 	/* System sleep withdraws an acknowledged request marked for it, then asserts it again. */
 	setup();
