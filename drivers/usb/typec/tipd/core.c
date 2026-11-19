@@ -819,13 +819,13 @@ static int cd321x_typec_update_mode(struct tps6598x *tps,
 			ret = cd321x_mux_set(cd321x, held);
 			cd321x->state.data = &dp_data;
 			if (ret) {
-				*display_busy = cd321x_display_taken(ret, tps->h17_display);
+				*display_busy = cd321x_display_taken(ret);
 				goto out;
 			}
 			cd321x->dp_status = edge.status;
 		}
 		ret = cd321x_mux_set(cd321x, held);
-		*display_busy = cd321x_display_taken(ret, tps->h17_display);
+		*display_busy = cd321x_display_taken(ret);
 		if (!ret) {
 			cd321x->dp_status = dp_data.status;
 			cd321x->dp_conf = dp_data.conf;
