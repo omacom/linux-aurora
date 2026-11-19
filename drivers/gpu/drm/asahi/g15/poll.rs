@@ -29,7 +29,7 @@ use kernel::{
 };
 
 use super::channel::Channel;
-use super::engine::{complete, now_ns, rmb, Flight, Lap};
+use super::engine::{complete, ewma_update, now_ns, rmb, ticks_ns, Flight, Lap};
 use super::fw::graph::qstate;
 use super::hw::sizes;
 use super::job::{self, Completions, Job};
@@ -533,7 +533,8 @@ impl Firmware {
     }
 
     /// A retired prefix: publication to retirement (including any wait behind its
-    /// predecessor), event times, internal stage times of its members.
+    /// predecessor), event times, internal stage times of its members; the mean CDM time of its
+    /// computes feeds its queue's mean compute command time (the compute share budget).
     fn stat_retire(&mut self, f: &Flight) {
         let now = now_ns();
         let d = now.wrapping_sub(f.published_ns);
@@ -549,26 +550,40 @@ impl Firmware {
         let scrub = self.slots.scrub.clone();
         let s = &mut self.engine.stats;
 
-        // Add one stage interval read from internal timestamp cells (start, end).
+        // Add one stage interval read from internal timestamp cells (start, end); false if it
+        // was not valid.
         let mut stage = |o: &super::object::FwObject, off: usize, sum: &mut u64| {
             let rd = |x: usize| o.r32(x).unwrap_or(0) as u64;
             let start = rd(off + 4) << 32 | rd(off);
             let end = rd(off + 12) << 32 | rd(off + 8);
             if start == 0 || end < start {
-                return;
+                return false;
             }
             *sum += end - start;
             lo = lo.min(start);
             hi = hi.max(end);
+            true
         };
         for k in 0..f.renders as usize {
             let p = &scrub.passes[f.claims.pass[k] as usize];
             stage(&p.its, 0, &mut s.ta_ticks);
             stage(&p.its, 0x10, &mut s.fs_ticks);
         }
+        // The computes' CDM ticks, and how many had a valid interval.
+        let (mut cdm, mut cdm_n) = (0u64, 0u64);
         for k in 0..(f.computes as usize).min(f.claims.slot_count as usize) {
             let c = &scrub.compute[f.claims.slot[k] as usize];
-            stage(&c.its, 0, &mut s.cdm_ticks);
+            cdm_n += stage(&c.its, 0, &mut cdm) as u64;
+        }
+        s.cdm_ticks += cdm;
+        // Mean over the valid intervals only: a missing one says nothing of the command's time.
+        if cdm_n != 0 {
+            let avg = &f.job.queue.avg_compute_ns;
+            let sample = ticks_ns(cdm / cdm_n);
+            avg.store(
+                ewma_update(avg.load(Ordering::Relaxed), sample),
+                Ordering::Relaxed,
+            );
         }
         if hi > lo {
             s.span_ticks += hi - lo;
@@ -759,6 +774,19 @@ impl Firmware {
             us(p.poll_ns),
             slots.flushes,
             us(slots.flush_ns)
+        )?;
+        // The compute share budget: prefixes with computes published under it and those it cut
+        // short, horizons it ended, holds of a job of another VM behind published flights, and
+        // its parameters (budget 0: off).
+        writeln!(
+            f,
+            "share: flights {} capped {} hz_budget {} hold_vm {} budget_us {} window_ms {}",
+            s.share_flights,
+            s.share_capped,
+            s.hz_stop[4],
+            s.hold[3],
+            params::share_budget_ns() / 1000,
+            params::share_window_ns() / 1_000_000
         )
     }
 }

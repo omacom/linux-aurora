@@ -50,6 +50,10 @@ pub(crate) struct QueueState {
     /// engine when a job arrives.
     pub(crate) owned: [AtomicU32; 32],
     pub(crate) owned_index: AtomicU32,
+    /// Mean GPU time of the queue's compute commands, ns, for the compute share budget: an
+    /// EWMA of the CDM stage times of its retired prefixes (horizon jobs share the base job's
+    /// queue), recorded by the engine at retirement; 0 until the first sample.
+    pub(crate) avg_compute_ns: AtomicU64,
 }
 
 /// One device-wide logical-queue credit, released after the queue scheduler drains.
@@ -133,6 +137,7 @@ impl Queue {
                 turn: AtomicU64::new(0),
                 owned: [const { AtomicU32::new(0) }; 32],
                 owned_index: AtomicU32::new(0),
+                avg_compute_ns: AtomicU64::new(0),
             },
             GFP_KERNEL,
         )?;

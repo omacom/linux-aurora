@@ -2190,6 +2190,19 @@
    "note": "Actual production-body host control plus runtime mutants; kernel services modeled, no private hardware fixtures."
   },
   {
+   "name": "tools/asahi/g15-share-budget-tests.py",
+   "group": "tools",
+   "argv": [
+    "python3",
+    "tools/asahi/g15-share-budget-tests.py",
+    "--mutations",
+    "--output",
+    "{output}"
+   ],
+   "rust": "1.85.0",
+   "note": "Actual compute share budget policy and parameter bodies plus runtime mutants; engine and module parameters modeled, stats formats source-checked. No hardware or private fixtures."
+  },
+  {
    "name": "tools/asahi/g15-display-order-tests.py",
    "group": "tools",
    "argv": [
