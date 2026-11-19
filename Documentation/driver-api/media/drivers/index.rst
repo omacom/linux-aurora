@@ -12,6 +12,7 @@ Video4Linux (V4L) drivers
 .. toctree::
 	:maxdepth: 5
 
+	apple-isp-j616s
 	bttv-devel
 	cx2341x-devel
 	cx88-devel

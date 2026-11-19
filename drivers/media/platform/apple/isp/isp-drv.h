@@ -6,11 +6,11 @@
 
 #include <linux/hrtimer.h>
 #include <linux/list.h>
+#include <linux/maple_tree.h>
 #include <linux/mutex.h>
 #include <linux/types.h>
 #include <linux/spinlock.h>
 
-#include <drm/drm_mm.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/videobuf2-core.h>
@@ -30,6 +30,8 @@
 
 /* used to limit the user space buffers to the buffer_pool_config */
 #define ISP_MAX_BUFFERS 16
+#define ISP_MAX_SENSOR_CONFIGS 64
+#define ISP_SENSOR_CONFIG_SIZE 0x120
 
 /* capture metadata buffers, for firmware that has that pool */
 #define ISP_CAPMETA_BUFFERS 8
@@ -51,6 +53,7 @@ enum isp_generation {
 	ISP_GEN_T8112,
 	ISP_GEN_T6031,
 	ISP_GEN_T8140,
+	ISP_GEN_T6040,
 };
 
 /*
@@ -79,7 +82,6 @@ enum isp_firmware_version {
 };
 
 struct isp_surf {
-	struct drm_mm_node *mm;
 	struct list_head head;
 	u64 size;
 	u64 type;
@@ -91,6 +93,7 @@ struct isp_surf {
 	refcount_t refcount;
 	bool gc;
 	bool submitted;
+	bool iova_reserved; /* @iova comes from &apple_isp.iovas */
 };
 
 struct isp_message {
@@ -115,6 +118,8 @@ struct isp_channel {
 	void *virt;
 	u32 doorbell;
 	u32 cursor;
+	unsigned long deadline;
+	bool deadline_active;
 	struct mutex lock;
 	struct isp_message req;
 	struct isp_message rsp;
@@ -132,12 +137,23 @@ struct isp_mmio_window {
 	u64 size;
 };
 
+/*
+ * A DART address filter window. Both bounds are inclusive and word
+ * granular, as the hardware takes them.
+ */
+struct isp_dapf_window {
+	u64 start;
+	u64 end;
+};
+
 struct isp_preset {
 	u32 index;
 	struct coord input_dim;
 	struct coord output_dim;
 	struct coord crop_offset;
 	struct coord crop_size;
+	/* Processed P010 geometry established by preview or a config reply. */
+	bool p010;
 };
 
 struct apple_isp_hw {
@@ -146,6 +162,8 @@ struct apple_isp_hw {
 	u64 pmu_base;
 
 	int dsid_count;
+	/* windows of the H17 multi broadcast-clear command, the unused all ones */
+	u8 dsid_slots;
 	u64 dsid_clr_base0;
 	u64 dsid_clr_base1;
 	u64 dsid_clr_base2;
@@ -178,22 +196,64 @@ struct apple_isp_hw {
 	bool mbox_irq_route;
 	/* coprocessor control register, 0 for ISP_COPROC_CONTROL */
 	u32 coproc_control;
+	/* coprocessor status register, 0 for ISP_COPROC_STATUS */
+	u32 coproc_status;
+	/*
+	 * coprocessor quiesce register, 0 for none. The CPU core domains of
+	 * a coprocessor that stopped only power down cleanly once it has
+	 * quiesced; otherwise they stay busy and never run again.
+	 */
+	u32 coproc_quiesce;
 
 	/* windows mapped 1:1 for the firmware */
 	const struct isp_mmio_window *fw_mmio;
 	unsigned int num_fw_mmio;
 
+	/*
+	 * The windows the ADT gives the first DART's address filter, inside
+	 * the fw_mmio windows. The filter loses them with ISP_SYS, so they
+	 * are programmed after every power-up.
+	 */
+	const struct isp_dapf_window *dapf;
+	unsigned int num_dapf;
+
 	/* ISP_GPIO_6 boot mode */
 	u32 boot_mode;
+
+	/* shared memory size in the H16 boot descriptor, 0 for the T8140 one */
+	u64 shared_size;
 
 	/* size of a capture metadata buffer, 0 for no such pool */
 	u32 capture_meta_size;
 
+	/* metadata buffers carry the frame's exposure report (H17 firmware) */
+	bool meta_exposure;
+
 	/*
-	 * The firmware can be started only once per system boot, so it is
-	 * started at probe and kept running while the driver is bound.
+	 * The firmware leaves its data segment changed when it stops, and
+	 * does not start from it again. Keep a copy of the segment as the
+	 * boot loader loaded it, taken at probe before the firmware first
+	 * runs, and put it back whenever the firmware has stopped.
+	 */
+	bool fw_restore;
+
+	/*
+	 * The firmware can be started only once per system boot, so once
+	 * started it is kept running while the driver is bound. It starts at
+	 * probe, or at the first stream with deferred_start.
 	 */
 	bool resident_fw;
+
+	/*
+	 * Start the firmware, and detect the camera, at the first stream
+	 * instead of at probe, so the ISP stays off until then. The firmware
+	 * must be resident or start again (fw_restore): the camera is
+	 * detected only once.
+	 */
+	bool deferred_start;
+
+	/* The xx24 setfiles' lens shading strides need zeroing (T8142). */
+	bool setfile_stride_fixup;
 };
 
 enum isp_sensor_id {
@@ -244,13 +304,23 @@ enum isp_sensor_id {
 	ISP_IMX814_2123_01,
 	ISP_IMX853_7622_01,
 	ISP_IMX913_7523_01,
+	ISP_IMX958_2224_01,
 	ISP_VD56G0_6221_01,
 	ISP_VD56G0_6222_01,
+};
+
+struct isp_sensor_config {
+	struct coord input_dim;
+	struct coord output_dim;
+	u32 sensor_clk;
+	bool usable;
+	u8 reply[ISP_SENSOR_CONFIG_SIZE];
 };
 
 struct isp_format {
 	enum isp_sensor_id id;
 	u32 version;
+	u32 pixelformat;
 	struct isp_preset *preset;
 	unsigned int num_planes;
 	u32 strides[VB2_MAX_PLANES];
@@ -264,8 +334,12 @@ struct apple_isp {
 	enum isp_firmware_version fw_compat;
 	u32 platform_id;
 	u32 temporal_filter;
+	u32 cam_connections_scheme;
 	struct isp_preset *presets;
 	int num_presets;
+	/* Read-only sensor configuration replies, cached before video registration. */
+	unsigned int num_sensor_configs;
+	struct isp_sensor_config *sensor_configs;
 
 	int num_channels;
 	struct isp_format fmts[ISP_MAX_CHANNELS];
@@ -276,10 +350,16 @@ struct apple_isp {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *exposure_priority;
+	struct v4l2_ctrl *power_line_frequency;
+	/* read-only exposure report of the last frame, NULL without one */
+	struct v4l2_ctrl *gain;
+	struct v4l2_ctrl *exposure;
+	/* last reported total gain (1/256 steps) and exposure (us) */
+	u32 frame_gain;
+	u32 frame_exposure_us;
 	struct vb2_queue vbq;
 	struct mutex video_lock;
 	unsigned int sequence;
-	bool multiplanar;
 	/* capture rate in frames per second, changes under video_lock */
 	unsigned int frame_rate;
 
@@ -295,25 +375,37 @@ struct apple_isp {
 	void __iomem *gpio;
 	void __iomem *mbox2;
 	void __iomem *wdt;
+	void __iomem *dapf;
 	struct hrtimer wdt_timer;
 	bool wdt_running;
 
 	struct iommu_domain *domain;
 	unsigned long shift;
-	struct drm_mm iovad; /* TODO iova.c can't allocate bottom-up */
-	u64 iova_size; /* size of the iovad range */
+	/* allocated IOVA ranges, in IOMMU pages, lowest free range first */
+	struct maple_tree iovas;
+	u64 iova_size; /* size of the range @iovas allocates from */
 	u64 fw_iova_mask; /* see isp_fw_iova() */
-	struct mutex iovad_lock;
 
 	struct isp_firmware {
+		u64 heap_base;
 		u64 heap_top;
+		u64 data_top; /* 0 unless the bootloader loads the data */
 	} fw;
 	/* changes under video_lock once the video device is registered */
 	enum isp_fw_state fw_state;
+	/* the camera was detected; until then a deferred start is pending */
+	bool camera_detected;
+	/* configurations the firmware has, once a deferred start detected them */
+	u32 num_fw_presets;
 
 	struct isp_surf *ipc_surf;
 	struct isp_surf *extra_surf;
 	struct isp_surf *data_surf;
+	struct isp_surf *main_tail_surf;
+	/* With hw->fw_restore: the firmware data segment and its copy */
+	void *fw_data;
+	void *fw_data_copy;
+	size_t fw_data_size;
 	struct isp_surf *log_surf;
 	struct isp_surf *bt_surf;
 	struct isp_surf *meta_surfs[ISP_MAX_BUFFERS];
@@ -347,16 +439,35 @@ struct apple_isp {
 	spinlock_t buf_lock;
 	struct list_head bufs_pending;
 	struct list_head bufs_submitted;
+	struct list_head bufs_returned;
+	u64 buffer_tag;
+	unsigned long meta_returned;
+	/*
+	 * The channel of a timed-out request that has not been answered yet,
+	 * see isp_ipc_resync(). Sends are serialized by the callers, which
+	 * share the command area.
+	 */
+	struct isp_channel *ipc_stale;
+	/*
+	 * Not even a late answer came, so where the firmware is in the ring
+	 * is unknown. Nothing is sent until the firmware is stopped, and
+	 * resident firmware cannot be started again before the next boot.
+	 */
+	bool ipc_failed;
 };
 
 struct isp_chan_ops {
 	int (*handle)(struct apple_isp *isp, struct isp_channel *chan);
+	/* Called after the response slot and its doorbell are published. */
+	void (*complete)(struct apple_isp *isp);
 };
 
 struct isp_buffer {
 	struct vb2_v4l2_buffer vb;
 	struct list_head link;
 	struct isp_surf surfs[VB2_MAX_PLANES];
+	u64 tag;
+	enum vb2_buffer_state return_state;
 };
 
 #define to_isp_buffer(x) container_of((x), struct isp_buffer, vb)
@@ -366,6 +477,8 @@ enum {
 	ISP_STATE_LOGGING,
 	ISP_STATE_SLEEPING,
 };
+
+int apple_isp_program_dapf(struct apple_isp *isp);
 
 #define isp_dbg(isp, fmt, ...) \
 	dev_dbg((isp)->dev, "[%s] " fmt, __func__, ##__VA_ARGS__)
@@ -383,5 +496,38 @@ enum {
 #define isp_num_capmeta(isp) \
 	((isp)->hw->capture_meta_size ? ISP_CAPMETA_BUFFERS : 0)
 #define isp_get_current_format(isp) (isp_get_format(isp, isp->current_ch))
+
+static inline bool isp_supports_p010(struct apple_isp *isp)
+{
+	/* Its config discovery would change formats already advertised. */
+	return isp->hw->gen == ISP_GEN_T6040 && !isp->hw->deferred_start &&
+	       isp_get_current_format(isp)->version == 0x958;
+}
+
+static inline bool isp_has_p010(struct apple_isp *isp)
+{
+	if (!isp_supports_p010(isp))
+		return false;
+	for (int i = 0; i < isp->num_presets; i++) {
+		if (isp->presets[i].p010)
+			return true;
+	}
+	return false;
+}
+
+static inline bool isp_is_p010(struct apple_isp *isp)
+{
+	return isp_get_current_format(isp)->pixelformat == V4L2_PIX_FMT_P010;
+}
+
+static inline unsigned int isp_num_rendered(struct apple_isp *isp)
+{
+	return isp_is_p010(isp) ? 2 : ISP_MAX_BUFFERS;
+}
+
+static inline unsigned int isp_num_meta(struct apple_isp *isp)
+{
+	return isp_is_p010(isp) ? 8 : ISP_MAX_BUFFERS;
+}
 
 #endif /* __ISP_DRV_H__ */

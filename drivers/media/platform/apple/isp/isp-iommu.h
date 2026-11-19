@@ -10,6 +10,8 @@ struct isp_surf *__isp_alloc_surface(struct apple_isp *isp, u64 size, bool gc);
 #define isp_alloc_surface(isp, size)	(__isp_alloc_surface(isp, size, false))
 #define isp_alloc_surface_gc(isp, size) (__isp_alloc_surface(isp, size, true))
 struct isp_surf *isp_alloc_surface_vmap(struct apple_isp *isp, u64 size);
+struct isp_surf *isp_alloc_surface_at(struct apple_isp *isp, dma_addr_t iova,
+				      u64 size);
 int isp_surf_vmap(struct apple_isp *isp, struct isp_surf *surf);
 void isp_free_surface(struct apple_isp *isp, struct isp_surf *surf);
 void isp_free_released_surfaces(struct apple_isp *isp);
