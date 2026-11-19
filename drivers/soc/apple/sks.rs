@@ -46,6 +46,42 @@ impl Drop for KeybagCreateIntent<'_> {
     }
 }
 
+/// The xART guard's first-setup window while provisioning holds it: closed on
+/// drop, so every failed exit shuts it. The guard decides whether it outlasts
+/// the create (`Guard::end_create`).
+pub(crate) struct SetupWindow<'a> {
+    sep: &'a SepData,
+    open: bool,
+}
+
+impl<'a> SetupWindow<'a> {
+    /// The first activation's hold on a window provisioning may have left
+    /// open; closing a shut window does nothing.
+    pub(crate) fn for_activation(sep: &'a SepData) -> Self {
+        SetupWindow { sep, open: true }
+    }
+
+    fn end_create(&self) {
+        if self.open {
+            self.sep.with_store(|store| store.end_create());
+        }
+    }
+
+    /// Hands the window to the first activation, which closes it when it
+    /// returns (`activate_touchid`). Only a pinning window is still open here.
+    fn leave_open_for_activation(mut self) {
+        self.open = false;
+    }
+}
+
+impl Drop for SetupWindow<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.sep.with_store(|store| store.close_first_setup());
+        }
+    }
+}
+
 impl SepData {
     pub(crate) fn on_sks(&self, msg: Message) {
         let r = crate::sks::decode_sks(&msg);
@@ -669,30 +705,33 @@ impl SepData {
                 return false;
             }
         };
-        // A cold-boot Mac's create rewrites a pre-Linux record for its own
-        // reasons (XART-SAFETY.md), so only warm attach gets the window.
-        let first_setup = if self.profile.bootstrap == profile::Bootstrap::WarmRegister {
-            match self.with_store(|store| store.open_first_setup()) {
-                Some(Ok(open)) => open,
-                None => false,
-                // Unsent, so the intent is dropped as retryable.
-                Some(Err(e)) => {
-                    dev_err!(
-                        self.dev,
-                        "sks: cannot record the xART guard's first-setup window ({:?}); not creating the keybag this boot\n",
-                        e
-                    );
-                    return false;
-                }
+        // A cold-boot Mac's first setup rewrites pre-Linux lockers
+        // (XART-SAFETY.md), so the guard gives it a window only under
+        // xart_guard_pins, and then pins those lockers.
+        let first_setup = match self.with_store(|store| store.open_first_setup()) {
+            Some(Ok(open)) => open,
+            None => false,
+            // Unsent, so the intent is dropped as retryable.
+            Some(Err(e)) => {
+                dev_err!(
+                    self.dev,
+                    "sks: cannot record the xART guard's first-setup window ({:?}); not creating the keybag this boot\n",
+                    e
+                );
+                return false;
             }
-        } else {
-            false
+        };
+        if first_setup {
+            // The create is sent under the guard: matching follows.
+            crate::diag::xart_guard_setup_recorded();
+        }
+        let window = SetupWindow {
+            sep: self,
+            open: first_setup,
         };
         intent.sending();
         let exchanged = self.sks_exchange(request.name, request.msg, &request.img);
-        if first_setup {
-            self.with_store(|store| store.close_first_setup());
-        }
+        window.end_create();
         let Some(out) = exchanged else {
             dev_err!(
                 self.dev,
@@ -789,6 +828,7 @@ impl SepData {
             return false;
         }
         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
+        window.leave_open_for_activation();
         dev_info!(self.dev, "sks: identity keybag provisioned\n");
         true
     }

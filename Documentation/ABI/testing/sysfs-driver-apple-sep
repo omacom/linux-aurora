@@ -341,10 +341,13 @@ Description:
 
 		==========	==========================================
 		usable		xART writes are enabled and no guard runs.
-		unverified	A guard runs with its list loaded on a
-				warm-attach Mac (boot "warm") and has refused
-				nothing yet. Whether every record a match
-				rewrites is on the list is not known until a
+		unverified	A guard runs with its list loaded and has
+				refused nothing yet, on a warm-attach Mac
+				(boot "warm") or on a cold-boot Mac (boot
+				"cold") whose keybag was created under the
+				guard with xart_guard_pins=1. Whether every
+				record a match rewrites is on the list, or
+				is a pinned locker, is not known until a
 				match is tried.
 		blocked		A match's write is refused or known to be:
 				xART writes are disabled (xart "disabled"),
@@ -352,15 +355,19 @@ Description:
 				(xart_guard_refusals above 0), the guard
 				has no list (xart_guard_list
 				"unavailable"), or a guard runs on a
-				cold-boot Mac (boot "cold"). On a cold-boot
-				Mac, creating the keybag needs xart_guard=0,
-				so the records a match rewrites are not on
-				the list.
+				cold-boot Mac (boot "cold") whose keybag
+				was not created under it. Creating the
+				keybag there needs xart_guard=0, which
+				leaves the records a match rewrites off the
+				list, or xart_guard_pins=1 (run on a J313
+				only).
 		==========	==========================================
 
 		For the guard cases the documented opt-out is xart_guard=0,
 		which lets the enclave rewrite session records that another
 		OS on the Mac may have created; see
 		tools/aurora-sep/XART-SAFETY.md. During a boot the value
-		can only move from "unverified" to "blocked", once the guard
-		refuses a write.
+		moves from "unverified" to "blocked" once the guard refuses
+		a write. On a cold-boot Mac with xart_guard_pins=1 it also
+		moves from "blocked" to "unverified" when the first keybag
+		creation is sent under the guard, and nowhere else.

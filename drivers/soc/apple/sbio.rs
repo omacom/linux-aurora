@@ -1382,6 +1382,8 @@ impl SepData {
                 bio::DEVICE_NAME,
                 e
             );
+            // No activation can follow, so a pinning first-setup window ends.
+            self.with_store(|store| store.close_first_setup());
         }
     }
 
@@ -1392,7 +1394,11 @@ impl SepData {
         if self.touchid_failed.load(Relaxed) {
             return Err(EIO);
         }
-
+        // A pinning first-setup window ends when this first activation
+        // returns, on every path: on a J313 the enclave rewrites the third
+        // shared locker about 280 ms after the LOAD_KEYBAG reply, during the
+        // requests that follow it.
+        let _window = crate::sks::SetupWindow::for_activation(self);
         let mut store = store::Store::open().inspect_err(|e| {
             dev_err!(
                 self.dev,

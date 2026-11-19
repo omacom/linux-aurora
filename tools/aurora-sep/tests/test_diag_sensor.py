@@ -245,7 +245,10 @@ static const char *attr(const char *name)
 	return "absent";
 }
 
-/* argv: level list matching-at-probe refusals matching-after-refusal */
+/*
+ * argv: level list matching-at-probe refusals matching-after-refusal
+ *       [matching-after-first-setup]
+ */
 int main(int argc, char **argv)
 {
 	struct device dev;
@@ -255,6 +258,8 @@ int main(int argc, char **argv)
 	sep_diag_register(&dev, "TEST", 4, false, false, true);
 	while (refusals--)
 		sep_diag_xart_guard_refused(atoi(argv[5]));
+	if (argc > 6)
+		sep_diag_set_matching(atoi(argv[6]));
 	/* attr() returns one static buffer: print each before the next. */
 	printf("%s ", attr("abi"));
 	printf("%s ", attr("xart_guard"));
@@ -295,12 +300,19 @@ class DiagSensorTest(unittest.TestCase):
         usable, unverified, blocked = 1, 2, 3  # SEP_DIAG_MATCHING_* in shim.h
         cases = [
             # level, list, matching at probe, refusals, matching after them
+            # and, where given, matching once the first setup is recorded
             ((0, 0, usable, 0, 0), '2 0 none 0 usable'),            # Neo, M1 Pro (pinned 0)
             ((1, 1, unverified, 0, 0), '2 1 loaded 0 unverified'),  # M2 under the guard
             ((1, 1, unverified, 2, blocked), '2 1 loaded 2 blocked'),  # ... after refusals
             ((2, 1, unverified, 0, 0), '2 2 loaded 0 unverified'),
             ((1, 0, blocked, 0, 0), '2 1 unavailable 0 blocked'),   # no list
             ((1, 1, blocked, 0, 0), '2 1 loaded 0 blocked'),        # cold boot, level 1
+            # ... with xart_guard_pins, once its first keybag creation is sent
+            ((1, 1, blocked, 0, 0, unverified), '2 1 loaded 0 unverified'),
+            # ... and the refusals counted before that stand, and win over a
+            # matching value that was derived before they landed
+            ((1, 1, blocked, 2, blocked, blocked), '2 1 loaded 2 blocked'),
+            ((1, 1, blocked, 2, blocked, unverified), '2 1 loaded 2 blocked'),
             ((0, 0, 0, 0, 0), '2 0 none 0 unknown'),                # never set
             ((0, 0, 7, 0, 0), '2 0 none 0 unknown'),                # out of range
         ]
@@ -310,6 +322,45 @@ class DiagSensorTest(unittest.TestCase):
                 done = subprocess.run([str(harness), *map(str, args)],
                                       capture_output=True, text=True, check=True)
                 self.assertEqual(done.stdout.strip(), want, args)
+
+    def test_the_first_setup_window_brackets_the_create(self):
+        # sks.rs asks the guard for the window on every platform (the guard
+        # decides which get one), tells diag once it opens, holds it across
+        # the create and tells the guard when the create is over (the guard
+        # decides whether the window outlasts it: KUnit
+        # only_a_pinning_window_outlasts_the_create). A successful create
+        # hands it to the first activation, which releases it when it
+        # returns; any failed exit in between shuts it on drop.
+        source = (APPLE / 'sks.rs').read_text()
+        create = function(source, 'pub(crate) fn sks_provision_identity_keybag(&self) -> bool')
+        steps = ['store.open_first_setup()', 'crate::diag::xart_guard_setup_recorded()',
+                 'SetupWindow {', 'intent.sending()', 'self.sks_exchange(request.name',
+                 'window.end_create()', 'self.sks_req_copy_keybag(handle)',
+                 'window.leave_open_for_activation()']
+        places = [create.find(step) for step in steps]
+        self.assertNotIn(-1, places, steps)
+        self.assertEqual(places, sorted(places), steps)
+        for step in steps:
+            self.assertEqual(create.count(step), 1, step)
+        self.assertNotIn('close_first_setup', create)
+        # The holder's end_create hands the decision to the guard.
+        holder = function(source, 'fn end_create(&self)')
+        self.assertIn('store.end_create()', holder)
+        # Nothing else in the key store opens or reports the window.
+        for step in (steps[0], steps[1]):
+            self.assertEqual(source.count(step), 1, step)
+        # The bootstrap no longer decides here: xart_guard.rs (Setup) does.
+        self.assertNotIn('Bootstrap', create[:places[3]])
+        sbio = (APPLE / 'sbio.rs').read_text()
+        activate = function(sbio, 'fn activate_touchid(&self) -> Result<()>')
+        # The first activation holds the window from before its first step
+        # to its return (a J313 rewrites a shared locker after LOAD_KEYBAG),
+        # and nothing releases it earlier.
+        hold = activate.find('let _window = crate::sks::SetupWindow::for_activation(self);')
+        self.assertNotEqual(hold, -1)
+        self.assertLess(hold, activate.find('store::Store::open()'))
+        self.assertNotIn('drop(_window)', activate)
+        self.assertNotIn('close_first_setup', activate)
 
     def test_probe_and_remove_report_the_bind(self):
         source = (APPLE / 'sensor_shim.c').read_text()
