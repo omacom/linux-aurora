@@ -93,14 +93,17 @@ static inline int dcp_v14_encode_nits(u8 *swap, bool change, u32 nits)
 
 /* 'BGRA': 8-bit linear, ARGB8888 in DRM terms. */
 #define DCP_V14_FORMAT_BGRA		0x42475241
+/* 'l10r': 10-bit linear, ARGB2101010 in DRM terms. */
+#define DCP_V14_FORMAT_L10R		0x6c313072
 
 /*
- * A single-plane linear BGRA surface covering the whole framebuffer. The
- * firmware has no XRGB format: an opaque surface blends as premultiplied
- * alpha over the black background, which shows XRGB pixels unchanged.
+ * A single-plane linear surface of @format covering the whole framebuffer.
+ * The firmware has no XRGB formats: an opaque surface blends as
+ * premultiplied alpha over the black background, which shows XRGB pixels
+ * unchanged.
  */
-static inline void dcp_v14_encode_surface(u8 *s, u32 stride, u32 width, u32 height,
-					  bool opaque)
+static inline void dcp_v14_encode_surface(u8 *s, u32 format, u32 stride, u32 width,
+					  u32 height, bool opaque)
 {
 	u32 bytes = stride * height;
 
@@ -108,7 +111,7 @@ static inline void dcp_v14_encode_surface(u8 *s, u32 stride, u32 width, u32 heig
 	s[DCP_V14_SURF_OPAQUE] = opaque;
 	put_unaligned_le32(1, s + 0x03);
 	put_unaligned_le32(1, s + 0x07);
-	put_unaligned_le32(DCP_V14_FORMAT_BGRA, s + DCP_V14_SURF_FORMAT);
+	put_unaligned_le32(format, s + DCP_V14_SURF_FORMAT);
 	s[0x13] = 13;
 	s[0x14] = 12;
 	put_unaligned_le32(stride, s + DCP_V14_SURF_STRIDE);
