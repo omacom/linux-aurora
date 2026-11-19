@@ -97,6 +97,8 @@ static int typec_thunderbolt_switch_set(void *p,void *s) { (void)p;(void)s;event
 static int usb_role_switch_set_role(void *p,int r) { (void)p;assert(r==USB_ROLE_NONE);if(ordinary_port&&!role_error){int ret=ordinary_power_off();if(ret)return ret;controller_active=false;phy_off=true;}event('R');role_calls++;return role_error; }
 static enum usb_role __attribute__((unused)) usb_role_switch_get_role(void *p) { (void)p;return controller_active?USB_ROLE_HOST:USB_ROLE_NONE; }
 static void typec_unregister_partner(void *p) { (void)p;event('P'); }
+static void __attribute__((unused)) tps6598x_partner_pd_drop(struct tps6598x *t) { (void)t; }
+static void __attribute__((unused)) tps6598x_partner_pd_sync(struct tps6598x *t) { (void)t; }
 #define typec_set_pwr_opmode(...) ((void)0)
 #define typec_set_pwr_role(...) ((void)0)
 #define typec_set_vconn_role(...) ((void)0)

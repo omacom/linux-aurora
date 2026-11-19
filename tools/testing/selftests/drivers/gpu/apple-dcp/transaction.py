@@ -359,6 +359,7 @@ static int apply_patch(struct tps6598x *t) { (void)t;return 0; }
 static int tps6598x_write64(struct tps6598x *t,int reg,unsigned v) { (void)t;(void)reg;(void)v;return 0; }
 static bool tps6598x_read_status(struct tps6598x *t,u32 *s) { (void)t;*s=TPS_STATUS_PLUG_PRESENT;return true; }
 static bool tps6598x_read_power_status(struct tps6598x *t) { (void)t;return true; }
+static void tps6598x_update_contract(struct tps6598x *t) { (void)t; }
 static struct fwnode_handle node;
 static struct fwnode_handle *device_get_named_child_node(void *d,const char *s) { (void)d;(void)s;return &node; }
 static void fw_devlink_purge_absent_suppliers(struct fwnode_handle *f) { (void)f; }
