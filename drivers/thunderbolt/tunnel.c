@@ -914,6 +914,53 @@ static int tb_dp_reduce_bandwidth(int max_bw, u32 in_rate, u32 in_lanes,
 	return -ENOSR;
 }
 
+/*
+ * The DP IN adapters of an Apple silicon host never report the trained link
+ * rate in DP_COMMON_CAP, so tb_dp_consumed_bandwidth() keeps charging a
+ * tunnel the full rate it was offered. When two DP OUT adapters of one
+ * router come up together, the two tiles of a 5K display or two monitors on
+ * a dock, the first tunnel is offered all that fits (HBR3 x4, 25.92 Gb/s of
+ * a 40 Gb/s link) and the second is left with HBR x4, too little for a
+ * 2560x2880@60 tile. Offer each of them an even share instead: 2 x HBR2 x4
+ * fits the 40 Gb/s link, and a host or sink that needs no sharing is not
+ * limited. A dock with two DP OUT adapters and one monitor gets half the
+ * link for that monitor (HBR2 x4 on 40 Gb/s, enough for 4K60 at 10 bpc).
+ */
+static bool apple_dpin_share_bandwidth = true;
+module_param(apple_dpin_share_bandwidth, bool, 0444);
+MODULE_PARM_DESC(apple_dpin_share_bandwidth,
+		 "Offer a DP tunnel from an Apple host DP IN adapter an even share of the available bandwidth when other DP OUT adapters of the same router have no tunnel yet (default: true)");
+
+/*
+ * DP OUT adapters of @out's router that share the bandwidth of the path to
+ * it with this tunnel, @out included: those with HPD asserted and no tunnel
+ * yet. The second tile of a Studio Display XDR raises HPD only after the
+ * first tile's link is trained, and a DP OUT adapter without a sink (the
+ * display's third one) never does, so the first DP tunnel to a router with
+ * more than one DP OUT adapter reserves room for one more instead of
+ * counting them.
+ */
+static int tb_dp_pending_sinks(struct tb_port *out)
+{
+	struct tb_port *port;
+	int outs = 0, tunneled = 0, sinks = 0;
+
+	tb_switch_for_each_port(out->sw, port) {
+		if (!tb_port_is_dpout(port))
+			continue;
+		outs++;
+		if (tb_port_is_enabled(port))
+			tunneled++;
+		else if (port == out || tb_dp_port_hpd_is_active(port) > 0)
+			sinks++;
+	}
+
+	if (!tunneled && outs > 1 && sinks < 2)
+		sinks = 2;
+
+	return sinks;
+}
+
 static int tb_dp_xchg_caps(struct tb_tunnel *tunnel)
 {
 	u32 out_dp_cap, out_rate, out_lanes, in_dp_cap, in_rate, in_lanes, bw;
@@ -974,6 +1021,18 @@ static int tb_dp_xchg_caps(struct tb_tunnel *tunnel)
 		max_bw = tunnel->max_down;
 	else
 		max_bw = tunnel->max_up;
+
+	if (apple_dpin_share_bandwidth && max_bw > 0 &&
+	    tb_port_is_apple_host_dpin(in)) {
+		int sinks = tb_dp_pending_sinks(out);
+
+		if (sinks > 1) {
+			max_bw /= sinks;
+			tb_tunnel_info(tunnel,
+				       "sharing the path with %d DP OUT adapters, offering %d Mb/s\n",
+				       sinks, max_bw);
+		}
+	}
 
 	if (max_bw && bw > max_bw) {
 		u32 new_rate, new_lanes, new_bw;
