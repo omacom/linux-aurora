@@ -12,6 +12,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/jiffies.h>
+#include <linux/ktime.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -405,6 +406,19 @@ struct apple_pmp_start {
 	u64 startup_ack;
 	/* Seeded bits that are soc-device record indices. */
 	u64 record_seed;
+	/*
+	 * Seeded requests withdrawn once the PMP has started, until their
+	 * consumer first asks for them (apple,release-until-used), and those
+	 * still withdrawn.
+	 */
+	u64 idle_release;
+	u64 released;
+	/*
+	 * Requests apple_pmp_report_use() has written and awaits the ack of,
+	 * without apple_pmp_start_mutex. They stay in "released" until the
+	 * ack is in; meanwhile idle() and another use() of them get -EBUSY.
+	 */
+	u64 asserting;
 	struct of_changeset pmp_cs;
 	const struct apple_pmp_start_ops *ops;
 	const struct apple_pmp_start_timing *timing;
@@ -418,6 +432,16 @@ struct apple_pmp_start {
 	unsigned int waiters;
 	struct completion waiters_done;
 };
+
+static int apple_pmp_report_set_state(struct apple_pmp_report *rep, u32 id,
+				      bool enable, bool no_ack);
+static int apple_pmp_report_request(struct apple_pmp_report *rep, u32 id,
+				    bool enable, unsigned long timeout);
+static bool apple_pmp_report_acked(struct apple_pmp_report *rep, u64 bit,
+				   bool enable);
+
+/* How long a withdrawn request may take to be acknowledged. */
+#define APPLE_PMP_IDLE_ACK_TIMEOUT	msecs_to_jiffies(100)
 
 /* Reports that start their PMP; serializes startup requests and waiters. */
 static LIST_HEAD(apple_pmp_starts);
@@ -673,6 +697,8 @@ static int apple_pmp_start_describe(struct apple_pmp_report *rep,
 		if (record)
 			st->record_seed |= BIT_ULL(id);
 		st->seed |= BIT_ULL(id);
+		if (of_property_read_bool(child, "apple,release-until-used"))
+			st->idle_release |= BIT_ULL(id);
 		if (!of_property_read_bool(child, "apple,no-ack")) {
 			st->ack |= BIT_ULL(id);
 			if (!of_property_read_bool(child, "apple,defer-startup-ack"))
@@ -692,11 +718,45 @@ static int apple_pmp_start_describe(struct apple_pmp_report *rep,
 	return 0;
 }
 
+/*
+ * A request the PMP took at its start, but whose consumer is not using it
+ * yet: an external display processor with no display ever attached. Holding
+ * it keeps the PMP's external display state up, about 0.25 W of idle power
+ * on J514S; macOS keeps an unused processor's floor off. Withdraw it until
+ * apple_pmp_report_use() asks for it again. The request is written before
+ * the acknowledgment is awaited, so it is recorded as withdrawn even when the
+ * acknowledgment does not come: the first use then asserts it again, whether
+ * or not the PMP still shows it acknowledged.
+ */
+static void apple_pmp_start_release_idle(struct apple_pmp_start *st)
+{
+	unsigned long bits = st->idle_release;
+	unsigned int id;
+
+	lockdep_assert_held(&apple_pmp_start_mutex);
+	for_each_set_bit(id, &bits, 64) {
+		int ret = apple_pmp_report_request(st->rep, id, false,
+						   APPLE_PMP_IDLE_ACK_TIMEOUT);
+
+		st->released |= BIT_ULL(id);
+		if (ret)
+			dev_warn(st->rep->dev,
+				 "request %u withdrawn while unused, not acknowledged: %d\n",
+				 id, ret);
+	}
+	if (st->released)
+		dev_info(st->rep->dev, "withdrew unused requests %#llx until first use\n",
+			 st->released);
+}
+
 static void apple_pmp_start_finish(struct apple_pmp_start *st, int result)
 {
 	scoped_guard(mutex, &apple_pmp_start_mutex) {
-		if (!st->stopping)
+		if (!st->stopping) {
 			st->result = result;
+			if (!result)
+				apple_pmp_start_release_idle(st);
+		}
 		complete_all(&st->started);
 	}
 	if (result && READ_ONCE(st->enabled)) {
@@ -1106,6 +1166,159 @@ out:
 }
 EXPORT_SYMBOL_GPL(apple_pmp_report_wait_ready);
 
+/**
+ * apple_pmp_report_use() - ask for a request and wait for its acknowledgment
+ * @entry: report entry node, as for apple_pmp_report_wait_ready()
+ * @timeout: in jiffies, for both waits together
+ *
+ * As apple_pmp_report_wait_ready(), but a request that was withdrawn after
+ * the PMP started because nothing used it yet (apple,release-until-used) is
+ * asserted again first, and its acknowledgment awaited for the rest of
+ * @timeout, without apple_pmp_start_mutex held. A request withdrawn while
+ * unused is asserted again even if the PMP still shows it acknowledged: its
+ * withdraw may have been acknowledged late. If the new acknowledgment does
+ * not come in time, the request is withdrawn again and stays marked so, and
+ * the next call writes it and waits again: the request, its record here and
+ * the caller's view agree either way. The request stays marked withdrawn
+ * until it is acknowledged.
+ *
+ * Context: Process context; sleeps.
+ * Return: as apple_pmp_report_wait_ready(); -EIO, with nothing written, if
+ * the PMP is not running; -EBUSY if another call is asserting it;
+ * -ETIMEDOUT if a request asserted again was not acknowledged in time;
+ * -ENODEV if the report went away meanwhile. A request asserted again is
+ * withdrawn on every error.
+ */
+int apple_pmp_report_use(struct device_node *entry, unsigned long timeout)
+{
+	unsigned long deadline = jiffies + timeout;
+	struct apple_pmp_start *st = NULL, *it;
+	struct device_node *parent;
+	bool record, acked;
+	ktime_t start;
+	u64 status;
+	u32 id;
+	int ret;
+
+	ret = apple_pmp_report_wait_ready(entry, timeout);
+	/*
+	 * -EIO: the PMP runs, but has not acknowledged this request. 0 can still
+	 * mean a withdrawn request whose withdraw was acknowledged late.
+	 */
+	if (ret && ret != -EIO)
+		return ret;
+
+	parent = of_get_parent(entry);
+	scoped_guard(mutex, &apple_pmp_start_mutex) {
+		list_for_each_entry(it, &apple_pmp_starts, list) {
+			if (it->stopping || it->rep->dev->of_node != parent ||
+			    apple_pmp_report_bit(it, entry, &id, &record) ||
+			    !(it->released & BIT_ULL(id)))
+				continue;
+			if (it->asserting & BIT_ULL(id)) {
+				ret = -EBUSY;
+				break;
+			}
+			/* No acknowledgment can come: fail now, and leave it withdrawn. */
+			status = readq(it->rep->base + it->rep->offsets->status);
+			if (!(status & PMP_REPORT_READY)) {
+				ret = -EIO;
+				break;
+			}
+			/* A waiter keeps the report until the acknowledgment is in. */
+			apple_pmp_report_set_state(it->rep, id, true, true);
+			it->asserting |= BIT_ULL(id);
+			it->waiters++;
+			st = it;
+			break;
+		}
+	}
+	of_node_put(parent);
+	if (!st)
+		return ret;
+
+	start = ktime_get();
+	ret = read_poll_timeout(apple_pmp_report_acked, acked, acked, 1000,
+				jiffies_to_usecs(max_t(long, deadline - jiffies, 1)),
+				false, st->rep, BIT_ULL(id), true);
+
+	scoped_guard(mutex, &apple_pmp_start_mutex) {
+		st->asserting &= ~BIT_ULL(id);
+		/* The waiter keeps the report mapped while it is torn down. */
+		if (st->stopping)
+			ret = -ENODEV;
+		if (ret) {
+			/* Roll back, so that "released" still means withdrawn. */
+			apple_pmp_report_set_state(st->rep, id, false, true);
+			dev_warn(st->rep->dev,
+				 "request %u asserted for use, not acknowledged: %d; withdrawn again\n",
+				 id, ret);
+		} else {
+			st->released &= ~BIT_ULL(id);
+			dev_info(st->rep->dev, "request %u asserted for use, acknowledged in %lld us\n",
+				 id, ktime_us_delta(ktime_get(), start));
+		}
+		if (!--st->waiters && st->stopping)
+			complete(&st->waiters_done);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_use);
+
+/**
+ * apple_pmp_report_idle() - withdraw a request while its consumer is idle
+ * @entry: report entry node of a request marked apple,release-until-used
+ *
+ * The consumer asks for it again with apple_pmp_report_use(). An external
+ * display processor withdraws its request once no display is attached; its
+ * firmware keeps running, as it does when the request is withdrawn for
+ * system sleep.
+ *
+ * The request is recorded as withdrawn once it is written; an acknowledgment
+ * that does not come in time is logged, and the next use asserts it again.
+ * One recorded as withdrawn already is withdrawn in the hardware too.
+ *
+ * Context: Process context; sleeps.
+ * Return: 0 once the request is withdrawn, -EBUSY while apple_pmp_report_use()
+ * is asserting it, or -EINVAL if @entry is not such a request of a started
+ * PMP.
+ */
+int apple_pmp_report_idle(struct device_node *entry)
+{
+	struct device_node *parent = of_get_parent(entry);
+	struct apple_pmp_start *st;
+	int ret = -EINVAL;
+	bool record;
+	u32 id;
+
+	scoped_guard(mutex, &apple_pmp_start_mutex) {
+		list_for_each_entry(st, &apple_pmp_starts, list) {
+			if (st->stopping || st->rep->dev->of_node != parent ||
+			    !completion_done(&st->started) || st->result ||
+			    apple_pmp_report_bit(st, entry, &id, &record) ||
+			    !(st->idle_release & BIT_ULL(id)))
+				continue;
+			/* apple_pmp_report_use() is asserting it: leave it to that. */
+			if (st->asserting & BIT_ULL(id)) {
+				ret = -EBUSY;
+				break;
+			}
+			ret = 0;
+			if (st->released & BIT_ULL(id))
+				break;
+			st->released |= BIT_ULL(id);
+			if (apple_pmp_report_request(st->rep, id, false,
+						     APPLE_PMP_IDLE_ACK_TIMEOUT))
+				dev_warn(st->rep->dev,
+					 "request %u withdrawn while idle, not acknowledged\n", id);
+			break;
+		}
+	}
+	of_node_put(parent);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_pmp_report_idle);
+
 static int apple_pmp_report_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1323,6 +1536,30 @@ static int apple_pmp_report_set_state(struct apple_pmp_report *rep, u32 id,
 		50000);
 }
 
+static bool apple_pmp_report_acked(struct apple_pmp_report *rep, u64 bit, bool enable)
+{
+	if (!(readq(rep->base + rep->offsets->status) & PMP_REPORT_READY))
+		return false;
+	return !!(readq(rep->base + rep->offsets->actual) & bit) == enable;
+}
+
+/*
+ * Write a request, then wait up to @timeout for the running PMP to
+ * acknowledge it. The request stays written if the acknowledgment does not
+ * come. Unlike apple_pmp_report_set_state(), a PMP that is not running is no
+ * acknowledgment.
+ */
+static int apple_pmp_report_request(struct apple_pmp_report *rep, u32 id,
+				    bool enable, unsigned long timeout)
+{
+	bool acked;
+
+	apple_pmp_report_set_state(rep, id, enable, true);
+	return read_poll_timeout(apple_pmp_report_acked, acked, acked, 1000,
+				 jiffies_to_usecs(timeout), false, rep,
+				 BIT_ULL(id), enable);
+}
+
 /* Find and check the report before taking the GPU vote; optionally update it. */
 static int apple_pmp_report_t6030_gfx(struct device *supplier, const bool *enable)
 {
@@ -1419,6 +1656,10 @@ static int apple_pmp_report_entry_sleep(struct apple_pmp_report_entry *ent, bool
 		if (release && (!(readq(rep->base + rep->offsets->status) & PMP_REPORT_READY) ||
 				!(readq(rep->base + rep->offsets->actual) & BIT_ULL(ent->id))))
 			ret = -EALREADY;
+		/* Withdrawn until used, with its ack late at suspend: leave it so. */
+		else if (!release && rep->start &&
+			 (READ_ONCE(rep->start->released) & BIT_ULL(ent->id)))
+			ret = 0;
 		else
 			ret = apple_pmp_report_set_state(rep, ent->id, !release, ent->no_ack);
 		break;

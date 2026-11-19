@@ -46,6 +46,7 @@ static void host_log(const char *format, ...)
 struct device_node {
 	const char *name, *compatible;
 	bool available, always_on, no_ack, deferred, uuid, soc_record, release_sleep;
+	bool release_idle;
 	u32 reg;
 	int refs;
 	struct device_node *parent, *child, *sibling, *pmp;
@@ -136,6 +137,10 @@ struct apple_pmp_start {
 	bool stopping;
 	unsigned int waiters;
 	struct completion waiters_done;
+	/* apple,release-until-used requests, and those withdrawn now. */
+	u64 idle_release;
+	u64 released;
+	u64 asserting;
 };
 struct apple_pmp_report_entry {
 	struct generic_pm_domain genpd;
@@ -246,6 +251,11 @@ static u8 ranges[64], devices[17 * 0x7c];
 static struct work_struct *pending;
 static unsigned long jiffies;
 static unsigned int ack_polls;
+/* The timeout of the last read_poll_timeout(), in us, and when it began. */
+static unsigned long last_poll_us, last_poll_jiffies;
+/* Run once inside the next read_poll_timeout(), as another caller would. */
+static void (*poll_hook)(void);
+static unsigned int writes;
 #define msecs_to_jiffies(v) (v)
 #define time_before(a, b) ((long)((a) - (b)) < 0)
 #define time_after(a, b) time_before(b, a)
@@ -262,6 +272,7 @@ static void complete_all(struct completion *c)
 	c->done = true;
 }
 #define complete complete_all
+#define completion_done(c) ((c)->done)
 #define INIT_WORK(w, f) ((w)->func = (f), (w)->pending = false)
 #define system_unbound_wq NULL
 static bool queue_work(void *q, struct work_struct *w)
@@ -304,6 +315,7 @@ static unsigned int ack_late;
 static void writeq(u64 v, void *a)
 {
 	assert(a == (char *)regs + 0x108c0);
+	writes++;
 	*(u64 *)a = v;
 	regs[0x1180 / 8] = v;
 	if (ack_follows && ack_late)
@@ -327,6 +339,37 @@ static void writeq(u64 v, void *a)
 		r;                                                    \
 	})
 #define readq_poll_timeout_atomic readq_poll_timeout
+#define read_poll_timeout(op, value, condition, sleep_us, timeout_us, sleep_before, ...) \
+	({                                                            \
+		int r = -ETIMEDOUT;                                   \
+		void (*hook)(void) = poll_hook;                       \
+		ack_polls++;                                          \
+		last_poll_us = (timeout_us);                          \
+		last_poll_jiffies = jiffies;                          \
+		poll_hook = NULL;                                     \
+		if (hook)                                             \
+			hook();                                       \
+		for (int i = 0; i < 4; i++) {                         \
+			(value) = op(__VA_ARGS__);                    \
+			if (condition) {                              \
+				r = 0;                                \
+				break;                                \
+			}                                             \
+		}                                                     \
+		(void)(sleep_us);                                     \
+		(void)(sleep_before);                                 \
+		r;                                                    \
+	})
+#define jiffies_to_usecs(j) ((unsigned int)(j) * 1000)
+#define max_t(t, a, b) ((t)(a) > (t)(b) ? (t)(a) : (t)(b))
+#define ktime_t long long
+#define ktime_get() 0LL
+#define ktime_us_delta(a, b) ((a) - (b))
+#define lockdep_assert_held(l) ((void)(l))
+/* The bits set in *@addr (an unsigned long, so @size is at most its width). */
+#define for_each_set_bit(b, addr, size)                                    \
+	for (unsigned long __bits = *(addr) & (~0UL >> (64 - (size)));     \
+	     __bits && ((b) = __builtin_ctzl(__bits), true); __bits &= __bits - 1)
 static u32 get_unaligned_le32(const void *p)
 {
 	u32 v;
@@ -374,6 +417,8 @@ static bool of_property_read_bool(const struct device_node *n, const char *p)
 		return n->soc_record;
 	if (!strcmp(p, "apple,release-for-sleep"))
 		return n->release_sleep;
+	if (!strcmp(p, "apple,release-until-used"))
+		return n->release_idle;
 	return false;
 }
 static bool of_property_present(const struct device_node *n, const char *p)
@@ -694,10 +739,37 @@ static int g15_vote(void)
 		commands++;
 	return ret;
 }
+
+#ifdef HAVE_IDLE_RELEASE
+static bool hook_ran;
+static void mid_poll(void)
+{
+	unsigned int w = writes, p = ack_polls;
+
+	assert(!apple_pmp_start_mutex);
+	assert(apple_pmp_report_idle(&entries[1]) == -EBUSY);
+	assert(apple_pmp_report_use(&entries[1], 3000) == -EBUSY);
+	assert(writes == w && ack_polls == p);
+	hook_ran = true;
+}
+
+/* As apple_pmp_start_drain() would, with this use() still a waiter. */
+static void mid_poll_stop(void)
+{
+	struct apple_pmp_start *st = ((struct apple_pmp_report *)report_dev.dev.data)->start;
+
+	assert(st->waiters == 1 && !apple_pmp_start_mutex);
+	st->stopping = true;
+}
+#endif
 int main(void)
 {
 	unsigned int cases = 0;
 	(void)apple_pmp_start_init;
+	(void)last_poll_us;
+	(void)last_poll_jiffies;
+	(void)poll_hook;
+	(void)writes;
 	(void)apple_pmp_report_wait_t6030_14;
 	setup();
 	assert(apple_pmp_report_probe(&report_dev) == 0);
@@ -810,6 +882,108 @@ int main(void)
 	assert(g15_vote() == -EINVAL && commands == 0 && !enables);
 	cases++;
 	cleanup();
+#ifdef HAVE_IDLE_RELEASE
+	/*
+	 * apple,release-until-used: the request (R), its acknowledgment (A) and
+	 * the "released" record (S) must agree after every call, also when an
+	 * acknowledgment comes late. The PMP here acknowledges nothing by itself
+	 * (ack_follows false), so each write below is acknowledged late unless
+	 * the case sets the ack bit.
+	 */
+	setup();
+	entries[1].release_idle = true;
+	entries[1].release_sleep = true;
+	hw_ack = BIT_ULL(7) | BIT_ULL(8);
+	assert(apple_pmp_report_probe(&report_dev) == 0);
+	assert(apple_pmp_report_wait_ready(&entries[0], 30000) == 0);
+	struct apple_pmp_start *ist = ((struct apple_pmp_report *)report_dev.dev.data)->start;
+
+	/* Boot withdraw acknowledged late: R=0, A=1, S=1. */
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (regs[0x11c0 / 8] & BIT_ULL(8)) &&
+	       (ist->released & BIT_ULL(8)));
+	/* use() must assert it again although the PMP still shows it acknowledged. */
+	assert(apple_pmp_report_use(&entries[1], 3000) == 0);
+	assert((regs[0x1180 / 8] & BIT_ULL(8)) && !(ist->released & BIT_ULL(8)));
+	cases++;
+	/* idle() withdraws it; that ack is late too: R=0, A=1, S=1. */
+	assert(apple_pmp_report_idle(&entries[1]) == 0);
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (ist->released & BIT_ULL(8)));
+	cases++;
+	/* A re-assert never acknowledged is withdrawn again and stays recorded so. */
+	regs[0x11c0 / 8] &= ~BIT_ULL(8);
+	assert(apple_pmp_report_use(&entries[1], 3000) == -ETIMEDOUT);
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (ist->released & BIT_ULL(8)));
+	cases++;
+	/* idle() on a request recorded withdrawn writes and waits for nothing. */
+	unsigned int ipolls = ack_polls;
+
+	assert(apple_pmp_report_idle(&entries[1]) == 0 && ack_polls == ipolls);
+	cases++;
+	/*
+	 * A PMP that is not running cannot acknowledge: use() fails at once,
+	 * writes nothing and leaves it recorded withdrawn.
+	 */
+	unsigned int w0 = writes;
+
+	regs[0x10 / 8] &= ~1ULL;
+	assert(apple_pmp_report_use(&entries[1], 30000) == -EIO);
+	assert(writes == w0 && ack_polls == ipolls && !(regs[0x1180 / 8] & BIT_ULL(8)) &&
+	       (ist->released & BIT_ULL(8)));
+	regs[0x10 / 8] |= 1;
+	cases++;
+	/*
+	 * The ack is awaited without apple_pmp_start_mutex, for what is left of
+	 * the caller's timeout; meanwhile idle() and another use() of the same
+	 * request write nothing and get -EBUSY.
+	 */
+	poll_hook = mid_poll;
+	unsigned long j0 = jiffies;
+
+	assert(apple_pmp_report_use(&entries[1], 30000) == -ETIMEDOUT);
+	assert(hook_ran);
+	assert(last_poll_jiffies > j0);
+	assert(last_poll_us == (j0 + 30000 - last_poll_jiffies) * 1000);
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (ist->released & BIT_ULL(8)));
+	assert(!ist->asserting);
+	assert(!ist->waiters);
+	cases++;
+	j0 = jiffies;
+	assert(apple_pmp_report_use(&entries[1], 100) == -ETIMEDOUT);
+	assert(last_poll_us == (j0 + 100 - last_poll_jiffies) * 1000);
+	cases++;
+	/* A timeout used up by the start wait still polls once: never 0 (no limit). */
+	assert(apple_pmp_report_use(&entries[1], 1) == -ETIMEDOUT);
+	assert(last_poll_us == 1000);
+	cases++;
+	/* The next use writes it again and, acknowledged now, clears the record. */
+	ack_follows = true;
+	assert(apple_pmp_report_use(&entries[1], 3000) == 0);
+	assert((regs[0x1180 / 8] & BIT_ULL(8)) && (regs[0x11c0 / 8] & BIT_ULL(8)) &&
+	       !(ist->released & BIT_ULL(8)));
+	cases++;
+	/*
+	 * An idle withdraw acknowledged late, then system sleep: suspend still
+	 * sees the ack and withdraws it, and resume must not assert it again.
+	 */
+	ack_follows = false;
+	assert(apple_pmp_report_idle(&entries[1]) == 0);
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (regs[0x11c0 / 8] & BIT_ULL(8)));
+	assert(apple_pmp_report_entry_suspend_noirq(&entry_devs[1].dev) == 0);
+	assert(apple_pmp_report_entry_resume_noirq(&entry_devs[1].dev) == 0);
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (ist->released & BIT_ULL(8)));
+	cases++;
+	/*
+	 * The report torn down while use() awaits the ack: its waiter held the
+	 * report, and it withdraws the request again and returns -ENODEV.
+	 */
+	poll_hook = mid_poll_stop;
+	assert(apple_pmp_report_use(&entries[1], 3000) == -ENODEV);
+	assert(!(regs[0x1180 / 8] & BIT_ULL(8)) && (ist->released & BIT_ULL(8)));
+	assert(!ist->asserting);
+	assert(!ist->waiters && ist->waiters_done.done);
+	cases++;
+	cleanup();
+#endif
 #ifdef HAVE_SLEEP_RELEASE
 	/* System sleep withdraws an acknowledged request marked for it, then asserts it again. */
 	setup();

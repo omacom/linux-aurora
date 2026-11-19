@@ -1581,6 +1581,12 @@ static int __init gate_ext_apply(struct gate_ext *ext, bool native)
 	/* No external display is attached in system sleep: the PMP may drop it. */
 	if (!ret)
 		ret = gate_add_bool(cs, ext->entry, "apple,release-for-sleep");
+	/*
+	 * Nor before the first attach: the PMP takes the request at its start
+	 * and withdraws it until the driver starts this processor.
+	 */
+	if (!ret)
+		ret = gate_add_bool(cs, ext->entry, "apple,release-until-used");
 	if (!ret)
 		ret = of_changeset_update_prop_string(cs, ext->entry, "status", "okay");
 	if (!ret)
