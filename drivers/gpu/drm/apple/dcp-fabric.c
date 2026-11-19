@@ -1378,6 +1378,57 @@ static int dcp_typec_port_busy(struct apple_dcp_typec_port *port,
 	return -ENOSPC;
 }
 
+/*
+ * @waiting has a display (HPD up) but no pipeline. A direct DP-alt port that
+ * holds one of @waiting's pipelines with no display behind it (its sink has
+ * never asserted HPD, as a USB-C hub with a DP output and nothing plugged in)
+ * gives it up: a pipeline goes to a display, not to whichever port entered DP
+ * mode first. The idle port keeps DP mode and is routed again when a pipeline
+ * is free and its own sink asserts HPD. Returns 1 if one was released, 0 if
+ * no port holds one idle, or the error from a release that failed: the idle
+ * port then still owns its pipeline, and the caller must report that error
+ * and not that every pipeline drives a display.
+ */
+static int dcp_typec_reclaim_idle(struct apple_dcp_typec_port *waiting)
+{
+	struct apple_dcp_typec_route *route;
+	struct apple_dcp_typec_port *idle;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+
+	list_for_each_entry(route, &waiting->routes, port_link) {
+		list_for_each_entry(idle, &dcp_typec_ports, link) {
+			struct apple_dcp_typec_route *owner = idle->owner;
+			struct apple_dcp *dcp;
+			const char *from = NULL, *to = NULL;
+			int ret;
+
+			if (idle == waiting || !owner || owner->tunnel ||
+			    owner->dcp != route->dcp || idle->safe_pending ||
+			    idle->dp_hpd || idle->hpd)
+				continue;
+			dcp = owner->dcp;
+			if (dcp->typec_cable_connected ||
+			    (dcp->typec_connector &&
+			     READ_ONCE(dcp->typec_connector->connected)))
+				continue;
+			ret = dcp_typec_route_deactivate(owner);
+			if (ret)
+				return ret;
+			idle->preferred_route = owner;
+			idle->owner = NULL;
+			idle->busy_noted = false;
+			of_property_read_string(idle->connector_np, "label", &from);
+			of_property_read_string(waiting->connector_np, "label", &to);
+			dev_info(dcp->dev,
+				 "external display pipeline moves from %s (no display) to the display on %s\n",
+				 from ?: "a USB-C port", to ?: "a USB-C port");
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static int dcp_typec_route_set(struct typec_mux_dev *mux,
 			       struct typec_mux_state *state)
 {
@@ -1519,6 +1570,14 @@ static int dcp_typec_route_set(struct typec_mux_dev *mux,
 
 	if (!port->owner) {
 		best = dcp_typec_free_route(port);
+		/* A pipeline held by a port with no display goes to this one. */
+		if (!best && hpd) {
+			ret = dcp_typec_reclaim_idle(port);
+			if (ret < 0)
+				return ret;
+			if (ret)
+				best = dcp_typec_free_route(port);
+		}
 		/* Every pipeline is driving another port's display. */
 		if (!best)
 			return hpd ? dcp_typec_port_busy(port, route->dcp) : -ENOSPC;
