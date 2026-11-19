@@ -73,9 +73,9 @@ established, so:
   set it up.
 - On a warm-attach Mac set up under the guard, whether every record a match
   rewrites is on the list has not been tested.
-- On a cold-boot Mac set up under the guard with `xart_guard_pins=1`, the
-  record the create added is on the list and the shared lockers the first
-  setup rewrote are pinned (three on a J313). On that J313, matches before
+- On the J313 set up under the guard with `xart_guard_pins=1` (the only
+  cold-boot Mac run so far), the record the create added is on the list and
+  the three shared lockers the first setup rewrote are pinned. On that J313, matches before
   and after a reboot had no refusal: every pre-Linux record they rewrote
   was pinned or listed (writes to the shared roots are allowed at level 1
   and not logged). Other boards are untested.
@@ -185,8 +185,8 @@ it:
 - On a cold-boot Mac set up with `xart_guard_pins=1`, up to three entries
   are pins instead of records: each names a shared SEP-xART locker the
   enclave may rewrite, and lists no record as Linux's. Only the first three
-  pins in the list count. A kernel without pinning reports each as an
-  unreadable entry and ignores it, so that kernel refuses the lockers as
+  pins in the list count. A kernel without pinning counts them as
+  unreadable entries and ignores them, so that kernel refuses the lockers as
   before.
 
 The file holds only record kinds and session ids, no key material, and it
@@ -264,8 +264,9 @@ only and did not work on a J313.
   If nothing opens `/dev/sep-bio` that boot, the window stays open until
   the boot ends; if `/dev/sep-bio` cannot be published, or an early step of
   the activation fails, the window closes then. Either way:
-  the window opens once. The guard then logs a reset hint when it refuses a
-  read locker on an install with free pins. Recovery is a Touch ID reset with
+  the window opens once. Once the window is closed, the guard logs a reset hint with the first
+  eight refusals in a boot of a read kind-4 locker on an install with free
+  pins. Recovery is a Touch ID reset with
   `/var/lib/aurora-sep-xart-owned.bin` removed.
 - A pin counts only from a list that loaded whole, and a pinned locker is
   never adopted as Linux's, even if it was absent at probe.
@@ -298,15 +299,16 @@ What the pin does not establish:
   SEP-xART lockers. The refusals logged on J316s and J314s name kind 4, but
   the ledger above does not give the kind. A kind-3 record is refused in the
   window as anywhere else, and the setup then fails as it does today.
-- That macOS is unaffected by Linux's rewrites of that locker. The locker
+- That macOS is unaffected by Linux's rewrites of those lockers. The locker
   is not tied to an OS identity and macOS reads it too. This is the same
   open question as with `xart_guard=0` on these Macs; the pin narrows which
-  records Linux can change, not what a change to this one does. Treat macOS
+  records Linux can change, not what a change to them does. Treat macOS
   Touch ID as unverified until unlock and keychain access have been checked
   after a Linux keybag creation and after Linux matches.
 - That a match rewrites only listed records and pinned lockers. If it
-  rewrites another record from before Linux, the guard refuses it and logs
-  the refused locker's tag and whether the enclave had read it, next to the
+  rewrites another record from before Linux, the guard refuses it; for a
+  kind-4 locker, among the first eight refusals in a boot, it also logs the
+  locker's tag and whether the enclave had read it, next to the
   pinned lockers' tags in the earlier log lines, so the two can be compared.
 - That each pinned locker keeps its session id. If another OS replaces one
   under a new id, its pin names a record that no longer exists and the new

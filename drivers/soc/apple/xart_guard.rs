@@ -121,9 +121,9 @@ pub(crate) fn decide(level: u8, key: &Key, existed: bool, owned: bool) -> Verdic
     }
 }
 
-/// Whether a fresh install's first setup window is open: the keybag creation
-/// on a warm-attach Mac, from the create to the end of the first
-/// activation under `xart_guard_pins`.
+/// Whether a fresh install's first setup window is open: during the keybag
+/// creation on a warm-attach Mac; under `xart_guard_pins` on a cold-boot Mac,
+/// from the create until the first activation returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FirstSetup {
     /// No first keybag creation is in progress.
@@ -168,7 +168,7 @@ pub(crate) fn setup(cold: bool, pin: u8) -> Setup {
 }
 
 /// A short tag for one locker in the log, so that a refusal can be compared
-/// with the locker this install pinned. It is not the session id, which the
+/// with the lockers this install pinned. It is not the session id, which the
 /// log never carries.
 fn tag(key: &Key) -> u32 {
     crc32_ieee(&key.uuid)
@@ -628,7 +628,7 @@ impl<F: ListFile> Guard<F> {
         Ok(())
     }
 
-    /// Records `key` as this install's pinned locker, durably, before the
+    /// Records `key` as one of this install's pinned lockers, durably, before the
     /// enclave's rewrite of it is let through.
     fn pin(&mut self, key: &Key) -> Result<()> {
         if self.pins_full() {
@@ -755,7 +755,7 @@ impl<F: ListFile> Guard<F> {
                     );
                     // Under xart_guard_pins, which locker and whether the
                     // enclave had read it tell the refusals apart: the
-                    // pinned locker before a read, or another one.
+                    // pinned lockers before a read, or another one.
                     if self.setup == Setup::Pin && key.kind == 4 {
                         let read = if self.read.contains(key) {
                             "read"

@@ -459,7 +459,8 @@ impl Store {
     }
 
     /// Opens the guard's first-setup window (see [`crate::xart_guard`]).
-    /// `Ok(false)` without a guard or once this install has listed anything.
+    /// `Ok(false)` without a guard, off level 1, on a cold-boot Mac without
+    /// `xart_guard_pins`, or once this install has listed anything.
     pub(crate) fn open_first_setup(&mut self) -> Result<bool> {
         self.guard
             .as_mut()
