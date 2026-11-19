@@ -34,6 +34,11 @@ module_param(tiled_split, bool, 0644);
 MODULE_PARM_DESC(tiled_split,
 		 "Drive both halves of a tiled Thunderbolt display (LG UltraFine 5K) on one pipeline, through its two DPTX ports (default: on)");
 
+static bool split_dock_main;
+module_param(split_dock_main, bool, 0644);
+MODULE_PARM_DESC(split_dock_main,
+		 "EXPERIMENT: put a Thunderbolt display on the free HDMI pipeline (dcpext0), so split_modeset can drive it over two pipes as macOS does");
+
 static bool typec_follow_crtc = true;
 module_param(typec_follow_crtc, bool, 0444);
 MODULE_PARM_DESC(typec_follow_crtc,
@@ -180,7 +185,9 @@ static bool dcp_typec_route_busy(struct apple_dcp_typec_route *route)
 	struct apple_dcp *dcp = route->dcp;
 
 	return dcp_typec_route_fixed_output_busy(route) ||
-	       (dcp->external_native && iomfb_v14_7_external_failed(dcp));
+	       (dcp->external_native && iomfb_v14_7_external_failed(dcp)) ||
+	       /* Experimental (split_modeset): lent to another display's split. */
+	       (dcp->external_native && iomfb_v14_7_split_helper(dcp));
 }
 
 static bool dcp_typec_route_available(struct apple_dcp_typec_route *route)
@@ -1952,6 +1959,47 @@ static int dcp_tb_candidate(void *data)
 		best = dcp_fabric_real_route(chosen);
 		if (!best)
 			return ret;
+	}
+
+	/*
+	 * Experimental (split_dock_main): a display driven over two pipes
+	 * needs the HDMI pipeline (the hybrid, dcpext0 on T6030) as the one
+	 * that owns the link, as macOS does. Take it for the tunnel while it is
+	 * free and no HDMI display is present.
+	 */
+	if (READ_ONCE(split_dock_main) && !best->dcp->fixed_phy) {
+		struct apple_dcp_typec_route *r;
+
+		list_for_each_entry(r, &port->routes, port_link) {
+			struct apple_dcp *h = r->dcp;
+			bool hdmi_empty;
+
+			if (r == best || !h->fixed_phy || !dcp_typec_tunnel_ctl(r, dpin))
+				continue;
+			/*
+			 * HDMI presence stays SETTLING for DCP_HDMI_HOLD_MS after
+			 * any edge, including the first sample at boot, which is
+			 * when a dock's tunnel comes up. Read the HPD line then.
+			 */
+			switch (dcp_hdmi_presence(h)) {
+			case DCP_FABRIC_ABSENT:
+				hdmi_empty = true;
+				break;
+			case DCP_FABRIC_SETTLING:
+				hdmi_empty = h->hdmi_hpd && !gpiod_get_value_cansleep(h->hdmi_hpd);
+				break;
+			default:
+				hdmi_empty = false;
+				break;
+			}
+			if (!hdmi_empty || h->active_typec_route || dcp_typec_safe_held(h) ||
+			    dcp_typec_route_busy(r))
+				continue;
+			dev_info(r->dcp->dev, "split_dock_main: tunnel dpin%u takes this pipeline instead of %s\n",
+				 dpin, dev_name(best->dcp->dev));
+			best = r;
+			break;
+		}
 	}
 
 	ctl = dcp_typec_tunnel_ctl(best, dpin);

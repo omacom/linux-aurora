@@ -402,6 +402,44 @@ int dcp_v14_link_pump(struct dcp_v14_link *link, unsigned long timeout,
 	return ret;
 }
 
+/* Experimental (split_modeset): is an outer call on the link right now? */
+bool dcp_v14_link_outer_pending(struct dcp_v14_link *link)
+{
+	bool pending;
+
+	mutex_lock(&link->lock);
+	pending = link->calls[0].active;
+	mutex_unlock(&link->lock);
+	return pending;
+}
+
+/*
+ * Experimental (split_modeset): handle callbacks until the swap-complete
+ * callback for swap @id, with no call outstanding. Same rules as
+ * dcp_v14_link_pump(). -ETIMEDOUT leaves the link usable.
+ */
+int dcp_v14_link_wait_swap(struct dcp_v14_link *link, u32 id, unsigned long timeout,
+			   dcp_v14_callback_fn callback, void *cookie)
+{
+	unsigned long deadline = jiffies + timeout;
+	u32 completed = 0;
+	int ret;
+
+	while (time_before(jiffies, deadline)) {
+		struct dcp_v14_event *e = link_next_event(link, max_t(long, deadline - jiffies, 0));
+
+		if (IS_ERR(e))
+			return PTR_ERR(e);
+		ret = link_callback(link, e, callback, cookie, &completed);
+		kfree(e);
+		if (ret)
+			return ret;
+		if (completed == id)
+			return 0;
+	}
+	return -ETIMEDOUT;
+}
+
 /*
  * Calls @tag and handles the callbacks that arrive until its reply, and, for
  * a non-zero @completion_id, until the swap-complete callback for that swap.
@@ -415,7 +453,8 @@ int dcp_v14_link_call_guarded(struct dcp_v14_link *link, u32 tag, const void *in
 		      dcp_v14_admit_fn admit, void *admit_cookie, bool *vetoed)
 {
 	struct apple_dcp_link_rpc_header *packet;
-	unsigned long deadline = jiffies + DCP_V14_CALL_TIMEOUT;
+	unsigned long deadline = jiffies +
+		(READ_ONCE(link->long_calls) ? 20 * HZ : DCP_V14_CALL_TIMEOUT);
 	u64 expected = APPLE_DCP_LINK_MSG_RPC_REPLY, parent = 0;
 	u32 size, completed = 0;
 	bool nested, replied = false;
