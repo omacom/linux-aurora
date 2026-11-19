@@ -48,13 +48,13 @@
 //! A cold-boot Mac cannot stay inside the rule. Its first Touch ID setup
 //! rewrites session records from before Linux that the enclave reads at every
 //! attach and that belong to no single OS: on a MacBook Air M1 (J313) three
-//! SEP-xART lockers, two at the `COPY_KEYBAG` after the create and one at the
-//! first activation's `LOAD_KEYBAG`. The guard refuses them, so such a Mac
+//! SEP-xART lockers, two at the `COPY_KEYBAG` after the create and one during the
+//! first activation, after its `LOAD_KEYBAG`. The guard refuses them, so such a Mac
 //! needs the guard off, which leaves every record open to the enclave. With
 //! `xart_guard_pins=1` (run on a J313 only) the owner accepts those lockers
 //! instead
 //! ([`Setup::Pin`]). The first-setup window then opens on a cold-boot Mac and
-//! stays open from the create to the first activation's `LOAD_KEYBAG`, closing
+//! stays open from the create until the first activation returns, closing
 //! on any failed step before it. Each existing kind-4 locker the enclave
 //! rewrites in it, provided the enclave read it since probe, is recorded in
 //! the list as pinned before the write lands, up to [`MAX_PINS`]. From then on
@@ -90,7 +90,7 @@ const ENTRY_PINNED: u8 = 1;
 const MAX_READ: usize = 512;
 /// Pre-Linux lockers one install may pin. On a MacBook Air M1 (J313, 13.5 sepOS)
 /// the first setup rewrites three, all read since probe: two at COPY_KEYBAG,
-/// one at LOAD_KEYBAG.
+/// one during the first activation, after its LOAD_KEYBAG.
 const MAX_PINS: usize = 3;
 
 /// What the guard does with one enclave write or delete.
@@ -122,8 +122,8 @@ pub(crate) fn decide(level: u8, key: &Key, existed: bool, owned: bool) -> Verdic
 }
 
 /// Whether a fresh install's first setup window is open: the keybag creation
-/// on a warm-attach Mac, from the create to the first activation's
-/// `LOAD_KEYBAG` under `xart_guard_pins`.
+/// on a warm-attach Mac, from the create to the end of the first
+/// activation under `xart_guard_pins`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FirstSetup {
     /// No first keybag creation is in progress.
@@ -538,8 +538,9 @@ impl<F: ListFile> Guard<F> {
     }
 
     /// The create exchange is over. Only a pinning window outlasts it, to the
-    /// first activation's LOAD_KEYBAG: on a J313 the enclave rewrites the
-    /// shared lockers at COPY_KEYBAG and at that load, not at the create.
+    /// end of the first activation: on a J313 the enclave rewrites the shared
+    /// lockers at COPY_KEYBAG and after the activation's LOAD_KEYBAG, not at
+    /// the create.
     pub(crate) fn end_create(&mut self) {
         if self.setup != Setup::Pin {
             self.close_first_setup();
@@ -1283,7 +1284,7 @@ mod tests {
         assert_eq!(pins(&bytes)[..], [None]);
         // Each read locker the setup rewrites is pinned, after the marker,
         // and is not listed as Linux's: up to three (J313: two at COPY_KEYBAG,
-        // one at the first LOAD_KEYBAG).
+        // one during the first activation).
         assert_eq!(guard.check(&shared, true), Ok(()));
         assert_eq!(guard.check(&other, true), Ok(()));
         assert_eq!(guard.check(&third, true), Ok(()));

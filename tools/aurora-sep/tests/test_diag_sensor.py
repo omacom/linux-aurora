@@ -329,8 +329,8 @@ class DiagSensorTest(unittest.TestCase):
         # the create and tells the guard when the create is over (the guard
         # decides whether the window outlasts it: KUnit
         # only_a_pinning_window_outlasts_the_create). A successful create
-        # hands it to the first activation, which releases it right after
-        # LOAD_KEYBAG; any failed exit in between shuts it on drop.
+        # hands it to the first activation, which releases it when it
+        # returns; any failed exit in between shuts it on drop.
         source = (APPLE / 'sks.rs').read_text()
         create = function(source, 'pub(crate) fn sks_provision_identity_keybag(&self) -> bool')
         steps = ['store.open_first_setup()', 'crate::diag::xart_guard_setup_recorded()',
@@ -353,15 +353,14 @@ class DiagSensorTest(unittest.TestCase):
         self.assertNotIn('Bootstrap', create[:places[3]])
         sbio = (APPLE / 'sbio.rs').read_text()
         activate = function(sbio, 'fn activate_touchid(&self) -> Result<()>')
-        order = ['SetupWindow::for_activation(self)', 'store::Store::open()',
-                 'self.sks_recover(&stored)', 'drop(window)']
-        where = [activate.find(step) for step in order]
-        self.assertNotIn(-1, where, order)
-        self.assertEqual(where, sorted(where), order)
-        # The window is released by the statement right after the load.
-        between = '\n'.join(line for line in activate[where[2]:where[3]].splitlines()
-                            if not line.strip().startswith('//'))
-        self.assertEqual(between.count(';'), 1, between)
+        # The first activation holds the window from before its first step
+        # to its return (a J313 rewrites a shared locker after LOAD_KEYBAG),
+        # and nothing releases it earlier.
+        hold = activate.find('let _window = crate::sks::SetupWindow::for_activation(self);')
+        self.assertNotEqual(hold, -1)
+        self.assertLess(hold, activate.find('store::Store::open()'))
+        self.assertNotIn('drop(_window)', activate)
+        self.assertNotIn('close_first_setup', activate)
 
     def test_probe_and_remove_report_the_bind(self):
         source = (APPLE / 'sensor_shim.c').read_text()

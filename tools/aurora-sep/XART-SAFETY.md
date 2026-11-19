@@ -218,7 +218,7 @@ On a T600x Mac where Linux has created its keybag, treat macOS Touch ID as
 unverified until macOS Touch ID unlock and keychain access have been checked
 there. The other cold-boot SoCs differ in detail: on a T8103 (J313) the
 create rewrites no pre-Linux record, the COPY_KEYBAG after it and the first
-LOAD_KEYBAG rewrite three (see "MacBook Air M1 (J313)" below). T6001 and
+activation (after its LOAD_KEYBAG) rewrite three (see "MacBook Air M1 (J313)" below). T6001 and
 T6002 are untested.
 
 ## Cold-boot Macs: pinning the shared locker (`xart_guard_pins`)
@@ -227,9 +227,9 @@ T6002 are untested.
 
 Run on a J313 with macOS 13.5 firmware (sepOS 13.5), `xart_guard_pins=1`, guard level 1, macOS booted after the Linux install, each attempt with no keybag and no list:
 
-- The create does not rewrite a pre-Linux locker on this Mac. The `COPY_KEYBAG` of the new bag rewrites two (tags `da70de89`, `140a890d`), and the first activation's `LOAD_KEYBAG` a third (`5700cc64`). The enclave had read all three since probe.
+- The create does not rewrite a pre-Linux locker on this Mac. The `COPY_KEYBAG` of the new bag rewrites two (tags `da70de89`, `140a890d`), and the first activation a third (`5700cc64`), about 280 ms after its `LOAD_KEYBAG` reply, during the requests that follow it. The enclave had read all three since probe.
 - All three were in a raw copy of the iBoot System Container taken before Linux's first xART write. An earlier setup on the same Mac with `xart_guard=0` changed five 4 KiB blocks of the gigalocker, which are where those three lockers sat or moved.
-- With the window closed after the create, the first was refused and provisioning failed. With it held through provisioning, the second was refused. With two pins, the third was refused at `LOAD_KEYBAG`; after that refusal the enclave answered nothing more that boot (`DEVICE_STATE_TRANSITION` and the ref-key unlock got no reply, sensor registration timed out).
+- With the window closed after the create, the first was refused and provisioning failed. With it held through provisioning, the second was refused. With two pins, the third was refused during the first activation; after that refusal the enclave answered nothing more that boot (`DEVICE_STATE_TRANSITION` and the ref-key unlock got no reply, sensor registration timed out).
 - So the window now runs from the create to the first `activate_touchid()`, and pins up to three lockers. With that: `identity keybag provisioned`, three pins, `xart_guard_refusals` 0, enrol, 3 of 3 matches, then after a reboot `16 session records exist, 1 created by Linux; the other 15 are protected`, the enrolment restored, 2 of 2 matches, refusals 0. The owner reports macOS Touch ID still works afterwards; macOS unlock and keychain were not checked one by one, so treat macOS Touch ID as unverified as below.
 
 Run on that J313 only. The rule was first built from the J316s measurements above, which saw one locker at the create.
@@ -248,8 +248,9 @@ only and did not work on a J313.
 
 - The first-setup window, which cold-boot Macs otherwise never get, opens
   for the first `CREATE_KEYBAG` of an install whose list is loaded and
-  empty, and stays open until the first activation's `LOAD_KEYBAG`
-  (`activate_touchid`). Any failed step of provisioning or of that
+  empty, and stays open until the first activation (`activate_touchid`)
+  returns. A version that closed it right after `LOAD_KEYBAG` refused the
+  third locker on the J313. Any failed step of provisioning or of that
   activation before the load closes it. The marker is written first, as on a
   warm-attach Mac. Without the parameter a cold-boot Mac gets no window.
 - In the window the guard passes rewrites of existing kind-4 lockers, up to
@@ -258,7 +259,7 @@ only and did not work on a J313.
   the gigalocker, the guard appends a pin entry naming that locker to the
   list and flushes it. If the pin cannot be made durable, the rewrite is
   refused.
-- If the first activation does not reach `LOAD_KEYBAG` in the boot that
+- If the first activation does not complete in the boot that
   created the keybag, a locker it would have pinned cannot be pinned later.
   If nothing opens `/dev/sep-bio` that boot, the window stays open until
   the boot ends; if `/dev/sep-bio` cannot be published, or an early step of

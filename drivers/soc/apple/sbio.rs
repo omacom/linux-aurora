@@ -1394,7 +1394,11 @@ impl SepData {
         if self.touchid_failed.load(Relaxed) {
             return Err(EIO);
         }
-        let window = crate::sks::SetupWindow::for_activation(self);
+        // A pinning first-setup window ends when this first activation
+        // returns, on every path: on a J313 the enclave rewrites the third
+        // shared locker about 280 ms after the LOAD_KEYBAG reply, during the
+        // requests that follow it.
+        let _window = crate::sks::SetupWindow::for_activation(self);
         let mut store = store::Store::open().inspect_err(|e| {
             dev_err!(
                 self.dev,
@@ -1444,11 +1448,7 @@ impl SepData {
             );
             return Err(ENODEV);
         }
-        let recovered = self.sks_recover(&stored);
-        // A pinning first-setup window ends with this LOAD_KEYBAG, the last
-        // request that rewrites a shared locker; any earlier exit closed it too.
-        drop(window);
-        let (handle, uuid) = recovered.ok_or_else(|| {
+        let (handle, uuid) = self.sks_recover(&stored).ok_or_else(|| {
             dev_err!(
                 self.dev,
                 "Touch ID: the persisted identity keybag did not recover\n"
