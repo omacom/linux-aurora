@@ -1103,6 +1103,16 @@
    "rust": "1.85.0"
   },
   {
+   "name": "tools/aurora-sep/tests/capture-error-wipe/run.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-I",
+    "tools/aurora-sep/tests/capture-error-wipe/run.py"
+   ],
+   "rust": "1.85.0"
+  },
+  {
    "name": "tools/aurora-sep/tests/test_adt_extract.py",
    "group": "aurora-sep",
    "argv": [
