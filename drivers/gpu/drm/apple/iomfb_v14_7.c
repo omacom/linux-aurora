@@ -984,7 +984,7 @@ static void dcp_v14_external_published(struct apple_dcp_v14 *v14, const char *ke
 	if (raw && raw->size && connector) {
 		struct dcp_chunks chunks = {
 			.length = raw->size,
-			.data = kmemdup(raw->data, raw->size, GFP_KERNEL),
+			.data = kvmemdup(raw->data, raw->size, GFP_KERNEL),
 		};
 
 		if (chunks.data)
