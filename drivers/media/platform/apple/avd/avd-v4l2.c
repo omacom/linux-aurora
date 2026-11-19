@@ -250,6 +250,7 @@ static const struct avd_ctrl_desc avd_h264_ctrl_descs[] = {
 	},
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_SLICE_PARAMS,
+		.cfg.ops = &avd_ctrl_ops,
 	},
 	{
 		.cfg.id = V4L2_CID_STATELESS_H264_DECODE_MODE,
@@ -687,7 +688,7 @@ static int avd_s_output_fmt(struct file *file, void *priv,
 	cap_fmt->fmt.pix_mp.quantization = f->fmt.pix_mp.quantization;
 
 	/* Enable format specific queue features */
-	vq->subsystem_flags |= desc->subsystem_flags;
+	vq->subsystem_flags = desc->subsystem_flags;
 
 	return 0;
 }
@@ -889,12 +890,17 @@ static void avd_buf_request_complete(struct vb2_buffer *vb)
 static int avd_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct avd_ctx *ctx = vb2_get_drv_priv(q);
+
 	const struct avd_coded_fmt_desc *desc;
 	struct vb2_v4l2_buffer *vbuf;
 	int ret;
 
+	WRITE_ONCE(ctx->draining, false);
 	if (V4L2_TYPE_IS_CAPTURE(q->type))
 		return 0;
+	/* A new stream gets a fresh hardware error budget. */
+	ctx->hw_errors = 0;
+	ctx->broken = false;
 
 	desc = ctx->coded_fmt_desc;
 	if (WARN_ON(!desc)) {
@@ -917,7 +923,7 @@ err_return_buffers:
 	return ret;
 }
 
-static void avd_queue_cleanup(struct vb2_queue *vq, u32 state)
+static void avd_m2m_queue_cleanup(struct vb2_queue *vq, u32 state)
 {
 	struct avd_ctx *ctx = vb2_get_drv_priv(vq);
 
@@ -942,6 +948,7 @@ static void avd_stop_streaming(struct vb2_queue *q)
 {
 	struct avd_ctx *ctx = vb2_get_drv_priv(q);
 
+	avd_queue_drain(ctx);
 	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
 		const struct avd_coded_fmt_desc *desc = ctx->coded_fmt_desc;
 
@@ -956,7 +963,7 @@ static void avd_stop_streaming(struct vb2_queue *q)
 		ctx->job.segments = NULL;
 	}
 
-	avd_queue_cleanup(q, VB2_BUF_STATE_ERROR);
+	avd_m2m_queue_cleanup(q, VB2_BUF_STATE_ERROR);
 }
 
 const struct vb2_ops avd_queue_ops = {
@@ -970,36 +977,17 @@ const struct vb2_ops avd_queue_ops = {
 	.stop_streaming = avd_stop_streaming,
 };
 
+/* Legacy multi-slice codecs finish held OUTPUT requests during prepare. */
 void avd_job_finish_no_pm(struct avd_ctx *ctx, enum vb2_buffer_state result)
 {
-	struct avd_dev *avd = ctx->dev;
-	unsigned long flags;
-
-	spin_lock_irqsave(&avd->job_lock, flags);
-	if (avd->job_ctx == ctx) {
-		avd->job_state = AVD_JOB_IDLE;
-		avd->job_ctx = NULL;
-		avd->job_pending = false;
-	}
-	spin_unlock_irqrestore(&avd->job_lock, flags);
-
-	if (ctx->coded_fmt_desc->ops->done) {
-		struct vb2_v4l2_buffer *src_buf, *dst_buf;
-
-		src_buf = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
-		dst_buf = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
-		ctx->coded_fmt_desc->ops->done(ctx, src_buf, dst_buf, result);
-	}
-
-	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev, ctx->fh.m2m_ctx,
-					 result);
+	if (WARN_ON(!ctx->dev->building))
+		return;
+	ctx->dev->compat_held = true;
+	ctx->dev->building->status = result == VB2_BUF_STATE_DONE ? 0 : -EIO;
 }
 
 void avd_job_finish(struct avd_ctx *ctx, enum vb2_buffer_state result)
 {
-	struct avd_dev *avd = ctx->dev;
-
-	pm_runtime_put_autosuspend(avd->dev);
 	avd_job_finish_no_pm(ctx, result);
 }
 

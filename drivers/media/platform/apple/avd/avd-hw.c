@@ -42,9 +42,12 @@
 
 int avd_boot(struct avd_dev *avd)
 {
+	struct resource *code = platform_get_resource_byname(avd->pdev, IORESOURCE_MEM, "code");
 	u32 val;
 	int ret;
 
+	if (!avd->fw || !avd->fw->size || !code || avd->fw->size > resource_size(code))
+		return -EINVAL;
 	if (avd->variant->revision != 3)
 		dev_info_once(avd->dev, "booting hw version: %04x",
 				readl_relaxed(avd->ctrl));
@@ -58,10 +61,34 @@ int avd_boot(struct avd_dev *avd)
 	/* wait for cm3 to boot */
 	ret = readl_poll_timeout(avd->mbox + AVD_REG_FLAG0_SET,
 			val, val == 1, 10, 10000);
-	if (ret)
+	if (ret) {
+		dev_err(avd->dev, "cm3 did not start: flag0 %#x\n", val);
 		return ret;
+	}
 
 	return 0;
+}
+
+/*
+ * Pop one firmware message. Reading RETRIEVE on an empty mailbox returns the
+ * previous message again, and a repeated PP DONE completes the next frame
+ * before its PP has run. An interrupt can also come just before its message
+ * is readable, so allow 10 us; after that treat the interrupt as spurious.
+ * Always acknowledges the interrupt. Returns false when there is no message.
+ */
+bool avd_mbox_pop(struct avd_dev *avd, u32 *msg)
+{
+	u32 st;
+	int ret;
+
+	ret = readl_poll_timeout_atomic(avd->mbox + AVD_REG_MBOX1_STATUS, st,
+					!(st & AVD_MBOX1_STATUS_EMPTY), 1, 10);
+	if (!ret)
+		*msg = readl(avd->mbox + AVD_REG_MBOX1_RETRIEVE);
+	writel(AVD_MBOX1_NOT_EMPTY, avd->mbox + AVD_REG_MBOX_IRQ_CLR);
+	if (ret)
+		dev_dbg_ratelimited(avd->dev, "spurious interrupt, mailbox empty\n");
+	return !ret;
 }
 
 void avd_shutdown(struct avd_dev *avd)

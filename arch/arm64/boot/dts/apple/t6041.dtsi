@@ -1,0 +1,621 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+// Copyright The Asahi Linux Contributors
+
+#include "t604x.dtsi"
+
+
+/* Keep the validated T6041 topology independent of unqualified T6040 blocks. */
+/delete-node/ &clk_200m;
+/delete-node/ &sio;
+/delete-node/ &ave0_dart1;
+/delete-node/ &ave0_dart0;
+/delete-node/ &apr0_dart;
+/delete-node/ &usb4_0_dart;
+/delete-node/ &apciec0_dart;
+/delete-node/ &usb4_1_dart;
+/delete-node/ &apciec1_dart;
+/delete-node/ &usb4_2_dart;
+/delete-node/ &apciec2_dart;
+/delete-node/ &apcie1_dart;
+/delete-node/ &sio_dart;
+/delete-node/ &jpeg0;
+/delete-node/ &jpeg1;
+/delete-node/ &jpeg0_dart;
+/delete-node/ &jpeg1_dart;
+/delete-node/ &scaler0_dart;
+/delete-node/ &usb4_0_mbox;
+/delete-node/ &usb4_1_mbox;
+/delete-node/ &usb4_2_mbox;
+/delete-node/ &sio_mbox;
+/delete-node/ &pinctrl_smc;
+/delete-node/ &ps_gpx;
+/delete-node/ &ps_apcie_gp;
+/delete-node/ &ps_fab4_soc;
+/delete-node/ &ps_sio_cpu;
+/delete-node/ &ps_fpwm1;
+/delete-node/ &ps_fpwm2;
+/delete-node/ &ps_i2c0;
+/delete-node/ &ps_i2c5;
+/delete-node/ &ps_i2c7;
+/delete-node/ &ps_uart_p;
+/delete-node/ &ps_dpa_p;
+/delete-node/ &ps_aes;
+/delete-node/ &ps_spi0;
+/delete-node/ &ps_spi1;
+/delete-node/ &ps_spi3;
+/delete-node/ &ps_spi4;
+/delete-node/ &ps_spi5;
+/delete-node/ &ps_qspi;
+/delete-node/ &ps_uart_n;
+/delete-node/ &ps_uart0;
+/delete-node/ &ps_uart1;
+/delete-node/ &ps_uart2;
+/delete-node/ &ps_uart3;
+/delete-node/ &ps_uart4;
+/delete-node/ &ps_uart5;
+/delete-node/ &ps_uart6;
+/delete-node/ &ps_dpa0;
+/delete-node/ &ps_dpa1;
+/delete-node/ &ps_dpa2;
+/delete-node/ &ps_dpa3;
+/delete-node/ &ps_dpa4;
+/delete-node/ &ps_disp_sys;
+/delete-node/ &ps_amcc4;
+/delete-node/ &ps_amcc5;
+/delete-node/ &ps_amcc6;
+/delete-node/ &ps_amcc7;
+/delete-node/ &ps_amcc12;
+/delete-node/ &ps_amcc13;
+/delete-node/ &ps_amcc14;
+/delete-node/ &ps_amcc15;
+/delete-node/ &ps_dcs_04;
+/delete-node/ &ps_dcs_05;
+/delete-node/ &ps_dcs_06;
+/delete-node/ &ps_dcs_07;
+/delete-node/ &ps_dcs_12;
+/delete-node/ &ps_dcs_13;
+/delete-node/ &ps_dcs_14;
+/delete-node/ &ps_dcs_15;
+/delete-node/ &ps_disp_fe;
+/delete-node/ &ps_apcie_sys_gp;
+/delete-node/ &ps_apcie_phy_sw;
+/delete-node/ &ps_jpg;
+/delete-node/ &pmgr_disp;
+/delete-node/ &ps_ecpu_0;
+/delete-node/ &ps_ecpu_2;
+/delete-node/ &ps_dwi;
+/delete-node/ &ps_aic;
+/delete-node/ &ps_pmc;
+/delete-node/ &ps_pms_c1ppt;
+/delete-node/ &ps_soc_dpe;
+/delete-node/ &ps_pmgr_soc_ocla;
+/delete-node/ &ps_pms_fpwm0;
+/delete-node/ &ps_pms_fpwm1;
+/delete-node/ &ps_pms_fpwm2;
+/delete-node/ &ps_pms_fpwm3;
+/delete-node/ &ps_pms_fpwm4;
+/delete-node/ &ps_fab0_soc;
+/delete-node/ &ps_ecpu_3;
+/delete-node/ &ps_amcc0;
+/delete-node/ &ps_dcs_00;
+/delete-node/ &ps_rom;
+/delete-node/ &ps_amcc1;
+/delete-node/ &ps_dcs_01;
+/delete-node/ &ps_amcc2;
+/delete-node/ &ps_dcs_02;
+/delete-node/ &ps_amcc3;
+/delete-node/ &ps_dcs_03;
+/delete-node/ &ps_amcc8;
+/delete-node/ &ps_dcs_08;
+/delete-node/ &ps_amcc9;
+/delete-node/ &ps_dcs_09;
+/delete-node/ &ps_amcc10;
+/delete-node/ &ps_dcs_10;
+/delete-node/ &ps_amcc11;
+/delete-node/ &ps_pcpu0_0;
+/delete-node/ &ps_dcs_11;
+/delete-node/ &ps_venc0_sys;
+/delete-node/ &ps_pcpu0_1;
+/delete-node/ &ps_fab_gw_0;
+/delete-node/ &ps_fab_gw_1;
+/delete-node/ &ps_fab_afr;
+/delete-node/ &ps_fab1_soc;
+/delete-node/ &ps_pcpu0_2;
+/delete-node/ &ps_scodec;
+/delete-node/ &ps_scodec_streaming;
+/delete-node/ &ps_fab2_soc;
+/delete-node/ &ps_dispext0_sys;
+/delete-node/ &ps_dispext0_fe;
+/delete-node/ &ps_dispext0_cpu;
+/delete-node/ &ps_pcpu0_3;
+/delete-node/ &ps_atc0_cio;
+/delete-node/ &ps_atc0_pcie;
+/delete-node/ &ps_atc0_cio_pcie;
+/delete-node/ &ps_atc0_cio_usb;
+/delete-node/ &ps_atc1_cio;
+/delete-node/ &ps_atc1_pcie;
+/delete-node/ &ps_atc1_cio_pcie;
+/delete-node/ &ps_atc1_cio_usb;
+/delete-node/ &ps_atc2_cio;
+/delete-node/ &ps_atc2_pcie;
+/delete-node/ &ps_atc2_cio_pcie;
+/delete-node/ &ps_pcpu0_4;
+/delete-node/ &ps_atc2_cio_usb;
+/delete-node/ &ps_atc3_cio;
+/delete-node/ &ps_atc3_pcie;
+/delete-node/ &ps_atc3_cio_pcie;
+/delete-node/ &ps_atc3_cio_usb;
+/delete-node/ &ps_fab5_soc;
+/delete-node/ &ps_sbr;
+/delete-node/ &ps_gpio;
+/delete-node/ &ps_msg;
+/delete-node/ &ps_ap_tmm;
+/delete-node/ &ps_msr0;
+/delete-node/ &ps_msr0_ase_core;
+/delete-node/ &ps_pcpu0_5;
+/delete-node/ &ps_fab7_soc;
+/delete-node/ &ps_dispext1_sys;
+/delete-node/ &ps_dispext1_fe;
+/delete-node/ &ps_dispext1_cpu;
+/delete-node/ &ps_pcpu1_0;
+/delete-node/ &ps_pcpu1_1;
+/delete-node/ &ps_pcpu1_2;
+/delete-node/ &ps_pcpu1_3;
+/delete-node/ &ps_pcpu1_4;
+/delete-node/ &ps_pcpu1_5;
+/delete-node/ &ps_ecpu_1;
+/delete-node/ &ps_ecpm;
+/delete-node/ &ps_pcpm0;
+/delete-node/ &ps_pcpm1;
+/delete-node/ &pmgr_venc;
+/delete-node/ &ps_debug_gated;
+/delete-node/ &ps_nub_fabric;
+/delete-node/ &ps_nub_sram;
+/delete-node/ &ps_debug_switch;
+/delete-node/ &ps_nub_spmi_ahb;
+/delete-node/ &ps_nub_spmi0;
+/delete-node/ &ps_nub_spmi_a2;
+/delete-node/ &ps_nub_spi0;
+/delete-node/ &ps_nub_aon;
+/delete-node/ &ps_nub_ocla;
+/delete-node/ &ps_nub_spmi1;
+/delete-node/ &ps_nub_spmi2;
+/delete-node/ &ps_nub_spmi3;
+/delete-node/ &ps_nub_spmi4;
+/delete-node/ &dcuart;
+/delete-node/ &spi4;
+/delete-node/ &qspi;
+/delete-node/ &nub_spmi1;
+/delete-node/ &nub_spmi2;
+/delete-node/ &nub_spmi3;
+/delete-node/ &nub_spmi4;
+/delete-node/ &aop_spmi0;
+/delete-node/ &ave;
+
+/delete-node/ &aop_accel;
+/delete-node/ &aop_gyro;
+/delete-node/ &pmc_soc_max;
+/delete-node/ &pmu_rtc;
+
+/ {
+	/delete-node/ pmu;
+};
+
+&avd {
+	compatible = "apple,t6041-max-avd", "apple,t6041-avd", "apple,t8132-avd";
+	power-domains = <&ps_avd_sys>;
+	/delete-property/ power-domain-names;
+};
+
+&nub_spmi0 {
+	/delete-property/ interrupt-controller;
+	/delete-property/ #interrupt-cells;
+	/delete-property/ interrupt-parent;
+	/delete-property/ interrupts;
+};
+
+&usb_drd0_dart_0 {
+	/delete-property/ apple,dma-range;
+};
+
+&usb_drd0_dart_1 {
+	/delete-property/ apple,dma-range;
+};
+
+&usb_drd1_dart_0 {
+	/delete-property/ apple,dma-range;
+};
+
+&usb_drd1_dart_1 {
+	/delete-property/ apple,dma-range;
+};
+
+&usb_drd2_dart_0 {
+	/delete-property/ apple,dma-range;
+};
+
+&usb_drd2_dart_1 {
+	/delete-property/ apple,dma-range;
+};
+
+&mtp_dart {
+	/delete-property/ apple,dma-range;
+};
+
+&{/opp-table-e/opp01} {
+	/delete-property/ opp-microwatt;
+};
+
+&{/opp-table-e/opp02} {
+	/delete-property/ opp-microwatt;
+};
+
+&{/opp-table-e/opp03} {
+	/delete-property/ opp-microwatt;
+};
+
+&{/opp-table-e/opp04} {
+	/delete-property/ opp-microwatt;
+};
+
+&{/opp-table-e/opp05} {
+	/delete-property/ opp-microwatt;
+};
+
+&{/opp-table-e/opp06} {
+	/delete-property/ opp-microwatt;
+};
+
+&{/opp-table-e/opp07} {
+	/delete-property/ opp-microwatt;
+};
+
+&ps_avd_sys {
+	/delete-property/ power-domains;
+};
+
+&ps_atc0_common {
+	/delete-property/ power-domains;
+};
+
+&ps_atc1_common {
+	/delete-property/ power-domains;
+};
+
+&ps_atc2_common {
+	/delete-property/ power-domains;
+};
+
+&ps_atc3_common {
+	/delete-property/ power-domains;
+};
+
+/* FAB4_SOC and FAB5_SOC are critical, on from iBoot and not described here. */
+&ps_ane_sys {
+	/delete-property/ power-domains;
+};
+
+&ps_pmp {
+	/delete-property/ power-domains;
+};
+
+&ps_pms_sram {
+	/delete-property/ power-domains;
+};
+
+&serial0 {
+	/delete-property/ power-domains;
+	/delete-property/ status;
+};
+
+/delete-node/ &gpu;
+/delete-node/ &gfx_mbox;
+/delete-node/ &opp_p0;
+/delete-node/ &opp_p1;
+
+/ {
+	cpus {
+		cpu-map {
+			cluster1 { core5 { cpu = <&cpu_p05>; }; };
+			cluster2 { core5 { cpu = <&cpu_p15>; }; };
+		};
+		cpu_p05: cpu@10105 {
+			compatible = "apple,brava-p";
+			device_type = "cpu";
+			reg = <0x0 0x10105>;
+			enable-method = "spin-table";
+			cpu-release-addr = <0 0>;
+			next-level-cache = <&l2_cache_p0>;
+			operating-points-v2 = <&opp_p0>;
+			capacity-dmips-mhz = <1024>;
+			performance-domains = <&cpufreq_p0>;
+			#cooling-cells = <2>;
+		};
+		cpu_p15: cpu@10205 {
+			compatible = "apple,brava-p";
+			device_type = "cpu";
+			reg = <0x0 0x10205>;
+			enable-method = "spin-table";
+			cpu-release-addr = <0 0>;
+			next-level-cache = <&l2_cache_p1>;
+			operating-points-v2 = <&opp_p1>;
+			capacity-dmips-mhz = <1024>;
+			performance-domains = <&cpufreq_p1>;
+			#cooling-cells = <2>;
+		};
+	};
+
+	opp_p0: opp-table-p0 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp01 {
+			opp-hz = /bits/ 64 <1260000000>;
+			opp-level = <1>;
+			clock-latency-ns = <7200>;
+		};
+		opp02 {
+			opp-hz = /bits/ 64 <1512000000>;
+			opp-level = <2>;
+			clock-latency-ns = <19000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <1800000000>;
+			opp-level = <3>;
+			clock-latency-ns = <20000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <2088000000>;
+			opp-level = <4>;
+			clock-latency-ns = <22000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <2352000000>;
+			opp-level = <5>;
+			clock-latency-ns = <30000>;
+		};
+		opp06 {
+			opp-hz = /bits/ 64 <2616000000>;
+			opp-level = <6>;
+			clock-latency-ns = <34000>;
+		};
+		opp07 {
+			opp-hz = /bits/ 64 <2868000000>;
+			opp-level = <7>;
+			clock-latency-ns = <37000>;
+		};
+		opp08 {
+			opp-hz = /bits/ 64 <3096000000>;
+			opp-level = <8>;
+			clock-latency-ns = <38000>;
+		};
+		opp09 {
+			opp-hz = /bits/ 64 <3300000000>;
+			opp-level = <9>;
+			clock-latency-ns = <40000>;
+		};
+		opp10 {
+			opp-hz = /bits/ 64 <3468000000>;
+			opp-level = <10>;
+			clock-latency-ns = <41000>;
+		};
+		opp11 {
+			opp-hz = /bits/ 64 <3624000000>;
+			opp-level = <11>;
+			clock-latency-ns = <43000>;
+		};
+		opp12 {
+			opp-hz = /bits/ 64 <3756000000>;
+			opp-level = <12>;
+			clock-latency-ns = <44000>;
+		};
+		opp13 {
+			opp-hz = /bits/ 64 <3828000000>;
+			opp-level = <13>;
+			clock-latency-ns = <45000>;
+		};
+		opp14 {
+			opp-hz = /bits/ 64 <3888000000>;
+			opp-level = <14>;
+			clock-latency-ns = <46000>;
+		};
+		opp15 {
+			opp-hz = /bits/ 64 <3948000000>;
+			opp-level = <15>;
+			clock-latency-ns = <47000>;
+		};
+		opp16 {
+			opp-hz = /bits/ 64 <3996000000>;
+			opp-level = <16>;
+			clock-latency-ns = <48000>;
+		};
+		opp17 {
+			opp-hz = /bits/ 64 <4044000000>;
+			opp-level = <17>;
+			clock-latency-ns = <49000>;
+		};
+		opp18 {
+			opp-hz = /bits/ 64 <4104000000>;
+			opp-level = <18>;
+			clock-latency-ns = <50000>;
+		};
+		opp19 {
+			opp-hz = /bits/ 64 <4416000000>;
+			opp-level = <19>;
+			clock-latency-ns = <55000>;
+			turbo-mode;
+		};
+		opp20 {
+			opp-hz = /bits/ 64 <4512000000>;
+			opp-level = <20>;
+			clock-latency-ns = <56000>;
+			turbo-mode;
+		};
+	};
+
+	opp_p1: opp-table-p1 {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp01 {
+			opp-hz = /bits/ 64 <1260000000>;
+			opp-level = <1>;
+			clock-latency-ns = <7200>;
+		};
+		opp02 {
+			opp-hz = /bits/ 64 <1512000000>;
+			opp-level = <2>;
+			clock-latency-ns = <19000>;
+		};
+		opp03 {
+			opp-hz = /bits/ 64 <1800000000>;
+			opp-level = <3>;
+			clock-latency-ns = <20000>;
+		};
+		opp04 {
+			opp-hz = /bits/ 64 <2088000000>;
+			opp-level = <4>;
+			clock-latency-ns = <22000>;
+		};
+		opp05 {
+			opp-hz = /bits/ 64 <2352000000>;
+			opp-level = <5>;
+			clock-latency-ns = <30000>;
+		};
+		opp06 {
+			opp-hz = /bits/ 64 <2616000000>;
+			opp-level = <6>;
+			clock-latency-ns = <34000>;
+		};
+		opp07 {
+			opp-hz = /bits/ 64 <2868000000>;
+			opp-level = <7>;
+			clock-latency-ns = <37000>;
+		};
+		opp08 {
+			opp-hz = /bits/ 64 <3096000000>;
+			opp-level = <8>;
+			clock-latency-ns = <38000>;
+		};
+		opp09 {
+			opp-hz = /bits/ 64 <3300000000>;
+			opp-level = <9>;
+			clock-latency-ns = <40000>;
+		};
+		opp10 {
+			opp-hz = /bits/ 64 <3468000000>;
+			opp-level = <10>;
+			clock-latency-ns = <41000>;
+		};
+		opp11 {
+			opp-hz = /bits/ 64 <3624000000>;
+			opp-level = <11>;
+			clock-latency-ns = <43000>;
+		};
+		opp12 {
+			opp-hz = /bits/ 64 <3756000000>;
+			opp-level = <12>;
+			clock-latency-ns = <44000>;
+		};
+		opp13 {
+			opp-hz = /bits/ 64 <3828000000>;
+			opp-level = <13>;
+			clock-latency-ns = <45000>;
+		};
+		opp14 {
+			opp-hz = /bits/ 64 <3888000000>;
+			opp-level = <14>;
+			clock-latency-ns = <46000>;
+		};
+		opp15 {
+			opp-hz = /bits/ 64 <3948000000>;
+			opp-level = <15>;
+			clock-latency-ns = <47000>;
+		};
+		opp16 {
+			opp-hz = /bits/ 64 <3996000000>;
+			opp-level = <16>;
+			clock-latency-ns = <48000>;
+		};
+		opp17 {
+			opp-hz = /bits/ 64 <4044000000>;
+			opp-level = <17>;
+			clock-latency-ns = <49000>;
+		};
+		opp18 {
+			opp-hz = /bits/ 64 <4104000000>;
+			opp-level = <18>;
+			clock-latency-ns = <50000>;
+		};
+		opp19 {
+			opp-hz = /bits/ 64 <4416000000>;
+			opp-level = <19>;
+			clock-latency-ns = <55000>;
+			turbo-mode;
+		};
+		opp20 {
+			opp-hz = /bits/ 64 <4512000000>;
+			opp-level = <20>;
+			clock-latency-ns = <56000>;
+			turbo-mode;
+		};
+	};
+
+};
+
+&cpu_p00 {
+	enable-method = "spin-table";
+	cpu-release-addr = <0 0>;
+};
+
+&aic {
+	reg = <0x5 0x02400000 0x0 0x1cc000>,
+	      <0x5 0x02440000 0x0 0x4>;
+};
+
+&smc {
+	reg = <0x5 0x0c600000 0x0 0x4000>,
+	      <0x5 0x0de00000 0x0 0x170000>;
+};
+
+&pmc {
+	/delete-property/ apple,pmp;
+	apple,static-voters = <1 3>;
+};
+
+/ {
+	gpu: gpu@288000000 {
+		compatible = "apple,agx-t6041";
+		reg = <0x2 0x8a600000 0x0 0x88000>,
+		      <0x2 0x88000000 0x0 0x3758000>;
+		reg-names = "asc", "sgx";
+		mboxes = <&gfx_mbox>;
+		power-domains = <&ps_gfx>;
+		status = "disabled";
+	};
+
+	gfx_mbox: mailbox@28a600000 {
+		compatible = "apple,t6040-ascwrap-v6";
+		reg = <0x2 0x8a600000 0x0 0x88000>,
+		      <0x2 0x8a050000 0x0 0x8>;
+		reg-names = "wrapper", "iop-vbar";
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1501 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1504 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "recv-not-empty";
+		apple,firmware-role = "GFX";
+		power-domains = <&ps_gfx>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+};
+
+&ps_afr {
+	apple,always-on;
+	apple,no-auto-pm;
+};
+
+&ps_gfx {
+	apple,always-on;
+	apple,no-auto-pm;
+};

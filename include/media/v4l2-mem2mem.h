@@ -201,6 +201,24 @@ void v4l2_m2m_job_finish(struct v4l2_m2m_dev *m2m_dev,
 			 struct v4l2_m2m_ctx *m2m_ctx);
 
 /**
+ * v4l2_m2m_job_finish_detach() - detach buffers and release a dispatch
+ * @m2m_dev: mem2mem device
+ * @m2m_ctx: context of the running job
+ *
+ * Remove the current source and destination from their ready lists and finish
+ * the running job, without completing either buffer. The driver must save both
+ * buffer pointers before calling, retain ownership until hardware has stopped
+ * accessing them, and eventually complete them with v4l2_m2m_buf_done().
+ *
+ * This may be used by pipelined drivers on HOLD_CAPTURE-capable queues only
+ * for a source without V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF. Partial slices must
+ * instead use v4l2_m2m_buf_done_and_job_finish() to retain the capture buffer.
+ * The destination is no longer held or visible to subsequent m2m scheduling.
+ */
+void v4l2_m2m_job_finish_detach(struct v4l2_m2m_dev *m2m_dev,
+			      struct v4l2_m2m_ctx *m2m_ctx);
+
+/**
  * v4l2_m2m_buf_done_and_job_finish() - return source/destination buffers with
  * state and inform the framework that a job has been finished and have it
  * clean up
