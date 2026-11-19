@@ -694,11 +694,37 @@ static int macsmc_ac_get_property(struct power_supply *psy,
 	int ret = 0;
 	u16 vu16;
 	u32 vu32;
+	s16 current_ma;
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
+		/*
+		 * CHIS can read online while the battery neither charges nor
+		 * discharges (M5: a port1 PD source set CHIS with 0 A into the
+		 * battery holding at 97%, so the system ran on battery while
+		 * every AC consumer claimed online). Report online only when
+		 * the battery agrees: discharging means no usable AC, and
+		 * NOT_CHARGING with no positive battery current means the
+		 * charger feeds nothing.
+		 */
 		ret = apple_smc_read_u32(power->smc, SMC_KEY(CHIS), &vu32);
-		val->intval = !!vu32;
+		if (ret < 0)
+			break;
+		switch (macsmc_battery_get_status(power)) {
+		case POWER_SUPPLY_STATUS_DISCHARGING:
+			val->intval = 0;
+			break;
+		case POWER_SUPPLY_STATUS_NOT_CHARGING:
+			if (!apple_smc_read_s16(power->smc, SMC_KEY(B0AC), &current_ma) &&
+			    current_ma <= 0)
+				val->intval = 0;
+			else
+				val->intval = !!vu32;
+			break;
+		default:
+			val->intval = !!vu32;
+			break;
+		}
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
 		ret = apple_smc_read_u16(power->smc, SMC_KEY(AC-n), &vu16);
