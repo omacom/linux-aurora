@@ -51,7 +51,7 @@ int main(void)
   assert(known && (!!b)==expected);
   if(!b)continue;
   assert(!strcmp(b->handoff,"apple,t6034-handoff"));
-  assert(b->promotion && b->log_bringup && !b->ctm_set && !b->ctm_get && !b->panel_nits);
+  assert(b->promotion && b->log_bringup && !b->ctm_set && !b->ctm_get && b->panel_nits && b->swap_timestamps);
   assert(dcp_v14_board_admits(b,"F493F03E-CC40-3D89-9A08-5F259BA2B246"));
   assert(!dcp_v14_board_admits(b,"F493F03E-CC40-3D89-9A08-5F259BA2B247"));
   assert(!dcp_v14_board_admits(b,"f493f03e-cc40-3d89-9a08-5f259ba2b246"));
