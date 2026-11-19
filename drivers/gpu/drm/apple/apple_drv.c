@@ -163,6 +163,39 @@ static int apple_drm_gem_dumb_create(struct drm_file *file_priv,
 	return drm_gem_dma_dumb_create_internal(file_priv, drm, args);
 }
 
+/*
+ * A T8122 dcpext mirrors framebuffers into its own display DART domain.
+ * Remove a buffer's mirror before its pages and its DVA are released.
+ */
+static void apple_drm_gem_free(struct drm_gem_object *gem)
+{
+	struct drm_crtc *crtc;
+
+	drm_for_each_crtc(crtc, gem->dev)
+		dcp_fb_unmirror(to_apple_crtc(crtc)->dcp, to_drm_gem_dma_obj(gem));
+	drm_gem_dma_object_free(gem);
+}
+
+static const struct drm_gem_object_funcs apple_drm_gem_funcs = {
+	.free		= apple_drm_gem_free,
+	.print_info	= drm_gem_dma_object_print_info,
+	.get_sg_table	= drm_gem_dma_object_get_sg_table,
+	.vmap		= drm_gem_dma_object_vmap,
+	.mmap		= drm_gem_dma_object_mmap,
+	.vm_ops		= &drm_gem_dma_vm_ops,
+};
+
+static struct drm_gem_object *apple_drm_gem_create_object(struct drm_device *drm,
+							  size_t size)
+{
+	struct drm_gem_dma_object *obj = kzalloc_obj(*obj);
+
+	if (!obj)
+		return ERR_PTR(-ENOMEM);
+	obj->base.funcs = &apple_drm_gem_funcs;
+	return &obj->base;
+}
+
 #ifdef CONFIG_DRM_FBDEV_EMULATION
 static int apple_drm_fbdev_probe(struct drm_fb_helper *helper,
 				 struct drm_fb_helper_surface_size *sizes)
@@ -205,6 +238,7 @@ static const struct drm_driver apple_drm_driver = {
 	DRM_FBDEV_DMA_DRIVER_OPS,
 #endif
 	.postclose		= apple_drm_postclose,
+	.gem_create_object	= apple_drm_gem_create_object,
 	.name			= DRIVER_NAME,
 	.desc			= DRIVER_DESC,
 	.major			= 1,

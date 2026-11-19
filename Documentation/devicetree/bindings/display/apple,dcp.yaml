@@ -258,6 +258,42 @@ properties:
       - iommus
     additionalProperties: false
 
+  apple,no-shared-display-dart:
+    type: boolean
+    description:
+      The external coprocessor's display DART must stay out of the display
+      subsystem's IOMMU domain. Framebuffers are mirrored through the fbdma
+      child instead, which must be present.
+
+  apple,t8122-dcpext-firmware-ready:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [1, 2]
+    description:
+      Set by the boot loader on a T8122 external coprocessor whose firmware
+      it has reserved. 2 is the boot loader's default. 1 is set only when
+      the owner asked for the coprocessor in the boot loader configuration,
+      because kernels that share the display DART unconditionally accept 1
+      and nothing else.
+
+  fbdma:
+    type: object
+    description:
+      The display DART stream an external coprocessor scans framebuffers
+      through, with the display subsystem's DVA window.
+    properties:
+      iommus:
+        maxItems: 1
+      apple,dma-range:
+        $ref: /schemas/types.yaml#/definitions/uint64-array
+        description:
+          Base and size of the display subsystem's DVA window on this stream.
+        minItems: 2
+        maxItems: 2
+    required:
+      - iommus
+      - apple,dma-range
+    additionalProperties: false
+
   panel:
     type: object
     properties:

@@ -14,7 +14,9 @@
  *    changed when a check fails.
  *  - T8122 (t8122-gate-test.dtso): on by default, with the full handoff,
  *    and nothing changed when a check of the handoff or of the reused PMP
- *    topology fails.
+ *    topology fails. Its external display processor is enabled with either
+ *    firmware marker value, and its display DART is shared with the display
+ *    subsystem or left to the fbdma child, never both.
  * Included at the end of t6030-display-gate.c.
  *
  * The test trees are applied once and stay: the gate gives some properties
@@ -142,6 +144,7 @@ static int gt_fixture_t8122 __initdata = -1;
 static int gt_live_soc __initdata = -1;
 
 struct gate_test {
+	int dcpext_disp_dart;	/* apple_t8122_display.dcpext_disp_dart, as booted */
 	const struct gt_soc *s;
 	struct of_changeset cs;	/* this case's own edits to the test tree */
 	bool requested, t6031_requested;
@@ -403,6 +406,9 @@ static int __init gt_init(struct kunit *test, const struct gt_soc *s)
 		return -ENOMEM;
 	test->priv = t;
 	t->s = s;
+	t->dcpext_disp_dart = gate_t8122_dcpext_disp_dart;
+	gate_t8122_dcpext_disp_dart = -1;
+	gate_t8122_dcpext_cs = NULL;
 	/* As the boot left them: the test kernel's command line sets neither. */
 	t->requested = gate_requested;
 	t->t6031_requested = gate_t6031_requested;
@@ -440,6 +446,13 @@ static void __init gt_exit(struct kunit *test)
 {
 	struct gate_test *t = test->priv;
 
+	/* The external display processor was enabled last. */
+	if (gate_t8122_dcpext_cs) {
+		of_changeset_revert(gate_t8122_dcpext_cs);
+		gate_cs_free(gate_t8122_dcpext_cs);
+		gate_t8122_dcpext_cs = NULL;
+	}
+	gate_t8122_dcpext_disp_dart = t->dcpext_disp_dart;
 	/* The gate leaves its changes applied only when it enabled the display. */
 	if (gate_pmp_ovcs) {
 		of_changeset_revert(&gate_pmp_cs);
@@ -902,6 +915,110 @@ static void __init gate_t8122_enabled_again(struct kunit *test)
 	gt_expect_enabled(test);
 }
 
+/* T8122 external display processor (dcpext) */
+
+#define GT_DCPEXT	"/t8122-soc/dcp@31ac00000"
+#define GT_DCPEXT_MARKER "apple,t8122-dcpext-firmware-ready"
+
+/* Is the dcpext's display DART among the display subsystem's iommus? */
+static bool __init gt_dcpext_dart_shared(struct kunit *test)
+{
+	return of_count_phandle_with_args(gt_node(test, gt_t8122.display), "iommus",
+					  "#iommu-cells") == 2;
+}
+
+/* The dcpext is on, with exactly one way for framebuffers to reach its DART. */
+static void __init gt_expect_dcpext(struct kunit *test, bool shared)
+{
+	gt_expect_enabled(test);
+	KUNIT_EXPECT_TRUE(test, gt_okay(test, GT_DCPEXT));
+	KUNIT_EXPECT_TRUE(test, gt_okay(test, "/t8122-soc/iommu@319304000"));
+	KUNIT_EXPECT_EQ(test, gt_dcpext_dart_shared(test), shared);
+	KUNIT_EXPECT_EQ(test, gt_okay(test, GT_DCPEXT "/fbdma"), !shared);
+}
+
+/* The panel is on and nothing of the dcpext is. */
+static void __init gt_expect_dcpext_off(struct kunit *test)
+{
+	gt_expect_enabled(test);
+	KUNIT_EXPECT_FALSE(test, gt_okay(test, GT_DCPEXT));
+	KUNIT_EXPECT_FALSE(test, gt_okay(test, "/t8122-soc/iommu@319304000"));
+	KUNIT_EXPECT_FALSE(test, gt_okay(test, "/t8122-soc/iommu@31930c000"));
+	KUNIT_EXPECT_FALSE(test, gt_okay(test, "/t8122-soc/mailbox@31ac08000"));
+	KUNIT_EXPECT_FALSE(test, gt_dcpext_dart_shared(test));
+}
+
+/* The boot loader's default marker, a board that mirrors: DART not shared. */
+static void __init gate_t8122_dcpext_board_mirrors(struct kunit *test)
+{
+	gt_run(test);
+	gt_expect_dcpext(test, false);
+}
+
+/* The owner's explicit marker is accepted as before. */
+static void __init gate_t8122_dcpext_owner_marker(struct kunit *test)
+{
+	gt_set_u32(test, GT_DCPEXT, GT_DCPEXT_MARKER, 1);
+	gt_run(test);
+	gt_expect_dcpext(test, false);
+}
+
+static void __init gate_t8122_dcpext_other_marker(struct kunit *test)
+{
+	gt_set_u32(test, GT_DCPEXT, GT_DCPEXT_MARKER, 3);
+	gt_run(test);
+	gt_expect_dcpext_off(test);
+}
+
+static void __init gate_t8122_dcpext_no_marker(struct kunit *test)
+{
+	gt_remove(test, GT_DCPEXT, GT_DCPEXT_MARKER);
+	gt_run(test);
+	gt_expect_dcpext_off(test);
+}
+
+/* A board that must not share and has nothing to mirror through: refused. */
+static void __init gate_t8122_dcpext_board_no_fbdma(struct kunit *test)
+{
+	gt_detach(test, GT_DCPEXT "/fbdma");
+	gt_run(test);
+	gt_expect_dcpext_off(test);
+}
+
+/* A board without the property shares, as on a J613, and fbdma goes off. */
+static void __init gate_t8122_dcpext_board_shares(struct kunit *test)
+{
+	gt_remove(test, GT_DCPEXT, "apple,no-shared-display-dart");
+	gt_run(test);
+	gt_expect_dcpext(test, true);
+}
+
+/* =0 keeps the DART out on a board that would share. */
+static void __init gate_t8122_dcpext_forced_unshared(struct kunit *test)
+{
+	gt_remove(test, GT_DCPEXT, "apple,no-shared-display-dart");
+	KUNIT_ASSERT_EQ(test, gate_t8122_dcpext_disp_dart_setup("0"), 0);
+	gt_run(test);
+	gt_expect_dcpext(test, false);
+}
+
+/* =1 shares on a board that mirrors, and takes its fbdma child away. */
+static void __init gate_t8122_dcpext_forced_shared(struct kunit *test)
+{
+	KUNIT_ASSERT_EQ(test, gate_t8122_dcpext_disp_dart_setup("1"), 0);
+	gt_run(test);
+	gt_expect_dcpext(test, true);
+}
+
+/* Without the panel there is no dcpext either. */
+static void __init gate_t8122_dcpext_no_panel(struct kunit *test)
+{
+	gt_remove(test, gt_t8122.display, "apple,t8122-handoff");
+	gt_run(test);
+	gt_expect_untouched(test);
+	KUNIT_EXPECT_FALSE(test, gt_okay(test, GT_DCPEXT));
+}
+
 /* The case and suite structs outlive init: only the functions are init code. */
 static struct kunit_case gate_t6031_cases[] __refdata = {
 	KUNIT_CASE(gate_t6031_param),
@@ -975,6 +1092,15 @@ static struct kunit_case gate_t8122_cases[] __refdata = {
 	KUNIT_CASE(gate_t8122_disp_no_ack),
 	KUNIT_CASE(gate_t8122_no_storage_request),
 	KUNIT_CASE(gate_t8122_not_inherited_on),
+	KUNIT_CASE(gate_t8122_dcpext_board_mirrors),
+	KUNIT_CASE(gate_t8122_dcpext_owner_marker),
+	KUNIT_CASE(gate_t8122_dcpext_other_marker),
+	KUNIT_CASE(gate_t8122_dcpext_no_marker),
+	KUNIT_CASE(gate_t8122_dcpext_board_no_fbdma),
+	KUNIT_CASE(gate_t8122_dcpext_board_shares),
+	KUNIT_CASE(gate_t8122_dcpext_forced_unshared),
+	KUNIT_CASE(gate_t8122_dcpext_forced_shared),
+	KUNIT_CASE(gate_t8122_dcpext_no_panel),
 	KUNIT_CASE(gate_t8122_enabled_again),
 	{}
 };
