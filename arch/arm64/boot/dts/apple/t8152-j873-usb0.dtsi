@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* usb-drd0 as a fixed high-speed peripheral: the debug cable port
+ * (receptacle 1, ATC0). Windows, IRQ and phy banks are from the M6 ADT;
+ * the layout mirrors the drd3 host node. */
+
+/ {
+	aliases {
+		usb2phy0 = &usb2phy0;
+		usbdrd0 = &usbdrd0;
+	};
+
+	soc {
+		usb2phy0: phy@402418000 {
+			compatible = "apple,t8152-usb2-phy";
+			reg = <4 0x02418000 0 0x4000>,
+			      <4 0x02448000 0 0x4000>;
+			reg-names = "usb2", "eusb2";
+			#phy-cells = <0>;
+			power-domains = <&ps_atc0_usb_aon>, <&psd_atc0_usb>;
+			power-domain-names = "usb-aon", "usb";
+		};
+
+		usbdrd0: usb@402430000 {
+			compatible = "apple,t8152-dwc3";
+			reg = <4 0x02430000 0 0xcd00>,
+			      <4 0x0243cd00 0 0x4b00>,
+			      <4 0x02414000 0 0x4000>,
+			      <4 0x02410000 0 0x4000>,
+			      <4 0x02444000 0 0x4000>,
+			      <4 0x02450000 0 0x4000>;
+			reg-names = "dwc3-core", "dwc3-apple", "pipe-handler",
+				    "pwr-ctrl", "bulk-fabric", "ausbc-debug";
+			interrupts = <AIC_IRQ 1621 IRQ_TYPE_LEVEL_HIGH>;
+			iommus = <&usb0_dart0 0>, <&usb0_dart0 1>, <&usb0_dart1 0>, <&usb0_dart1 1>;
+			power-domains = <&psd_atc0_usb>;
+			phys = <&usb2phy0>;
+			phy-names = "usb2-phy";
+			dr_mode = "peripheral";
+			maximum-speed = "high-speed";
+		};
+	};
+};

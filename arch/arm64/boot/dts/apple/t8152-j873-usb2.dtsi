@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/ {
+	aliases {
+		usb2phy3 = &usb2phy3;
+		usbdrd3 = &usbdrd3;
+	};
+
+	soc {
+		usb2phy3: phy@412418000 {
+			compatible = "apple,t8152-usb2-phy";
+			reg = <4 0x12418000 0 0x4000>,
+			      <4 0x12448000 0 0x4000>;
+			reg-names = "usb2", "eusb2";
+			#phy-cells = <0>;
+			power-domains = <&ps_atc3_usb_aon>, <&psd_atc3_usb>;
+			power-domain-names = "usb-aon", "usb";
+		};
+
+		usbdrd3: usb@412430000 {
+			compatible = "apple,t8152-dwc3";
+			reg = <4 0x12430000 0 0xcd00>,
+			      <4 0x1243cd00 0 0x4b00>,
+			      <4 0x12414000 0 0x4000>,
+			      <4 0x12410000 0 0x4000>,
+			      <4 0x12444000 0 0x4000>,
+			      <4 0x12450000 0 0x4000>;
+			reg-names = "dwc3-core", "dwc3-apple", "pipe-handler",
+				    "pwr-ctrl", "bulk-fabric", "ausbc-debug";
+			interrupts = <AIC_IRQ 1834 IRQ_TYPE_LEVEL_HIGH>;
+			iommus = <&usb3_dart0 0>, <&usb3_dart0 1>, <&usb3_dart1 0>, <&usb3_dart1 1>;
+			power-domains = <&psd_atc3_usb>;
+			phys = <&usb2phy3>;
+			phy-names = "usb2-phy";
+			dr_mode = "host";
+			maximum-speed = "high-speed";
+		};
+	};
+};

@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Apple T8152 (M6) Mac mini J873: SuperSpeed / USB4 PHYs of the ATC ports
+ * (apple,t8152-atcphy).
+ *
+ * Source: the firmware device tree, nodes atc-phy2 / usb-drd2 and atc-phy3 /
+ * usb-drd3. Addresses are the firmware regs plus 0x200000000:
+ *   atc-phy reg[2] = PHY core window (xbar, CMN, CIOPLL, lane AON, PIPE/BIST,
+ *                    PCS, power block, ATC fabric; the USB DART banks sit
+ *                    inside it)
+ *   The dwc3 PIPE handler (usb-drd reg[3]) and the PIPE_PHY_READY word
+ *   (usb-drd reg[1]) are found through apple,dwc3: the dwc3 node owns those
+ *   ranges.
+ * No tunables here: the boot loader passes every apple,tunable-<name> list of
+ * the ADT atc-phy node (see the binding).
+ *
+ * Both nodes are disabled: the SuperSpeed link of the front port (atcphy2) is
+ * not verified yet, and atcphy3 serves the ACIO controller (USB4 tunnel nodes
+ * are not part of this file). Enable per port together with a "usb3-phy"
+ * reference in the dwc3 node and/or a phys reference in the ACIO node.
+ *
+ * Needs: ps_atc2_usb_aon / ps_atc3_usb_aon from t8152-j873-pmgr.dtsi and
+ * psd_atc2_usb / psd_atc3_usb from t8152-j873g-peripherals.dtsi.
+ */
+
+/ {
+	soc {
+		atcphy2: phy@383000000 {
+			compatible = "apple,t8152-atcphy";
+			reg = <3 0x83000000 0 0x84000>;
+			reg-names = "core";
+			apple,dwc3 = <&usbdrd2>;
+			#phy-cells = <1>;
+			power-domains = <&ps_atc2_usb_aon>, <&psd_atc2_usb>;
+			power-domain-names = "usb-aon", "usb";
+			status = "disabled";
+		};
+
+		atcphy3: phy@413000000 {
+			compatible = "apple,t8152-atcphy";
+			reg = <4 0x13000000 0 0x84000>;
+			reg-names = "core";
+			apple,dwc3 = <&usbdrd3>;
+			#phy-cells = <1>;
+			orientation-switch;
+			power-domains = <&ps_atc3_usb_aon>, <&psd_atc3_usb>;
+			power-domain-names = "usb-aon", "usb";
+			status = "disabled";
+		};
+	};
+};
