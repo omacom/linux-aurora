@@ -907,6 +907,8 @@ mod tests {
         sync: Cell<bool>,
         /// The directory entry cannot be flushed.
         parent: Cell<bool>,
+        /// Reads at or past this offset fail.
+        read_from: Cell<Option<u64>>,
     }
 
     /// A list file in memory, kept across the guards of successive boots, with
@@ -933,6 +935,9 @@ mod tests {
         }
 
         fn read_exact(&self, off: u64, buf: &mut [u8]) -> Result<()> {
+            if self.1.and_then(|faults| faults.read_from.get()).is_some_and(|from| off >= from) {
+                return Err(EIO);
+            }
             let bytes = self.0.borrow();
             let off = usize::try_from(off).map_err(|_| EINVAL)?;
             let end = off.checked_add(buf.len()).ok_or(EINVAL)?;
@@ -1335,6 +1340,55 @@ mod tests {
         // The window is still open, and the same slot takes the pin.
         assert_eq!(guard.check(&locker, true), Ok(()));
         assert_eq!(pins(&bytes)[..], [None, Some(locker)]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_list_that_fails_partway_counts_for_nothing() -> Result<()> {
+        let pinned = session(1);
+        let owned = session(2);
+        let other = session(3);
+        let mut list = KVec::new();
+        list.extend_from_slice(&setup_consumed(), GFP_KERNEL)?;
+        list.extend_from_slice(&encode_pin(&pinned), GFP_KERNEL)?;
+        list.extend_from_slice(&encode(&owned), GFP_KERNEL)?;
+        list.extend_from_slice(&encode(&other), GFP_KERNEL)?;
+        let bytes = RefCell::new(list);
+        let faults = Faults::default();
+        faults.read_from.set(Some((3 * ENTRY_SIZE) as u64));
+        let mut guard = Guard::with_file(
+            1,
+            keys(&[pinned, owned, other])?,
+            Ok(faulty(&bytes, &faults)),
+        )
+        .with_setup(Setup::Pin);
+        guard.note_read(&pinned);
+        assert!(!guard.list_loaded());
+        // Neither the pin nor the record listed before the failed read counts.
+        assert_eq!(guard.check(&pinned, true), Err(EPERM));
+        assert_eq!(guard.check(&owned, true), Err(EPERM));
+        assert_eq!(guard.open_first_setup(), Ok(false));
+        Ok(())
+    }
+
+    #[test]
+    fn a_saved_pin_absent_at_probe_is_never_adopted() -> Result<()> {
+        let pinned = session(1);
+        let mut list = KVec::new();
+        list.extend_from_slice(&setup_consumed(), GFP_KERNEL)?;
+        list.extend_from_slice(&encode_pin(&pinned), GFP_KERNEL)?;
+        let bytes = RefCell::new(list);
+        let none: [Key; 0] = [];
+        let mut guard =
+            Guard::with_file(1, keys(&none)?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        assert_eq!(guard.check(&pinned, true), Err(EPERM));
+        assert_eq!(guard.check(&pinned, false), Err(EPERM));
+        assert!(guard.owned.is_empty());
+        assert_eq!(listed(&bytes)[..], [None, None]);
+        // A new record that is not pinned is still adopted.
+        let created = session(9);
+        assert_eq!(guard.check(&created, true), Ok(()));
+        assert_eq!(listed(&bytes)[..], [None, None, Some(created)]);
         Ok(())
     }
 
