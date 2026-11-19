@@ -427,10 +427,11 @@ impl Store {
     }
 
     /// From now on, refuses the enclave's writes to records Linux did not
-    /// create. See [`crate::xart_guard`].
-    pub(crate) fn set_guard(&mut self, level: u8) -> Result<()> {
+    /// create. `setup` is the platform's first-setup rule. See
+    /// [`crate::xart_guard`].
+    pub(crate) fn set_guard(&mut self, level: u8, setup: crate::xart_guard::Setup) -> Result<()> {
         let keys = self.live_keys()?;
-        self.guard = Some(crate::xart_guard::Guard::open(level, keys));
+        self.guard = Some(crate::xart_guard::Guard::open(level, keys, setup));
         Ok(())
     }
 
@@ -440,6 +441,21 @@ impl Store {
         self.guard
             .as_ref()
             .map(|guard| (guard.effective_level(), guard.list_loaded()))
+    }
+
+    /// Whether this install's first keybag creation was sent under the guard,
+    /// as far as the guard's list says; `false` when no guard runs.
+    pub(crate) fn guarded_setup(&self) -> bool {
+        self.guard
+            .as_ref()
+            .is_some_and(|guard| guard.guarded_setup())
+    }
+
+    /// Tells the guard that the enclave was handed the record under `key`.
+    pub(crate) fn note_enclave_read(&mut self, key: &Key) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.note_read(key);
+        }
     }
 
     /// Opens the guard's first-setup window (see [`crate::xart_guard`]).

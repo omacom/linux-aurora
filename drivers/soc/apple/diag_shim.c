@@ -487,6 +487,23 @@ void sep_diag_set_xart_guard(unsigned int level, bool list_loaded,
 	atomic_set(&sep_diag.matching, matching);
 }
 
+/*
+ * After probe, when a fact matching is derived from changes without a
+ * refusal: the guard recorded this install's first-setup window. The level,
+ * the list and the refusals counted so far stand.
+ *
+ * The caller derived matching before this call, and a refusal may have
+ * landed since. A refusal always leaves "blocked", so the count is read
+ * after the store: either this sees the refusal and restores "blocked", or
+ * the refusal's own store comes later.
+ */
+void sep_diag_set_matching(int matching)
+{
+	atomic_set(&sep_diag.matching, matching);
+	if (atomic_read(&sep_diag.xart_refusals))
+		atomic_set(&sep_diag.matching, SEP_DIAG_MATCHING_BLOCKED);
+}
+
 /* With matching as the refusal leaves it. */
 void sep_diag_xart_guard_refused(int matching)
 {

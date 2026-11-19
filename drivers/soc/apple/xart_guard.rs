@@ -44,6 +44,22 @@
 //! nothing identifies that locker as the pending one. It does not list the
 //! locker as Linux's, and the list records the window as consumed before it
 //! opens, so no later create on this install gets it again.
+//!
+//! A cold-boot Mac cannot stay inside the rule. Its `CREATE_KEYBAG` rewrites
+//! one session record from before Linux, one of the records the enclave
+//! reads at every attach and no single OS's (seen on a J316s), and a match
+//! rewrites session records that existed before it. The guard refuses the
+//! first, so such a Mac needs the guard off, which leaves every record open
+//! to the enclave. With `xart_guard_pin=1` the owner accepts that one record
+//! instead, if it is a SEP-xART locker ([`Setup::Pin`]). The same
+//! first-setup window then opens on a cold-boot Mac, and the first existing
+//! kind-4 locker the enclave rewrites in it, provided the enclave read that
+//! locker since probe, is recorded in the list as pinned before the write
+//! lands. From then on the enclave may rewrite the pinned locker on any boot
+//! on which the parameter is set and it has read the locker. The locker is
+//! never deleted and never listed as Linux's, and every other record from
+//! before Linux stays refused. Without the parameter a cold-boot Mac gets no
+//! window and its pin is not honoured.
 
 use crate::shim::StoreFile;
 use crate::xart_store::{crc32_ieee, Key};
@@ -61,6 +77,14 @@ const ENTRY_MAGIC: &[u8; 4] = b"AXGO";
 const MAX_ENTRIES: usize = 4096;
 /// Refusals are logged individually up to this count, then only counted.
 const LOGGED_REFUSALS: usize = 8;
+/// Marks a list entry as the pinned locker's. It sits in the first of the
+/// three bytes an owned entry keeps zero, so a kernel without pinning reads
+/// the entry as unreadable and lists nothing by it.
+const ENTRY_PINNED: u8 = 1;
+/// SEP-xART lockers the enclave read since probe that a pinning guard
+/// remembers. The gigalocker has at most a few hundred slots; a locker past
+/// the bound counts as unread.
+const MAX_READ: usize = 512;
 
 /// What the guard does with one enclave write or delete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +132,37 @@ pub(crate) fn first_setup_allows(level: u8, window: FirstSetup, key: &Key, write
     level == 1 && window == FirstSetup::Open && write && key.kind == 4
 }
 
+/// What an install's first keybag creation may do to a locker from before
+/// Linux, which depends on how the platform's enclave boots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Setup {
+    /// Warm attach: commit one pending SEP-xART locker.
+    Commit,
+    /// Cold boot: nothing. The create's rewrite is refused.
+    Refuse,
+    /// Cold boot with `xart_guard_pin=1`: pin the one SEP-xART locker the
+    /// create rewrites, which the enclave may then rewrite again.
+    Pin,
+}
+
+/// The first-setup rule for a platform that cold-boots its enclave (`cold`)
+/// or attaches to a running one, with `xart_guard_pin=pin`. The parameter
+/// changes nothing on a warm-attach Mac.
+pub(crate) fn setup(cold: bool, pin: u8) -> Setup {
+    match (cold, pin) {
+        (false, _) => Setup::Commit,
+        (true, 0) => Setup::Refuse,
+        (true, _) => Setup::Pin,
+    }
+}
+
+/// A short tag for one locker in the log, so that a refusal can be compared
+/// with the locker this install pinned. It is not the session id, which the
+/// log never carries.
+fn tag(key: &Key) -> u32 {
+    crc32_ieee(&key.uuid)
+}
+
 /// The guard level for `xart_guard=param` on a platform whose profile
 /// defaults to `platform`, or `None` for no guard. A negative value takes the
 /// platform's level; a level above 2 is treated as 2, the strictest.
@@ -139,6 +194,9 @@ pub(crate) struct MatchFacts {
     pub(crate) xart_writable: bool,
     /// The platform cold-boots its enclave.
     pub(crate) cold: bool,
+    /// This install's first keybag creation was sent under the guard, as far
+    /// as the guard's list says (see [`Guard::guarded_setup`]).
+    pub(crate) guarded_setup: bool,
     /// The guard's effective level and whether its list loaded, or `None`
     /// when no guard runs.
     pub(crate) guard: Option<(u8, bool)>,
@@ -150,19 +208,23 @@ impl MatchFacts {
     /// A match rewrites session records that existed before it (seen on a
     /// T6000). It is blocked when xART is read-only, once the guard has
     /// refused anything, when the guard has no list to allow Linux's records
-    /// by, and on a cold-boot Mac: creating the keybag there needs the guard
-    /// off, so the records a match rewrites were never listed.
+    /// by, and on a cold-boot Mac whose keybag was not created under the
+    /// guard: creating it there needs the guard off unless the owner set
+    /// `xart_guard_pin`, and with the guard off the records a match rewrites
+    /// were never listed.
     ///
     /// Nothing else proves an unguarded setup. An empty list in particular
     /// does not: a guarded keybag creation on an M2 writes no record, and a
     /// rollback can empty the list. So a guarded warm-attach Mac is
-    /// unverified until a refusal says otherwise.
+    /// unverified until a refusal says otherwise, and so is a cold-boot Mac
+    /// set up under `xart_guard_pin`: which records a match rewrites there
+    /// has not been established either.
     pub(crate) fn matching(&self) -> Matching {
         match self.guard {
             _ if !self.xart_writable || self.refusals != 0 => Matching::Blocked,
             None => Matching::Usable,
             Some((_, false)) => Matching::Blocked,
-            Some(_) if self.cold => Matching::Blocked,
+            Some(_) if self.cold && !self.guarded_setup => Matching::Blocked,
             Some(_) => Matching::Unverified,
         }
     }
@@ -189,18 +251,46 @@ pub(crate) fn setup_consumed() -> [u8; ENTRY_SIZE] {
     entry_bytes(0, b"first setup used")
 }
 
-/// Decodes one list entry; `None` for a torn or foreign one.
-pub(crate) fn decode(entry: &[u8]) -> Option<Key> {
-    if entry.len() != ENTRY_SIZE || &entry[..4] != ENTRY_MAGIC || entry[5..8] != [0; 3] {
+/// Encodes the entry that pins `key`, a SEP-xART locker from before Linux.
+/// [`decode`] reads it as no record, so it lists nothing as Linux's.
+pub(crate) fn encode_pin(key: &Key) -> [u8; ENTRY_SIZE] {
+    let mut entry = entry_bytes(key.kind, &key.uuid);
+    entry[5] = ENTRY_PINNED;
+    let crc = crc32_ieee(&entry[..24]);
+    entry[24..28].copy_from_slice(&crc.to_le_bytes());
+    entry
+}
+
+/// The kind, the three bytes after it and the session id of a whole entry
+/// with the list's magic and a good CRC; `None` for a torn or foreign one.
+fn parse(entry: &[u8]) -> Option<(u8, [u8; 3], [u8; 16])> {
+    if entry.len() != ENTRY_SIZE || &entry[..4] != ENTRY_MAGIC {
         return None;
     }
     let crc = u32::from_le_bytes([entry[24], entry[25], entry[26], entry[27]]);
-    if crc != crc32_ieee(&entry[..24]) || !(3..=4).contains(&entry[4]) {
+    if crc != crc32_ieee(&entry[..24]) {
         return None;
     }
     let mut uuid = [0u8; 16];
     uuid.copy_from_slice(&entry[8..24]);
-    Some(Key::new(entry[4], uuid))
+    Some((entry[4], [entry[5], entry[6], entry[7]], uuid))
+}
+
+/// Decodes a pin entry; `None` for anything else, a pin of a record that is
+/// not a SEP-xART locker included.
+pub(crate) fn decode_pin(entry: &[u8]) -> Option<Key> {
+    match parse(entry)? {
+        (4, [ENTRY_PINNED, 0, 0], uuid) => Some(Key::new(4, uuid)),
+        _ => None,
+    }
+}
+
+/// Decodes one list entry; `None` for a torn or foreign one.
+pub(crate) fn decode(entry: &[u8]) -> Option<Key> {
+    match parse(entry)? {
+        (kind @ 3..=4, [0, 0, 0], uuid) => Some(Key::new(kind, uuid)),
+        _ => None,
+    }
 }
 
 /// The file that holds Linux's list: the host file, or memory in the tests.
@@ -246,24 +336,39 @@ pub(crate) struct Guard<F: ListFile = StoreFile> {
     existed: KVec<Key>,
     refused: usize,
     first_setup: FirstSetup,
+    /// What the first-setup window may do on this platform.
+    setup: Setup,
+    /// The list holds the first-setup window's record, from this boot or an
+    /// earlier one.
+    setup_recorded: bool,
+    /// The SEP-xART locker from before Linux that the list pins. It is
+    /// honoured only under [`Setup::Pin`].
+    pinned: Option<Key>,
+    /// Rewrites of the pinned locker let through since probe.
+    pinned_writes: usize,
+    /// The SEP-xART lockers the enclave read since probe, kept only under
+    /// [`Setup::Pin`].
+    read: KVec<Key>,
 }
 
 impl Guard {
     /// Opens Linux's list in the host file and records which keys `existing`
-    /// holds now. Never fails: a list that cannot be read protects every
-    /// existing record.
-    pub(crate) fn open(level: u8, existing: KVec<Key>) -> Guard {
-        Guard::with_file(
+    /// holds now. `setup` is the platform's first-setup rule. Never fails: a
+    /// list that cannot be read protects every existing record.
+    pub(crate) fn open(level: u8, existing: KVec<Key>, setup: Setup) -> Guard {
+        Guard::new(
             level,
             existing,
             StoreFile::open_host(OWNED_PATH).map(|(file, _created)| file),
+            setup,
         )
     }
 }
 
 impl<F: ListFile> Guard<F> {
-    /// As [`Guard::open`], with the list in `file`.
-    pub(crate) fn with_file(level: u8, existing: KVec<Key>, file: Result<F>) -> Guard<F> {
+    /// As [`Guard::open`], with the list in `file`. There is no default
+    /// first-setup rule: every guard is told its platform's.
+    fn new(level: u8, existing: KVec<Key>, file: Result<F>, setup: Setup) -> Guard<F> {
         let mut guard = Guard {
             level,
             file: None,
@@ -272,6 +377,11 @@ impl<F: ListFile> Guard<F> {
             existed: existing,
             refused: 0,
             first_setup: FirstSetup::Closed,
+            setup,
+            setup_recorded: false,
+            pinned: None,
+            pinned_writes: 0,
+            read: KVec::new(),
         };
         // A list created this boot (or by a crashed one) is only safe to adopt
         // into once its name is durable: fsync() of the file alone does not
@@ -313,7 +423,44 @@ impl<F: ListFile> Guard<F> {
             sessions - own,
             roots
         );
+        guard.announce_pin();
         guard
+    }
+
+    /// Whether the list loaded and holds no entry, torn ones included: what a
+    /// first-setup window needs.
+    fn list_empty(&self) -> bool {
+        self.file
+            .as_ref()
+            .is_some_and(|file| file.size().is_ok_and(|size| size == 0))
+    }
+
+    /// Says what `xart_guard_pin` and a pinned locker come to on this boot.
+    fn announce_pin(&self) {
+        let honoured = self.setup == Setup::Pin && self.level == 1;
+        match (honoured, self.pinned) {
+            (true, Some(key)) => pr_info!(
+                "xART guard: xart_guard_pin is set: the enclave may rewrite this install's pinned SEP-xART locker (tag {:08x}) once it has read it\n",
+                tag(&key)
+            ),
+            (true, None) if self.list_empty() => pr_info!(
+                "xART guard: xart_guard_pin is set and no locker is pinned: this install's first keybag creation may pin one\n"
+            ),
+            // The window that pins a locker opens only on an empty list, so
+            // an earlier guarded attempt on this install shuts it for good.
+            (true, None) => pr_warn!(
+                "xART guard: xart_guard_pin is set, but no locker is pinned and the list of Linux's records is not empty or did not load: the first-setup window stays shut and a keybag creation's rewrite is refused. Reset Touch ID with the list removed to set up under xart_guard_pin\n"
+            ),
+            (false, Some(key)) => pr_info!(
+                "xART guard: this install pinned a SEP-xART locker (tag {:08x}), which counts only with xart_guard_pin=1 at level 1: rewrites of it are refused\n",
+                tag(&key)
+            ),
+            (false, None) if self.setup == Setup::Pin => pr_info!(
+                "xART guard: xart_guard_pin has no effect at level {}\n",
+                self.level
+            ),
+            (false, None) => {}
+        }
     }
 
     fn load(&mut self, file: &F) -> Result<()> {
@@ -329,8 +476,13 @@ impl<F: ListFile> Guard<F> {
             match decode(&entry) {
                 Some(key) if !self.owned.contains(&key) => self.owned.push(key, GFP_KERNEL)?,
                 Some(_) => {}
-                None if entry == setup_consumed() => {}
-                None => torn += 1,
+                None if entry == setup_consumed() => self.setup_recorded = true,
+                None => match decode_pin(&entry) {
+                    // One locker per install: the first-setup window pins it,
+                    // and that window opens once.
+                    Some(key) if self.pinned.is_none() => self.pinned = Some(key),
+                    _ => torn += 1,
+                },
             }
         }
         if torn != 0 {
@@ -351,14 +503,39 @@ impl<F: ListFile> Guard<F> {
         self.file.is_some()
     }
 
+    /// Whether this install's first keybag creation was sent under the guard,
+    /// as far as the list says: the list loaded and records the first-setup
+    /// window, on a platform that has one. A cold-boot Mac has one only
+    /// under `xart_guard_pin`, so without the parameter this is `false` there
+    /// whatever the list holds.
+    pub(crate) fn guarded_setup(&self) -> bool {
+        self.file.is_some() && self.setup_recorded && self.setup != Setup::Refuse
+    }
+
+    /// Notes that the enclave was handed the record under `key` since probe.
+    /// Only SEP-xART lockers are kept, and only under [`Setup::Pin`], whose
+    /// allowances ask for it. A locker that cannot be kept counts as unread,
+    /// which they refuse.
+    pub(crate) fn note_read(&mut self, key: &Key) {
+        if self.setup != Setup::Pin
+            || key.kind != 4
+            || self.read.contains(key)
+            || self.read.len() >= MAX_READ
+        {
+            return;
+        }
+        let _ = self.read.push(*key, GFP_KERNEL);
+    }
+
     /// Opens the first-setup window for one keybag creation, only at level 1
     /// on a fresh install: the list loaded and holding no entry, torn ones
-    /// included. The window is recorded as consumed in the list, durably,
-    /// before it opens, so it opens at most once per install whatever becomes
-    /// of the keybag. `Ok(false)` when the install is not eligible; an error,
-    /// with the window shut, when the record could not be made durable.
+    /// included. A cold-boot Mac has no window unless the owner set
+    /// `xart_guard_pin`. The window is recorded as consumed in the list,
+    /// durably, before it opens, so it opens at most once per install whatever
+    /// becomes of the keybag. `Ok(false)` when the install is not eligible; an
+    /// error, with the window shut, when the record could not be made durable.
     pub(crate) fn open_first_setup(&mut self) -> Result<bool> {
-        if self.level != 1 {
+        if self.level != 1 || self.setup == Setup::Refuse {
             return Ok(false);
         }
         let Some(file) = self.file.as_ref() else {
@@ -375,6 +552,7 @@ impl<F: ListFile> Guard<F> {
         file.write_all(0, &setup_consumed())?;
         file.sync()?;
         self.end = ENTRY_SIZE as u64;
+        self.setup_recorded = true;
         self.first_setup = FirstSetup::Open;
         Ok(true)
     }
@@ -406,6 +584,37 @@ impl<F: ListFile> Guard<F> {
         Ok(())
     }
 
+    /// Records `key` as this install's pinned locker, durably, before the
+    /// enclave's rewrite of it is let through.
+    fn pin(&mut self, key: &Key) -> Result<()> {
+        let file = self.file.as_ref().ok_or(ENOENT)?;
+        // As in adopt(): the file's length is what load() accepts.
+        if usize::try_from(self.end).map_or(true, |end| end / ENTRY_SIZE >= MAX_ENTRIES) {
+            return Err(ENOSPC);
+        }
+        file.write_all(self.end, &encode_pin(key))?;
+        file.sync()?;
+        // Only now that the entry is written and flushed. A failed write or
+        // flush leaves the end unchanged, so the next entry overwrites the
+        // slot, and a pin that survives there names the locker the owner's
+        // parameter was about to allow.
+        self.pinned = Some(*key);
+        self.end += ENTRY_SIZE as u64;
+        Ok(())
+    }
+
+    /// Whether a request the guard would refuse passes as the enclave's
+    /// rewrite of this install's pinned locker: under `xart_guard_pin` at
+    /// level 1, a rewrite (not a delete) of the locker the list pins, once
+    /// the enclave has read it since probe.
+    fn pinned_allows(&self, key: &Key, write: bool) -> bool {
+        self.setup == Setup::Pin
+            && self.level == 1
+            && write
+            && self.pinned == Some(*key)
+            && self.read.contains(key)
+    }
+
     /// Checks one enclave write (`write`) or delete before it reaches the
     /// gigalocker. An error refuses the request.
     pub(crate) fn check(&mut self, key: &Key, write: bool) -> Result<()> {
@@ -422,7 +631,41 @@ impl<F: ListFile> Guard<F> {
                     e
                 )
             }),
-            Verdict::Refuse if first_setup_allows(self.level, self.first_setup, key, write) => {
+            Verdict::Refuse if self.pinned_allows(key, write) => {
+                self.pinned_writes += 1;
+                if self.pinned_writes == 1 {
+                    pr_info!(
+                        "xART guard: allowed the enclave to rewrite this install's pinned SEP-xART locker (tag {:08x})\n",
+                        tag(key)
+                    );
+                }
+                Ok(())
+            }
+            // Under xart_guard_pin the window passes only a locker the
+            // enclave read since probe, and pins it before the write lands.
+            Verdict::Refuse
+                if self.setup == Setup::Pin
+                    && first_setup_allows(self.level, self.first_setup, key, write)
+                    && self.read.contains(key) =>
+            {
+                self.pin(key).inspect_err(|e| {
+                    crate::diag::xart_guard_refused();
+                    pr_warn!(
+                        "xART guard: could not record the SEP-xART locker to pin ({:?}); refusing to rewrite it\n",
+                        e
+                    )
+                })?;
+                self.first_setup = FirstSetup::Used;
+                pr_info!(
+                    "xART guard: pinned the existing SEP-xART locker the enclave rewrote during this install's first keybag creation (tag {:08x})\n",
+                    tag(key)
+                );
+                Ok(())
+            }
+            Verdict::Refuse
+                if self.setup == Setup::Commit
+                    && first_setup_allows(self.level, self.first_setup, key, write) =>
+            {
                 self.first_setup = FirstSetup::Used;
                 pr_info!(
                     "xART guard: allowed the enclave to commit an existing kind-{} locker during this install's first keybag creation\n",
@@ -440,6 +683,21 @@ impl<F: ListFile> Guard<F> {
                         action,
                         key.kind
                     );
+                    // Under xart_guard_pin, which locker and whether the
+                    // enclave had read it tell the refusals apart: the
+                    // pinned locker before a read, or another one.
+                    if self.setup == Setup::Pin && key.kind == 4 {
+                        let read = if self.read.contains(key) {
+                            "read"
+                        } else {
+                            "had not read"
+                        };
+                        pr_info!(
+                            "xART guard: the refused locker has tag {:08x}; the enclave {} it this boot\n",
+                            tag(key),
+                            read
+                        );
+                    }
                 }
                 Err(EPERM)
             }
@@ -452,6 +710,22 @@ impl<F: ListFile> Guard<F> {
 mod tests {
     use super::*;
     use core::cell::{Cell, RefCell};
+
+    /// The tests' shorthand: a warm-attach Mac's guard, as every guard was
+    /// before a cold-boot Mac had a rule of its own. The driver itself has no
+    /// default and always names the rule.
+    impl<F: ListFile> Guard<F> {
+        fn with_file(level: u8, existing: KVec<Key>, file: Result<F>) -> Guard<F> {
+            Guard::new(level, existing, file, Setup::Commit)
+        }
+
+        /// The same guard on a platform with the rule `setup`.
+        fn with_setup(mut self, setup: Setup) -> Guard<F> {
+            self.setup = setup;
+            self.announce_pin();
+            self
+        }
+    }
 
     fn session(byte: u8) -> Key {
         Key::new(4, [byte; 16])
@@ -466,6 +740,24 @@ mod tests {
         MatchFacts {
             xart_writable,
             cold,
+            guarded_setup: false,
+            guard,
+            refusals,
+        }
+        .matching()
+    }
+
+    /// As [`facts`], on a Mac whose first keybag creation ran under the guard.
+    fn facts_after_setup(
+        xart_writable: bool,
+        cold: bool,
+        guard: Option<(u8, bool)>,
+        refusals: u32,
+    ) -> Matching {
+        MatchFacts {
+            xart_writable,
+            cold,
+            guarded_setup: true,
             guard,
             refusals,
         }
@@ -488,8 +780,35 @@ mod tests {
     }
 
     #[test]
+    fn matching_on_a_cold_boot_mac_follows_its_setup() {
+        // Set up under the guard with xart_guard_pin: unverified, as a
+        // warm-attach Mac is.
+        assert_eq!(
+            facts_after_setup(true, true, Some((1, true)), 0),
+            Matching::Unverified
+        );
+        // The fact changes nothing on a warm-attach Mac, or without a guard.
+        assert_eq!(
+            facts_after_setup(true, false, Some((1, true)), 0),
+            Matching::Unverified
+        );
+        assert_eq!(facts_after_setup(true, true, None, 0), Matching::Usable);
+        // What blocks any Mac still blocks this one.
+        assert_eq!(
+            facts_after_setup(true, true, Some((1, true)), 1),
+            Matching::Blocked
+        );
+        assert_eq!(
+            facts_after_setup(true, true, Some((1, false)), 0),
+            Matching::Blocked
+        );
+        assert_eq!(facts_after_setup(false, true, None, 0), Matching::Blocked);
+    }
+
+    #[test]
     fn matching_is_blocked_where_it_is_known_to_be() {
-        // A cold-boot M1-family Mac under the default level 1.
+        // A cold-boot M1-family Mac under the default level 1, not set up
+        // under the guard: its keybag was created with the guard off.
         assert_eq!(facts(true, true, Some((1, true)), 0), Matching::Blocked);
         // No list: nothing that existed at probe is Linux's.
         assert_eq!(facts(true, false, Some((1, false)), 0), Matching::Blocked);
@@ -787,6 +1106,269 @@ mod tests {
         let mut guard = Guard::with_file(2, keys(&[pending])?, Ok(mem(&empty)));
         assert_eq!(guard.open_first_setup(), Ok(false));
         assert_eq!(empty.borrow().len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn the_setup_rule_follows_the_boot_and_the_parameter() {
+        assert_eq!(setup(false, 0), Setup::Commit);
+        // The parameter changes nothing on a warm-attach Mac.
+        assert_eq!(setup(false, 1), Setup::Commit);
+        assert_eq!(setup(true, 0), Setup::Refuse);
+        assert_eq!(setup(true, 1), Setup::Pin);
+        assert_eq!(setup(true, u8::MAX), Setup::Pin);
+    }
+
+    #[test]
+    fn pin_entries_round_trip_and_list_no_record() {
+        let locker = session(7);
+        let pin = encode_pin(&locker);
+        assert_eq!(decode_pin(&pin), Some(locker));
+        // To the list of Linux's records, and to a kernel without pinning,
+        // a pin is no entry at all.
+        assert_eq!(decode(&pin), None);
+        // An owned entry and the consumed marker pin nothing.
+        assert_eq!(decode_pin(&encode(&locker)), None);
+        assert_eq!(decode_pin(&setup_consumed()), None);
+        // Nor does a damaged pin, a short one, or one of a USER-xART locker.
+        let mut damaged = pin;
+        damaged[9] ^= 1;
+        assert_eq!(decode_pin(&damaged), None);
+        assert_eq!(decode_pin(&pin[..31]), None);
+        assert_eq!(decode_pin(&encode_pin(&Key::new(3, [7; 16]))), None);
+    }
+
+    /// The lockers the list in `bytes` pins, entry by entry.
+    fn pins(bytes: &RefCell<KVec<u8>>) -> KVec<Option<Key>> {
+        let mut entries = KVec::new();
+        for entry in bytes.borrow().chunks(ENTRY_SIZE) {
+            if entries.push(decode_pin(entry), GFP_KERNEL).is_err() {
+                break;
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn a_cold_boot_mac_gets_no_window_by_default() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let locker = session(1);
+        let mut guard =
+            Guard::with_file(1, keys(&[locker])?, Ok(mem(&bytes))).with_setup(Setup::Refuse);
+        // Reads are not kept, the window stays shut and nothing is recorded.
+        guard.note_read(&locker);
+        assert!(guard.read.is_empty());
+        assert_eq!(guard.open_first_setup(), Ok(false));
+        assert_eq!(bytes.borrow().len(), 0);
+        assert_eq!(guard.check(&locker, true), Err(EPERM));
+        assert!(!guard.guarded_setup());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pinning_first_create_pins_the_locker_the_enclave_rewrites() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let shared = session(1);
+        let unread = session(2);
+        let other = session(4);
+        let user = Key::new(3, [3; 16]);
+        let mut guard = Guard::with_file(1, keys(&[shared, unread, other, user])?, Ok(mem(&bytes)))
+            .with_setup(Setup::Pin);
+        guard.note_read(&shared);
+        guard.note_read(&other);
+        guard.note_read(&user);
+        // Reading a locker allows nothing by itself.
+        assert_eq!(guard.check(&shared, true), Err(EPERM));
+        assert_eq!(guard.open_first_setup(), Ok(true));
+        // A locker the enclave never read, a delete and a USER-xART locker
+        // stay refused and do not use the window.
+        assert_eq!(guard.check(&unread, true), Err(EPERM));
+        assert_eq!(guard.check(&shared, false), Err(EPERM));
+        assert_eq!(guard.check(&user, true), Err(EPERM));
+        assert_eq!(pins(&bytes)[..], [None]);
+        // The first locker the create rewrites is pinned, after the marker,
+        // and is not listed as Linux's.
+        assert_eq!(guard.check(&shared, true), Ok(()));
+        assert_eq!(pins(&bytes)[..], [None, Some(shared)]);
+        assert_eq!(listed(&bytes)[..], [None, None]);
+        // One locker only: another one the enclave read stays refused.
+        assert_eq!(guard.check(&other, true), Err(EPERM));
+        // A record the create adds is listed, as on any Mac.
+        let created = session(9);
+        assert_eq!(guard.check(&created, true), Ok(()));
+        assert_eq!(listed(&bytes)[..], [None, None, Some(created)]);
+        guard.close_first_setup();
+        // After the create the pinned locker stays writable, for a match's
+        // rewrite, and is still never deleted.
+        assert_eq!(guard.check(&shared, true), Ok(()));
+        assert_eq!(guard.check(&shared, true), Ok(()));
+        assert_eq!(guard.pinned_writes, 2);
+        assert_eq!(guard.check(&shared, false), Err(EPERM));
+        assert_eq!(guard.check(&other, true), Err(EPERM));
+        assert_eq!(guard.check(&created, true), Ok(()));
+        assert_eq!(guard.refused, 7);
+        assert!(guard.guarded_setup());
+        Ok(())
+    }
+
+    #[test]
+    fn a_pinning_window_passes_a_locker_only_once_it_is_read() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let locker = session(1);
+        let mut guard =
+            Guard::with_file(1, keys(&[locker])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        assert_eq!(guard.open_first_setup(), Ok(true));
+        assert_eq!(guard.check(&locker, true), Err(EPERM));
+        // Read during the create, it passes: the refusal left the window open.
+        guard.note_read(&locker);
+        assert_eq!(guard.check(&locker, true), Ok(()));
+        assert_eq!(guard.pinned, Some(locker));
+        Ok(())
+    }
+
+    #[test]
+    fn the_pin_survives_a_reboot_and_needs_the_parameter() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let shared = session(1);
+        let other = session(2);
+        let mut guard =
+            Guard::with_file(1, keys(&[shared, other])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        guard.note_read(&shared);
+        assert_eq!(guard.open_first_setup(), Ok(true));
+        assert_eq!(guard.check(&shared, true), Ok(()));
+        guard.close_first_setup();
+        drop(guard);
+
+        // The next boot, with the parameter: the pin holds once the enclave
+        // has read the locker, and the window does not open again.
+        let mut guard =
+            Guard::with_file(1, keys(&[shared, other])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        assert_eq!(guard.pinned, Some(shared));
+        assert!(guard.guarded_setup());
+        assert_eq!(guard.open_first_setup(), Ok(false));
+        assert_eq!(guard.check(&shared, true), Err(EPERM));
+        guard.note_read(&shared);
+        guard.note_read(&other);
+        assert_eq!(guard.check(&shared, true), Ok(()));
+        assert_eq!(guard.check(&other, true), Err(EPERM));
+        drop(guard);
+
+        // Without the parameter the pin is not honoured, and matching is
+        // blocked as on any cold-boot Mac.
+        let mut guard =
+            Guard::with_file(1, keys(&[shared, other])?, Ok(mem(&bytes))).with_setup(Setup::Refuse);
+        guard.note_read(&shared);
+        assert_eq!(guard.check(&shared, true), Err(EPERM));
+        // Even with the read on record, which note_read() does not keep here.
+        guard.read.push(shared, GFP_KERNEL)?;
+        assert_eq!(guard.check(&shared, true), Err(EPERM));
+        assert!(!guard.guarded_setup());
+        drop(guard);
+
+        // Nor at level 2, which refuses the shared roots as well.
+        let mut guard =
+            Guard::with_file(2, keys(&[shared, other])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        guard.note_read(&shared);
+        assert_eq!(guard.check(&shared, true), Err(EPERM));
+        Ok(())
+    }
+
+    #[test]
+    fn a_pin_that_cannot_be_recorded_refuses_the_rewrite() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let faults = Faults::default();
+        let locker = session(1);
+        let mut guard = Guard::with_file(1, keys(&[locker])?, Ok(faulty(&bytes, &faults)))
+            .with_setup(Setup::Pin);
+        guard.note_read(&locker);
+        assert_eq!(guard.open_first_setup(), Ok(true));
+        faults.sync.set(true);
+        // The flush fails: the rewrite is refused and nothing is pinned.
+        assert_eq!(guard.check(&locker, true), Err(EIO));
+        assert_eq!(guard.pinned, None);
+        faults.sync.set(false);
+        // The window is still open, and the same slot takes the pin.
+        assert_eq!(guard.check(&locker, true), Ok(()));
+        assert_eq!(pins(&bytes)[..], [None, Some(locker)]);
+        Ok(())
+    }
+
+    #[test]
+    fn only_the_first_pin_in_the_list_counts() -> Result<()> {
+        let first = session(1);
+        let second = session(2);
+        let mut list = KVec::new();
+        list.extend_from_slice(&setup_consumed(), GFP_KERNEL)?;
+        list.extend_from_slice(&encode_pin(&first), GFP_KERNEL)?;
+        list.extend_from_slice(&encode_pin(&second), GFP_KERNEL)?;
+        let bytes = RefCell::new(list);
+        let mut guard =
+            Guard::with_file(1, keys(&[first, second])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
+        guard.note_read(&first);
+        guard.note_read(&second);
+        assert_eq!(guard.check(&first, true), Ok(()));
+        assert_eq!(guard.check(&second, true), Err(EPERM));
+        // Neither pin made its locker Linux's.
+        assert!(guard.owned.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_pinning_guard_remembers_reads() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let locker = session(1);
+        // A warm-attach Mac's window never asks, so nothing is kept.
+        let mut guard = Guard::with_file(1, keys(&[locker])?, Ok(mem(&bytes)));
+        guard.note_read(&locker);
+        assert!(guard.read.is_empty());
+        let mut guard = guard.with_setup(Setup::Pin);
+        // Not a USER-xART locker or a root.
+        guard.note_read(&Key::new(3, [3; 16]));
+        guard.note_read(&Key::root(1));
+        assert!(guard.read.is_empty());
+        // Once each.
+        guard.note_read(&locker);
+        guard.note_read(&locker);
+        assert_eq!(guard.read.len(), 1);
+        // Past the bound a locker counts as unread.
+        for i in 0..MAX_READ {
+            guard.note_read(&numbered(i));
+        }
+        assert_eq!(guard.read.len(), MAX_READ);
+        assert!(!guard.read.contains(&numbered(MAX_READ - 1)));
+        Ok(())
+    }
+
+    #[test]
+    fn a_guarded_setup_is_read_from_the_list() -> Result<()> {
+        let bytes = RefCell::new(KVec::new());
+        let mut guard = Guard::with_file(1, KVec::new(), Ok(mem(&bytes)));
+        assert!(!guard.guarded_setup());
+        assert_eq!(guard.open_first_setup(), Ok(true));
+        assert!(guard.guarded_setup());
+        guard.close_first_setup();
+        drop(guard);
+        let guard = Guard::with_file(1, KVec::new(), Ok(mem(&bytes)));
+        assert!(guard.guarded_setup());
+        drop(guard);
+
+        // A list of Linux's records alone, as a keybag created before the
+        // window existed leaves, records no setup.
+        let own = session(4);
+        let older = RefCell::new(list_of(&[own])?);
+        let guard = Guard::with_file(1, keys(&[own])?, Ok(mem(&older)));
+        assert!(!guard.guarded_setup());
+
+        // Nor does a list that could not be loaded, or a window whose record
+        // could not be made durable.
+        let guard = Guard::<MemFile<'_>>::with_file(1, KVec::new(), Err(ENOENT));
+        assert!(!guard.guarded_setup());
+        let unsynced = RefCell::new(KVec::new());
+        let faults = Faults::default();
+        let mut guard = Guard::with_file(1, KVec::new(), Ok(faulty(&unsynced, &faults)));
+        faults.sync.set(true);
+        assert_eq!(guard.open_first_setup(), Err(EIO));
+        assert!(!guard.guarded_setup());
         Ok(())
     }
 
