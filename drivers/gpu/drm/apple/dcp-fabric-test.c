@@ -1961,6 +1961,86 @@ static void fabric_t6030_dual_policy_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, mask, (u32)(BIT(1) | BIT(2)));
 }
 
+/*
+ * M2 Ultra Mac Studio: HDMI runs from die 1, so all four die-0 pipelines on a
+ * rear port are Type-C-only.  The second stream of a daisy chain or dock must
+ * not be fixed to the first stream's pipeline.
+ */
+static void fabric_secondary_crtc_test(struct kunit *test)
+{
+	static const u32 ultra[] = { BIT(0), BIT(1), BIT(2), BIT(3) };
+	static const bool ultra_tc[] = { true, true, true, true };
+	static const u32 laptop[] = { BIT(1), BIT(2), BIT(3), BIT(4) };
+	static const bool laptop_tc[] = { false, true, true, true };
+	static const u32 unsorted[] = { BIT(3), BIT(2), BIT(0), BIT(1) };
+	static const bool single_tc[] = { true };
+	static const bool none_tc[] = { false, false };
+	struct dcp_fabric_pipeline pipeline[4] = {};
+	struct dcp_fabric_route route[4] = {};
+	struct dcp_fabric_plan plan = {};
+	struct dcp_fabric_port port = {};
+	struct dcp_fabric_policy policy = { .dual_stream = true };
+	struct dcp_fabric_route *chosen;
+	unsigned int i;
+	int error;
+
+	/* Laptops (hybrid dcpext0 lowest) keep dcpext1, with or without dcpext2/3. */
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(laptop, laptop_tc, 2), (u32)BIT(2));
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(laptop, laptop_tc, 4), (u32)BIT(2));
+	/* All Type-C-only: skip the first stream's pipeline, in any order. */
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(ultra, ultra_tc, 2), (u32)BIT(1));
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(ultra, ultra_tc, 4), (u32)BIT(1));
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(unsorted, ultra_tc, 4), (u32)BIT(1));
+	/* One Type-C-only pipeline keeps it; none gives no candidate. */
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(ultra, single_tc, 1), (u32)BIT(0));
+	KUNIT_EXPECT_EQ(test, dcp_fabric_secondary_crtc(laptop, none_tc, 2), 0U);
+
+	for (i = 0; i < 4; i++) {
+		pipeline[i].bound = true;
+		pipeline[i].crtc_index = i;
+		pipeline[i].services_ready = true;
+		if (i < 3) {
+			pipeline[i].next = &pipeline[i + 1];
+			route[i].next = &route[i + 1];
+		}
+		route[i].pipeline = &pipeline[i];
+	}
+	port.key = 1;
+	port.routes = &route[0];
+	port.plan = &plan;
+	port.candidate_crtcs[0] = BIT(0) | BIT(1) | BIT(2) | BIT(3);
+	port.candidate_crtcs[1] = dcp_fabric_secondary_crtc(ultra, ultra_tc, 4);
+
+	/* The first stream takes dcpext0 (CRTC 0), as on the hardware. */
+	chosen = dcp_fabric_tunnel_candidate(&port, &policy, NULL, false, 0,
+					     true, &error);
+	KUNIT_ASSERT_PTR_EQ(test, chosen, &route[0]);
+	pipeline[0].owned = true;
+	pipeline[0].tunnel_held = true;
+	route[0].tunnel = true;
+	port.owner[0] = &route[0];
+
+	/* The second stream gets dcpext1 instead of -EBUSY. */
+	chosen = dcp_fabric_tunnel_candidate(&port, &policy, NULL, false, 1,
+					     true, &error);
+	KUNIT_EXPECT_PTR_EQ(test, chosen, &route[1]);
+	KUNIT_EXPECT_EQ(test, error, 0);
+
+	/* So does the ordered pairing pass. */
+	dcp_fabric_plan(&pipeline[0], &port, &port, 1);
+	KUNIT_EXPECT_PTR_EQ(test, plan.target[0], &route[0]);
+	KUNIT_EXPECT_PTR_EQ(test, plan.target[1], &route[1]);
+
+	/* The old rule fixed it to the first stream's CRTC: nothing fits. */
+	port.candidate_crtcs[1] = BIT(0);
+	chosen = dcp_fabric_tunnel_candidate(&port, &policy, NULL, false, 1,
+					     true, &error);
+	KUNIT_EXPECT_NULL(test, chosen);
+	KUNIT_EXPECT_EQ(test, error, -EBUSY);
+	dcp_fabric_plan(&pipeline[0], &port, &port, 1);
+	KUNIT_EXPECT_NULL(test, plan.target[1]);
+}
+
 static void fabric_t6030_clock_header_parity_test(struct kunit *test)
 {
 	static const struct {
@@ -2352,6 +2432,7 @@ static struct kunit_case fabric_tests[] = {
 	KUNIT_CASE(relink_stamp_test),
 	KUNIT_CASE(fabric_t6030_dual_policy_test),
 	KUNIT_CASE(fabric_t6030_clock_routes_test),
+	KUNIT_CASE(fabric_secondary_crtc_test),
 	KUNIT_CASE(fabric_t6030_clock_header_parity_test),
 	KUNIT_CASE(fabric_t6030_plan_test),
 	KUNIT_CASE(fabric_t6030_follow_test),

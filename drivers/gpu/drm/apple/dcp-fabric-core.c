@@ -518,6 +518,36 @@ u32 dcp_fabric_port_crtc_mask(bool secondary, bool ordered_dual, bool typec_only
 }
 EXPORT_SYMBOL_GPL(dcp_fabric_port_crtc_mask);
 
+/*
+ * The CRTC an ordered dual-stream port's second stream (DPIN1) is fixed to.
+ * dcp_fabric_plan() walks pipelines in CRTC order, so the first stream takes
+ * the port's lowest-indexed pipeline: skip it.  On the M2 Pro/Max laptops
+ * that is the HDMI hybrid, never a candidate here, which leaves dcpext1.  On
+ * the M2 Ultra Mac Studio every rear-port pipeline is Type-C-only, and the
+ * second stream would otherwise be fixed to the first stream's dcpext0.  A
+ * port with a single Type-C-only pipeline keeps it.
+ */
+u32 dcp_fabric_secondary_crtc(const u32 *candidates, const bool *typec_only,
+			      unsigned int count)
+{
+	u32 first = 0, mask = 0, fallback = 0;
+	unsigned int i;
+
+	for (i = 0; i < count; i++)
+		if (!first || candidates[i] < first)
+			first = candidates[i];
+	for (i = 0; i < count; i++) {
+		if (!typec_only[i])
+			continue;
+		if (!fallback || candidates[i] < fallback)
+			fallback = candidates[i];
+		if (candidates[i] != first && (!mask || candidates[i] < mask))
+			mask = candidates[i];
+	}
+	return mask ?: fallback;
+}
+EXPORT_SYMBOL_GPL(dcp_fabric_secondary_crtc);
+
 enum dcp_fabric_attach_action dcp_fabric_attach_action(bool external)
 {
 	return external ? DCP_FABRIC_ATTACH_WORK : DCP_FABRIC_ATTACH_OOB;

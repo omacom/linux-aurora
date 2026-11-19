@@ -816,21 +816,35 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 		connector->connected = false;
 		connector->dcp = NULL;
 
-		for (i = 0; i < num_dcp; i++) {
-			if (!dcp_typec_port_has_candidate(port_idx, dcp[i]))
-				continue;
+		if (secondary && dcp_typec_ordered_dual_stream()) {
+			u32 candidates[MAX_COPROCESSORS];
+			bool typec_only[MAX_COPROCESSORS];
+			unsigned int count = 0;
+
 			/*
-			 * A dock's second stream (DPIN1) always runs on the
-			 * lowest-indexed Type-C-only pipeline (dcpext1). Fix the
+			 * A dock's second stream (DPIN1) always runs on one
+			 * Type-C-only pipeline, not the one the first stream
+			 * takes (see dcp_fabric_secondary_crtc()). Fix the
 			 * connector to it: compositors read possible_crtcs once
 			 * and would otherwise pair it with a pipeline the stream
-			 * can never be routed to. T6030 instead narrows both
-			 * connectors to the native processor holding their route.
+			 * can never be routed to.
 			 */
-			mask = dcp_fabric_port_crtc_mask(secondary,
-						       dcp_typec_ordered_dual_stream(),
-						       dcp_is_typec_only(dcp[i]),
-						       mask, crtc_mask[i]);
+			for (i = 0; i < num_dcp; i++) {
+				if (!dcp_typec_port_has_candidate(port_idx, dcp[i]))
+					continue;
+				candidates[count] = crtc_mask[i];
+				typec_only[count++] = dcp_is_typec_only(dcp[i]);
+			}
+			mask = dcp_fabric_secondary_crtc(candidates, typec_only,
+							 count);
+		} else {
+			/*
+			 * Every pipeline that can drive the port; a routed port
+			 * may be narrowed later (see dcp_typec_narrows()).
+			 */
+			for (i = 0; i < num_dcp; i++)
+				if (dcp_typec_port_has_candidate(port_idx, dcp[i]))
+					mask |= crtc_mask[i];
 		}
 
 		if (!mask) {
