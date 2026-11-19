@@ -190,7 +190,13 @@ abort_boot:
 
 static void apple_rtkit_management_rx_epmap(struct apple_rtkit *rtk, u64 msg)
 {
-	int i, ep, ret;
+	/* T6050: the system endpoints start in the loader's order, 3 1 2 4 8. */
+	static const u8 t6050_order[] = { APPLE_RTKIT_EP_DEBUG, APPLE_RTKIT_EP_CRASHLOG,
+					   APPLE_RTKIT_EP_SYSLOG, APPLE_RTKIT_EP_IOREPORT,
+					   APPLE_RTKIT_EP_OSLOG };
+	bool loader_order = of_machine_is_compatible("apple,t6050");
+	int count = loader_order ? ARRAY_SIZE(t6050_order) : APPLE_RTKIT_APP_ENDPOINT_START;
+	int i, oi, ep, ret;
 	u64 reply;
 	unsigned long bitmap = FIELD_GET(APPLE_RTKIT_MGMT_EPMAP_BITMAP, msg);
 	u32 base = FIELD_GET(APPLE_RTKIT_MGMT_EPMAP_BASE, msg);
@@ -230,7 +236,10 @@ static void apple_rtkit_management_rx_epmap(struct apple_rtkit *rtk, u64 msg)
 	if (!(msg & APPLE_RTKIT_MGMT_EPMAP_LAST))
 		return;
 
-	for_each_set_bit(ep, rtk->endpoints, APPLE_RTKIT_APP_ENDPOINT_START) {
+	for (oi = 0; oi < count; oi++) {
+		ep = loader_order ? t6050_order[oi] : oi;
+		if (!test_bit(ep, rtk->endpoints))
+			continue;
 		switch (ep) {
 		/* the management endpoint is started by default */
 		case APPLE_RTKIT_EP_MGMT:
@@ -756,7 +765,8 @@ static void apple_rtkit_oslog_rx(struct apple_rtkit *rtk, u64 msg)
 	/* Preserve the tested Neo/M5 and synchronous-log no-ACK policy. */
 	if (type == APPLE_RTKIT_OSLOG_LOG &&
 	    (rtk->sync_syslog_ack || of_machine_is_compatible("apple,t8140") ||
-	     of_machine_is_compatible("apple,t8142"))) {
+	     of_machine_is_compatible("apple,t8142") ||
+	     of_machine_is_compatible("apple,t6050"))) {
 		dev_dbg(rtk->dev, "RTKit: oslog notification: %016llx\n", msg);
 		return;
 	}
@@ -1313,6 +1323,18 @@ static int apple_rtkit_set_ap_power_state(struct apple_rtkit *rtk,
 	if (ret)
 		return ret;
 
+	/*
+	 * T6050: the loader never waits for this acknowledgment, and not every
+	 * coprocessor sends it. Give it a short window so a caller that starts an
+	 * endpoint right away (macsmc) sees the AP state; carry on without it.
+	 */
+	if (of_machine_is_compatible("apple,t6050")) {
+		if (!wait_for_completion_timeout(&rtk->ap_pwr_ack_completion,
+						 msecs_to_jiffies(200)))
+			dev_dbg(rtk->dev, "RTKit: no AP power state ACK\n");
+		return 0;
+	}
+
 	ret = apple_rtkit_wait(rtk, &rtk->ap_pwr_ack_completion);
 	if (ret)
 		return ret;
@@ -1377,6 +1399,28 @@ static int apple_rtkit_boot_common(struct apple_rtkit *rtk, bool early_ap_power)
 	if (ret) {
 		dev_err(rtk->dev, "RTKit: IOP power acknowledgment failed: %d\n", ret);
 		return ret;
+	}
+
+	/*
+	 * T6050: the loader only proceeds once the IOP reports ON, and
+	 * intermediate states can be acknowledged first. Wait for ON here too.
+	 */
+	if (of_machine_is_compatible("apple,t6050")) {
+		int tries = 10;
+
+		while ((rtk->iop_power_state & 0xff) != APPLE_RTKIT_PWR_STATE_ON && tries--) {
+			dev_dbg(rtk->dev, "RTKit: IOP power state 0x%x, waiting for ON\n",
+				rtk->iop_power_state);
+			reinit_completion(&rtk->iop_pwr_ack_completion);
+			if ((rtk->iop_power_state & 0xff) == APPLE_RTKIT_PWR_STATE_ON)
+				break;
+			ret = apple_rtkit_wait(rtk, &rtk->iop_pwr_ack_completion);
+			if (ret) {
+				dev_err(rtk->dev, "RTKit: IOP never reached ON (state 0x%x): %d\n",
+					rtk->iop_power_state, ret);
+				return ret;
+			}
+		}
 	}
 
 	return early_ap_power ? 0 :
