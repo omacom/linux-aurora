@@ -85,6 +85,10 @@ const ENTRY_PINNED: u8 = 1;
 /// remembers. The gigalocker has at most a few hundred slots; a locker past
 /// the bound counts as unread.
 const MAX_READ: usize = 512;
+/// Pre-Linux lockers one install may pin. On a MacBook Air M1 (J313, 13.5 sepOS)
+/// the first setup rewrites three, all read since probe: two at COPY_KEYBAG,
+/// one at LOAD_KEYBAG.
+const MAX_PINS: usize = 3;
 
 /// What the guard does with one enclave write or delete.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,7 +347,7 @@ pub(crate) struct Guard<F: ListFile = StoreFile> {
     setup_recorded: bool,
     /// The SEP-xART locker from before Linux that the list pins. It is
     /// honoured only under [`Setup::Pin`].
-    pinned: Option<Key>,
+    pinned: [Option<Key>; MAX_PINS],
     /// Rewrites of the pinned locker let through since probe.
     pinned_writes: usize,
     /// The SEP-xART lockers the enclave read since probe, kept only under
@@ -379,7 +383,7 @@ impl<F: ListFile> Guard<F> {
             first_setup: FirstSetup::Closed,
             setup,
             setup_recorded: false,
-            pinned: None,
+            pinned: [None; MAX_PINS],
             pinned_writes: 0,
             read: KVec::new(),
         };
@@ -438,23 +442,31 @@ impl<F: ListFile> Guard<F> {
     /// Says what `xart_guard_pin` and a pinned locker come to on this boot.
     fn announce_pin(&self) {
         let honoured = self.setup == Setup::Pin && self.level == 1;
-        match (honoured, self.pinned) {
-            (true, Some(key)) => pr_info!(
-                "xART guard: xart_guard_pin is set: the enclave may rewrite this install's pinned SEP-xART locker (tag {:08x}) once it has read it\n",
-                tag(&key)
-            ),
+        match (honoured, self.pinned[0]) {
+            (true, Some(_)) => {
+                for key in self.pinned.iter().flatten() {
+                    pr_info!(
+                        "xART guard: xart_guard_pin is set: the enclave may rewrite this install's pinned SEP-xART locker (tag {:08x}) once it has read it\n",
+                        tag(key)
+                    );
+                }
+            }
             (true, None) if self.list_empty() => pr_info!(
-                "xART guard: xart_guard_pin is set and no locker is pinned: this install's first keybag creation may pin one\n"
+                "xART guard: xart_guard_pin is set and no locker is pinned: this install's first Touch ID setup may pin up to three\n"
             ),
             // The window that pins a locker opens only on an empty list, so
             // an earlier guarded attempt on this install shuts it for good.
             (true, None) => pr_warn!(
                 "xART guard: xart_guard_pin is set, but no locker is pinned and the list of Linux's records is not empty or did not load: the first-setup window stays shut and a keybag creation's rewrite is refused. Reset Touch ID with the list removed to set up under xart_guard_pin\n"
             ),
-            (false, Some(key)) => pr_info!(
-                "xART guard: this install pinned a SEP-xART locker (tag {:08x}), which counts only with xart_guard_pin=1 at level 1: rewrites of it are refused\n",
-                tag(&key)
-            ),
+            (false, Some(_)) => {
+                for key in self.pinned.iter().flatten() {
+                    pr_info!(
+                        "xART guard: this install pinned a SEP-xART locker (tag {:08x}), which counts only with xart_guard_pin=1 at level 1: rewrites of it are refused\n",
+                        tag(key)
+                    );
+                }
+            }
             (false, None) if self.setup == Setup::Pin => pr_info!(
                 "xART guard: xart_guard_pin has no effect at level {}\n",
                 self.level
@@ -478,9 +490,9 @@ impl<F: ListFile> Guard<F> {
                 Some(_) => {}
                 None if entry == setup_consumed() => self.setup_recorded = true,
                 None => match decode_pin(&entry) {
-                    // One locker per install: the first-setup window pins it,
-                    // and that window opens once.
-                    Some(key) if self.pinned.is_none() => self.pinned = Some(key),
+                    // At most MAX_PINS lockers per install: the first-setup
+                    // window pins them, and that window opens once.
+                    Some(key) if !self.is_pinned(&key) && !self.pins_full() => self.add_pin(key),
                     _ => torn += 1,
                 },
             }
@@ -587,6 +599,9 @@ impl<F: ListFile> Guard<F> {
     /// Records `key` as this install's pinned locker, durably, before the
     /// enclave's rewrite of it is let through.
     fn pin(&mut self, key: &Key) -> Result<()> {
+        if self.pins_full() {
+            return Err(ENOSPC);
+        }
         let file = self.file.as_ref().ok_or(ENOENT)?;
         // As in adopt(): the file's length is what load() accepts.
         if usize::try_from(self.end).map_or(true, |end| end / ENTRY_SIZE >= MAX_ENTRIES) {
@@ -598,7 +613,7 @@ impl<F: ListFile> Guard<F> {
         // flush leaves the end unchanged, so the next entry overwrites the
         // slot, and a pin that survives there names the locker the owner's
         // parameter was about to allow.
-        self.pinned = Some(*key);
+        self.add_pin(*key);
         self.end += ENTRY_SIZE as u64;
         Ok(())
     }
@@ -607,11 +622,25 @@ impl<F: ListFile> Guard<F> {
     /// rewrite of this install's pinned locker: under `xart_guard_pin` at
     /// level 1, a rewrite (not a delete) of the locker the list pins, once
     /// the enclave has read it since probe.
+    fn is_pinned(&self, key: &Key) -> bool {
+        self.pinned.iter().any(|pin| *pin == Some(*key))
+    }
+
+    fn pins_full(&self) -> bool {
+        self.pinned.iter().all(Option::is_some)
+    }
+
+    fn add_pin(&mut self, key: Key) {
+        if let Some(slot) = self.pinned.iter_mut().find(|pin| pin.is_none()) {
+            *slot = Some(key);
+        }
+    }
+
     fn pinned_allows(&self, key: &Key, write: bool) -> bool {
         self.setup == Setup::Pin
             && self.level == 1
             && write
-            && self.pinned == Some(*key)
+            && self.is_pinned(key)
             && self.read.contains(key)
     }
 
@@ -655,9 +684,12 @@ impl<F: ListFile> Guard<F> {
                         e
                     )
                 })?;
-                self.first_setup = FirstSetup::Used;
+                // The window stays open for the setup's other read lockers.
+                if self.pins_full() {
+                    self.first_setup = FirstSetup::Used;
+                }
                 pr_info!(
-                    "xART guard: pinned the existing SEP-xART locker the enclave rewrote during this install's first keybag creation (tag {:08x})\n",
+                    "xART guard: pinned the existing SEP-xART locker the enclave rewrote during this install's first Touch ID setup (tag {:08x})\n",
                     tag(key)
                 );
                 Ok(())
@@ -1166,16 +1198,24 @@ mod tests {
     }
 
     #[test]
-    fn a_pinning_first_create_pins_the_locker_the_enclave_rewrites() -> Result<()> {
+    fn a_pinning_first_setup_pins_up_to_three_lockers_the_enclave_rewrites() -> Result<()> {
         let bytes = RefCell::new(KVec::new());
         let shared = session(1);
         let unread = session(2);
         let other = session(4);
+        let third = session(5);
+        let fourth = session(6);
         let user = Key::new(3, [3; 16]);
-        let mut guard = Guard::with_file(1, keys(&[shared, unread, other, user])?, Ok(mem(&bytes)))
-            .with_setup(Setup::Pin);
+        let mut guard = Guard::with_file(
+            1,
+            keys(&[shared, unread, other, third, fourth, user])?,
+            Ok(mem(&bytes)),
+        )
+        .with_setup(Setup::Pin);
         guard.note_read(&shared);
         guard.note_read(&other);
+        guard.note_read(&third);
+        guard.note_read(&fourth);
         guard.note_read(&user);
         // Reading a locker allows nothing by itself.
         assert_eq!(guard.check(&shared, true), Err(EPERM));
@@ -1186,25 +1226,30 @@ mod tests {
         assert_eq!(guard.check(&shared, false), Err(EPERM));
         assert_eq!(guard.check(&user, true), Err(EPERM));
         assert_eq!(pins(&bytes)[..], [None]);
-        // The first locker the create rewrites is pinned, after the marker,
-        // and is not listed as Linux's.
+        // Each read locker the setup rewrites is pinned, after the marker,
+        // and is not listed as Linux's: up to three (J313: two at COPY_KEYBAG,
+        // one at the first LOAD_KEYBAG).
         assert_eq!(guard.check(&shared, true), Ok(()));
-        assert_eq!(pins(&bytes)[..], [None, Some(shared)]);
-        assert_eq!(listed(&bytes)[..], [None, None]);
-        // One locker only: another one the enclave read stays refused.
-        assert_eq!(guard.check(&other, true), Err(EPERM));
-        // A record the create adds is listed, as on any Mac.
+        assert_eq!(guard.check(&other, true), Ok(()));
+        assert_eq!(guard.check(&third, true), Ok(()));
+        assert_eq!(pins(&bytes)[..], [None, Some(shared), Some(other), Some(third)]);
+        assert_eq!(listed(&bytes)[..], [None, None, None, None]);
+        // A fourth read locker stays refused.
+        assert_eq!(guard.check(&fourth, true), Err(EPERM));
+        // A record the setup adds is listed, as on any Mac.
         let created = session(9);
         assert_eq!(guard.check(&created, true), Ok(()));
-        assert_eq!(listed(&bytes)[..], [None, None, Some(created)]);
+        assert_eq!(listed(&bytes)[..], [None, None, None, None, Some(created)]);
         guard.close_first_setup();
-        // After the create the pinned locker stays writable, for a match's
-        // rewrite, and is still never deleted.
+        // After the setup the pinned lockers stay writable, for a match's
+        // rewrite, and are still never deleted.
         assert_eq!(guard.check(&shared, true), Ok(()));
         assert_eq!(guard.check(&shared, true), Ok(()));
         assert_eq!(guard.pinned_writes, 2);
         assert_eq!(guard.check(&shared, false), Err(EPERM));
-        assert_eq!(guard.check(&other, true), Err(EPERM));
+        assert_eq!(guard.check(&other, true), Ok(()));
+        assert_eq!(guard.check(&third, true), Ok(()));
+        assert_eq!(guard.check(&fourth, true), Err(EPERM));
         assert_eq!(guard.check(&created, true), Ok(()));
         assert_eq!(guard.refused, 7);
         assert!(guard.guarded_setup());
@@ -1222,7 +1267,7 @@ mod tests {
         // Read during the create, it passes: the refusal left the window open.
         guard.note_read(&locker);
         assert_eq!(guard.check(&locker, true), Ok(()));
-        assert_eq!(guard.pinned, Some(locker));
+        assert_eq!(guard.pinned[0], Some(locker));
         Ok(())
     }
 
@@ -1243,7 +1288,7 @@ mod tests {
         // has read the locker, and the window does not open again.
         let mut guard =
             Guard::with_file(1, keys(&[shared, other])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
-        assert_eq!(guard.pinned, Some(shared));
+        assert_eq!(guard.pinned[0], Some(shared));
         assert!(guard.guarded_setup());
         assert_eq!(guard.open_first_setup(), Ok(false));
         assert_eq!(guard.check(&shared, true), Err(EPERM));
@@ -1285,7 +1330,7 @@ mod tests {
         faults.sync.set(true);
         // The flush fails: the rewrite is refused and nothing is pinned.
         assert_eq!(guard.check(&locker, true), Err(EIO));
-        assert_eq!(guard.pinned, None);
+        assert_eq!(guard.pinned[0], None);
         faults.sync.set(false);
         // The window is still open, and the same slot takes the pin.
         assert_eq!(guard.check(&locker, true), Ok(()));
@@ -1294,21 +1339,30 @@ mod tests {
     }
 
     #[test]
-    fn only_the_first_pin_in_the_list_counts() -> Result<()> {
-        let first = session(1);
-        let second = session(2);
+    fn only_the_first_three_pins_in_the_list_count() -> Result<()> {
+        let pinned = [session(1), session(2), session(3)];
+        let fourth = session(4);
         let mut list = KVec::new();
         list.extend_from_slice(&setup_consumed(), GFP_KERNEL)?;
-        list.extend_from_slice(&encode_pin(&first), GFP_KERNEL)?;
-        list.extend_from_slice(&encode_pin(&second), GFP_KERNEL)?;
+        let all = [pinned[0], pinned[1], pinned[2], fourth];
+        for key in &all {
+            list.extend_from_slice(&encode_pin(key), GFP_KERNEL)?;
+        }
         let bytes = RefCell::new(list);
-        let mut guard =
-            Guard::with_file(1, keys(&[first, second])?, Ok(mem(&bytes))).with_setup(Setup::Pin);
-        guard.note_read(&first);
-        guard.note_read(&second);
-        assert_eq!(guard.check(&first, true), Ok(()));
-        assert_eq!(guard.check(&second, true), Err(EPERM));
-        // Neither pin made its locker Linux's.
+        let mut guard = Guard::with_file(
+            1,
+            keys(&all)?,
+            Ok(mem(&bytes)),
+        )
+        .with_setup(Setup::Pin);
+        for key in &all {
+            guard.note_read(key);
+        }
+        for key in &pinned {
+            assert_eq!(guard.check(key, true), Ok(()));
+        }
+        assert_eq!(guard.check(&fourth, true), Err(EPERM));
+        // No pin made its locker Linux's.
         assert!(guard.owned.is_empty());
         Ok(())
     }

@@ -23,9 +23,9 @@ a read-only gigalocker does: Touch ID may then be unavailable, but no other
 OS's record changes. The one exception is a fresh install's first keybag
 creation on a warm-attach Mac at level 1, which may rewrite one existing
 SEP-xART locker (see "Fresh installs" below). On a cold-boot Mac the owner
-can accept one more with `xart_guard_pin=1`: rewrites of the one shared
-locker its keybag creation reaches (see "Cold-boot Macs: pinning the shared
-locker" below).
+can accept up to three more with `xart_guard_pin=1`: rewrites of the shared
+lockers its first Touch ID setup reaches (see "Cold-boot Macs: pinning the shared
+locker" below; three on the MacBook Air M1).
 
 The default, `xart_guard=-1`, takes the platform's level:
 
@@ -216,6 +216,17 @@ there. The other cold-boot SoCs (T8103, T6001, T6002) probably behave the
 same way; that is untested.
 
 ## Cold-boot Macs: pinning the shared locker (`xart_guard_pin`)
+
+### MacBook Air M1 (J313), 2026-11-19: three lockers, after the create
+
+Run on a J313 with macOS 13.5 firmware (sepOS 13.5), `xart_guard_pin=1`, guard level 1, macOS booted after the Linux install, each attempt with no keybag and no list:
+
+- The create does not rewrite a pre-Linux locker on this Mac. The `COPY_KEYBAG` of the new bag rewrites two (tags `da70de89`, `140a890d`), and the first activation's `LOAD_KEYBAG` a third (`5700cc64`). The enclave had read all three since probe.
+- All three were in a raw copy of the iBoot System Container taken before Linux's first xART write. An earlier setup on the same Mac with `xart_guard=0` changed five 4 KiB blocks of the gigalocker, which are where those three lockers sat or moved.
+- With the window closed after the create, the first was refused and provisioning failed. With it held through provisioning, the second was refused. With two pins, the third was refused at `LOAD_KEYBAG`; after that refusal the enclave answered nothing more that boot (`DEVICE_STATE_TRANSITION` and the ref-key unlock got no reply, sensor registration timed out).
+- So the window now runs from the create to the first `activate_touchid()`, and pins up to three lockers. With that: `identity keybag provisioned`, three pins, `xart_guard_refusals` 0, enrol, 3 of 3 matches, then after a reboot `16 session records exist, 1 created by Linux; the other 15 are protected`, the enrolment restored, 2 of 2 matches, refusals 0. The owner reports macOS Touch ID still works afterwards.
+
+The rest of this section was written for one locker and applies to each pinned locker.
 
 Not yet run on hardware. The rule below is built from the J316s
 measurements above and is covered by KUnit tests only.
