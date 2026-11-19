@@ -6,6 +6,10 @@
   "reports these cases as passed, so they are tracked here; a new or missing one is a mismatch."
  ],
  "results": {
+  "asahi_fwid.j713_accepts_both_loaded_images": {
+   "status": "SKIP",
+   "reason": "By design: the case carries #[cfg(CONFIG_DRM_ASAHI_G16)], and integration/aurora does not build the G16 backend, so #[kunit_tests] reports it as skipped (drivers/gpu/drm/asahi/fwid.rs)."
+  },
   "apple-dcp-fabric.fabric_scenario_test.S35_dual_retry_off": {
    "status": "SKIP",
    "reason": "Unconditional: scenario 35 of the fabric scenario table only calls kunit_skip(\"TB match-data retry policy is tested by W3\") (drivers/gpu/drm/apple/dcp-fabric-test.c). No other code in the tree is named W3; the retry policy is not exercised by this case."

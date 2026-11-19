@@ -10,7 +10,8 @@ use super::fw::{
 };
 use crate::util::{AnyBitPattern, Reader};
 use core::ops::Range;
-use kernel::{prelude::*, uapi};
+use kernel::{prelude::*, sync::Arc, uapi};
+use super::render_resources::{ComputePrograms, Programs};
 
 const _: () = assert!(uapi::drm_asahi_compute_flags_DRM_ASAHI_COMPUTE_AS_BUILD == 1 << 2);
 
@@ -29,14 +30,22 @@ const PAGE_SIZE: u64 = 0x4000;
 const ZLS_METADATA_STRIDE: u64 = 0x80;
 const MAX_DIMENSION: u16 = 16384;
 const MAX_LAYERS: u16 = 2048;
-const MAX_TILE_BUFFER: u64 = 32768;
+pub(crate) const MAX_TILE_BUFFER: u64 = 32768;
+// Eight RGBA8 render targets take 64 bytes a pixel across a 32x32 tile.
+pub(crate) const M5_MAX_TILE_BUFFER: u64 = 65536;
 const PROCESS_EMPTY: u32 = uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES;
 const RSRC_SPEC_HI: u32 = uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_RSRC_SPEC_HI;
 const DBIAS_INT: u32 = uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT;
 const FEW_PRIMITIVES: u32 = uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_FEW_PRIMITIVES;
 const FRAGMENT_BARRIERS: u32 = uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
+const STAGE_PREFIXES: u32 = crate::file::DRM_ASAHI_RENDER_STAGE_PREFIXES;
+const WHOLE_ATTACHMENTS: u32 = crate::file::DRM_ASAHI_RENDER_WHOLE_ATTACHMENTS;
+const SHADER_WRITES: u32 = crate::file::DRM_ASAHI_RENDER_SHADER_WRITES;
+/// Render flags only the M5 runtime implements.
+const M5_RENDER_FLAGS: u32 = SHADER_WRITES | STAGE_PREFIXES | WHOLE_ATTACHMENTS;
 const RENDER_FLAGS: u32 =
-    PROCESS_EMPTY | RSRC_SPEC_HI | DBIAS_INT | FEW_PRIMITIVES | FRAGMENT_BARRIERS;
+    PROCESS_EMPTY | RSRC_SPEC_HI | DBIAS_INT | FEW_PRIMITIVES | FRAGMENT_BARRIERS | SHADER_WRITES
+        | STAGE_PREFIXES | WHOLE_ATTACHMENTS;
 
 /// Attachment settings persist until replaced, including by an empty list.
 #[derive(Clone, Copy)]
@@ -82,13 +91,65 @@ impl Attachments {
         }
         Ok(())
     }
+
+    /// An M5 render's lists: the firmware never sees them (the pass's tile stores are encoded from
+    /// its surfaces), so each range is only the host's ordering hint, its footprint
+    /// (`Vm::render_footprint`). A range may then cover several mappings and the gaps between them:
+    /// a coarser footprint only orders more. It must still be a range.
+    fn validate_hint(&self) -> Result {
+        for range in self.as_slice() {
+            if range.size == 0 || range.va.checked_add(range.size).is_none() {
+                return Err(EINVAL);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_as(&self, space: &impl AddressSpace, rule: AttachmentRule) -> Result {
+        match rule {
+            AttachmentRule::Mapped => self.validate(space),
+            AttachmentRule::Hint => self.validate_hint(),
+        }
+    }
+}
+
+/// What a render's attachment lists must prove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AttachmentRule {
+    /// Every range is mapped writable: the firmware reads the lists.
+    Mapped,
+    /// Every range is a non-empty range that does not wrap: the lists only order renders (M5).
+    Hint,
+}
+
+/// Where a render command's stage-prefix fields start: after the ray-query stages.
+const RENDER_STAGE_PREFIXES: usize = core::mem::offset_of!(uapi::drm_asahi_cmd_render, ta_cdm_barrier);
+
+/// A render command. With DRM_ASAHI_RENDER_STAGE_PREFIXES it is the full command, with its
+/// reserved fields zero; without it the stage-prefix fields are absent or zero.
+fn render_payload(bytes: &[u8]) -> Result<uapi::drm_asahi_cmd_render> {
+    let cmd: uapi::drm_asahi_cmd_render = payload(bytes)?;
+    let valid = if cmd.flags & STAGE_PREFIXES != 0 {
+        bytes.len() == size_of::<uapi::drm_asahi_cmd_render>()
+            && cmd.flags & FRAGMENT_BARRIERS == 0
+            && cmd.reserved0 == 0
+            && cmd.reserved1 == 0
+            && cmd.reserved2 == 0
+            && cmd.reserved3 == 0
+    } else {
+        !bytes.get(RENDER_STAGE_PREFIXES..).is_some_and(|tail| tail.iter().any(|&b| b != 0))
+    };
+    if !valid {
+        return Err(EINVAL);
+    }
+    Ok(cmd)
 }
 
 // Commands stay inline in the submission plan, avoiding an allocation per render pass.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Payload {
-    Render(uapi::drm_asahi_cmd_render, [Attachments; 2], [RayQueryStage; 2]),
-    Compute(uapi::drm_asahi_cmd_compute, Attachments, IntersectionTables),
+    Render(uapi::drm_asahi_cmd_render, [Attachments; 2], [RayQueryStage; 2], Option<Arc<Programs>>),
+    Compute(uapi::drm_asahi_cmd_compute, Attachments, IntersectionTables, Option<Arc<ComputePrograms>>),
 }
 
 pub(crate) struct Command {
@@ -103,6 +164,8 @@ pub(crate) struct Parser<'a> {
     bytes: &'a [u8],
     counts: [u16; 2],
     attachments: [Attachments; 3],
+    render_resources: Option<Arc<Programs>>,
+    compute_resources: Option<Arc<ComputePrograms>>,
 }
 
 impl<'a> Parser<'a> {
@@ -111,6 +174,8 @@ impl<'a> Parser<'a> {
             bytes,
             counts: [0; 2],
             attachments: [Attachments::EMPTY; 3],
+            render_resources: None,
+            compute_resources: None,
         }
     }
 
@@ -138,18 +203,24 @@ impl<'a> Parser<'a> {
                     {
                         self.counts[0] += 1;
                         no_timestamp_copies(bytes, RENDER_TIMESTAMP_COPIES)?;
+                        // The ray-query stages follow prior_cdm, and the stage-prefix fields follow them.
+                        let ray_query = bytes
+                            .get(RENDER_BASE_SIZE..bytes.len().min(RENDER_STAGE_PREFIXES))
+                            .unwrap_or(&[]);
                         Payload::Render(
-                            payload(&bytes[..bytes.len().min(RENDER_BASE_SIZE)])?,
+                            render_payload(bytes)?,
                             [self.attachments[0], self.attachments[1]],
-                            RayQueryStage::parse_pair(bytes.get(RENDER_BASE_SIZE..).unwrap_or(&[]))?,
+                            RayQueryStage::parse_pair(ray_query)?,
+                            self.render_resources.clone(),
                         )
                     } else {
                         self.counts[1] += 1;
                         no_timestamp_copies(bytes, COMPUTE_TIMESTAMP_COPIES)?;
                         Payload::Compute(
-                            payload(&bytes[..bytes.len().min(COMPUTE_BASE_SIZE)])?,
+                            payload(bytes)?,
                             self.attachments[2],
                             IntersectionTables::parse(bytes.get(COMPUTE_BASE_SIZE..).unwrap_or(&[]))?,
+                            self.compute_resources.clone(),
                         )
                     };
                     return Ok(Some(Command { barriers, payload }));
@@ -163,6 +234,25 @@ impl<'a> Parser<'a> {
                     let slot = header.cmd_type as usize
                         - uapi::drm_asahi_cmd_type_DRM_ASAHI_SET_VERTEX_ATTACHMENTS as usize;
                     self.attachments[slot] = Attachments::parse(bytes)?;
+                }
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_SET_RENDER_RESOURCES => {
+                    if barriers != [uapi::DRM_ASAHI_BARRIER_NONE as u16; 2] {
+                        return Err(EINVAL);
+                    }
+                    self.render_resources = if bytes.is_empty() { None }
+                        else { Some(Arc::new(Programs::parse(bytes)?, GFP_KERNEL)?) };
+                }
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_SET_RENDER_RESOURCES_V2 => {
+                    if barriers != [uapi::DRM_ASAHI_BARRIER_NONE as u16; 2] { return Err(EINVAL); }
+                    self.render_resources = if bytes.is_empty() { None }
+                        else { Some(Arc::new(Programs::parse_v2(bytes)?, GFP_KERNEL)?) };
+                }
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_SET_COMPUTE_RESOURCES => {
+                    if barriers != [uapi::DRM_ASAHI_BARRIER_NONE as u16; 2] {
+                        return Err(EINVAL);
+                    }
+                    self.compute_resources = if bytes.is_empty() { None }
+                        else { Some(Arc::new(ComputePrograms::parse(bytes)?, GFP_KERNEL)?) };
                 }
                 _ => return Err(EINVAL),
             }
@@ -311,13 +401,27 @@ pub(crate) enum Validated {
         long_job: bool,
         pass: RenderPass,
         ray_query: [RayQueryStage; 2],
+        resources: Option<Arc<Programs>>,
+        plan: Option<super::render_resources::Plan>,
         attachments: [Attachments; 2],
         timestamps: [uapi::drm_asahi_timestamps; 2],
     },
     Compute {
         long_job: bool,
         intersection: IntersectionTables,
+        matrix_ops: bool,
+        /// The command may copy or reset queries, so it must follow the host's
+        /// timestamp publication for earlier commands.
+        query_access: bool,
+        resources: Option<Arc<ComputePrograms>>,
+        plan: Option<super::render_resources::Plan>,
         scratch: ScratchRequest,
+        cdm_auxiliary_allocation: u32,
+        /// The M5 intersection-table binding (dj's `intersection`; that name is the G17P
+        /// tables' above).
+        m5_intersection: super::fw::m5::compute::IntersectionTables,
+        /// The M5 shader-context scratch request (`scratch` is G17P's).
+        m5_scratch: super::fw::m5::compute::ScratchRequest,
         usc_base: u64,
         cdm_va: u64,
         cdm_end_va: u64,
@@ -343,8 +447,20 @@ impl Validated {
 impl Payload {
     pub(crate) fn prior(&self) -> [u64; 2] {
         match self {
-            Self::Render(cmd, _, _) => [cmd.prior_vdm, cmd.prior_cdm],
-            Self::Compute(cmd, _, _) => [cmd.prior_vdm, cmd.prior_cdm],
+            Self::Render(cmd, ..) => [cmd.prior_vdm, cmd.prior_cdm],
+            Self::Compute(cmd, ..) => [cmd.prior_vdm, cmd.prior_cdm],
+        }
+    }
+
+    /// The tiling half's own render and compute prefixes (barrier, exact prior), if the
+    /// command carries them.
+    pub(crate) fn tiling_prefixes(&self) -> Option<([u16; 2], [u64; 2])> {
+        match self {
+            Self::Render(cmd, ..) if cmd.flags & STAGE_PREFIXES != 0 => Some((
+                [cmd.ta_vdm_barrier, cmd.ta_cdm_barrier],
+                [cmd.ta_prior_vdm, cmd.ta_prior_cdm],
+            )),
+            _ => None,
         }
     }
 
@@ -354,9 +470,14 @@ impl Payload {
         variant: &super::fw::Variant,
         space: &impl AddressSpace,
     ) -> Result<Validated> {
+        // Everything M5 accepts beyond the G17P command set is gated on this.
+        let m5 = variant.m5_commands;
+        let max_tile_buffer = if m5 { M5_MAX_TILE_BUFFER } else { MAX_TILE_BUFFER };
+        let attachment_rule = if m5 { AttachmentRule::Hint } else { AttachmentRule::Mapped };
         match self {
-            Self::Render(cmd, attachments, ray_query) => {
-                if cmd.flags & !RENDER_FLAGS != 0
+            Self::Render(cmd, attachments, ray_query, resources) => {
+                if cmd.flags & !(if m5 { RENDER_FLAGS } else { RENDER_FLAGS & !M5_RENDER_FLAGS }) != 0
+                    || (!m5 && resources.is_some())
                     || !(1..=MAX_DIMENSION).contains(&cmd.width_px)
                     || !(1..=MAX_DIMENSION).contains(&cmd.height_px)
                     || !(1..=MAX_LAYERS).contains(&cmd.layers)
@@ -371,13 +492,14 @@ impl Payload {
                     1 => 0,
                     2 => 1,
                     4 => 2,
+                    8 if m5 => 3,
                     _ => return Err(EINVAL),
                 };
                 if u64::from(cmd.sample_size_B)
                     * u64::from(cmd.utile_width_px)
                     * u64::from(cmd.utile_height_px)
                     * u64::from(cmd.samples)
-                    > MAX_TILE_BUFFER
+                    > max_tile_buffer
                     || cmd.vdm_ctrl_stream_base == 0
                     || cmd.vdm_ctrl_stream_base & 3 != 0
                     || cmd.isp_scissor_base == 0
@@ -408,7 +530,7 @@ impl Payload {
                     window.program(space, program.usc)?;
                 }
                 for list in attachments {
-                    list.validate(space)?;
+                    list.validate_as(space, attachment_rule)?;
                 }
                 let pass = RenderPass {
                     width: cmd.width_px.into(),
@@ -427,6 +549,9 @@ impl Payload {
                     depth_bias_is_int: cmd.flags & DBIAS_INT != 0,
                     few_primitives: cmd.flags & FEW_PRIMITIVES != 0 && variant.few_primitives,
                     fragment_barriers: cmd.flags & FRAGMENT_BARRIERS != 0,
+                    stage_prefixes: cmd.flags & STAGE_PREFIXES != 0,
+                    whole_attachments: cmd.flags & WHOLE_ATTACHMENTS != 0,
+                    shader_writes_memory: cmd.flags & SHADER_WRITES != 0,
                     occlusion_query_va: cmd.isp_oclqry_base,
                     sampler_heap_va: cmd.sampler_heap,
                     sampler_count: cmd.sampler_count.into(),
@@ -459,7 +584,7 @@ impl Payload {
                 };
                 for stage in ray_query {
                     if (stage.intersection.enabled() || stage.scratch.enabled())
-                        && !variant.ray_traversal
+                        && !(variant.ray_traversal && variant.render_ray_query)
                     {
                         return Err(refuse_ray_traversal());
                     }
@@ -469,18 +594,37 @@ impl Payload {
                         if code != 0 { require_range(space, code, 64, Access::Read)?; }
                     }
                 }
+                if let Some(programs) = resources {
+                    for stage in programs.stage_scs()? {
+                        let intersection = stage.intersection;
+                        if intersection.enabled() {
+                            require_range(space, intersection.pool, intersection.pool_bytes, Access::Read)?;
+                            let code = intersection.default_program & 0x0000_ffff_ffff_ffff;
+                            if code != 0 { require_range(space, code, 64, Access::Read)?; }
+                        }
+                    }
+                }
                 Ok(Validated::Render {
                     long_job: super::timeout::select(false,
                         ray_query.map(|stage| stage.intersection.enabled()), false),
                     pass,
                     ray_query: *ray_query,
+                    resources: resources.clone(),
+                    plan: None,
                     attachments: *attachments,
                     timestamps: [cmd.ts_vtx, cmd.ts_frag],
                 })
             }
-            Self::Compute(cmd, attachments, intersection) => {
-                let as_build = super::timeout::as_build(cmd.flags).ok_or(EINVAL)?;
-                if cmd.cdm_ctrl_stream_base & 3 != 0
+            Self::Compute(cmd, attachments, intersection, resources) => {
+                let as_build = if m5 { false } else { super::timeout::as_build(cmd.flags).ok_or(EINVAL)? };
+                if (m5
+                    && (cmd.flags
+                        & !(crate::file::DRM_ASAHI_COMPUTE_USES_MATRIX
+                            | crate::file::DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS)
+                        != 0
+                        || cmd.reserved != 0))
+                    || (!m5 && resources.is_some())
+                    || cmd.cdm_ctrl_stream_base & 3 != 0
                     || cmd.cdm_ctrl_stream_end & 3 != 0
                     || cmd.cdm_ctrl_stream_end <= cmd.cdm_ctrl_stream_base
                     || !helper_is_empty(&cmd.helper)
@@ -495,19 +639,50 @@ impl Payload {
                 )?;
                 sampler(space, cmd.sampler_heap, cmd.sampler_count)?;
                 attachments.validate(space)?;
-                let scratch = ScratchRequest::new(cmd.scs_layout)?;
+                // M5 shader-context scratch has its own (Gen2) layout; G17P's stays disabled.
+                let scratch = ScratchRequest::new(if m5 { 0 } else { cmd.scs_layout })?;
+                let m5_scratch = if m5 {
+                    super::fw::m5::compute::ScratchRequest::new(cmd.scs_layout)?
+                } else {
+                    super::fw::m5::compute::ScratchRequest::NONE
+                };
                 if (scratch.enabled() || intersection.enabled()) && !variant.ray_traversal {
                     return Err(refuse_ray_traversal());
+                }
+                // The auxiliary allocation is the per-USC page count of the dispatch's SCS
+                // storage, which the pool is sized for (`plan_compute_scs`). Without SCS there
+                // is no such storage, as render's programs require.
+                if !m5_scratch.enabled() && cmd.cdm_auxiliary_allocation != 0 {
+                    return Err(EINVAL);
                 }
                 if intersection.enabled() {
                     require_range(space, intersection.pool, intersection.pool_bytes, Access::Read)?;
                     let code = intersection.default_program & 0x0000_ffff_ffff_ffff;
                     if code != 0 { require_range(space, code, 64, Access::Read)?; }
                 }
+                let m5_intersection = if m5 {
+                    super::fw::m5::compute::IntersectionTables::new(
+                        cmd.intersection_pool, cmd.intersection_pool_bytes,
+                        cmd.intersection_first, cmd.intersection_count,
+                        cmd.intersection_default_program, cmd.intersection_default_control)?
+                } else {
+                    super::fw::m5::compute::IntersectionTables::NONE
+                };
+                if m5_intersection.enabled() {
+                    require_range(space, m5_intersection.pool, m5_intersection.pool_bytes, Access::Read)?;
+                    let code = m5_intersection.default_program & 0x0000_ffff_ffff_ffff;
+                    if code != 0 { require_range(space, code, 64, Access::Read)?; }
+                }
                 Ok(Validated::Compute {
                     long_job: super::timeout::select(intersection.enabled(), [false; 2], as_build),
                     intersection: *intersection,
+                    matrix_ops: cmd.flags & crate::file::DRM_ASAHI_COMPUTE_USES_MATRIX != 0,
+                    query_access: cmd.flags & crate::file::DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS == 0,
+                    resources: resources.clone(), plan: None,
                     scratch,
+                    m5_scratch,
+                    cdm_auxiliary_allocation: cmd.cdm_auxiliary_allocation,
+                    m5_intersection,
                     usc_base: window.base,
                     cdm_va: cmd.cdm_ctrl_stream_base,
                     cdm_end_va: cmd.cdm_ctrl_stream_end - 4,
@@ -524,4 +699,43 @@ impl Payload {
 fn refuse_ray_traversal() -> Error {
     kernel::pr_warn_once!("G17: ray-traversal work refused on this firmware\n");
     Error::from_errno(-(kernel::bindings::EOPNOTSUPP as i32))
+}
+
+#[kunit_tests(asahi_g17_attachments)]
+mod attachment_tests {
+    use super::*;
+
+    /// A VM with nothing mapped.
+    struct Unmapped;
+
+    impl AddressSpace for Unmapped {
+        fn covers(&self, _address: u64, _size: u64, _access: Access) -> bool {
+            false
+        }
+    }
+
+    fn list(ranges: &[(u64, u64)]) -> Attachments {
+        let mut list = Attachments::EMPTY;
+        for (slot, &(va, size)) in list.ranges.iter_mut().zip(ranges) {
+            *slot = WriteRange { va, size };
+            list.count += 1;
+        }
+        list
+    }
+
+    #[test]
+    fn an_m5_hint_may_span_unmapped_gaps() {
+        // One range over two attachments and the gap between them, as userspace merges more
+        // attachments than a list holds.
+        let merged = list(&[(0x1_0000_0000, 0x40_0000), (0x2_0000_0000, 0x1_0000_0000)]);
+        assert_eq!(merged.validate_as(&Unmapped, AttachmentRule::Hint), Ok(()));
+        assert_eq!(merged.validate_as(&Unmapped, AttachmentRule::Mapped), Err(EINVAL));
+    }
+
+    #[test]
+    fn an_m5_hint_is_still_a_range() {
+        assert_eq!(list(&[(0x1_0000_0000, 0)]).validate_hint(), Err(EINVAL));
+        assert_eq!(list(&[(u64::MAX - 0xfff, 0x2000)]).validate_hint(), Err(EINVAL));
+        assert_eq!(list(&[]).validate_hint(), Ok(()));
+    }
 }

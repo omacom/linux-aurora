@@ -77,11 +77,9 @@ impl WorkStates {
     }
 }
 
-/// Ordinals past the turn remembered for ioctls that took a node or left early.
+/// How far past the oldest waiting ioctl a new ioctl may be ordered: the ordinals past the
+/// turn remembered for ioctls that left early.
 pub(super) const ORDER_WINDOW: u64 = 1024;
-
-/// How far past the oldest waiting ioctl an ioctl may take its node.
-pub(super) const RUN_AHEAD: u64 = 8;
 
 /// The order in which a context's ioctls take work-state nodes.
 ///
@@ -93,20 +91,21 @@ pub(super) const RUN_AHEAD: u64 = 8;
 /// engines, at most 36 between scheduling and completion, and the same load runs there without
 /// failure.
 ///
-/// So an ioctl takes its node only while at most [`RUN_AHEAD`] older ioctls of its context have
-/// neither taken one nor left without one. Native scheduling happens at commit, on one thread;
-/// here each engine admits from its own scheduler, and a strictly ordered turn costs a scheduler
-/// round trip whenever the other engine's ioctl is ready first. A short run-ahead avoids that
-/// without letting one engine get far ahead of the other.
+/// So an ioctl takes its node only at its turn, once every older ioctl of its context has taken
+/// one or left without one. The firmware sorts a context's nodes by their words and flushes
+/// from the head, and a node's word is drawn when the node is taken
+/// ([`WorkStates::allocate`]): an ioctl taking its node ahead of an older one would hold a lower
+/// word than that ioctl, whose completion stamp would then wait behind a node submitted after
+/// it. Taking nodes strictly in turn keeps the words in submission order. Each engine admits
+/// from its own scheduler, so the turn costs a scheduler round trip whenever the other engine's
+/// ioctl is ready first.
 pub(super) struct Order {
     /// The next ordinal to hand out.
     next: u64,
     /// The oldest ordinal that has neither taken a node nor left.
     turn: u64,
-    /// Ordinals past the turn that took a node or left, as bits at ordinal % ORDER_WINDOW.
+    /// Ordinals past the turn that left, as bits at ordinal % ORDER_WINDOW.
     done: [u64; (ORDER_WINDOW / 64) as usize],
-    /// Set once an ioctl left too far past the turn to remember; admission is unordered after.
-    unordered: bool,
     /// An ioctl was refused since the turn last moved: its publisher waits for the next move.
     refused: bool,
 }
@@ -116,24 +115,28 @@ impl Order {
             next: 0,
             turn: 0,
             done: [0; (ORDER_WINDOW / 64) as usize],
-            unordered: false,
             refused: false,
         }
     }
-    /// The ordinal of a new ioctl, in submission order.
-    pub(super) fn assign(&mut self) -> u64 {
+    /// The ordinal of a new ioctl, in submission order. None while [`ORDER_WINDOW`] ioctls of
+    /// the context are past the oldest one still waiting for its node.
+    pub(super) fn assign(&mut self) -> Option<u64> {
+        if self.next - self.turn >= ORDER_WINDOW {
+            return None;
+        }
         let ordinal = self.next;
         self.next += 1;
-        ordinal
+        Some(ordinal)
     }
-    /// Whether the ioctl `ordinal` may take its node now. A refusal is remembered until the
-    /// turn next moves, so that move wakes the refused publisher.
+    /// Whether the ioctl `ordinal` may take its node now: only at its turn. A refusal is
+    /// remembered until the turn next moves, so that move wakes the refused publisher.
     pub(super) fn admits(&mut self, ordinal: u64) -> bool {
-        let admits = self.unordered || ordinal <= self.turn + RUN_AHEAD;
+        let admits = ordinal == self.turn;
         self.refused |= !admits;
         admits
     }
-    /// The ioctl `ordinal` took its node. Returns whether a refused ioctl may now be admitted.
+    /// The ioctl `ordinal` took its node at its turn. Returns whether a refused ioctl may now be
+    /// admitted.
     pub(super) fn admit(&mut self, ordinal: u64) -> bool {
         self.finish(ordinal)
     }
@@ -143,17 +146,14 @@ impl Order {
         self.finish(ordinal)
     }
     fn finish(&mut self, ordinal: u64) -> bool {
-        if self.unordered || ordinal < self.turn {
+        if ordinal < self.turn {
             return false;
         }
         if ordinal == self.turn {
             self.pass();
             return core::mem::take(&mut self.refused);
         }
-        if ordinal - self.turn >= ORDER_WINDOW {
-            self.unordered = true;
-            return core::mem::take(&mut self.refused);
-        }
+        // assign() keeps every ordinal within the window past the turn.
         let bit = ordinal % ORDER_WINDOW;
         self.done[(bit / 64) as usize] |= 1 << (bit % 64);
         false
@@ -172,19 +172,35 @@ impl Order {
     }
 }
 
-/// Two stable logical ordinals, independent of physical pair numbering.
+/// Two stable logical ordinals (render channels), independent of physical pair numbering. A
+/// context's render work can move between physical pairs (sibling pairs, lending, relocation,
+/// QID recycling), so a channel is rebound to a new pair once every publication this context
+/// made through it has retired. A context's channel counts its passes up for the whole
+/// process, so a rebound channel continues its pass sequence.
 pub(super) struct RenderSlots {
     pairs: [Option<u8>; 2],
     origins: [Option<u64>; 2],
+    /// Pass of the channel's last publication on its previous pair.
+    bases: [u8; 2],
+    /// QIDs and visibility target (ordinal + 1) of the last publication made through each
+    /// channel.
+    last: [Option<([u8; 2], u64)>; 2],
+    /// Recency of each channel's last publication.
+    used: [u64; 2],
+    epoch: u64,
 }
 impl RenderSlots {
     pub(super) const fn new() -> Self {
         Self {
             pairs: [None; 2],
             origins: [None; 2],
+            bases: [0; 2],
+            last: [None; 2],
+            used: [0; 2],
+            epoch: 0,
         }
     }
-    pub(super) fn get(&mut self, pair: u8) -> Option<u32> {
+    fn get(&mut self, pair: u8) -> Option<u32> {
         if let Some(index) = self.pairs.iter().position(|value| *value == Some(pair)) {
             return Some(index as u32);
         }
@@ -192,14 +208,61 @@ impl RenderSlots {
         self.pairs[index] = Some(pair);
         Some(index as u32)
     }
+    /// The channel of `pair`, rebinding the least recently used channel whose publications
+    /// have all retired (`retired(qids, ordinal)`) when both are bound to other pairs. `None`:
+    /// no channel can move yet.
+    pub(super) fn bind(
+        &mut self,
+        pair: u8,
+        retired: impl Fn([u8; 2], u64) -> bool,
+    ) -> Option<(u32, Option<u8>)> {
+        if let Some(index) = self.get(pair) {
+            return Some((index, None));
+        }
+        let index = (0..2)
+            .filter(|index| self.last[*index].is_none_or(|(qids, ordinal)| retired(qids, ordinal)))
+            .min_by_key(|index| self.used[*index])?;
+        let previous = self.pairs[index];
+        // `last` holds the ordinal after the last publication (its visibility target), so that
+        // publication's pass is base + (next - origin).
+        if let (Some(origin), Some((_, next))) = (self.origins[index], self.last[index]) {
+            self.bases[index] = self.bases[index].wrapping_add(next.wrapping_sub(origin) as u8);
+        }
+        self.pairs[index] = Some(pair);
+        self.origins[index] = None;
+        self.last[index] = None;
+        Some((index as u32, previous))
+    }
     pub(super) fn payload(&mut self, pair: u8, ordinal: u64) -> Option<u8> {
-        let index = self.get(pair)? as usize;
+        let index = self.pairs.iter().position(|value| *value == Some(pair))?;
         let origin = *self.origins[index].get_or_insert(ordinal);
-        Some(ordinal.checked_sub(origin)?.wrapping_add(1) as u8)
+        Some(self.bases[index].wrapping_add(ordinal.checked_sub(origin)?.wrapping_add(1) as u8))
+    }
+    /// Records a publication that reached firmware through `pair`'s channel.
+    pub(super) fn published(&mut self, pair: u8, qids: [u8; 2], ordinal: u64) -> bool {
+        let Some(index) = self.pairs.iter().position(|value| *value == Some(pair)) else {
+            return false;
+        };
+        self.epoch = self.epoch.wrapping_add(1);
+        self.used[index] = self.epoch;
+        self.last[index] = Some((qids, ordinal));
+        true
     }
 }
 
 impl WorkStates {
+    /// The oldest node in use that the firmware lists ahead of `word`: a live word older than
+    /// it by the signed 32-bit difference the firmware sorts by. Its ioctl was submitted
+    /// earlier ([`Order`]), and until that node drains the firmware withholds every stamp of
+    /// `word`'s node behind it.
+    pub(super) fn older_live(&self, word: u32) -> Option<u32> {
+        self.live
+            .iter()
+            .map(|live| live.load(Ordering::Acquire))
+            .filter(|&live| live != FREE && (live.wrapping_sub(word) as i32) < 0)
+            .min_by_key(|&live| live.wrapping_sub(word) as i32)
+    }
+
     pub(super) fn used(&self) -> usize {
         self.live.iter().filter(|word| word.load(Ordering::Acquire) != FREE).count()
     }
@@ -250,65 +313,66 @@ mod tests {
     }
 
     #[test]
-    fn ioctls_take_nodes_at_most_run_ahead_past_the_oldest_waiting_one() {
+    fn ioctls_take_nodes_only_at_their_turn() {
         let mut order = Order::new();
-        let ordinals: [u64; RUN_AHEAD as usize + 3] = core::array::from_fn(|_| order.assign());
-        let (oldest, last) = (ordinals[0], ordinals[RUN_AHEAD as usize + 2]);
-        // Every ioctl up to RUN_AHEAD past the oldest waiting one may take its node.
-        for &ordinal in &ordinals[..=RUN_AHEAD as usize] {
-            assert!(order.admits(ordinal));
+        let ordinals: [u64; 4] = core::array::from_fn(|_| order.assign().unwrap());
+        // Only the oldest waiting ioctl may take its node; the others are refused.
+        for &ordinal in &ordinals[1..] {
+            assert!(!order.admits(ordinal));
         }
-        assert!(!order.admits(ordinals[RUN_AHEAD as usize + 1]));
-        // Ioctls ahead of the turn taking their nodes do not move it.
-        for &ordinal in &ordinals[1..=RUN_AHEAD as usize] {
-            assert!(!order.admit(ordinal));
-        }
-        assert!(!order.admits(ordinals[RUN_AHEAD as usize + 1]));
-        // The oldest one moves the turn past everything already admitted, and wakes the refused.
-        assert!(order.admit(oldest));
-        assert!(order.admits(last));
-        let next = order.assign();
-        assert!(order.admits(next));
-        assert!(!order.admits(next + RUN_AHEAD + 1));
+        assert!(order.admits(ordinals[0]));
+        // Its admission moves the turn and wakes the refused.
+        assert!(order.admit(ordinals[0]));
+        assert!(order.admits(ordinals[1]));
+        // Nobody was refused since, so the next admission wakes nobody.
+        assert!(!order.admit(ordinals[1]));
+        assert!(!order.admits(ordinals[3]));
+        assert!(order.admits(ordinals[2]));
+        assert!(order.admit(ordinals[2]));
+        assert!(order.admits(ordinals[3]));
     }
 
     #[test]
     fn ioctls_leaving_without_a_node_pass_the_turn() {
         let mut order = Order::new();
-        let (a, b, c) = (order.assign(), order.assign(), order.assign());
-        let later: [u64; RUN_AHEAD as usize] = core::array::from_fn(|_| order.assign());
-        let beyond = later[RUN_AHEAD as usize - 1];
-        // b and c fail before their turn; while a waits, ioctls past a + RUN_AHEAD wait too.
+        let (a, b, c, d) = (
+            order.assign().unwrap(),
+            order.assign().unwrap(),
+            order.assign().unwrap(),
+            order.assign().unwrap(),
+        );
+        // b and c fail before their turn; while a waits, d waits too.
         assert!(!order.leave(b));
         assert!(!order.leave(c));
-        assert!(!order.admits(beyond));
+        assert!(!order.admits(d));
         // Once a takes its node, the turn passes b and c as well, and the refused one may retry.
         assert!(order.admit(a));
-        assert!(order.admits(beyond));
-        // With nobody refused since, moving the turn wakes nobody; an ordinal already passed
-        // leaves without effect.
-        assert!(!order.leave(later[0]));
+        assert!(order.admits(d));
+        // An ordinal already passed leaves without effect.
         assert!(!order.leave(a));
     }
 
     #[test]
-    fn an_ioctl_leaving_too_far_ahead_unorders_admission() {
+    fn no_ioctl_is_ordered_past_the_window() {
         let mut order = Order::new();
-        let first = order.assign();
+        let first = order.assign().unwrap();
         let mut last = first;
-        for _ in 0..ORDER_WINDOW {
-            last = order.assign();
+        for _ in 1..ORDER_WINDOW {
+            last = order.assign().unwrap();
         }
-        assert!(!order.admits(last));
-        assert!(order.leave(last));
-        assert!(order.admits(last - 1));
+        assert!(order.assign().is_none());
+        // An ioctl leaving far ahead is remembered within the window.
+        assert!(!order.leave(last));
+        assert!(order.admits(first));
+        assert!(!order.admit(first));
+        assert!(order.assign().is_some());
     }
 
     #[test]
     fn single_engine_admission_wakes_nobody() {
         let mut order = Order::new();
-        for _ in 0..3 * RUN_AHEAD {
-            let ordinal = order.assign();
+        for _ in 0..24 {
+            let ordinal = order.assign().unwrap();
             assert!(order.admits(ordinal));
             assert!(!order.admit(ordinal));
         }

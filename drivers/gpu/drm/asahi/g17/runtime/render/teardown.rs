@@ -38,7 +38,11 @@ impl RenderState {
                 return Ok(false);
             }
             if let Some(pair) = entry.pair.as_ref() {
-                if !pair.idle_for_context(context)? && !pair.executed_for_kill(context) {
+                // Commands that ran unstamped leave nothing for the firmware to run only once a
+                // kill of the context has been published; until then they still hold it.
+                if !pair.idle_for_context(context)?
+                    && !(context.kill_published() && pair.executed_for_kill(context))
+                {
                     return Ok(false);
                 }
             }
@@ -77,7 +81,13 @@ impl RenderState {
         }
         let mut index = 0;
         while index < self.retired.len() {
-            if self.retired[index].buffer_id().is_some() {
+            // An M5 pool replaced by a same-context rebind stays until
+            // firmware acknowledged its release.
+            let pool = self.retired[index].pool();
+            if self.retired[index].buffer_id().is_some()
+                || (self.retired[index].wait_for_pool_release()
+                    && !self.pools.released(u32::from(pool.id()), pool.control_va()))
+            {
                 index += 1;
                 continue;
             }

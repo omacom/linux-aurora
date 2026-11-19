@@ -11,6 +11,14 @@ impl Registry {
         owner: u64,
         packet: &Arc<Packet>,
     ) -> Result<Frontier> {
+        self.render_prefix_at(owner, packet, packet.order.wait_through[0])
+    }
+    pub(in crate::g17::runtime) fn render_prefix_at(
+        &self,
+        owner: u64,
+        packet: &Arc<Packet>,
+        prefix: Option<u64>,
+    ) -> Result<Frontier> {
         let mut frontier = Frontier::new();
         let compute = packet.engine() == crate::g17::job::Engine::Compute;
         for entry in self.render.entries.iter().flatten() {
@@ -18,7 +26,7 @@ impl Registry {
                 pair.collect_dependencies(
                     owner,
                     packet.completion.status(),
-                    packet.order.wait_through[0],
+                    prefix,
                     &mut frontier,
                     compute,
                 )?;
@@ -26,7 +34,7 @@ impl Registry {
                 dependencies.collect(
                     owner,
                     packet.completion.status(),
-                    packet.order.wait_through[0],
+                    prefix,
                     &mut frontier,
                     compute,
                 )?;

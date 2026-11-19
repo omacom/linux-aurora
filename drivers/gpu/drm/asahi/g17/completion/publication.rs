@@ -8,7 +8,7 @@
 //! nor waits for another command; the last prerequisite publishes a ready result.
 
 use super::Output;
-use crate::g17::{dependency::inherited_error, status::VmStatus};
+use crate::g17::{dependency::PRODUCER_FAILED, status::VmStatus};
 use kernel::{new_mutex, prelude::*, sync::{Arc, Mutex}};
 
 type Links = Option<KBox<Link>>;
@@ -96,7 +96,9 @@ impl Publication {
         if let Err(error) = result {
             // Inherited failure is visible to the client without inventing a
             // permanent admission failure in this command's VM.
-            self.status.report_failure(error);
+            if error != ECANCELED {
+                self.status.report_failure(error);
+            }
         }
         self.output.publish(result);
         let result = result.map(|_| ());
@@ -119,10 +121,8 @@ impl Publication {
         let ready = {
             let mut state = self.state.lock();
             debug_assert!(state.remaining != 0);
-            if let Err(error) = result {
-                if state.predecessor_error.is_none() {
-                    state.predecessor_error = Some(inherited_error(error));
-                }
+            if result.is_err() && state.predecessor_error.is_none() {
+                state.predecessor_error = Some(PRODUCER_FAILED);
             }
             state.remaining -= 1;
             state.claim()

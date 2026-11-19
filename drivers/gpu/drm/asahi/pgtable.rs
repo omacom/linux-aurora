@@ -153,9 +153,8 @@ impl ReservedTables {
     pub(crate) unsafe fn add(&mut self, res: kernel::io::resource::Resource) -> Result {
         let start = res.start();
         // SAFETY: The caller guarantees the region; write-back matches how the firmware maps it.
-        let map = unsafe {
-            kernel::io::mem::Mem::try_new(res, kernel::io::mem::MemFlag::WB.into())?
-        };
+        let map =
+            unsafe { kernel::io::mem::Mem::try_new(res, kernel::io::mem::MemFlag::WB.into())? };
         self.starts.push(start, GFP_KERNEL)?;
         self.regions.push(map, GFP_KERNEL)?;
         Ok(())
@@ -183,6 +182,15 @@ impl ReservedTables {
 
     /// Drops the CPU's cached lines of every region, so that later reads see what the firmware
     /// wrote while booting. Lines the host dirtied are written back first, never discarded.
+    ///
+    /// This runs once, after the firmware booted. The host has written table entries by then
+    /// (fixed kernel objects are mapped before the boot), but the T6040, the only SoC with
+    /// reserved tables, also sets `UatQuirks::clean_tables`: every host table store is cleaned
+    /// to the PoC as it is made, so this drops only clean lines and loses no host write.
+    ///
+    /// The regions are not invalidated again, which assumes the firmware no longer writes the
+    /// tables the host walks once it has booted. That is not proven by a trace; the J616s has
+    /// run this way since its GPU came up without a fault traced to a stale table.
     pub(crate) fn invalidate(&self) {
         for map in self.regions.iter() {
             clean_invalidate_poc(map.ptr(), map.size());
@@ -192,7 +200,9 @@ impl ReservedTables {
 }
 
 /// Runs `f` on a pointer to `len` bytes at `offset` in the page-table page at `phys`, through the
-/// reserved mapping when the page lies in a reserved region, else through `struct page`.
+/// reserved mapping when the page lies in a reserved region, else through `struct page`. With
+/// reserved regions, a page outside them that is not System RAM with a `struct page` (other
+/// no-map memory) is refused with `EIO`.
 ///
 /// # Safety
 ///
@@ -211,8 +221,14 @@ unsafe fn with_table<T>(
         // SAFETY: lookup() checked that the whole page is mapped.
         return f(unsafe { base.add(offset) });
     }
-    // SAFETY: The caller guarantees an allocated page-table page in RAM.
-    let page = unsafe { Page::borrow_phys_unchecked(&phys) };
+    let page = if reserved.is_some() {
+        // SAFETY: The caller guarantees the page stays allocated; borrow_phys() checks that it
+        // is System RAM with a struct page.
+        unsafe { Page::borrow_phys(&phys) }.ok_or(EIO)?
+    } else {
+        // SAFETY: The caller guarantees an allocated page-table page in RAM.
+        unsafe { Page::borrow_phys_unchecked(&phys) }
+    };
     page.with_pointer_into_page(offset, len, f)
 }
 
@@ -273,7 +289,7 @@ const HIGH_BITS_PXN: u16 = 1 << 1;
 const HIGH_BITS_UXN: u16 = 1 << 2;
 const HIGH_BITS_GPU_ACCESS: u16 = 1 << 3;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct Prot {
     memattr: u8,
     ap: u8,
@@ -400,6 +416,10 @@ impl Prot {
 
     pub(crate) const fn as_uncached(&self) -> Self {
         self.memattr(MEMATTR_UNCACHED)
+    }
+
+    pub(crate) const fn as_cached(&self) -> Self {
+        self.memattr(MEMATTR_CACHED)
     }
 }
 
@@ -653,8 +673,9 @@ impl UatPageTable {
                     mod_pr_debug!("UATPageTable::with_pages: borrowed phys {:#x}\n", phys);
                     let driver_tables = &mut self.driver_tables;
                     let oas_mask = self.oas_mask;
+                    let firmware_tree = reserved.as_deref();
                     let entry = |p: *mut u8| -> Result<Option<PhysicalAddr>> {
-                        let uptep = p as *const _ as *const Pte;
+                        let uptep = p.cast_const().cast::<Pte>();
                         // SAFETY: with_table() ensures the pointer is valid, and our index is
                         // aligned so it is safe to deref as an AtomicU64.
                         let upte = unsafe { &*uptep };
@@ -662,7 +683,10 @@ impl UatPageTable {
                         // Allocate if requested
                         if upte_val == 0 && alloc {
                             let pt_page = Page::alloc_page(GFP_KERNEL | __GFP_ZERO)?;
-                            mod_pr_debug!("UATPageTable::with_pages: alloc PT at {:#x}\n", pt_page.phys());
+                            mod_pr_debug!(
+                                "UATPageTable::with_pages: alloc PT at {:#x}\n",
+                                pt_page.phys()
+                            );
                             if clean {
                                 // A non-snooping walker must never follow a parent to a
                                 // table whose zeroes are still in the CPU caches.
@@ -687,7 +711,21 @@ impl UatPageTable {
                             }
                         }
                         if upte_val & PTE_TYPE_BITS == PTE_TYPE_LEAF_TABLE {
-                            Ok(Some(upte_val & oas_mask & (!UAT_PGMSK as u64)))
+                            let child = upte_val & oas_mask & (!UAT_PGMSK as u64);
+                            // Below a root the driver did not allocate, the descriptors were
+                            // written by the firmware or the bootloader. Follow one only into a
+                            // reserved table page or a table this driver allocated, never into
+                            // other RAM, whose PTEs this walk would then write.
+                            if let (Some(firmware_tree), Some(tables)) =
+                                (firmware_tree, driver_tables.as_ref())
+                            {
+                                if !firmware_tree.contains(child) && !tables.contains(&child) {
+                                    pr_err!("UATPageTable::with_pages: table PTE {:#x} at iova {:#x} level {} names a page outside the reserved and driver tables\n",
+                                            upte_val, iova, level + 1);
+                                    return Err(EIO);
+                                }
+                            }
+                            Ok(Some(child))
                         } else if upte_val == 0 || (!alloc && !free) {
                             mod_pr_debug!("UATPageTable::with_pages: no level {}\n", level);
                             Ok(None)
@@ -738,7 +776,7 @@ impl UatPageTable {
                 iova
             );
             let leaves = |p: *mut u8| -> Result {
-                let ptep = p as *const _ as *const Pte;
+                let ptep = p.cast_const().cast::<Pte>();
                 // SAFETY: We know this is a valid pointer to PTEs and the range is valid and
                 // checked by with_table().
                 let ptes = unsafe { core::slice::from_raw_parts(ptep, count) };
@@ -752,7 +790,13 @@ impl UatPageTable {
             // SAFETY: Page table addresses are either allocated by us, or
             // firmware-managed tables in RAM or in a reserved region.
             unsafe {
-                with_table(reserved.as_deref(), phys, idx * PTE_SIZE, count * PTE_SIZE, leaves)
+                with_table(
+                    reserved.as_deref(),
+                    phys,
+                    idx * PTE_SIZE,
+                    count * PTE_SIZE,
+                    leaves,
+                )
             }?;
 
             let block = 1 << (UAT_PGBIT + UAT_LVBIT);
@@ -789,7 +833,10 @@ impl UatPageTable {
         }
         if let Some((parent_phys, parent_index)) = parent {
             let oas_mask = self.oas_mask;
-            let in_reserved = self.reserved.as_ref().is_some_and(|r| r.contains(parent_phys));
+            let in_reserved = self
+                .reserved
+                .as_ref()
+                .is_some_and(|r| r.contains(parent_phys));
             // SAFETY: Only looks the page up; nothing is accessed through it.
             if !in_reserved && unsafe { Page::borrow_phys(&parent_phys) }.is_none() {
                 return Err(EIO);
@@ -815,7 +862,15 @@ impl UatPageTable {
             // its child descriptor is detached. A changed descriptor indicates
             // an ownership violation; fail closed instead of freeing a table
             // that may still be reachable.
-            unsafe { with_table(reserved, parent_phys, parent_index * PTE_SIZE, PTE_SIZE, detach) }?;
+            unsafe {
+                with_table(
+                    reserved,
+                    parent_phys,
+                    parent_index * PTE_SIZE,
+                    PTE_SIZE,
+                    detach,
+                )
+            }?;
         }
         if let Some(tables) = self.driver_tables.as_mut() {
             let index = tables.iter().position(|&table| table == phys).ok_or(EIO)?;
@@ -950,11 +1005,15 @@ impl UatPageTable {
             for (idx, pte) in ptes.iter().enumerate() {
                 let ptev = pte.load(Ordering::Relaxed);
                 if ptev != 0 {
+                    // Never replace a live leaf: it belongs to another mapping. The callers
+                    // check their whole range first (`ensure_unmapped`), so this is reached
+                    // only by a collision they missed.
                     pr_err!(
                         "UATPageTable::map_pages: Page at IOVA {:#x} is mapped (PTE: {:#x})\n",
                         iova + (idx * UAT_PGSZ) as u64,
                         ptev
                     );
+                    return Err(EBUSY);
                 }
                 pte.store(phys | prot.as_pte() | pte_bits, Ordering::Relaxed);
                 if !one_page {
@@ -962,6 +1021,28 @@ impl UatPageTable {
                 }
             }
             Ok(())
+        })
+    }
+
+    /// Refuses with `EBUSY`, writing nothing, when any leaf of `iova_range` is live.
+    ///
+    /// Every PTE store writes either zero or a complete entry, so a nonzero leaf belongs to
+    /// another mapping. A map operation checks its whole range with this before its first
+    /// store: its failure path clears the whole range it asked for, which would otherwise
+    /// also clear the other mapping's leaves.
+    pub(crate) fn ensure_unmapped(&mut self, iova_range: Range<u64>) -> Result {
+        self.walk(iova_range, false, false, false, |iova, ptes| {
+            match ptes.iter().position(|pte| pte.load(Ordering::Relaxed) != 0) {
+                Some(idx) => {
+                    pr_err!(
+                        "UATPageTable::ensure_unmapped: Page at IOVA {:#x} is mapped (PTE: {:#x})\n",
+                        iova + (idx * UAT_PGSZ) as u64,
+                        ptes[idx].load(Ordering::Relaxed)
+                    );
+                    Err(EBUSY)
+                }
+                None => Ok(()),
+            }
         })
     }
 

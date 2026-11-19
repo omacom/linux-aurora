@@ -181,7 +181,7 @@ unsafe impl AnyBitPattern for drm_asahi_cmd_render {}
 unsafe impl AnyBitPattern for drm_asahi_cmd_compute {}
 
 const _: () = {
-    assert!(size_of::<uapi::drm_asahi_cmd_render>() == 448);
+    assert!(size_of::<uapi::drm_asahi_cmd_render>() == 480);
     assert!(offset_of!(uapi::drm_asahi_cmd_render, prior_vdm) == 320);
     assert!(size_of::<uapi::drm_asahi_cmd_compute>() == 200);
     assert!(offset_of!(uapi::drm_asahi_cmd_compute, scs_layout) == 128);

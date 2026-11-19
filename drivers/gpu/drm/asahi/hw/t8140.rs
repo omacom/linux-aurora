@@ -39,26 +39,31 @@ pub(crate) const CONFIG: Config = Config {
     ]),
     // Read by the firmware through the kernel lower root, whose top-level entries it only
     // samples when it starts.
-    pm_metrics: FixedBuffer {
+    profile: crate::g17::FirmwareProfile::PublishedRoots,
+    pm_metrics: Some(FixedBuffer {
         va: 0x10_0008_0000,
         size: 0x8000,
-    },
+    }),
     recovery_slot_keys: Some(recovery::SLOT_KEYS),
     gpu_generation: GpuGen::G17,
     windows: &REGISTER_WINDOWS,
     reserved_slots: &RESERVED_REGISTER_SLOTS,
-    perf: &PERF,
+    perf: Some(&PERF),
     opps: OPPS,
     uat_quirks: crate::mmu::UatQuirks::DEFAULT,
-    region_c: &crate::g17::fw::initdata::REGION_C_26A428,
+    region_c: Some(&crate::g17::fw::initdata::REGION_C_26A428),
+    chip: None,
+    m5: None,
     adopt_root_entries: true,
     fabric_bridge: true,
     firmware: crate::g17::fw::variant::Firmware::Fixed(&crate::g17::fw::variant::V26A428),
     // The layouts the A18 Pro has always run with.
     core_layout: crate::g17::CoreLayout {
         cores: None,
+        alternate_core_masks: None,
         operand_state: crate::g17::fw::compute::OperandState::ONE_BY_SIX,
         deflake: crate::g17::fw::render::Deflake::ONE_CLUSTER,
+        compute_blocks: crate::g17::fw::freelist::COMPUTE_BLOCKS,
     },
 };
 
@@ -313,7 +318,7 @@ pub(crate) mod resources {
     ];
     pub(crate) const TVB_GROWTH: u64 = USER_BASE + 0x0400_0000;
     pub(crate) const TVB_PAIR_STRIDE: u64 = 0x2800_0000;
-    pub(crate) const RESERVED_RANGES: usize = 48;
+    pub(crate) const RESERVED_RANGES: usize = 50;
 
     /// Compact allocations search these shared client arenas in this order.
     pub(crate) fn compact_ranges() -> [Range<u64>; 4] {
@@ -360,6 +365,13 @@ pub(crate) mod resources {
         }
         add(AUXILIARY);
         add(metrics_va..metrics_va.checked_add(METRICS_SIZE)?);
+        // The dynamic arenas the kernel places a client's queue aliases in (kick and
+        // descriptor rings, render generation state, client-private compute and render
+        // backing) stay reserved from creation too, as the fixed windows above are: an alias
+        // created later is then never mapped over a user bind, and the bind check's view of the
+        // reserved ranges cannot change between parsing a bind and committing it.
+        add(super::dynamic::LOWER);
+        add(super::dynamic::CLIENT_LOWER);
         Some(ranges)
     }
 }

@@ -158,6 +158,83 @@ TRACE_EVENT(asahi_g17_event,
 	TP_printk("phase=%u counter=%llu", __entry->phase, __entry->counter)
 );
 
+/* Input conversion: phase 0 entry, 1 result. converted=0 also covers no live input. */
+TRACE_EVENT(asahi_g17_inputs,
+    TP_PROTO(u32 ctx, u64 seq, u8 phase, u32 inputs, u32 sources, u32 waits,
+	     bool converted, u64 counter),
+    TP_ARGS(ctx, seq, phase, inputs, sources, waits, converted, counter),
+    TP_STRUCT__entry(
+	__field(u32, ctx)
+	__field(u64, seq)
+	__field(u8, phase)
+	__field(u32, inputs)
+	__field(u32, sources)
+	__field(u32, waits)
+	__field(bool, converted)
+	__field(u64, counter)
+    ),
+    TP_fast_assign(
+	__entry->ctx = ctx;
+	__entry->seq = seq;
+	__entry->phase = phase;
+	__entry->inputs = inputs;
+	__entry->sources = sources;
+	__entry->waits = waits;
+	__entry->converted = converted;
+	__entry->counter = counter;
+    ),
+    TP_printk("ctx=%u seq=%llu phase=%u inputs=%u sources=%u waits=%u converted=%u counter=%llu",
+	      __entry->ctx, __entry->seq, __entry->phase, __entry->inputs,
+	      __entry->sources, __entry->waits, __entry->converted, __entry->counter)
+);
+
+/* phase: 0 enqueue, 1 inline published, 2 scheduler fallback, 3 run begin,
+ * 4 run end, 5 prepare begin, 6 prepare end. detail: dependencies, error or wait. */
+TRACE_EVENT(asahi_g17_schedule,
+    TP_PROTO(u8 engine, u32 ctx, u64 seq, u8 phase, s32 detail, u64 counter),
+    TP_ARGS(engine, ctx, seq, phase, detail, counter),
+    TP_STRUCT__entry(
+	__field(u8, engine)
+	__field(u32, ctx)
+	__field(u64, seq)
+	__field(u8, phase)
+	__field(s32, detail)
+	__field(u64, counter)
+    ),
+    TP_fast_assign(
+	__entry->engine = engine;
+	__entry->ctx = ctx;
+	__entry->seq = seq;
+	__entry->phase = phase;
+	__entry->detail = detail;
+	__entry->counter = counter;
+    ),
+    TP_printk("engine=%u ctx=%u seq=%llu phase=%u detail=%d counter=%llu",
+	      __entry->engine, __entry->ctx, __entry->seq, __entry->phase,
+	      __entry->detail, __entry->counter)
+);
+
+/* Raw 18-word records: trace=0, statistics=1, event=2. No unit inference. */
+TRACE_EVENT(asahi_g17_report,
+	TP_PROTO(u8 role, u8 ring, const u32 *words, u64 counter),
+	TP_ARGS(role, ring, words, counter),
+	TP_STRUCT__entry(
+		__field(u8, role)
+		__field(u8, ring)
+		__array(u32, words, 18)
+		__field(u64, counter)
+	),
+	TP_fast_assign(
+		__entry->role = role;
+		__entry->ring = ring;
+		memcpy(__entry->words, words, sizeof(__entry->words));
+		__entry->counter = counter;
+	),
+	TP_printk("role=%u ring=%u words=%s counter=%llu", __entry->role,
+		  __entry->ring, __print_array(__entry->words, 18, sizeof(u32)),
+		  __entry->counter)
+);
+
 #endif
 
 #undef TRACE_INCLUDE_PATH

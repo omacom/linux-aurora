@@ -108,11 +108,12 @@ impl Vm {
     pub(crate) fn render_footprint(
         &self,
         attachments: &Attachments,
+        whole: bool,
     ) -> Result<Option<Arc<Footprint>>> {
         if attachments.as_slice().is_empty() {
             return Ok(None);
         }
-        let mut footprint = Footprint::new(self.id);
+        let mut footprint = Footprint::new(self.id, whole);
         let bindings = self.shared_bindings.as_ref().and_then(|shared| {
             (shared.count.load(Ordering::Relaxed) != 0).then(|| shared.bindings.lock())
         });

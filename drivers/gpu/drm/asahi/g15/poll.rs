@@ -550,25 +550,38 @@ impl Firmware {
         let s = &mut self.engine.stats;
 
         // Add one stage interval read from internal timestamp cells (start, end).
-        let mut stage = |o: &super::object::FwObject, off: usize, sum: &mut u64| {
-            let rd = |x: usize| o.r32(x).unwrap_or(0) as u64;
-            let start = rd(off + 4) << 32 | rd(off);
-            let end = rd(off + 12) << 32 | rd(off + 8);
+        let mut stage = |o: &super::object::FwObject,
+                         off: usize,
+                         sum: &mut u64,
+                         engine: crate::usage::Engine| {
+            let (Ok(start_lo), Ok(start_hi), Ok(end_lo), Ok(end_hi)) =
+                (o.r32(off), o.r32(off + 4), o.r32(off + 8), o.r32(off + 12))
+            else {
+                return;
+            };
+            let start = u64::from(start_hi) << 32 | u64::from(start_lo);
+            let end = u64::from(end_hi) << 32 | u64::from(end_lo);
             if start == 0 || end < start {
                 return;
             }
+            f.job.queue.usage.add(engine, start, end, 24_000_000);
             *sum += end - start;
             lo = lo.min(start);
             hi = hi.max(end);
         };
         for k in 0..f.renders as usize {
             let p = &scrub.passes[f.claims.pass[k] as usize];
-            stage(&p.its, 0, &mut s.ta_ticks);
-            stage(&p.its, 0x10, &mut s.fs_ticks);
+            stage(&p.its, 0, &mut s.ta_ticks, crate::usage::Engine::Vertex);
+            stage(
+                &p.its,
+                0x10,
+                &mut s.fs_ticks,
+                crate::usage::Engine::Fragment,
+            );
         }
         for k in 0..(f.computes as usize).min(f.claims.slot_count as usize) {
             let c = &scrub.compute[f.claims.slot[k] as usize];
-            stage(&c.its, 0, &mut s.cdm_ticks);
+            stage(&c.its, 0, &mut s.cdm_ticks, crate::usage::Engine::Compute);
         }
         if hi > lo {
             s.span_ticks += hi - lo;

@@ -494,6 +494,16 @@ impl Pool {
             }
         }
     }
+    /// The owner's pair is quarantined behind another VM's recovery (spared) and drains.
+    pub(crate) fn spared_quarantined(&self, owner: u64) -> bool {
+        let state = self.state.lock();
+        state
+            .owners
+            .iter()
+            .position(|id| *id == owner)
+            .is_some_and(|slot| state.quarantined & state.spared & (1u64 << slot) != 0)
+    }
+
     pub(crate) fn acquire_render(
         self: &Arc<Self>,
         owner: u64,
@@ -525,17 +535,22 @@ impl Pool {
                 .position(|id| *id == owner)
                 .is_some_and(|slot| state.quarantined & (1u64 << slot) != 0)
             {
-                if now >= quarantine_deadline {
-                    // Behind an innocent pair's quarantine (another VM wedged the GPU) only this
-                    // publication fails, not the VM: it recovers once the pair drains.
-                    let spared = state
-                        .owners
-                        .iter()
-                        .position(|id| *id == owner)
-                        .is_some_and(|slot| state.spared & (1u64 << slot) != 0);
-                    return Err(if spared { EBUSY } else { EIO });
+                // Behind an innocent pair's quarantine (another VM wedged the GPU) wait for the
+                // pair to drain until the caller's deadline, which the caller extends while it
+                // drains (RECOVERY_WAIT_MS); a guilty pair's publication fails after a second.
+                let spared = state
+                    .owners
+                    .iter()
+                    .position(|id| *id == owner)
+                    .is_some_and(|slot| state.spared & (1u64 << slot) != 0);
+                if now >= quarantine_deadline && !spared {
+                    return Err(EIO);
                 }
-                let slice = remaining_ms.min(wait_slice_ms(quarantine_deadline, now)?);
+                let slice = if spared {
+                    remaining_ms
+                } else {
+                    remaining_ms.min(wait_slice_ms(quarantine_deadline, now)?)
+                };
                 if matches!(self.released.wait_interruptible_timeout(
                     &mut state, kernel::time::msecs_to_jiffies(slice)
                 ), CondVarTimeoutResult::Signal { .. }) {
@@ -1001,10 +1016,13 @@ mod fault_capacity_tests {
         let queue = pool.reserve_queue().unwrap();
         let lease = pool.acquire_render(1, None, u64::MAX, || Ok(())).unwrap();
         let bit = 1u64 << lease.slot();
+        assert!(!pool.spared_quarantined(1));
         lease.quarantine(true);
         assert_ne!(pool.state.lock().spared & bit, 0);
+        assert!(pool.spared_quarantined(1));
         lease.quarantine(false);
         assert_eq!(pool.state.lock().spared & bit, 0);
+        assert!(!pool.spared_quarantined(1));
         // Once guilty, a later spared failure does not make it spared again.
         lease.quarantine(true);
         assert_eq!(pool.state.lock().spared & bit, 0);

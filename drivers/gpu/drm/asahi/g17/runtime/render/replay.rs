@@ -10,6 +10,29 @@ use crate::g17::{object::Allocator, queue::render::RenderAddresses, Firmware};
 use kernel::prelude::*;
 
 impl super::RenderState {
+    /// (an executed group of the owner retired in `generation` or later,
+    ///  a published group of the owner is still live and not parked).
+    pub(in crate::g17) fn owner_render_state(&self, owner: u64, generation: u64) -> (bool, bool) {
+        let mut executed = false;
+        let mut live = false;
+        for pair in self.entries.iter().flatten().filter_map(|entry| entry.pair.as_ref()) {
+            if pair.owner() != Some(owner) {
+                continue;
+            }
+            executed |= pair.executed_since(generation);
+            live |= pair.live_unparked();
+        }
+        (executed, live)
+    }
+    /// A parked render of the owner precedes a command waiting through `through`.
+    pub(in crate::g17) fn owner_parked_through(&self, owner: u64, through: Option<u64>) -> bool {
+        self.entries
+            .iter()
+            .flatten()
+            .filter_map(|entry| entry.pair.as_ref())
+            .any(|pair| pair.owner() == Some(owner) && pair.replay_through(through))
+    }
+
     pub(in crate::g17) fn replay_polling(&self) -> bool {
         self.entries
             .iter()

@@ -616,6 +616,14 @@ impl Vm {
                 inner.page_table.discard_partial_map(map.addr..end)?;
                 inner.tlbi_contexts_naming_root(map.addr, map.range as usize);
                 let prot = map.inner.prot.ok_or(EINVAL)?;
+                if super::is_sparse_tile(map.flags) {
+                    // A tile fill has no GEM pages to restore: reinstall it.
+                    let _change = inner.mapping_mutation();
+                    inner.map_sparse_tile(map.addr..end, prot)?;
+                    inner.tlbi_contexts_naming_root(map.addr, map.range as usize);
+                    inner.set_invalidated(map.addr, map.range, false)?;
+                    return Ok(());
+                }
                 let repeat = map.flags.contains(GpuVaFlag::REPEAT);
                 let mut skip = map
                     .offset

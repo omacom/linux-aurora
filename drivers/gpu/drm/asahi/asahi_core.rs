@@ -4,6 +4,7 @@
 //! Driver for the Apple AGX GPUs found in Apple Silicon SoCs.
 
 mod alloc;
+mod binding;
 mod buffer;
 mod channel;
 mod cleanup;
@@ -13,20 +14,21 @@ mod event;
 mod file;
 mod float;
 mod fw;
-mod gem;
-mod g17;
+mod fwid;
 #[cfg(CONFIG_DRM_ASAHI_G15)]
 mod g15;
 // Without the G15 backend, only the UAT adoption the T8122 runtime shares with it.
 #[cfg(all(CONFIG_DRM_ASAHI_UAT_ADOPTION, not(CONFIG_DRM_ASAHI_G15)))]
 #[path = "g15/adopt.rs"]
 mod g15;
+mod g17;
+mod gem;
 mod gpu;
 mod hw;
 mod initdata;
+mod m3;
 mod mem;
 mod memacct;
-mod m3;
 mod microseq;
 mod mmu;
 mod object;
@@ -38,6 +40,7 @@ mod stats;
 mod stats_raw;
 mod sysfs_exports;
 mod timestamp;
+mod usage;
 mod util;
 #[cfg(CONFIG_DRM_ASAHI_MAPLE_TREE)]
 mod vm;
@@ -64,6 +67,8 @@ struct DriverModule {
 
 impl kernel::InPlaceModule for DriverModule {
     fn init(module: &'static kernel::ThisModule) -> impl PinInit<Self, Error> {
+        // SAFETY: Module init runs once, before either adapter is registered below.
+        unsafe { binding::init() };
         try_pin_init!(Self {
             // Initialize the queue first, before registration can invoke probe.
             _cleanup: cleanup::QueueOwner::new()?,
@@ -86,6 +91,22 @@ module! {
     description: "AGX GPU driver for Apple silicon SoCs",
     license: "Dual MIT/GPL",
     params: {
+        m5_mesh_storage_chunks: u32 {
+            default: 0x200,
+            description: "M5 mesh rendering buffer bound to API task (object-stage) render kicks only, in 64 KiB chunks; 0 disables the binding and the task feature",
+        },
+        m5_thermal_governor: u32 {
+            default: 0,
+            description: "M5 thermal flags: bit 0 enables the host GPU power budget controller, bit 2 lets the controller lower the CPU frequency ceiling while the GPU is budget-bound, bit 3 runs the fans at their maximum while it governs; default 0 preserves the existing policy",
+        },
+        m5_thermal_target_mc: u32 {
+            default: 90000,
+            description: "M5 GPU power budget governor target for the SoC hotspot temperature computed by the SMC, in milli-degrees C (70000..104000)",
+        },
+        m5_depth_msaa_compression: u32 {
+            default: 1,
+            description: "Enable single-layer D32 compressed 2x/4x ZLS admission",
+        },
         debug_flags: u64 {
             default: 0,
             // permissions: 0o644,

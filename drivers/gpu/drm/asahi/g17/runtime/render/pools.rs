@@ -122,7 +122,17 @@ impl Pools {
     }
 
     fn stage(&self, init: &InitData, pool: &RenderPool) -> Result {
-        let words = descriptor_words(init.page_pool_descriptor_table()?, pool.id())?;
+        if pool.is_m5() {
+            let words = descriptor_words::<8>(init.page_pool_descriptor_table()?, pool.id())?;
+            pool.repopulate()?;
+            let descriptor = pool.m5_descriptor()?;
+            for (word, value) in words.into_iter().zip(descriptor) {
+                word.store(value, Ordering::Relaxed);
+            }
+            fence(Ordering::SeqCst);
+            return Ok(());
+        }
+        let words = descriptor_words::<4>(init.page_pool_descriptor_table()?, pool.id())?;
         pool.repopulate()?;
         let descriptor = pool
             .page_pool_state()?
@@ -240,8 +250,13 @@ impl Pools {
     /// A detached pool may capture firmware counters only after its last pair
     /// stopped using this registration. Callers check all retained pair owners.
     pub(super) fn save(&self, init: &InitData, pool: &RenderPool) -> Result {
+        if pool.is_m5() {
+            let words = descriptor_words::<8>(init.page_pool_descriptor_table()?, pool.id())?;
+            fence(Ordering::Acquire);
+            return pool.store_m5_descriptor(words.map(|word| word.load(Ordering::Relaxed)));
+        }
         let state = pool.page_pool_state()?;
-        let words = descriptor_words(init.page_pool_descriptor_table()?, pool.id())?;
+        let words = descriptor_words::<4>(init.page_pool_descriptor_table()?, pool.id())?;
         fence(Ordering::Acquire);
         let descriptor = PagePoolDescriptor {
             page_list: words[0].load(Ordering::Relaxed),
@@ -256,14 +271,12 @@ impl Pools {
     }
 }
 
-fn descriptor_words(table: &KernelObject, id: u16) -> Result<[&AtomicU64; 4]> {
-    let offset = Pools::slot(id)? * size_of::<PagePoolDescriptor>();
-    Ok([
-        table.dword(offset)?,
-        table.dword(offset + 8)?,
-        table.dword(offset + 16)?,
-        table.dword(offset + 24)?,
-    ])
+/// The `N` descriptor words of pool `id`: four on G17P, eight on M5.
+fn descriptor_words<const N: usize>(table: &KernelObject, id: u16) -> Result<[&AtomicU64; N]> {
+    let offset = Pools::slot(id)? * N * size_of::<u64>();
+    // Check the full row before constructing the infallible array of views.
+    table.pointer(offset, N * size_of::<u64>())?;
+    Ok(core::array::from_fn(|i| table.dword(offset + i * 8).unwrap()))
 }
 
 impl Pools {

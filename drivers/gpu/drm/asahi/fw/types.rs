@@ -117,6 +117,8 @@ macro_rules! default_zeroed {
     (<$($lt:lifetime),*>, $type:ty) => {
         impl<$($lt),*> Default for $type {
             fn default() -> $type {
+                // SAFETY: The macro's contract requires every field of this
+                // type to admit the all-zero bit pattern.
                 unsafe { core::mem::zeroed() }
             }
         }
@@ -126,6 +128,8 @@ macro_rules! default_zeroed {
     ($type:ty) => {
         impl Default for $type {
             fn default() -> $type {
+                // SAFETY: The macro's contract requires every field of this
+                // type to admit the all-zero bit pattern.
                 unsafe { core::mem::zeroed() }
             }
         }
@@ -144,6 +148,7 @@ unsafe impl<const N: usize> Zeroable for Pad<N> {}
 
 impl<const N: usize> Default for Pad<N> {
     fn default() -> Self {
+        // SAFETY: The wrapper contains only an array of bytes.
         unsafe { core::mem::zeroed() }
     }
 }
@@ -170,6 +175,7 @@ unsafe impl<const N: usize, T: Zeroable> Zeroable for Array<N, T> {}
 
 impl<const N: usize, T: Zeroable> Default for Array<N, T> {
     fn default() -> Self {
+        // SAFETY: Every element admits the all-zero bit pattern through T: Zeroable.
         unsafe { core::mem::zeroed() }
     }
 }

@@ -229,6 +229,13 @@ impl KernelObject {
         self.mapping.take().ok_or(EINVAL)
     }
 
+    /// Publishes the page-table updates of the object's own mapping to every context naming its
+    /// VM's root (see [`mmu::KernelMapping::publish_to_contexts`]).
+    pub(crate) fn publish_to_contexts(&self) -> Result {
+        self.mapping.as_ref().ok_or(EINVAL)?.publish_to_contexts();
+        Ok(())
+    }
+
     /// Returns the GPU address of the object.
     pub(crate) fn gpu_va(&self) -> u64 {
         self.mapping.as_ref().map_or(0, |mapping| mapping.iova())
@@ -338,8 +345,7 @@ impl Allocator<'_> {
         prot: mmu::Prot,
         cpu: CpuMap,
     ) -> Result<KernelObject> {
-        let mut range = self.uat.geometry().kernel_range();
-        range.start += crate::hw::t8140::dynamic::KERNEL_OFFSET;
+        let range = self.uat.kernel_dynamic_range();
         KernelObject::new(
             self.dev,
             self.uat.kernel_vm(),
@@ -362,7 +368,7 @@ impl Allocator<'_> {
         KernelObject::new(
             self.dev,
             self.uat.kernel_lower_vm(),
-            Placement::In(crate::hw::t8140::dynamic::LOWER, align),
+            Placement::In(self.uat.kernel_lower_dynamic_range(), align),
             size,
             prot,
             cpu,
@@ -448,9 +454,11 @@ pub(crate) enum Family {
     WorkState = 1,
     QueueState = 2,
     QueueConfig = 3,
+    /// An M5 context's scheduler page, whose mapping the M5 firmware caches.
+    Scheduler = 4,
 }
 
-const POOL_FAMILIES: usize = 4;
+const POOL_FAMILIES: usize = 5;
 const POOL_SLOTS: usize = 64;
 const POOL_BYTES: usize = 128 * 1024 * 1024;
 

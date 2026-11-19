@@ -250,7 +250,7 @@ impl gpu::Gpu for Backend {
     }
     fn new_queue(&self, vm: mmu::Vm, _ualloc: Arc<Mutex<alloc::DefaultAllocator>>,
         _ualloc_priv: Arc<Mutex<alloc::DefaultAllocator>>, priority: u32,
-        usc_exec_base: u64) -> Result<KBox<dyn queue::Queue>> {
+        usc_exec_base: u64, _usage: Arc<crate::usage::Client>) -> Result<KBox<dyn queue::Queue>> {
         Ok(KBox::new(crate::m3::m3_submit::Queue::new(self.shared.clone(),self.scheduler.clone(),vm,priority,usc_exec_base,
             self.soc.features.fragment_dependency)?,GFP_KERNEL)?)
     }

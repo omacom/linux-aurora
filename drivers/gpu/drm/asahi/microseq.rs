@@ -45,7 +45,7 @@ impl Builder {
     pub(crate) fn add<T: microseq::Operation>(&mut self, op: T) -> Result<i32> {
         let off = self.ops.len();
         let p: *const T = &op;
-        let p: *const u8 = p as *const u8;
+        let p: *const u8 = p.cast::<u8>();
         // SAFETY: Microseq operations always have no padding bytes, so it is safe to
         // access them as a byte slice.
         let s: &[u8] = unsafe { core::slice::from_raw_parts(p, core::mem::size_of::<T>()) };

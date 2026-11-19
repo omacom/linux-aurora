@@ -23,14 +23,17 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/sched.h>
 #include <linux/soc/apple/mailbox.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
+#include <uapi/linux/sched/types.h>
 
 #define APPLE_ASC_MBOX_CONTROL_FULL BIT(16)
 #define APPLE_ASC_MBOX_CONTROL_EMPTY BIT(17)
@@ -112,6 +115,8 @@ static_assert(APPLE_ASCWRAP_V6_MBOX_OFFSET + APPLE_ASC_MBOX_I2A_RECV0 ==
 #define APPLE_MBOX_MSG1_MSG GENMASK(31, 0)
 
 #define APPLE_MBOX_TX_TIMEOUT 500
+#define APPLE_G17_MBOX_RX_BUDGET 64
+#define APPLE_G17_MBOX_ATOMIC_TX_US 1000
 
 struct apple_mbox_hw {
 	unsigned int reg_offset;
@@ -266,10 +271,17 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(apple_mbox_ascwrap_v6_stop_cpu);
 
+static bool apple_mbox_is_g17(const struct apple_mbox *mbox)
+{
+	return mbox->ascwrap_v6.role == APPLE_MBOX_ASCWRAP_V6_ROLE_GFX ||
+	       mbox->ascwrap_v6.role == APPLE_MBOX_ASCWRAP_V6_ROLE_GFX1;
+}
+
 int apple_mbox_send(struct apple_mbox *mbox, const struct apple_mbox_msg msg,
 		    bool atomic)
 {
-	unsigned long flags;
+	unsigned long flags, remaining, now;
+	unsigned long deadline = jiffies + msecs_to_jiffies(APPLE_MBOX_TX_TIMEOUT);
 	int ret;
 	u32 mbox_ctrl;
 	long t;
@@ -282,10 +294,32 @@ int apple_mbox_send(struct apple_mbox *mbox, const struct apple_mbox_msg msg,
 	mbox_ctrl = readl_relaxed(mbox->regs + mbox->hw->a2i_control);
 
 	while (mbox_ctrl & mbox->hw->control_full) {
+		now = jiffies;
+		if (time_after_eq(now, deadline)) {
+			spin_unlock_irqrestore(&mbox->tx_lock, flags);
+			return -ETIMEDOUT;
+		}
+		remaining = deadline - now;
+		if (apple_mbox_is_g17(mbox) && !atomic && mbox->irq_send_empty < 0) {
+			/* The GPU has no send-empty IRQ. Do not busy wait with IRQs
+			 * off while dead firmware keeps its FIFO full. Recheck both
+			 * the removal fence and the one absolute deadline on retry.
+			 */
+			spin_unlock_irqrestore(&mbox->tx_lock, flags);
+			usleep_range(1000, 2000);
+			spin_lock_irqsave(&mbox->tx_lock, flags);
+			if (unlikely(READ_ONCE(mbox->removing))) {
+				spin_unlock_irqrestore(&mbox->tx_lock, flags);
+				return -ENODEV;
+			}
+			mbox_ctrl = readl_relaxed(mbox->regs + mbox->hw->a2i_control);
+			continue;
+		}
 		if (atomic || mbox->irq_send_empty < 0) {
 			ret = readl_poll_timeout_atomic(
 				mbox->regs + mbox->hw->a2i_control, mbox_ctrl,
 				!(mbox_ctrl & mbox->hw->control_full), 100,
+				apple_mbox_is_g17(mbox) ? APPLE_G17_MBOX_ATOMIC_TX_US :
 				APPLE_MBOX_TX_TIMEOUT * 1000);
 
 			if (ret) {
@@ -316,8 +350,7 @@ int apple_mbox_send(struct apple_mbox *mbox, const struct apple_mbox_msg msg,
 		spin_unlock_irqrestore(&mbox->tx_lock, flags);
 
 		t = wait_for_completion_interruptible_timeout(
-			&mbox->tx_empty,
-			msecs_to_jiffies(APPLE_MBOX_TX_TIMEOUT));
+			&mbox->tx_empty, remaining);
 		if (t <= 0) {
 			/* A late IRQ may already have masked this under tx_lock. */
 			spin_lock_irqsave(&mbox->tx_lock, flags);
@@ -374,13 +407,14 @@ static int apple_mbox_poll_locked(struct apple_mbox *mbox)
 	struct apple_mbox_msg msg;
 	int ret = 0;
 	u32 mbox_ctrl;
+	u32 budget = apple_mbox_is_g17(mbox) ? APPLE_G17_MBOX_RX_BUDGET : U32_MAX;
 
 	/* A stopped receiver may still have firmware traffic in its FIFO. */
 	if (!mbox->rx)
 		return 0;
 	mbox_ctrl = readl_relaxed(mbox->regs + mbox->hw->i2a_control);
 
-	while (!(mbox_ctrl & mbox->hw->control_empty)) {
+	while (!(mbox_ctrl & mbox->hw->control_empty) && budget--) {
 		msg.msg0 = readq_relaxed(mbox->regs + mbox->hw->i2a_recv0);
 		msg.msg1 = FIELD_GET(
 			APPLE_MBOX_MSG1_MSG,
@@ -407,14 +441,60 @@ static int apple_mbox_poll_locked(struct apple_mbox *mbox)
 	return ret;
 }
 
+/*
+ * Threaded receive handler only: apply the consumer's minimum utilization to
+ * this thread. As an RT thread it otherwise runs with the RT default, which
+ * makes schedutil raise its CPU cluster to the top frequency on every message.
+ */
+static void apple_mbox_apply_rx_util_min(struct apple_mbox *mbox)
+{
+	int util_min = READ_ONCE(mbox->rx_util_min);
+	struct sched_attr attr = {
+		.sched_policy = current->policy,
+		.sched_priority = current->rt_priority,
+		.sched_flags = SCHED_FLAG_KEEP_ALL | SCHED_FLAG_UTIL_CLAMP_MIN,
+	};
+
+	if (util_min == mbox->rx_util_min_applied)
+		return;
+	/* -1 resets the clamp to the default, which follows the RT sysctl. */
+	attr.sched_util_min = util_min;
+	if (!sched_setattr_nocheck(current, &attr))
+		mbox->rx_util_min_applied = util_min;
+}
+
+int apple_mbox_set_rx_util_min(struct apple_mbox *mbox, int util_min)
+{
+	if (!IS_ENABLED(CONFIG_UCLAMP_TASK) || !apple_mbox_is_g17(mbox))
+		return -EOPNOTSUPP;
+	if (util_min < -1 || util_min > SCHED_CAPACITY_SCALE)
+		return -EINVAL;
+	WRITE_ONCE(mbox->rx_util_min, util_min);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(apple_mbox_set_rx_util_min);
+
 static irqreturn_t apple_mbox_recv_irq(int irq, void *data)
 {
 	struct apple_mbox *mbox = data;
+	unsigned long flags;
+	int consumed = 0;
 
-	spin_lock(&mbox->rx_lock);
+	/* Only the G17 receive handler is threaded (see apple_mbox_probe()). */
+	if (apple_mbox_is_g17(mbox))
+		apple_mbox_apply_rx_util_min(mbox);
+
+	spin_lock_irqsave(&mbox->rx_lock, flags);
 	if (likely(!READ_ONCE(mbox->removing)))
-		apple_mbox_poll_locked(mbox);
-	spin_unlock(&mbox->rx_lock);
+		consumed = apple_mbox_poll_locked(mbox);
+	spin_unlock_irqrestore(&mbox->rx_lock, flags);
+
+	/* G17 uses a oneshot threaded IRQ. Leave it masked during this sleep
+	 * so a firmware flood cannot monopolize a CPU at IRQ-thread priority.
+	 * The level condition retriggers after return; no message is discarded.
+	 */
+	if (apple_mbox_is_g17(mbox) && consumed == APPLE_G17_MBOX_RX_BUDGET)
+		usleep_range(1000, 2000);
 
 	return IRQ_HANDLED;
 }
@@ -731,6 +811,8 @@ static int apple_mbox_probe(struct platform_device *pdev)
 	if (mbox->irq_send_empty < 0 && mbox->irq_send_empty != -ENXIO)
 		return mbox->irq_send_empty;
 
+	mbox->rx_util_min = -1;
+	mbox->rx_util_min_applied = -1;
 	spin_lock_init(&mbox->rx_lock);
 	spin_lock_init(&mbox->tx_lock);
 	mutex_init(&mbox->lifecycle_lock);
@@ -740,9 +822,15 @@ static int apple_mbox_probe(struct platform_device *pdev)
 	if (!irqname)
 		return -ENOMEM;
 
-	ret = devm_request_irq(dev, mbox->irq_recv_not_empty,
-			       apple_mbox_recv_irq,
-			       IRQF_NO_AUTOEN | IRQF_NO_SUSPEND, irqname, mbox);
+	if (apple_mbox_is_g17(mbox))
+		ret = devm_request_threaded_irq(dev, mbox->irq_recv_not_empty, NULL,
+				apple_mbox_recv_irq,
+				IRQF_ONESHOT | IRQF_NO_AUTOEN | IRQF_NO_SUSPEND,
+				irqname, mbox);
+	else
+		ret = devm_request_irq(dev, mbox->irq_recv_not_empty,
+				apple_mbox_recv_irq,
+				IRQF_NO_AUTOEN | IRQF_NO_SUSPEND, irqname, mbox);
 	if (ret)
 		return ret;
 
@@ -910,3 +998,7 @@ module_platform_driver(apple_mbox_driver);
 MODULE_LICENSE("Dual MIT/GPL");
 MODULE_AUTHOR("Sven Peter <sven@svenpeter.dev>");
 MODULE_DESCRIPTION("Apple Mailbox driver");
+
+#if IS_ENABLED(CONFIG_KUNIT)
+#include "mailbox-g17-test.h"
+#endif

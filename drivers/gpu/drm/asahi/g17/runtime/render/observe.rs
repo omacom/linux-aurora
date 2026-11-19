@@ -10,7 +10,7 @@ use kernel::{prelude::*, sync::Arc};
 impl crate::g17::Firmware {
     /// The first slot from `start` whose pair has news to observe: published work in flight, the
     /// fragment queue's notification seen (`completion_noted`), and an observation the pair accepts.
-    fn next_render_observation(&self, start: usize) -> Result<Option<usize>> {
+    fn next_render_observation(&mut self, start: usize) -> Result<Option<usize>> {
         if self.recovery.pending() {
             return Ok(None);
         }
@@ -27,7 +27,8 @@ impl crate::g17::Firmware {
             };
             let qids = pair.qids();
             if !pair.published_in_flight()
-                || !crate::g17::queue::render::completion_noted(qids, entry.event_masks)
+                || (!crate::g17::queue::render::completion_noted(qids, entry.event_masks)
+                    && !pair.stamp_waiting())
             {
                 continue;
             }
@@ -37,6 +38,15 @@ impl crate::g17::Firmware {
             ];
             core::sync::atomic::fence(Ordering::Acquire);
             if pair.observation_packet(entry.event_masks, stamps, state)?.is_some() {
+                return Ok(Some(slot));
+            }
+            // The stamps gate this pair out. If its front executed and was consumed anyway, the
+            // stamps may never move: after the bound, observe it and retire it on its record.
+            let pair = self.queues.render.entries[slot]
+                .as_mut()
+                .and_then(|entry| entry.pair.as_mut())
+                .ok_or(EIO)?;
+            if pair.note_stamp_wait(stamps, state, crate::g17::now_ns())? {
                 return Ok(Some(slot));
             }
         }

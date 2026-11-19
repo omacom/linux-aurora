@@ -42,6 +42,8 @@ pub(crate) struct QueueState {
     /// Host priority: `DRM_ASAHI_PRIORITY_REALTIME - priority` as `file.rs` passes it (MEDIUM 2,
     /// LOW 3; `file.rs` refuses HIGH and REALTIME). Smaller is served first.
     pub(crate) priority: u32,
+    /// Completed stage time of the DRM file that created this queue.
+    pub(crate) usage: Arc<crate::usage::Client>,
     /// USC executable window base.
     pub(crate) usc_base: u64,
     /// Engine service turn of this queue (least recently served first).
@@ -103,7 +105,13 @@ impl Drop for Queue {
 impl Queue {
     /// Creates a logical queue. `priority` is `DRM_ASAHI_PRIORITY_REALTIME - priority`, as
     /// `file.rs` passes it.
-    pub(crate) fn new(gpu: &Gpu, vm: mmu::Vm, priority: u32, usc_exec_base: u64) -> Result<Self> {
+    pub(crate) fn new(
+        gpu: &Gpu,
+        vm: mmu::Vm,
+        priority: u32,
+        usc_exec_base: u64,
+        usage: Arc<crate::usage::Client>,
+    ) -> Result<Self> {
         if priority > uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME {
             return Err(EINVAL);
         }
@@ -129,6 +137,7 @@ impl Queue {
         let state = Arc::new(
             QueueState {
                 priority,
+                usage,
                 usc_base: usc_exec_base,
                 turn: AtomicU64::new(0),
                 owned: [const { AtomicU32::new(0) }; 32],

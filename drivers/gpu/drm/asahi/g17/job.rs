@@ -7,6 +7,9 @@ use crate::driver::AsahiDrmDevice;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use kernel::{
     bindings, c_str,
+    cpu::CpuId,
+    cpumask::Cpumask,
+    workqueue,
     dma_fence::{Fence, RawDmaFence},
     drm::sched,
     prelude::*,
@@ -41,6 +44,9 @@ impl Engine {
 pub(crate) struct Order {
     pub(crate) sequence: u64,
     pub(crate) wait_through: [Option<u64>; 2],
+    /// What a render's tiling half waits on: `wait_through` unless the command
+    /// carries its own, never later, tiling prefixes.
+    pub(crate) tiling_wait_through: [Option<u64>; 2],
 }
 
 impl Order {
@@ -81,7 +87,20 @@ impl Order {
         Ok(Self {
             sequence: sequences[engine.index()],
             wait_through,
+            tiling_wait_through: wait_through,
         })
+    }
+
+    /// Give the tiling half the narrower prefixes of `tiling`, which resolves the
+    /// command's tail against the same ioctl position.
+    pub(crate) fn narrow_tiling(&mut self, tiling: &Self) -> Result {
+        for index in 0..2 {
+            if tiling.wait_through[index].unwrap_or(0) > self.wait_through[index].unwrap_or(0) {
+                return Err(EINVAL);
+            }
+        }
+        self.tiling_wait_through = tiling.wait_through;
+        Ok(())
     }
 
     pub(crate) fn contains(prefix: Option<u64>, sequence: u64) -> bool {
@@ -115,8 +134,8 @@ impl Packet {
         firmware: KVec<Fence>,
     ) -> Result<Arc<Self>> {
         let footprint = match &command {
-            Validated::Render { attachments, .. } => {
-                context.vm().render_footprint(&attachments[1])?
+            Validated::Render { attachments, pass, .. } => {
+                context.vm().render_footprint(&attachments[1], pass.whole_attachments)?
             }
             Validated::Compute { .. } => None,
         };
@@ -177,17 +196,27 @@ impl Packet {
                         kernel::time::msecs_to_jiffies(10) as isize,
                     )
                 };
+                // An interrupted wait is not a producer failure.
                 if waited < 0 {
-                    return Err(super::dependency::inherited_error(Error::from_errno(waited as i32)));
+                    return Err(Error::from_errno(waited as i32));
                 }
                 if waited > 0 { break; }
             }
             check_status(fence)?;
         }
+        self.check_firmware_producers()?;
+        self.completion.check_source_inputs()?;
+        Ok(())
+    }
+
+    /// Producers this packet waits for in firmware (another engine's commands that
+    /// were published, not complete, when it was scheduled). Checked before
+    /// publication, and again at retirement: a producer that fails after this
+    /// packet was published fails it too, although the firmware ran it.
+    pub(crate) fn check_firmware_producers(&self) -> Result {
         for fence in &self.firmware {
             check_status(fence)?;
         }
-        self.completion.check_source_inputs()?;
         Ok(())
     }
 
@@ -257,7 +286,7 @@ pub(crate) fn fence_status(fence: &Fence) -> i32 {
 fn check_status(fence: &Fence) -> Result {
     let status = fence_status(fence);
     if status < 0 {
-        Err(super::dependency::inherited_error(Error::from_errno(status)))
+        Err(super::dependency::PRODUCER_FAILED)
     } else {
         Ok(())
     }
@@ -274,9 +303,22 @@ pub(crate) trait Backend: Send + Sync {
         None
     }
 
+    /// The device accepts command submission (an M5 GPU before its queues take submission
+    /// does not).
+    fn supports_submission(&self) -> bool { true }
+    /// Whether this backend's scheduler workers run in their queue creator's cluster (M5).
+    fn creator_cluster_scheduling(&self) -> bool { false }
+    /// The reclaim-safe queue for the scheduler's timeout work, whose handler signals the
+    /// fences of timed-out jobs.
+    fn fence_queue(&self) -> Arc<workqueue::OwnedQueue>;
+    fn supports_engine(&self, _engine: Engine) -> bool { true }
+    /// Device policy applied to a validated command before it is ordered (the M5 resource
+    /// plan).
+    fn prepare_command(&self, _command: &mut super::command::Validated) -> Result { Ok(()) }
+
     /// Validate compute sizing without reserving a physical channel. Queued
     /// commands may wait on a host signal submitted after this ioctl returns.
-    fn ensure_compute(&self, scs_pages: u16) -> Result;
+    fn ensure_compute(&self, command: &super::command::Validated) -> Result;
     fn render_scs_blocks(&self, pages: [u16; 2]) -> Result<usize> {
         if pages != [0; 2] { return Err(EINVAL); }
         Ok(super::fw::freelist::RENDER_BLOCKS)
@@ -295,6 +337,9 @@ pub(crate) trait Backend: Send + Sync {
     fn defer_timeout(&self, packet: &Arc<Packet>, renewals: u8) -> bool;
     /// A long job of another queue is running beside `packet`.
     fn long_job_beside(&self, _packet: &Arc<Packet>) -> bool { false }
+    /// A published job's deadline may be renewed while other work retires
+    /// ([`super::timeout::renew_shared`]).
+    fn renews_shared(&self) -> bool { true }
     /// Return true only after taking publication ownership and recording its result.
     fn try_early(&self, packet: &Arc<Packet>) -> bool;
     fn count_backlog(&self, packet: &Packet);
@@ -350,8 +395,9 @@ impl<B: Backend> sched::JobImpl for Job<B> {
         }
         // Other work retiring means the GPU is shared, not hung. So does another long job
         // running beside a long job, though neither retires until it ends.
-        let shared = super::timeout::retiring(super::recovery::since_retired(super::now_ns()))
-            || (job.packet.command.long_job() && job.backend.long_job_beside(&job.packet));
+        let shared = job.backend.renews_shared()
+            && (super::timeout::retiring(super::recovery::since_retired(super::now_ns()))
+                || (job.packet.command.long_job() && job.backend.long_job_beside(&job.packet)));
         if super::timeout::renew_shared(job.packet.is_published(), shared, &mut job.shared_renewals) {
             return true;
         }
@@ -363,10 +409,17 @@ impl<B: Backend> sched::JobImpl for Job<B> {
     }
 
     fn prepare(job: &mut Self) -> Option<Fence> {
-        job.backend.prepare(&job.packet)
+        super::trace::schedule(&job.packet, 5, 0);
+        let wait = job.backend.prepare(&job.packet);
+        super::trace::schedule(&job.packet, 6, i32::from(wait.is_some()));
+        wait
     }
     fn run(job: &mut Self) -> Result<Option<Fence>> {
-        job.backend.publish(job.packet.clone()).map(Some)
+        super::trace::schedule(&job.packet, 3, 0);
+        let result = job.backend.publish(job.packet.clone()).map(Some);
+        super::trace::schedule(&job.packet, 4,
+            result.as_ref().err().map_or(0, |error| error.to_errno()));
+        result
     }
     fn timed_out(job: &mut Timeout<B>, finished: bool) -> sched::Status {
         // The scheduler retains the detached job throughout this callback. Keep
@@ -394,6 +447,13 @@ pub(crate) struct Fences {
     pub(crate) ready: Fence,
     pub(crate) completed: Fence,
     pub(crate) publication: Option<Arc<super::completion::Publication>>,
+    pub(crate) owner: Arc<Completion>,
+}
+
+impl super::dependency::Retention for Fences {
+    fn retained(&self) -> bool {
+        self.owner.retains_vm()
+    }
 }
 
 impl Fences {
@@ -414,7 +474,20 @@ impl<B: Backend> Scheduler<B> {
             Engine::Render => (RENDER_CREDITS, c_str!("asahi_g17_render")),
             Engine::Compute => (COMPUTE_CREDITS, c_str!("asahi_g17_compute")),
         };
-        let scheduler = sched::Scheduler::new(dev.as_ref().as_ref(), 1, credits, 0, TIMEOUT_MS, name)?;
+        let device = dev.as_ref().as_ref();
+        let submit = if backend.creator_cluster_scheduling() {
+            // The run and free work stays in the creating CPU's cluster, as the event work
+            // follows the submitter, instead of wherever an unbound worker last ran.
+            let queue = workqueue::OwnedQueue::new_ordered_reclaim(name)?;
+            queue.restrict(Cpumask::cluster_of(CpuId::current()))?;
+            Some(queue)
+        } else {
+            // drm_sched allocates its own ordered reclaim-safe queue.
+            None
+        };
+        let scheduler = sched::Scheduler::new_with_queues(
+            device, 1, credits, 0, TIMEOUT_MS, name, submit, Some(backend.fence_queue()),
+        )?;
         let entity = sched::Entity::new(&scheduler, sched::Priority::Kernel)?;
         Ok(Self {
             entity,
@@ -430,6 +503,7 @@ impl<B: Backend> Scheduler<B> {
         early: bool,
         publication: Option<super::completion::PreparedPublication>,
     ) -> Result<Fences> {
+        super::trace::schedule(&packet, 0, dependencies.len() as i32);
         let completed = packet.completion.fence();
         let host_timestamps = packet.completion.has_timestamps();
         // Only commands which actually write timestamps become host-prefix
@@ -462,13 +536,15 @@ impl<B: Backend> Scheduler<B> {
         };
         // All fallible scheduler setup precedes early hardware publication. The
         // scheduler still owns watchdog, credits and cancellation after push.
-        if !(early && self.backend.try_early(&packet)) {
+        let inline = early && self.backend.try_early(&packet);
+        super::trace::schedule(&packet, if inline { 1 } else { 2 }, 0);
+        if !inline {
             if packet.completion.needs_source_ready() {
                 packet.completion.set_source_ready(ready.clone());
             }
             self.backend.count_backlog(&packet);
         }
         job.push();
-        Ok(Fences { ready, completed, publication: host_publication })
+        Ok(Fences { ready, completed, publication: host_publication, owner: packet.completion.clone() })
     }
 }

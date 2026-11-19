@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 
 #include <linux/cpumask.h>
+#include <linux/topology.h>
 
 __rust_helper
 void rust_helper_cpumask_set_cpu(unsigned int cpu, struct cpumask *dstp)
@@ -81,3 +82,9 @@ void rust_helper_free_cpumask_var(cpumask_var_t mask)
 	free_cpumask_var(mask);
 }
 #endif
+
+__rust_helper
+const struct cpumask *rust_helper_topology_cluster_cpumask(int cpu)
+{
+	return topology_cluster_cpumask(cpu);
+}

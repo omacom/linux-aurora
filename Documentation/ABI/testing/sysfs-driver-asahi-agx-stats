@@ -64,5 +64,58 @@ Description:
 		`#[repr(C)]` on the Rust side and its offsets are asserted at
 		build time in `sysfs.c`; readers must parse `key value` lines and
 		must not assume binary layout of this file.
-		G17 firmware has no supported decoder for this snapshot format;
-		its file reports unsupported rather than fabricated zero counters.
+
+		G16S (T6040/V25G83) and G17P (T8140/V26A428) use a separate,
+		qualified snapshot. The G13/G14 output above is unchanged.
+		The following keys replace the legacy keys on these firmwares:
+
+		utilisation_status, pstate_status
+		           Each is valid, stale, or unavailable. Numeric metrics
+		           are printed only while their capability is valid;
+		           otherwise their value is the string unsupported.
+
+		util_tiler_percent, util_renderer_percent, util_device_percent
+		           Unsigned integer percent (0..100), from tag 0x13
+		           words 3, 4 and 6 respectively (zero-based). Device
+		           utilisation is independent of the overlapping engines;
+		           it is never their sum. Each complete valid packet from
+		           either role contributes one sample to a shared integer
+		           mean, rounded down. Reads do not consume samples.
+		           A packet with any value above 100 invalidates the whole
+		           utilisation capability. Zero is a valid sample.
+
+		pstate     Logical selector 0..10 from tag 0x10 word 6. Words 1
+		           and 2 form a little-endian u64 firmware timestamp.
+		           The first timestamp establishes a baseline. Invalid
+		           selectors and backwards timestamps remove pstate
+		           validity; timestamps are never extended across epochs.
+		           P0 is a logical state, not a core-power measurement.
+
+		requested_frequency_hz, achieved_frequency_hz, busy_ns,
+		power_mw, temperature_raw
+		           Always unsupported on these firmwares. The statistics
+		           packet does not identify performance table A or B;
+		           a selector is neither a host request nor a measured
+		           frequency. No qualified busy-time duration, power unit
+		           or temperature field is available.
+
+		The host uses a 16 ms age/averaging-window limit for V25G83 and
+		32 ms for V26A428 (two nominal periods). These are conservative
+		host policies, not firmware guarantees about packet duration.
+		The oldest contributing utilisation sample bounds its window.
+		A logical pstate has no qualified periodic-report cadence and
+		remains valid until a replacement or an epoch boundary; its
+		host receive time is retained in diagnostics, not used to invent
+		a periodic-report deadline.
+		Suspend/resume, restart, statistics-ring quarantine, observed
+		core gating and teardown end validity. After an epoch boundary,
+		each ring's already queued records are discarded before new
+		baselines are accepted. A quarantined statistics ring disables
+		both roles' exports until reprobe; a trace-ring error does not.
+
+		Reads take the device mutex and do not wake the GPU. The
+		firmware_reports debugfs view retains per-role raw packets,
+		counts and host monotonic receive times, plus capability status,
+		policy, timestamp and diagnostic tick deltas. Tick deltas are
+		never accumulated as GPU busy time. Firmware role streams are
+		merged in drain order without deduplication.

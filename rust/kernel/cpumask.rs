@@ -77,6 +77,14 @@ impl Cpumask {
         unsafe { &*ptr.cast() }
     }
 
+    /// The CPUs of `cpu`'s cluster as the architecture's topology describes it: `cpu` alone when
+    /// there is no cluster information.
+    pub fn cluster_of(cpu: CpuId) -> &'static Self {
+        // SAFETY: The topology keeps one mask per possible CPU for the kernel's lifetime, and `cpu`
+        // is a valid CPU ID by its type invariant.
+        unsafe { Self::from_raw(bindings::topology_cluster_cpumask(cpu.as_u32() as i32)) }
+    }
+
     /// Obtain the raw `struct cpumask` pointer.
     pub fn as_raw(&self) -> *mut bindings::cpumask {
         let this: *const Self = self;

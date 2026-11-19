@@ -41,9 +41,7 @@ use crate::{
         AsahiDrmDevice,
         AsahiDrmDriver, //
     },
-    file,
-    memacct,
-    mmu,
+    file, memacct, mmu,
 };
 
 const DEBUG_CLASS: DebugFlags = DebugFlags::Gem;
@@ -132,9 +130,6 @@ pub(crate) fn validate_vm_binding(gem: &Object, vm: &mmu::Vm) -> Result {
     }
     Ok(())
 }
-
-unsafe impl Send for AsahiObject {}
-unsafe impl Sync for AsahiObject {}
 
 /// A shared reference to a GEM object for this driver.
 pub(crate) struct ObjectRef {
@@ -465,7 +460,6 @@ pub(crate) fn prepare_new_object(gem: &Object) -> Result {
     crate::pgtable::poc_barrier();
     Ok(())
 }
-
 
 #[cfg(CONFIG_DRM_ASAHI_G15)]
 extern "C" { fn asahi_g15_dma_coherent(dev: *mut core::ffi::c_void) -> bool; }

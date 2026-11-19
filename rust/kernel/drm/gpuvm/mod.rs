@@ -60,6 +60,43 @@ pub use self::vm_bo::*;
 mod va;
 pub use self::va::*;
 
+/// `drm_gpuvm_exec_lock()` without `drm_gpuvm_prepare_objects()`: the
+/// `drm_exec_until_all_locked()` loop over the VM reservation and `vm_exec.extra`.
+///
+/// # Safety
+///
+/// `vm_exec` must be initialized as for `drm_gpuvm_exec_lock()`.
+unsafe fn exec_lock_vm_raw(vm_exec: &mut bindings::drm_gpuvm_exec) -> core::ffi::c_int {
+    let exec = &raw mut vm_exec.exec;
+    // SAFETY: Per the safety requirements, `exec` belongs to a valid `drm_gpuvm_exec`.
+    unsafe { bindings::drm_exec_init(exec, vm_exec.flags, 0) };
+    let mut ret = 0;
+    // SAFETY (whole loop): `exec` was initialized above and `vm_exec.vm` is a valid GPUVM.
+    // `drm_exec_cleanup()` drops all locks and restarts after contention, as the C macros do.
+    while unsafe { bindings::drm_exec_cleanup(exec) } {
+        ret = unsafe { bindings::drm_gpuvm_prepare_vm(vm_exec.vm, exec, vm_exec.num_fences) };
+        if unsafe { bindings::drm_exec_is_contended(exec) } {
+            continue;
+        }
+        if ret == 0 {
+            if let Some(extra) = vm_exec.extra.fn_ {
+                ret = unsafe { extra(vm_exec) };
+                if unsafe { bindings::drm_exec_is_contended(exec) } {
+                    continue;
+                }
+            }
+        }
+        if ret != 0 {
+            break;
+        }
+    }
+    if ret != 0 {
+        // SAFETY: Finalize the context initialized above, as `drm_gpuvm_exec_lock()` does on error.
+        unsafe { bindings::drm_exec_fini(exec) };
+    }
+    ret
+}
+
 pub(super) unsafe extern "C" fn exec_lock_gem_object(
     vm_exec: *mut bindings::drm_gpuvm_exec,
 ) -> core::ffi::c_int {
@@ -261,6 +298,36 @@ impl<T: DriverGpuVm> GpuVm<T> {
         obj: Option<&T::Object>,
         interruptible: bool,
     ) -> Result<GpuVmExec<T>> {
+        // SAFETY: Same contract as this function.
+        unsafe { self.exec_lock_impl(obj, interruptible, true) }
+    }
+
+    /// HACK: added for the asahi downstream driver. Like [`GpuVm::exec_lock`], but locks only
+    /// the VM's shared reservation (and `obj` if it is external), not every external object.
+    ///
+    /// Enough for VA updates of this immediate-mode, `DRM_GPUVM_RESV_PROTECTED` VM: they need
+    /// the VM reservation and each object's gpuva lock, which the link and unlink paths take.
+    /// Callers must not need external objects' reservations (fences, validation, eviction).
+    /// Locking all of them made each update cost O(external objects).
+    ///
+    /// # Safety
+    ///
+    /// Same as [`GpuVm::exec_lock`].
+    pub unsafe fn exec_lock_vm<'a>(
+        &'a self,
+        obj: Option<&T::Object>,
+        interruptible: bool,
+    ) -> Result<GpuVmExec<T>> {
+        // SAFETY: Same contract as this function.
+        unsafe { self.exec_lock_impl(obj, interruptible, false) }
+    }
+
+    unsafe fn exec_lock_impl<'a>(
+        &'a self,
+        obj: Option<&T::Object>,
+        interruptible: bool,
+        all_objects: bool,
+    ) -> Result<GpuVmExec<T>> {
         // Do not try to lock the object if it is internal (since it is already locked).
         let is_ext = obj.map(|a| self.is_extobj(a)).unwrap_or(false);
 
@@ -286,10 +353,16 @@ impl<T: DriverGpuVm> GpuVm<T> {
             GFP_KERNEL,
         )?;
 
-        // SAFETY: The object is valid and was initialized above. On failure,
-        // `drm_gpuvm_exec_lock()` has already finalized the exec context, so the box only needs to
-        // be freed, which dropping it does.
-        to_result(unsafe { bindings::drm_gpuvm_exec_lock(&mut *vm_exec) })?;
+        // SAFETY: The object is valid and was initialized above. On failure, both lock functions
+        // have already finalized the exec context, so the box only needs to be freed, which
+        // dropping it does.
+        to_result(unsafe {
+            if all_objects {
+                bindings::drm_gpuvm_exec_lock(&mut *vm_exec)
+            } else {
+                exec_lock_vm_raw(&mut *vm_exec)
+            }
+        })?;
 
         // Build the guard, and take its VM reference, only once the locks are held: its `Drop`
         // unlocks them.

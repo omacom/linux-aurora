@@ -22,10 +22,19 @@ use core::sync::atomic::{fence, AtomicBool, AtomicU32, AtomicU64, Ordering};
 use kernel::{
     new_mutex, new_spinlock,
     prelude::*,
+    soc::apple::rtkit,
     sync::{Arc, Mutex, MutexGuard, SetOnce, SpinLock},
 };
 
 const PRIORITIES: usize = Policy::PRIORITIES as usize;
+
+/// Minimum utilization of the primary coprocessor's receive thread, which handles every
+/// completion, while the GPU itself is the bottleneck (see `Feed::gpu_bound`). Otherwise the
+/// thread keeps the scheduler's RT default, which takes its CPU cluster to the top frequency for
+/// each completion: the completion may be on the critical path, of a waiter, of an idle GPU or of
+/// work bound by host refills. While the GPU is the bottleneck the burst gains nothing, and at the
+/// SoC's thermal limit the power it takes comes out of the GPU's clock.
+const RX_UTIL_MIN_GPU_BOUND: u32 = 256;
 
 /// One priority class's compute work ring: its slot array and the cursors of its two firmware
 /// consumers and of the host producer.
@@ -82,13 +91,19 @@ unsafe impl Sync for Views {}
 #[pin_data]
 pub(super) struct Port {
     views: SetOnce<Views>,
-    /// Register access for tracing the core power state at the doorbell.
     regs: SetOnce<crate::regs::G17Resources>,
+    registration: SetOnce<super::fw::variant::QueueRegistration>,
     /// Compute work-ring slots reserved by publishers that have not exposed them yet.
     #[pin]
     rings: SpinLock<[u32; PRIORITIES]>,
     #[pin]
     qos: SpinLock<qos::Accounting>,
+    /// Sets the completion receive thread's minimum utilization, from `feed`'s view of the GPU.
+    rx: SetOnce<rtkit::RxUtilMin>,
+    feed: Arc<super::feed::Feed>,
+    /// The request last made, `None` before the first.
+    #[pin]
+    rx_applied: SpinLock<Option<Option<u32>>>,
     /// Serializes every render publication, with or without the device mutex: the tiling
     /// and fragment work rings have one host producer at a time, and same-VM attachment
     /// overlaps are ordered by publication order (see hazard.rs).
@@ -100,6 +115,9 @@ pub(super) struct Port {
     publications: AtomicU64,
     /// Full firmware effort is applied; cleared before an idle clear rechecks `submissions`.
     effort_full: AtomicBool,
+    demand: super::power::Demand,
+    statistics_epoch: AtomicU64,
+    last_submission_ns: AtomicU64,
     submissions: AtomicU64,
 }
 
@@ -137,17 +155,27 @@ impl Drop for OuterClaim<'_> {
 }
 
 impl Port {
-    pub(super) fn new() -> Result<Arc<Self>> {
+    pub(super) fn new(
+        demand: super::power::Demand,
+        feed: Arc<super::feed::Feed>,
+    ) -> Result<Arc<Self>> {
         Arc::pin_init(
             pin_init!(Self {
                 views: SetOnce::new(),
                 regs: SetOnce::new(),
+                registration: SetOnce::new(),
                 rings <- new_spinlock!([0; PRIORITIES], "g17::Port::rings"),
                 qos <- new_spinlock!(qos::Accounting::new(), "g17::Port::qos"),
+                rx: SetOnce::new(),
+                feed,
+                rx_applied <- new_spinlock!(None, "g17::Port::rx_applied"),
                 render <- new_mutex!((), "g17::Port::render"),
                 generation: AtomicU64::new(0),
                 publications: AtomicU64::new(0),
                 effort_full: AtomicBool::new(false),
+                demand,
+                statistics_epoch: AtomicU64::new(0),
+                last_submission_ns: AtomicU64::new(0),
                 submissions: AtomicU64::new(0),
             }),
             GFP_KERNEL,
@@ -155,16 +183,47 @@ impl Port {
     }
 
     /// Called once while the session is built, before any publisher can see the port.
-    pub(super) fn attach(&self, views: Views, regs: crate::regs::G17Resources) -> Result {
-        if self.views.populate(views) && self.regs.populate(regs) {
+    pub(super) fn attach(
+        &self,
+        views: Views,
+        regs: crate::regs::G17Resources,
+        registration: super::fw::variant::QueueRegistration,
+        clamp_rx: bool,
+    ) -> Result {
+        // SAFETY: The session owns the mailbox and outlives every port user.
+        let rx = unsafe { (*views.mailbox).rx_util_min_handle() };
+        // Without `clamp_rx` (M5) no handle is attached and the receive thread keeps its
+        // default; rx_update() then returns at once.
+        if self.views.populate(views)
+            && self.regs.populate(regs)
+            && self.registration.populate(registration)
+            && (!clamp_rx || self.rx.populate(rx))
+        {
             Ok(())
         } else {
             Err(EBUSY)
         }
     }
 
+    pub(super) fn register_queues(&self, queues: &[super::fw::kick::KsmQueue]) -> Result {
+        use super::fw::variant::QueueRegistration;
+        if self.registration.as_ref() != Some(&QueueRegistration::Mailbox) {
+            return Ok(());
+        }
+        let regs = self.regs.as_ref().ok_or(ENODEV)?;
+        for queue in queues {
+            regs.register_ksm_queue(queue.qid, queue.descriptor)?;
+        }
+        Ok(())
+    }
+
     fn views(&self) -> Result<&Views> {
         self.views.as_ref().ok_or(ENODEV)
+    }
+
+    /// Both MMU fault banks, for recovery diagnostics while the firmware is halted.
+    pub(super) fn fault_banks(&self) -> Result<[(u64, u64); 2]> {
+        self.regs.as_ref().ok_or(ENODEV)?.fault_banks()
     }
 
     fn ring(&self, priority: u8) -> Result<(usize, RingView)> {
@@ -197,7 +256,11 @@ impl Port {
 
     /// Exposes `record` in its reserved slot. Inner queue records must be visible first. Returns
     /// the new producer, the retained consumer witness for this slot.
-    pub(super) fn publish_compute(&self, mut claim: OuterClaim<'_>, record: &WorkSlot) -> Result<u32> {
+    pub(super) fn publish_compute(
+        &self,
+        mut claim: OuterClaim<'_>,
+        record: &WorkSlot,
+    ) -> Result<u32> {
         if record.data_master != DataMaster::Compute as u32 || !core::ptr::eq(claim.port, self) {
             return Err(EINVAL);
         }
@@ -214,7 +277,8 @@ impl Port {
         unsafe {
             core::ptr::copy_nonoverlapping(
                 core::ptr::from_ref(record).cast::<u8>(),
-                ring.slots.add(producer as usize * core::mem::size_of::<WorkSlot>()),
+                ring.slots
+                    .add(producer as usize * core::mem::size_of::<WorkSlot>()),
                 core::mem::size_of::<WorkSlot>(),
             );
         }
@@ -252,13 +316,16 @@ impl Port {
         let (fragment, tiling) = self.render_rings(priority)?;
         let cursors = [fragment.cursors()?, tiling.cursors()?];
         let room = |[first, second, producer]: [u32; 3]| {
-            let room = |consumer: u32| (consumer + WORK_RING_SLOTS - producer - 1) % WORK_RING_SLOTS;
+            let room =
+                |consumer: u32| (consumer + WORK_RING_SLOTS - producer - 1) % WORK_RING_SLOTS;
             room(first).min(room(second))
         };
-        Ok((room(cursors[0]) > 0 && room(cursors[1]) > 0).then_some(RenderRoom {
-            priority,
-            producers: [cursors[0][2], cursors[1][2]],
-        }))
+        Ok(
+            (room(cursors[0]) > 0 && room(cursors[1]) > 0).then_some(RenderRoom {
+                priority,
+                producers: [cursors[0][2], cursors[1][2]],
+            }),
+        )
     }
 
     /// Copies a render pair's fragment, then tiling record into the slots after the producers
@@ -284,7 +351,10 @@ impl Port {
                 return Err(EINVAL);
             }
             // SAFETY: The ring view spans WORK_RING_SLOTS records; `producer` is in range.
-            let slot = unsafe { ring.slots.add(producer as usize * core::mem::size_of::<WorkSlot>()) };
+            let slot = unsafe {
+                ring.slots
+                    .add(producer as usize * core::mem::size_of::<WorkSlot>())
+            };
             Ok((slot, (producer + 1) % WORK_RING_SLOTS))
         };
         let (fragment_slot, fragment_next) = slot(&fragment_ring, room.producers[0])?;
@@ -357,7 +427,12 @@ impl Port {
         policy: Policy,
     ) -> Result<qos::Publication> {
         let view = self.qos_view()?;
-        self.qos.lock().publish(&view, owner, scheduler, policy, qos::clock)
+        let publication = self
+            .qos
+            .lock()
+            .publish(&view, owner, scheduler, policy, qos::clock)?;
+        self.rx_update();
+        Ok(publication)
     }
 
     /// Publishes the two owners of a render command, fragment then tiling.
@@ -368,7 +443,12 @@ impl Port {
         policy: Policy,
     ) -> Result<[qos::Publication; 2]> {
         let view = self.qos_view()?;
-        self.qos.lock().publish_owners(&view, owners, scheduler, policy, qos::clock)
+        let publications =
+            self.qos
+                .lock()
+                .publish_owners(&view, owners, scheduler, policy, qos::clock)?;
+        self.rx_update();
+        Ok(publications)
     }
 
     pub(super) fn qos_cancel(&self, publication: qos::Publication) -> Result {
@@ -376,9 +456,36 @@ impl Port {
         self.qos.lock().cancel(&view, publication)
     }
 
+    /// Clears the QoS table rows of released QoS IDs (`QosIds::take_released`).
+    pub(super) fn qos_forget(&self, ids: u128) -> Result {
+        if ids == 0 {
+            return Ok(());
+        }
+        let view = self.qos_view()?;
+        self.qos.lock().forget(&view, ids);
+        Ok(())
+    }
+
     pub(super) fn qos_complete(&self, owners: &[qos::Owner]) -> Result {
         let view = self.qos_view()?;
-        self.qos.lock().complete(&view, owners)
+        self.qos.lock().complete(&view, owners)?;
+        self.rx_update();
+        Ok(())
+    }
+
+    /// Requests the receive thread's minimum utilization for the feed's current view of the GPU,
+    /// where the port clamps it (not on M5, see attach()). Called at every publication and
+    /// completion: the feed's state lingers for a few milliseconds, so after a pause the
+    /// publication that ends it restores the default before its completion arrives.
+    fn rx_update(&self) {
+        let Some(rx) = self.rx.as_ref() else {
+            return;
+        };
+        let want = self.feed.gpu_bound().then_some(RX_UTIL_MIN_GPU_BOUND);
+        let mut applied = self.rx_applied.lock();
+        if *applied != Some(want) && rx.set(want).is_ok() {
+            *applied = Some(want);
+        }
     }
 
     /// Rings the primary coprocessor's doorbell.
@@ -421,6 +528,7 @@ impl Port {
     /// clear sees this submission or this submission sees the flag withdrawn.
     pub(super) fn note_submission(&self) -> bool {
         self.submissions.fetch_add(1, Ordering::SeqCst);
+        self.note_gpu_activity();
         self.effort_full.load(Ordering::SeqCst)
     }
 
@@ -430,5 +538,36 @@ impl Port {
 
     pub(super) fn set_effort_full(&self, full: bool) {
         self.effort_full.store(full, Ordering::SeqCst);
+        self.demand.set_active(full);
+    }
+
+    pub(super) fn statistics_epoch(&self) -> u64 {
+        self.statistics_epoch.load(Ordering::Acquire)
+    }
+
+    pub(super) fn note_gpu_activity(&self) {
+        // Observe gating before activity can wake the cores. A lockless
+        // publisher cannot clear the decoder under the device mutex; this
+        // epoch makes both the next drain and the next reader discard it.
+        if self
+            .regs
+            .as_ref()
+            .is_some_and(|regs| regs.g17_core_power() & 0xf == 0)
+        {
+            self.statistics_epoch.fetch_add(1, Ordering::Release);
+        }
+        self.last_submission_ns
+            .store(super::now_ns(), Ordering::Relaxed);
+        self.demand.set_active(true);
+    }
+
+    pub(super) fn write_power(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {
+        writeln!(
+            f,
+            "effort_full={} direct_submissions={} last_submission_ns={}",
+            self.effort_full.load(Ordering::SeqCst),
+            self.submissions(),
+            self.last_submission_ns.load(Ordering::Relaxed)
+        )
     }
 }

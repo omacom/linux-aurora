@@ -20,6 +20,14 @@ impl Backend {
                 return Ok(Decision::Own);
             };
             firmware.scan_compute(None, &mut deferred)?;
+            if let Some((older, own)) = self.behind_own_head(packet, &firmware.init, renewals) {
+                if renewals == 0 {
+                    dev_info!(self.shared.dev.as_ref(),
+                        "Compute watchdog owner={} behind its context's older node {:#x} (own {:#x}); the firmware progresses: renewed\n",
+                        self.owner, older, own);
+                }
+                return Ok(Decision::Defer);
+            }
             // Each queue is locked on its own: release this one before visiting the others.
             let Some(own) = firmware.queues.compute(self.owner)
                 .filter(|queue| queue.can_classify_timeout(packet))
@@ -47,6 +55,23 @@ impl Backend {
         })();
         deferred.finish();
         matches!(result, Ok(Decision::Defer))
+    }
+
+    /// The older node of the packet's context ahead of its own, with its own word, when the
+    /// firmware's progress word moved within the watchdog's interval, the packet's VM has no
+    /// failed work and the job's deferrals are within budget
+    /// ([`crate::g17::timeout::behind_own_head`]). The word is read at every poll. Firmware
+    /// without the word renews nothing by this rule.
+    pub(super) fn behind_own_head(&self, packet: &Arc<Packet>,
+        init: &crate::g17::initdata::InitData, renewals: u8) -> Option<(u32, u32)> {
+        let work = packet.completion.work_state().ok()?;
+        let older = work.older_node();
+        let progressing = init.m5_progress().is_ok_and(crate::g17::timeout::note_progress);
+        let status = packet.completion.status();
+        let failed = status.get() != 0 || status.reported_error() != 0;
+        crate::g17::timeout::behind_own_head(packet.is_published(), older, progressing,
+            failed, renewals)
+            .then(|| (older.unwrap_or(0), work.word()))
     }
 
     /// The caller owns cancellation of a packet that never claimed publication.

@@ -2,6 +2,9 @@
 
 //! Event service ordering under the device mutex. A restart ends its role's batch; a worker
 //! joins preparation leases and services it on a separate turn before continuing the rings.
+//! On M5 only the event rings are consumed here: the firmware's trace and statistics reports
+//! are drained after the completions this service retires have been signalled
+//! (`Firmware::drain_reports`), so no report queued ahead of a completion delays its fence.
 
 use super::{
     fw::channels::{Event, FreeListCompletion, TvbGrowRequest},
@@ -15,6 +18,8 @@ pub(super) trait Transport {
     fn roles(&self) -> &'static [Role];
     fn trace(&mut self, role: Role);
     fn statistics(&mut self, role: Role);
+    /// The reports are drained after the pass's completions are signalled (M5).
+    fn reports_after_signal(&self) -> bool;
     fn drain(
         &mut self,
         role: Role,
@@ -91,11 +96,13 @@ pub(super) fn service<H: Host>(host: &mut H) -> Result<Pending> {
         return Ok(Pending::default());
     }
     host.observe_render_releases()?;
-    for &role in host.roles() {
-        host.trace(role);
-    }
-    for &role in host.roles() {
-        host.statistics(role);
+    if !host.reports_after_signal() {
+        for &role in host.roles() {
+            host.trace(role);
+        }
+        for &role in host.roles() {
+            host.statistics(role);
+        }
     }
     let mut masks = [0; 2];
     if !host.recovery().pending() {
