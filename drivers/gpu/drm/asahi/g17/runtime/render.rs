@@ -798,6 +798,19 @@ impl crate::g17::Firmware {
             {
                 continue;
             }
+            let state = crate::g17::recovery::Memory::recovery_state(&self.init)?;
+            if let Some(pair) = self.queues.render.entries[slot]
+                .as_mut()
+                .and_then(|entry| entry.pair.as_mut())
+            {
+                let qids = pair.qids();
+                let stamps = [
+                    self.init.stamp(qids[0])?.load(core::sync::atomic::Ordering::Relaxed),
+                    self.init.stamp(qids[1])?.load(core::sync::atomic::Ordering::Relaxed),
+                ];
+                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                pair.note_stamp_wait(stamps, state, crate::g17::now_ns())?;
+            }
             self.retire_render_slot(slot, None, deferred)?;
             self.queues.render.collect_retired(slot)?;
             self.settle_render_terminal(slot, deferred)?;
@@ -1057,10 +1070,10 @@ impl Registry {
                     |pair| pair.published_in_flight(),
                 );
             active
-                && crate::g17::queue::render::completion_noted(
+                && (crate::g17::queue::render::completion_noted(
                     entry.reservation.ids.map(kick::Id::qid),
                     entry.event_masks,
-                )
+                ) || entry.pair.as_ref().is_some_and(|pair| pair.stamp_waiting()))
         })
     }
     pub(in crate::g17) fn defer_render_timeout(
