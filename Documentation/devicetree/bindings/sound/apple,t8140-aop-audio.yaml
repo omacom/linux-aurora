@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/sound/apple,t8140-aop-audio.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Apple T8140 AOP audio
+title: Apple T8140 and T8152 AOP audio
 
 maintainers:
   - Ryan Murray <ryan@aurorasilicon.org>
@@ -20,22 +20,29 @@ description: |
   The remaining audio data moves over the named ADMAC channels while its AOP
   service is active. The parent AOP binding describes the firmware transport.
 
-allOf:
-  - $ref: dai-common.yaml#
+  On T8152 (Mac mini, J873) the AOP offers only the speaker, jack output and
+  jack input services; the low-power and array microphones and the speaker tap
+  answer with kIOReturnNoDevice. The serializers and the audio fabric are
+  powered by the firmware, so the node has no power domains and no DART stream
+  of its own, and the sound card is described by a separate machine node.
 
 properties:
   compatible:
-    const: apple,t8140-aop-audio
+    enum:
+      - apple,t8140-aop-audio
+      - apple,t8152-aop-audio
 
   dmas:
+    minItems: 4
     items:
       - description: Internal speaker output
       - description: Headset jack output
       - description: Headset microphone input
       - description: Speaker output monitor input
-      - description: High-quality microphone array input
+      - description: High-quality microphone array input (T8140 only)
 
   dma-names:
+    minItems: 4
     items:
       - const: spkr
       - const: cout
@@ -91,13 +98,37 @@ required:
   - compatible
   - dmas
   - dma-names
-  - power-domains
-  - power-domain-names
-  - iommus
-  - apple,dma-range
   - "#sound-dai-cells"
-  - apple,chassis-name
-  - apple,machine-kind
+
+allOf:
+  - $ref: dai-common.yaml#
+  - if:
+      properties:
+        compatible:
+          const: apple,t8140-aop-audio
+    then:
+      properties:
+        dmas:
+          minItems: 5
+        dma-names:
+          minItems: 5
+      required:
+        - power-domains
+        - power-domain-names
+        - iommus
+        - apple,dma-range
+        - apple,chassis-name
+        - apple,machine-kind
+    else:
+      properties:
+        dmas:
+          maxItems: 4
+        dma-names:
+          maxItems: 4
+        power-domains: false
+        power-domain-names: false
+        iommus: false
+        apple,dma-range: false
 
 unevaluatedProperties: false
 

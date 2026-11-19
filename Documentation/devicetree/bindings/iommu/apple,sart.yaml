@@ -40,6 +40,7 @@ properties:
           - apple,t6000-sart
           - apple,t8015-sart
           - apple,t8103-sart
+          - apple,t8152-sart
 
   reg:
     maxItems: 1

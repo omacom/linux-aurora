@@ -22,7 +22,11 @@ description: |
   On t8142, a standalone register page contains a shared request register
   with alternating request and busy bits for four ports.
 
-  In all cases the reset id is the CIO port index on the die.
+  On t8152 the request and done registers are two adjacent words in the PMGR
+  region and, as on t600x, are a sub-node of the PMGR syscon; reg is the offset
+  of the request register and the reset id is the CIO cluster index.
+
+  On the other SoCs the reset id is the CIO port index on the die.
 
 properties:
   compatible:
@@ -31,6 +35,7 @@ properties:
           - apple,t8103-cio-reset
           - apple,t8142-cio-reset
           - apple,t6000-cio-reset
+          - apple,t8152-cio-reset
       - items:
           - const: apple,t8112-cio-reset
           - const: apple,t8103-cio-reset

@@ -1,0 +1,374 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * PMGR power domains for the Apple T8152 (M6), generated from the device tree of the boot firmware
+ * (/arm-io/pmgr-child). Real (non-virtual) devices only;
+ * virtual ADT devices have no PS register of their own (ANS, DPTX_PHY, ATC*_CIO_USB, ...)
+ * and are managed by firmware. Every domain is apple,always-on: Linux only keeps them ACTIVE.
+ */
+
+/ {
+	soc {
+		pmgr0: power-management@300700000 {
+			compatible = "apple,t8152-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0x3 0x700000 0 0xd0000>;
+		};
+		pmgr1: power-management@308280000 {
+			compatible = "apple,t8152-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			reg = <0x3 0x8280000 0 0x80000>;
+		};
+	};
+};
+
+&pmgr0 {
+	ps_apcie_gp: power-controller@8c0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x8c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_gp";
+		apple,always-on;
+	};
+
+	ps_msg: power-controller@b40 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xb40 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "msg";
+		apple,always-on;
+	};
+
+	ps_gpio: power-controller@b60 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xb60 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "gpio";
+		apple,always-on;
+	};
+
+	ps_postoffice: power-controller@be0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xbe0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "postoffice";
+		apple,always-on;
+	};
+
+	ps_fpwm0: power-controller@c40 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xc40 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "fpwm0";
+		apple,always-on;
+	};
+
+	ps_apcie_st0: power-controller@ea0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xea0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_st0";
+		apple,always-on;
+	};
+
+	ps_apcie_sys_gp: power-controller@ec0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0xec0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_sys_gp";
+		power-domains = <&ps_apcie_gp>;
+		apple,always-on;
+	};
+
+	ps_apcie_sys_st0: power-controller@1280 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1280 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_sys_st0";
+		power-domains = <&ps_apcie_st0>;
+		apple,always-on;
+	};
+
+	ps_apcie_sysocla: power-controller@12a0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x12a0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_sysocla";
+		power-domains = <&ps_apcie_sys_gp>;
+		apple,always-on;
+	};
+
+	ps_apcie_phy_sw: power-controller@15a0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x15a0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_phy_sw";
+		power-domains = <&ps_apcie_sys_st0>, <&ps_apcie_sys_gp>;
+		apple,always-on;
+	};
+
+	ps_apcie_st0_ocla: power-controller@15c0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x15c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_st0_ocla";
+		power-domains = <&ps_apcie_sys_st0>;
+		apple,always-on;
+	};
+
+	ps_apcie_aon_aus5: power-controller@1620 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1620 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_aon_aus5";
+		power-domains = <&ps_apcie_phy_sw>;
+		apple,always-on;
+	};
+
+	ps_apcie_aon_gp: power-controller@1640 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1640 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_aon_gp";
+		power-domains = <&ps_apcie_phy_sw>;
+		apple,always-on;
+	};
+
+	ps_apcie_st0_aus5: power-controller@1660 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1660 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_st0_aus5";
+		power-domains = <&ps_apcie_aon_aus5>;
+		apple,always-on;
+	};
+
+	ps_apcie_gp_aus5: power-controller@1680 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1680 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "apcie_gp_aus5";
+		power-domains = <&ps_apcie_aon_gp>;
+		apple,always-on;
+	};
+
+};
+
+&pmgr1 {
+	ps_nub_spmi0: power-controller@180 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x180 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "nub_spmi0";
+		apple,always-on;
+	};
+
+	ps_nub_spmi1: power-controller@1a0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1a0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "nub_spmi1";
+		apple,always-on;
+	};
+
+	ps_nub_spmi_a0: power-controller@1c0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "nub_spmi_a0";
+		apple,always-on;
+	};
+
+	ps_nub_spmi_a1: power-controller@1e0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x1e0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "nub_spmi_a1";
+		apple,always-on;
+	};
+
+	ps_atc0_common_dp_0: power-controller@10000 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10000 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc0_common_dp_0";
+		apple,always-on;
+	};
+
+	ps_atc0_common_dp_1: power-controller@10020 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10020 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc0_common_dp_1";
+		apple,always-on;
+	};
+
+	ps_atc1_common_dp_0: power-controller@10040 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10040 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_common_dp_0";
+		apple,always-on;
+	};
+
+	ps_atc1_common_dp_1: power-controller@10060 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10060 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_common_dp_1";
+		apple,always-on;
+	};
+
+	ps_atc2_common_dp_0: power-controller@10080 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10080 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc2_common_dp_0";
+		apple,always-on;
+	};
+
+	ps_atc2_common_dp_1: power-controller@100a0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x100a0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc2_common_dp_1";
+		apple,always-on;
+	};
+
+	ps_atc3_common_dp_0: power-controller@100c0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x100c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc3_common_dp_0";
+		apple,always-on;
+	};
+
+	ps_atc3_common_dp_1: power-controller@100e0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x100e0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc3_common_dp_1";
+		apple,always-on;
+	};
+
+	ps_atc0_usb_aon: power-controller@10100 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10100 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc0_usb_aon";
+		apple,always-on;
+	};
+
+	ps_atc0_usb: power-controller@10120 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10120 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc0_usb";
+		apple,always-on;
+	};
+
+	ps_atc1_usb_aon: power-controller@10140 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10140 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_usb_aon";
+		apple,always-on;
+	};
+
+	ps_atc1_usb: power-controller@10160 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10160 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc1_usb";
+		apple,always-on;
+	};
+
+	ps_atc2_usb_aon: power-controller@10180 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x10180 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc2_usb_aon";
+		apple,always-on;
+	};
+
+	ps_atc2_usb: power-controller@101a0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x101a0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc2_usb";
+		apple,always-on;
+	};
+
+	ps_atc3_usb_aon: power-controller@101c0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x101c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc3_usb_aon";
+		apple,always-on;
+	};
+
+	ps_atc3_usb: power-controller@101e0 {
+		compatible = "apple,t8152-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x101e0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "atc3_usb";
+		apple,always-on;
+	};
+
+};
+
+/*
+ * The PSD service slots of the four USB ports sit on top of the PMGR domains of
+ * their port: genpd powers the parents first, then the slot request is made.
+ */
+&psd_atc0_usb {
+	power-domains = <&ps_atc0_usb_aon>, <&ps_atc0_usb>;
+};
+
+&psd_atc1_usb {
+	power-domains = <&ps_atc1_usb_aon>, <&ps_atc1_usb>;
+};
+
+&psd_atc2_usb {
+	power-domains = <&ps_atc2_usb_aon>, <&ps_atc2_usb>;
+};
+
+&psd_atc3_usb {
+	power-domains = <&ps_atc3_usb_aon>, <&ps_atc3_usb>;
+};
