@@ -119,6 +119,14 @@ static const struct macsmc_hwmon_board {
 		.die_keys = "Tg0D,Tg0P,Tg0X,Tg0b,Tg0j,Tg0v,Te05,Te0P,Tp05,Tp0L,Tp0b,Tp0r",
 		.pressure_key = "mTPL",
 	},
+	/*
+	 * MacBook Air (15-inch, M3): the same T8122 as the J613, and its SMC
+	 * has all twelve of the J613's die keys.
+	 */
+	{
+		.compatible = "apple,j615",
+		.die_keys = "Tg0D,Tg0P,Tg0X,Tg0b,Tg0j,Tg0v,Te05,Te0P,Tp05,Tp0L,Tp0b,Tp0r",
+	},
 };
 
 static bool macsmc_hwmon_is_m3(void)
