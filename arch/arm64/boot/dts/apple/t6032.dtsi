@@ -338,9 +338,41 @@
 
 /delete-node/ &ps_pmp_die1;
 
+/*
+ * Die 1 keeps only what the 27.0.1 j575dap ADT puts there. The pmgr
+ * aperture and the cpufreq register files are hardware mirrors at the die
+ * stride and stay. The dieX template's third dwc3/atcphy set lands at the
+ * mirror of die 0's port 2 (0x2f_0228_0000) - no such port exists: T6032's
+ * fourth controller is usb-drd3 at 0x13_0228_0000 (defined below), and its
+ * die-1 USB4 controller is not the die-0 mirror, so the inherited usb4_0
+ * instance goes too.
+ */
+/delete-node/ &dwc3_2_die1;
+/delete-node/ &dwc3_2_dart_0_die1;
+/delete-node/ &dwc3_2_dart_1_die1;
+/delete-node/ &atcphy2_die1;
+/delete-node/ &usb4_2_acio_die1;
+/delete-node/ &usb4_2_mbox_die1;
+
 #undef DIE
 #undef DIE_NO
 #undef SOC_NODE
+
+/*
+ * Devices inherited from the T6031 laptop description with no counterpart
+ * in the 27.0.1 j575dap ADT: the MTP keyboard controller stack, the AOP
+ * audio DMA channel (its only consumer, aop_audio, goes with it), the
+ * fourth AP i2c bus and the SPI-NOR. All harmless only while disabled;
+ * absent here.
+ */
+/delete-node/ &mtp;
+/delete-node/ &mtp_mbox;
+/delete-node/ &mtp_dart;
+/delete-node/ &mtp_dockchannel;
+/delete-node/ &aop_admac;
+/delete-node/ &aop_audio;
+/delete-node/ &i2c3;
+/delete-node/ &spi1;
 
 /* delete non-present DISP power-states */
 /delete-node/ &ps_disp_cpu;
@@ -434,4 +466,834 @@
 
 &ps_afr_d2d_1_die1 {
 	status = "okay";
+};
+
+/*
+ * USB-C controller 3 (drd3). Ports 4 and 5 are die-stride mirrors of die 0's
+ * ports 0 and 1 and come from the dieX include above; drd3 is not a mirror:
+ * the 27.0.1 ADT puts it at 0x13_0228_0000, inside die 0's identity window,
+ * and powers it from the die-0 ATC3_USB state. Addresses, interrupts (dwc3
+ * 1446, darts 1450) and windows are those of the ADT.
+ */
+&die0 {
+	dwc3_3_dart_0: iommu@1302f00000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x13 0x02f00000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1450 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc3_usb>;
+		#iommu-cells = <1>;
+	};
+
+	dwc3_3_dart_1: iommu@1302f80000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x13 0x02f80000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1450 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_atc3_usb>;
+		#iommu-cells = <1>;
+	};
+
+	atcphy3: phy@1303000000 {
+		compatible = "apple,t6031-atcphy", "apple,t8122-atcphy";
+		reg = <0x13 0x03000000 0x0 0x4c000>,
+			<0x13 0x03050000 0x0 0x8000>,
+			<0x13 0x00000000 0x0 0x8000>,
+			<0x13 0x02a90000 0x0 0x4000>,
+			<0x13 0x02a84000 0x0 0x4000>;
+		reg-names = "core", "lpdptx", "axi2af", "usb2phy",
+			"pipehandler";
+
+		#phy-cells = <1>;
+		#reset-cells = <0>;
+
+		orientation-switch;
+		mode-switch;
+		power-domains = <&ps_atc3_usb>;
+	};
+
+	dwc3_3: usb@1302280000 {
+		compatible = "apple,t6031-dwc3", "apple,t8103-dwc3";
+		reg = <0x13 0x02280000 0x0 0xcd00>, <0x13 0x0228cd00 0x0 0x3200>;
+		reg-names = "dwc3-core", "dwc3-apple";
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1446 IRQ_TYPE_LEVEL_HIGH>;
+		dr_mode = "otg";
+		usb-role-switch;
+		role-switch-default-mode = "host";
+		iommus = <&dwc3_3_dart_0 0>,
+			<&dwc3_3_dart_1 1>;
+		power-domains = <&ps_atc3_usb>;
+		resets = <&atcphy3>;
+		phys = <&atcphy3 PHY_TYPE_USB2>, <&atcphy3 PHY_TYPE_USB3>;
+		phy-names = "usb2-phy", "usb3-phy";
+	};
+};
+
+/*
+ * GPU (gpu,t6032 in the ADT: G15D, two dies, one sgx and one gfx-asc for
+ * both) and its ASC mailbox. Register windows, gates (pmgr_gfx GPX/AFR/GFX)
+ * and the seven ADT interrupts match the T6031 description. The G15 driver
+ * has no T6032 row and m1n1 has no G15D handoff for the 27 firmware, so the
+ * GPU and its mailbox stay disabled and every firmware-dependent value stays
+ * zero until the boot loader fills it.
+ */
+/ {
+	gpu_opp: opp-table-gpu {
+		compatible = "operating-points-v2";
+
+		/* Placeholder only; filled by the boot loader from the ADT. */
+		opp00 {
+			opp-hz = /bits/ 64 <0>;
+			opp-microvolt = <0 0 0 0>;
+			opp-microwatt = <0>;
+		};
+	};
+
+	gpu_cs_opp: opp-table-gpu-cs {
+		compatible = "operating-points-v2";
+
+		opp00 {
+			opp-hz = /bits/ 64 <0>;
+			opp-microvolt = <0>;
+		};
+	};
+
+	gpu_afr_opp: opp-table-gpu-afr {
+		compatible = "operating-points-v2";
+
+		opp00 {
+			opp-hz = /bits/ 64 <0>;
+			opp-microvolt = <0>;
+		};
+	};
+
+	reserved-memory {
+		/* Filled and enabled by the boot loader from the ADT sgx
+		 * gpu-region-*, gfx-shared-region-*, gfx-handoff-* and
+		 * gfx-shared-l2-region-* properties. */
+		uat_ttbs: uat-ttbs@10 {
+			reg = <0 0x10 0 0>;
+			status = "disabled";
+		};
+
+		uat_pagetables: uat-pagetables@20 {
+			reg = <0 0x20 0 0>;
+			status = "disabled";
+		};
+
+		uat_handoff: uat-handoff@30 {
+			reg = <0 0x30 0 0>;
+			status = "disabled";
+		};
+
+		uat_pagetables_l2: uat-pagetables-l2@40 {
+			reg = <0 0x40 0 0>;
+			status = "disabled";
+		};
+	};
+
+	aliases {
+		gpu = &gpu;
+	};
+};
+
+&die0 {
+	gpu: gpu@40a400000 {
+		compatible = "apple,agx-t6032";
+		reg = <0x4 0x0a400000 0x0 0x6c000>,
+		      <0x4 0x08000000 0x0 0x3fdc000>;
+		reg-names = "asc", "sgx";
+		interrupt-parent = <&aic>;
+		/* ADT order; entry 5 (IRQ 1249) is marked invalid there. */
+		interrupts = <AIC_IRQ 0 1224 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1225 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1226 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1227 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1247 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1249 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1239 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_gfx>;
+		post-init-providers = <&ps_gfx>;
+		mboxes = <&agx_mbox>;
+		memory-region = <&uat_ttbs>, <&uat_pagetables>,
+				<&uat_handoff>, <&uat_pagetables_l2>;
+		memory-region-names = "ttbs", "pagetables", "handoff",
+				      "pagetables-l2";
+
+		apple,firmware-abi = <0 0 0>;
+		apple,firmware-version = <0 0 0>;
+		apple,firmware-compat = <0 0 0>;
+
+		operating-points-v2 = <&gpu_opp>;
+		apple,cs-opp = <&gpu_cs_opp>;
+		apple,afr-opp = <&gpu_afr_opp>;
+
+		status = "disabled";
+	};
+
+	agx_mbox: mbox@40a408000 {
+		compatible = "apple,t6032-agx-asc-mailbox";
+		reg = <0x4 0x0a408000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT gfx-asc order 1244,1243,1246,1245 -> mailbox order. */
+		interrupts = <AIC_IRQ 0 1243 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1244 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1245 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1246 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+};
+
+/*
+ * The eight external display pipes (dcpext0-7, iop,ascwrap-v6 in the ADT;
+ * each dispextN shares its register windows with dcpextN, so no separate
+ * display node is needed). Window split and mailbox interrupt ordering
+ * follow the T6031 internal-display description; the compatibles are
+ * chip-specific so kernels without T6032 display support leave the DCPs
+ * unbound. Every node stays disabled: the DCP driver has no 27.x firmware
+ * family and m1n1 gates the display handoff on the OS firmware.
+ * Pipes 4-7 are die 1, except the disp-5 AOP gate window, which is die-0
+ * resident (0x2_903d0000) and left out of their register maps. The ADT
+ * carries pipe 4's dart interrupt (5143) on dart-dispext5 and
+ * dart-dcpext7; those values are kept as read.
+ */
+
+&die0 {
+	dispext0_dart: iommu@305304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x3 0x5304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext0_cpu>;
+		status = "disabled";
+	};
+
+	dcpext0_dart: iommu@30530c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x3 0x530c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext0_cpu>;
+		status = "disabled";
+	};
+
+	dcpext0_mbox: mbox@306c08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x3 0x6c08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 0 1068 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1069 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1070 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1071 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext0_cpu>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext0: dcp@306c00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext0_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext0_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4", "disp-5",
+			    "iop-vbar";
+		reg = <0x3 0x6c00000 0x0 0x4000>,
+		      <0x3 0x4000000 0x0 0x4000000>,
+		      <0x2 0x903d0000 0x0 0x4000>,
+		      <0x3 0x5320000 0x0 0x4000>,
+		      <0x3 0x5344000 0x0 0x4000>,
+		      <0x3 0x6800000 0x0 0x800000>,
+		      <0x3 0x6850000 0x0 0x4000>;
+		power-domains = <&ps_dispext0_cpu>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext0_piodma: piodma {
+			iommus = <&dispext0_dart 4>;
+		};
+	};
+};
+
+&die0 {
+	dispext1_dart: iommu@449304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x49304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1083 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext1_cpu>;
+		status = "disabled";
+	};
+
+	dcpext1_dart: iommu@44930c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x4930c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1083 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext1_cpu>;
+		status = "disabled";
+	};
+
+	dcpext1_mbox: mbox@44ac08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x4 0x4ac08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 0 1104 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1105 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1106 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1107 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext1_cpu>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext1: dcp@44ac00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext1_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext1_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4", "disp-5",
+			    "iop-vbar";
+		reg = <0x4 0x4ac00000 0x0 0x4000>,
+		      <0x4 0x48000000 0x0 0x4000000>,
+		      <0x2 0x903d0000 0x0 0x4000>,
+		      <0x4 0x49320000 0x0 0x4000>,
+		      <0x4 0x49344000 0x0 0x4000>,
+		      <0x4 0x4a800000 0x0 0x800000>,
+		      <0x4 0x4a850000 0x0 0x4000>;
+		power-domains = <&ps_dispext1_cpu>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext1_piodma: piodma {
+			iommus = <&dispext1_dart 4>;
+		};
+	};
+};
+
+&die0 {
+	dispext2_dart: iommu@44d304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x4d304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1119 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext2_cpu>;
+		status = "disabled";
+	};
+
+	dcpext2_dart: iommu@44d30c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x4d30c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1119 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext2_cpu>;
+		status = "disabled";
+	};
+
+	dcpext2_mbox: mbox@44ec08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x4 0x4ec08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 0 1140 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1141 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1142 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1143 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext2_cpu>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext2: dcp@44ec00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext2_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext2_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4", "disp-5",
+			    "iop-vbar";
+		reg = <0x4 0x4ec00000 0x0 0x4000>,
+		      <0x4 0x4c000000 0x0 0x4000000>,
+		      <0x2 0x903d0000 0x0 0x4000>,
+		      <0x4 0x4d320000 0x0 0x4000>,
+		      <0x4 0x4d344000 0x0 0x4000>,
+		      <0x4 0x4e800000 0x0 0x800000>,
+		      <0x4 0x4e850000 0x0 0x4000>;
+		power-domains = <&ps_dispext2_cpu>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext2_piodma: piodma {
+			iommus = <&dispext2_dart 4>;
+		};
+	};
+};
+
+&die0 {
+	dispext3_dart: iommu@2c9304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x2 0xc9304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1155 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext3_cpu>;
+		status = "disabled";
+	};
+
+	dcpext3_dart: iommu@2c930c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x2 0xc930c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 1155 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext3_cpu>;
+		status = "disabled";
+	};
+
+	dcpext3_mbox: mbox@2cac08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x2 0xcac08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 0 1176 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1177 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1178 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1179 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext3_cpu>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext3: dcp@2cac00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext3_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext3_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4", "disp-5",
+			    "iop-vbar";
+		reg = <0x2 0xcac00000 0x0 0x4000>,
+		      <0x2 0xc8000000 0x0 0x4000000>,
+		      <0x2 0x903d0000 0x0 0x4000>,
+		      <0x2 0xc9320000 0x0 0x4000>,
+		      <0x2 0xc9344000 0x0 0x4000>,
+		      <0x2 0xca800000 0x0 0x800000>,
+		      <0x2 0xca850000 0x0 0x4000>;
+		power-domains = <&ps_dispext3_cpu>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext3_piodma: piodma {
+			iommus = <&dispext3_dart 4>;
+		};
+	};
+};
+
+&die1 {
+	dispext4_dart: iommu@305304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x3 0x5304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext0_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext4_dart: iommu@30530c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x3 0x530c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext0_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext4_mbox: mbox@306c08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x3 0x6c08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 1 1068 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1069 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1070 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1071 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext0_cpu_die1>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext4: dcp@306c00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext4_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext4_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4",
+			    "iop-vbar";
+		reg = <0x3 0x6c00000 0x0 0x4000>,
+		      <0x3 0x4000000 0x0 0x4000000>,
+		      <0x3 0x5320000 0x0 0x4000>,
+		      <0x3 0x5344000 0x0 0x4000>,
+		      <0x3 0x6800000 0x0 0x800000>,
+		      <0x3 0x6850000 0x0 0x4000>;
+		power-domains = <&ps_dispext0_cpu_die1>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext4_piodma: piodma {
+			iommus = <&dispext4_dart 4>;
+		};
+	};
+};
+
+&die1 {
+	dispext5_dart: iommu@449304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x49304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext1_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext5_dart: iommu@44930c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x4930c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1083 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext1_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext5_mbox: mbox@44ac08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x4 0x4ac08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 1 1104 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1105 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1106 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1107 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext1_cpu_die1>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext5: dcp@44ac00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext5_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext5_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4",
+			    "iop-vbar";
+		reg = <0x4 0x4ac00000 0x0 0x4000>,
+		      <0x4 0x48000000 0x0 0x4000000>,
+		      <0x4 0x49320000 0x0 0x4000>,
+		      <0x4 0x49344000 0x0 0x4000>,
+		      <0x4 0x4a800000 0x0 0x800000>,
+		      <0x4 0x4a850000 0x0 0x4000>;
+		power-domains = <&ps_dispext1_cpu_die1>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext5_piodma: piodma {
+			iommus = <&dispext5_dart 4>;
+		};
+	};
+};
+
+&die1 {
+	dispext6_dart: iommu@44d304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x4d304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1119 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext2_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext6_dart: iommu@44d30c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x4 0x4d30c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1119 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext2_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext6_mbox: mbox@44ec08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x4 0x4ec08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 1 1140 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1141 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1142 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1143 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext2_cpu_die1>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext6: dcp@44ec00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext6_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext6_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4",
+			    "iop-vbar";
+		reg = <0x4 0x4ec00000 0x0 0x4000>,
+		      <0x4 0x4c000000 0x0 0x4000000>,
+		      <0x4 0x4d320000 0x0 0x4000>,
+		      <0x4 0x4d344000 0x0 0x4000>,
+		      <0x4 0x4e800000 0x0 0x800000>,
+		      <0x4 0x4e850000 0x0 0x4000>;
+		power-domains = <&ps_dispext2_cpu_die1>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext6_piodma: piodma {
+			iommus = <&dispext6_dart 4>;
+		};
+	};
+};
+
+&die1 {
+	dispext7_dart: iommu@2c9304000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x2 0xc9304000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1155 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext3_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext7_dart: iommu@2c930c000 {
+		compatible = "apple,t6032-dart", "apple,t8110-dart";
+		reg = <0x2 0xc930c000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 1047 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x0 0x10 0x0>;
+		power-domains = <&ps_dispext3_cpu_die1>;
+		status = "disabled";
+	};
+
+	dcpext7_mbox: mbox@2cac08000 {
+		compatible = "apple,t6032-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x2 0xcac08000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		/* ADT list (n+1,n,n+3,n+2) reordered to mailbox order. */
+		interrupts = <AIC_IRQ 1 1176 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1177 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1178 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 1179 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		power-domains = <&ps_dispext3_cpu_die1>;
+		#mbox-cells = <0>;
+		status = "disabled";
+	};
+
+	dcpext7: dcp@2cac00000 {
+		compatible = "apple,t6032-dcpext";
+		mboxes = <&dcpext7_mbox>;
+		mbox-names = "mbox";
+		iommus = <&dcpext7_dart 5>;
+		reg-names = "coproc", "disp-0", "disp-2", "disp-3", "disp-4",
+			    "iop-vbar";
+		reg = <0x2 0xcac00000 0x0 0x4000>,
+		      <0x2 0xc8000000 0x0 0x4000000>,
+		      <0x2 0xc9320000 0x0 0x4000>,
+		      <0x2 0xc9344000 0x0 0x4000>,
+		      <0x2 0xca800000 0x0 0x800000>,
+		      <0x2 0xca850000 0x0 0x4000>;
+		power-domains = <&ps_dispext3_cpu_die1>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		status = "disabled";
+
+		dcpext7_piodma: piodma {
+			iommus = <&dispext7_dart 4>;
+		};
+	};
+};
+
+/*
+ * The Apple Neural Engine: ane0 on die 0, ane1 on die 1 (the 26.0+ ADT
+ * layout: ASC wrapper 0x3_c940_0000, engine 0x3_c800_0000, a second engine
+ * window 0x4_0400_0000). Register windows are the 27.0.1 ADT's, in ADT
+ * order. No Linux driver covers M3, so the engines and their DARTs stay
+ * disabled.
+ */
+&die0 {
+	ane0_dart0: iommu@3c9800000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0xc9800000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 984 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
+	ane0_dart1: iommu@3c9810000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0xc9810000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 984 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
+	ane0_dart2: iommu@3c9820000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0xc9820000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 984 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
+	ane0: ane@3c9400000 {
+		compatible = "apple,t6032-ane";
+		/* ADT windows in ADT order: ASC wrapper, ASC block, engine,
+		 * pmgr bank, pmgr set bank, IO-clear, second engine, DART
+		 * tunables. */
+		reg = <0x3 0xc9400000 0x0 0x6c000>,
+		      <0x3 0xc9050000 0x0 0x4000>,
+		      <0x3 0xc8000000 0x0 0x2000000>,
+		      <0x2 0x92280000 0x0 0x10000>,
+		      <0x2 0x92290000 0x0 0x4000>,
+		      <0x2 0x903c0000 0x0 0x30000>,
+		      <0x4 0x04000000 0x0 0x2000000>,
+		      <0x2 0xa02dc000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 0 965 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 964 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 967 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 966 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 983 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys>, <&ps_ane_mpm>,
+				<&ps_ane_cpu>, <&ps_ane_td>, <&ps_ane_base>;
+		iommus = <&ane0_dart0 0>, <&ane0_dart1 0>, <&ane0_dart2 0>;
+		status = "disabled";
+	};
+};
+
+&die1 {
+	ane1_dart0: iommu@3c9800000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0xc9800000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 984 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys_die1>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
+	ane1_dart1: iommu@3c9810000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0xc9810000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 984 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys_die1>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
+	ane1_dart2: iommu@3c9820000 {
+		compatible = "apple,t6031-dart", "apple,t8110-dart";
+		reg = <0x3 0xc9820000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 984 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys_die1>;
+		#iommu-cells = <1>;
+		status = "disabled";
+	};
+
+	/* The io-clear window 0x2_903c0000 is die-0 resident and shared with
+	 * ane0; all other windows are die-1. */
+	ane1: ane@23c9400000 {
+		compatible = "apple,t6032-ane";
+		reg = <0x3 0xc9400000 0x0 0x6c000>,
+		      <0x3 0xc9050000 0x0 0x4000>,
+		      <0x3 0xc8000000 0x0 0x2000000>,
+		      <0x2 0x92280000 0x0 0x10000>,
+		      <0x2 0x92290000 0x0 0x4000>,
+		      <0x4 0x04000000 0x0 0x2000000>,
+		      <0x2 0xa02dc000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1 965 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 964 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 967 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 966 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1 983 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_ane_sys_die1>, <&ps_ane_mpm_die1>,
+				<&ps_ane_cpu_die1>, <&ps_ane_td_die1>,
+				<&ps_ane_base_die1>;
+		iommus = <&ane1_dart0 0>, <&ane1_dart1 0>, <&ane1_dart2 0>;
+		status = "disabled";
+	};
 };

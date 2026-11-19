@@ -16,6 +16,7 @@
 	model = "Apple Mac Studio (M3 Ultra, 2025)";
 
 	aliases {
+		ethernet0 = &ethernet0;
 		serial0 = &serial0;
 	};
 
@@ -106,6 +107,71 @@
 	};
 };
 
-#include "spi1-nvram.dtsi"
+/*
+ * PCIe devices, from the 27.0.1 ADT of a retail unit: port00 WLAN and
+ * Bluetooth, port01 SD card reader, port02 10 Gbit Ethernet, port03 USB
+ * xHCI (ASM3142). The pwren numbers are the SMC gPxx key of the ADT
+ * function-reg_on, function-sd_pwr_en and function-power_enable
+ * properties read as hex; the ADT has no power function for port02. The ADT
+ * gives the PCI id only for the SD reader, so the WLAN and Bluetooth child
+ * nodes are not written here.
+ */
+&port00 {
+	/* WLAN */
+	bus-range = <1 1>;
+	pwren-gpios = <&smc_gpio 19 GPIO_ACTIVE_HIGH>;
+};
+
+&port01 {
+	/* SD card reader */
+	bus-range = <2 2>;
+	pwren-gpios = <&smc_gpio 25 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+	/*
+	 * The ADT gives both polarity properties as 1. The inverted flags below
+	 * are copied from the M2 Ultra Studio; their mapping to 1 is unverified.
+	 */
+	sdhci0: mmc@0,0 {
+		compatible = "pci17a0,9755";
+		reg = <0x20000 0x0 0x0 0x0 0x0>;
+		cd-inverted;
+		wp-inverted;
+	};
+};
+
+&port02 {
+	/* 10 Gbit Ethernet */
+	bus-range = <3 3>;
+	status = "okay";
+	ethernet0: ethernet@0,0 {
+		reg = <0x30000 0x0 0x0 0x0 0x0>;
+		/* To be filled by the loader */
+		local-mac-address = [00 10 18 00 00 00];
+	};
+};
+
+&port03 {
+	/* USB xHCI */
+	bus-range = <4 4>;
+	pwren-gpios = <&smc_gpio 22 GPIO_ACTIVE_HIGH>;
+	status = "okay";
+};
+
+&pcie0_dart_1 {
+	status = "okay";
+};
+
+&pcie0_dart_2 {
+	status = "okay";
+};
+
+&pcie0_dart_3 {
+	status = "okay";
+};
+
 #include "hwmon-common.dtsi"
 #include "hwmon-fan-dual.dtsi"
+
+/* No spi1-nvram.dtsi: the 27.0.1 j575dap ADT has no SPI-NOR at
+ * 0x391104000 (the laptop keyboard/NVRAM bus), and t6032.dtsi deletes the
+ * inherited node. The boot chain keeps its environment on the ESP. */
