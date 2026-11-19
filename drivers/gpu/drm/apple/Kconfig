@@ -15,6 +15,7 @@ config DRM_APPLE
 	select DRM_GEM_DMA_HELPER
 	select VIDEOMODE_HELPERS
 	depends on BACKLIGHT_CLASS_DEVICE
+	depends on INPUT
 	select MULTIPLEXER
 	select DRM_APPLE_FABRIC_CORE
 	help
