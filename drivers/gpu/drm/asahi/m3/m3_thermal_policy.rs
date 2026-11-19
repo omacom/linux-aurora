@@ -1,10 +1,41 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
 //! Decisions of the M3 thermal limit (see `m3_thermal`), kept free of kernel dependencies so
-//! that host tests drive exactly this code (`tools/asahi/m3-thermal-policy-tests.rs`).
+//! that host tests drive exactly this code (`tools/asahi/m3-runtime-tests.rs`).
 //!
 //! Times are monotonic nanoseconds from any fixed origin, temperatures millidegrees Celsius, and
 //! states indices of the published performance-state table.
+
+/// Highest fixed cap for non-T8122 device-tree InitData, whose firmware die-temperature
+/// controller is disabled. T8122 retains its lower default cap without temperature feedback.
+const ADT_MAX_PSTATE_LIMIT: u32 = 5;
+/// T8122's unmonitored cap, independent of any experiment ceiling or future default change.
+const T8122_SAFE_PSTATE: u32 = 2;
+
+/// How the runtime backend limits the GPU performance state by temperature.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum ThermalMode {
+    /// A fixed ceiling no higher than the safe cap, without temperature feedback.
+    Off,
+    /// Publish the requested ceiling, but hold the runtime cap at the safe cap.
+    Hold,
+    /// Allow the runtime cap to follow the die temperature up to the requested ceiling.
+    On,
+}
+
+impl ThermalMode {
+    /// Return (firmware ceiling, boot/failure cap) for a table-clamped request. A T8122
+    /// experiment ceiling permits higher states only with working temperature feedback;
+    /// it must not also raise the cap used before a reading or after a sensor failure.
+    pub(crate) fn pstate_caps(self, requested: u32, t8122_ceiling: Option<u32>) -> (u32, u32) {
+        let (max, limit) = match t8122_ceiling {
+            Some(ceiling) => (requested.min(ceiling), T8122_SAFE_PSTATE),
+            None => (requested, ADT_MAX_PSTATE_LIMIT),
+        };
+        let safe = max.min(limit);
+        (if self == Self::Off { safe } else { max }, safe)
+    }
+}
 
 /// Required thermal-zone bits: SMC die (bit 0), PMP hotspot (bit 1).
 /// A missing or malformed compatible list requires both zones.
@@ -254,6 +285,117 @@ impl Policy {
         };
         self.over = Some((since, count));
         (count >= IGNORED_CHECKS && now - since >= IGNORED_NS).then_some((count, now - since))
+    }
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::*;
+
+    fn temp(mc: i32, at: i64) -> Reading {
+        Reading::Temp { mc, at, zones: 1 }
+    }
+
+    fn boosted_air() -> Policy {
+        let (ceiling, safe) = ThermalMode::On.pstate_caps(8, Some(5));
+        let mut policy = Policy::new(true, safe, ceiling, 80_000);
+        assert_eq!(policy.cap(), 2);
+        for (at, mc, cap) in [(0, 60_000, 3), (2 * S, 60_001, 4), (4 * S, 60_002, 5)] {
+            policy.update(at, temp(mc, at)).0.unwrap();
+            assert_eq!(policy.cap(), cap);
+        }
+        policy
+    }
+
+    #[test]
+    fn air_ceiling_never_raises_the_unmonitored_cap() {
+        assert_eq!(ThermalMode::On.pstate_caps(8, Some(5)), (5, 2));
+        assert_eq!(ThermalMode::Hold.pstate_caps(8, Some(5)), (5, 2));
+        assert_eq!(ThermalMode::Off.pstate_caps(8, Some(5)), (2, 2));
+        for mode in [ThermalMode::On, ThermalMode::Hold, ThermalMode::Off] {
+            assert_eq!(mode.pstate_caps(1, Some(5)), (1, 1));
+            assert_eq!(mode.pstate_caps(8, Some(1)), (1, 1));
+        }
+    }
+
+    #[test]
+    fn non_air_caps_keep_the_existing_safe_limit() {
+        assert_eq!(ThermalMode::On.pstate_caps(8, None), (8, 5));
+        assert_eq!(ThermalMode::Hold.pstate_caps(8, None), (8, 5));
+        assert_eq!(ThermalMode::Off.pstate_caps(8, None), (5, 5));
+    }
+
+    #[test]
+    fn failed_missing_stale_and_implausible_readings_drop_air_to_two() {
+        for (reading, source) in [
+            (Reading::None, Source::NoReading),
+            (Reading::Failed { errno: -5, at: 5 * S }, Source::Failed(-5)),
+            (temp(60_000, S), Source::Stale),
+            (temp(9_999, 5 * S), Source::Implausible),
+            (temp(125_001, 5 * S), Source::Implausible),
+        ] {
+            let mut policy = boosted_air();
+            let (usable, change) = policy.update(5 * S, reading);
+            assert_eq!(usable, Err(source));
+            assert_eq!(change, Some(Change { from: 5, to: 2, why: Why::NoTemperature(source) }));
+            policy.update(7 * S, temp(60_003, 7 * S)).0.unwrap();
+            assert_eq!(policy.cap(), 3);
+        }
+    }
+
+    #[test]
+    fn air_boost_requires_fresh_paced_readings_and_respects_the_ceiling() {
+        let (ceiling, safe) = ThermalMode::On.pstate_caps(8, Some(5));
+        let mut policy = Policy::new(true, safe, ceiling, 80_000);
+        policy.update(0, temp(60_000, 0)).0.unwrap();
+        assert_eq!(policy.cap(), 3);
+        policy.update(S, temp(60_001, S)).0.unwrap();
+        assert_eq!(policy.cap(), 3);
+        policy.update(2 * S, temp(60_000, 0)).0.unwrap();
+        assert_eq!(policy.cap(), 3);
+        policy.update(2 * S, temp(60_002, 2 * S)).0.unwrap();
+        assert_eq!(policy.cap(), 4);
+        policy.update(4 * S, temp(60_003, 4 * S)).0.unwrap();
+        policy.update(6 * S, temp(60_004, 6 * S)).0.unwrap();
+        assert_eq!(policy.cap(), 5);
+    }
+
+    #[test]
+    fn air_hot_and_critical_readings_reduce_the_cap() {
+        let mut policy = boosted_air();
+        policy.update(4 * S + 500 * MS, temp(80_000, 4 * S + 500 * MS)).0.unwrap();
+        assert_eq!(policy.cap(), 4);
+        policy.update(5 * S, temp(80_000, 4 * S + 500 * MS)).0.unwrap();
+        assert_eq!(policy.cap(), 4);
+        policy.update(5 * S, temp(80_001, 5 * S)).0.unwrap();
+        assert_eq!(policy.cap(), 3);
+        policy.update(5 * S + MS, temp(88_000, 5 * S + MS)).0.unwrap();
+        assert_eq!(policy.cap(), 2);
+        assert_eq!(policy.allowed(5 * S + 2 * MS), 5);
+        assert_eq!(policy.allowed(6 * S + MS), 2);
+    }
+
+    #[test]
+    fn unchanged_air_temperature_cannot_sustain_boost_forever() {
+        let (ceiling, safe) = ThermalMode::On.pstate_caps(8, Some(5));
+        let mut policy = Policy::new(true, safe, ceiling, 80_000);
+        for at in [0, 2 * S, 4 * S] {
+            policy.update(at, temp(60_000, at)).0.unwrap();
+        }
+        assert_eq!(policy.cap(), 5);
+        let (usable, _) = policy.update(STUCK_NS, temp(60_000, STUCK_NS));
+        assert_eq!(usable, Err(Source::Stuck));
+        assert_eq!(policy.cap(), 2);
+    }
+
+    #[test]
+    fn hold_mode_never_boosts_the_air() {
+        let (ceiling, safe) = ThermalMode::Hold.pstate_caps(8, Some(5));
+        let mut policy = Policy::new(false, safe, ceiling, 80_000);
+        for at in [0, 2 * S, 4 * S] {
+            policy.update(at, temp(60_000, at)).0.unwrap();
+        }
+        assert_eq!(policy.cap(), 2);
     }
 }
 

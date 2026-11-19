@@ -301,19 +301,7 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
         e.mapping_count(),
         storage::IOMAP_BASE
     );
-    // J615 and J504 have no SoC die temperature zone yet, so a cap above the no-feedback limit
-    // runs the GPU without any temperature feedback (`m3_thermal` holds the cap but gets no
-    // reading). The runtime cap and the firmware ceiling stay equal, because the cap is at most
-    // the no-feedback limit.
-    if v.pstate_cap > knobs::PSTATE_CAP {
-        dev_warn!(
-            dev,
-            "M3 G15G start: pstate_cap={} is above {}: no SoC die temperature zone on this board, so states up to {} run with no temperature feedback\n",
-            v.pstate_cap,
-            knobs::PSTATE_CAP,
-            v.pstate_cap
-        );
-    }
+
     Ok(Some(e))
 }
 

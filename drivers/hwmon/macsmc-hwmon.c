@@ -77,6 +77,7 @@ static const struct macsmc_hwmon_board {
 	const char *compatible;
 	const char *die_keys;
 	const char *pressure_key;
+	bool require_all_die_keys;
 } macsmc_hwmon_boards[] = {
 	/*
 	 * MacBook Pro (16-inch, M3 Pro): key names used for the CPU
@@ -118,6 +119,18 @@ static const struct macsmc_hwmon_board {
 		.compatible = "apple,j613",
 		.die_keys = "Tg0D,Tg0P,Tg0X,Tg0b,Tg0j,Tg0v,Te05,Te0P,Tp05,Tp0L,Tp0b,Tp0r",
 		.pressure_key = "mTPL",
+	},
+	/*
+	 * MacBook Air (15-inch, M3): all twelve keys are readable floats on
+	 * J615. The Tg readings rose during a GPU workload and fell after
+	 * it stopped. Require the complete CPU/GPU set, not a CPU-only zone
+	 * if discovery of a GPU key fails.
+	 */
+	{
+		.compatible = "apple,j615",
+		.die_keys = "Tg0D,Tg0P,Tg0X,Tg0b,Tg0j,Tg0v,Te05,Te0P,Tp05,Tp0L,Tp0b,Tp0r",
+		.pressure_key = "mTPL",
+		.require_all_die_keys = true,
 	},
 };
 
@@ -1139,6 +1152,7 @@ static void macsmc_hwmon_die_unregister(void *data)
 
 static int macsmc_hwmon_die_register(struct macsmc_hwmon *hwmon)
 {
+	const struct macsmc_hwmon_board *board = macsmc_hwmon_board();
 	struct thermal_zone_device *tz;
 	char keys[16 * 5] = "";
 	size_t len = 0;
@@ -1149,6 +1163,12 @@ static int macsmc_hwmon_die_register(struct macsmc_hwmon *hwmon)
 	if (!hwmon->die_count) {
 		dev_info(hwmon->dev, "no SoC die temperature zone: none of the %u listed keys is present\n",
 			 hwmon->die_listed);
+		return 0;
+	}
+	if (board && board->require_all_die_keys &&
+	    hwmon->die_count != hwmon->die_listed) {
+		dev_warn(hwmon->dev, "no SoC die temperature zone: only %u of %u required keys is present\n",
+			 hwmon->die_count, hwmon->die_listed);
 		return 0;
 	}
 

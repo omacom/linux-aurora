@@ -21,7 +21,8 @@ use crate::{
     m3::m3_init_layout as init,
     m3::m3_init_storage as storage,
     m3::m3_memory::Buffer,
-    m3::m3_params::{self, G15Debug, InitDataParam, ThermalMode},
+    m3::m3_params::{self, G15Debug, InitDataParam},
+    m3::m3_thermal_policy::ThermalMode,
     m3::m3_soc::{IoMapping, PstateTable, Soc},
     m3::t8122_hwdata,
     m3::t8122_start::Experiment,
@@ -137,12 +138,6 @@ const _: () = assert!(storage::same_iomaps(
     &storage::T6030_IOMAPS
 ));
 
-/// Highest performance state device-tree InitData may use without the driver's thermal limit
-/// (`asahi.m3_thermal=off`), and the runtime cap the thermal limit starts at and falls back to
-/// (the "safe cap"). The InitData's fast-die temperature controller words stay 0, so the
-/// firmware does not limit the die temperature by itself.
-pub(crate) const ADT_MAX_PSTATE_LIMIT: u32 = 5;
-
 /// The performance states the runtime backend lets the firmware use.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct PstatePolicy {
@@ -200,42 +195,34 @@ impl PstatePolicy {
             ThermalMode::Hold | ThermalMode::On => u64::from(table_max),
             ThermalMode::Off => m3_params::MAX_PSTATE_DEFAULT,
         });
-        let mut max = requested.clamp(1, u64::from(table_max)) as u32;
-        if u64::from(max) != requested {
+        let table_cap = requested.clamp(1, u64::from(table_max)) as u32;
+        let (max, safe) = thermal.pstate_caps(table_cap, ceiling);
+        if u64::from(table_cap) != requested {
             dev_info!(
                 dev,
                 "M3: asahi.m3_max_pstate={} clamped to {} (the table has states 1..={})\n",
                 requested,
-                max,
+                table_cap,
                 table_max
             );
         }
-        if thermal == ThermalMode::Off && max > ADT_MAX_PSTATE_LIMIT {
-            dev_info!(
-                dev,
-                "M3: performance cap {} lowered to {}: device-tree InitData leaves the fast-die temperature controller off and the thermal limit is off (asahi.m3_thermal=off)\n",
-                max,
-                ADT_MAX_PSTATE_LIMIT
-            );
-            max = ADT_MAX_PSTATE_LIMIT;
-        }
-        if let Some(ceiling) = ceiling {
-            if max > ceiling {
+        if max < table_cap {
+            if thermal == ThermalMode::Off {
+                dev_info!(
+                    dev,
+                    "M3: performance cap {} lowered to {}: device-tree InitData leaves the fast-die temperature controller off and the thermal limit is off (asahi.m3_thermal=off)\n",
+                    table_cap,
+                    max
+                );
+            } else {
                 dev_info!(
                     dev,
                     "M3 G15G start: performance cap {} lowered to {} (asahi.t8122_pstate_cap)\n",
-                    max,
-                    ceiling
+                    table_cap,
+                    max
                 );
-                max = ceiling;
             }
         }
-        // Without the thermal limit the runtime cap is the ceiling; with it, the runtime cap
-        // starts at (and never goes below) the cap used without it.
-        let safe = match thermal {
-            ThermalMode::Off => max,
-            ThermalMode::Hold | ThermalMode::On => max.min(ADT_MAX_PSTATE_LIMIT),
-        };
         let boot = m3_params::boot_pstate_param()
             .unwrap_or(u64::from(safe))
             .clamp(1, u64::from(safe)) as u32;
