@@ -11,13 +11,16 @@ maintainers:
 
 description:
   The Always-On Processor provides audio and sensor services through firmware
-  loaded by the bootloader. The application processor uses a primary mailbox
-  and a separate setup-port mailbox. Each mailbox consumer has its own DMA
-  allocation window in the inherited AOP DART mappings.
+  loaded by the bootloader. On T8140 the application processor uses a primary
+  mailbox and a separate setup-port mailbox; on T8152 the setup port belongs to
+  the secure world and only the primary mailbox exists. Each mailbox consumer
+  has its own DMA allocation window in the inherited AOP DART mappings.
 
 properties:
   compatible:
-    const: apple,t8140-aop
+    enum:
+      - apple,t8140-aop
+      - apple,t8152-aop
 
   reg:
     items:
@@ -30,11 +33,13 @@ properties:
       - const: asc
 
   mboxes:
+    minItems: 1
     items:
       - description: Primary firmware transport
-      - description: Firmware setup-port transport
+      - description: Firmware setup-port transport (T8140 only)
 
   mbox-names:
+    minItems: 1
     items:
       - const: mbox
       - const: setup
@@ -60,6 +65,24 @@ properties:
   audio:
     type: object
     $ref: /schemas/sound/apple,t8140-aop-audio.yaml#
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: apple,t8140-aop
+    then:
+      properties:
+        mboxes:
+          minItems: 2
+        mbox-names:
+          minItems: 2
+    else:
+      properties:
+        mboxes:
+          maxItems: 1
+        mbox-names:
+          maxItems: 1
 
 required:
   - compatible
