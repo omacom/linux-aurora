@@ -395,6 +395,12 @@ impl<F: ListFile> Guard<F> {
         match file {
             Ok(file) => {
                 if let Err(e) = guard.load(&file) {
+                    // Nothing a partial read parsed counts: no owned record,
+                    // no pin and no spent window from an unreadable list.
+                    guard.owned = KVec::new();
+                    guard.pinned = [None; MAX_PINS];
+                    guard.setup_recorded = false;
+                    guard.end = 0;
                     pr_warn!(
                         "xART guard: the list of Linux's records is unreadable ({:?}); every existing session record is protected and none can be adopted\n",
                         e
@@ -649,7 +655,13 @@ impl<F: ListFile> Guard<F> {
     pub(crate) fn check(&mut self, key: &Key, write: bool) -> Result<()> {
         let existed = self.existed.contains(key);
         let owned = self.owned.contains(key);
-        match decide(self.level, key, existed, owned) {
+        // A pinned locker is never adopted as Linux's, even one absent at probe.
+        let verdict = if self.is_pinned(key) && !owned {
+            Verdict::Refuse
+        } else {
+            decide(self.level, key, existed, owned)
+        };
+        match verdict {
             Verdict::Allow => Ok(()),
             Verdict::Adopt if !write => Ok(()),
             Verdict::Adopt => self.adopt(key).inspect_err(|e| {
