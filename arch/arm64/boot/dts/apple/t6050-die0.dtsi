@@ -1,0 +1,258 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Devices on the Apple T6050 "M5 Max" SoC (single die)
+ *
+ * Register windows from the J714c Apple Device Tree.
+ * The six pmgr register blocks are declared here; their power domains
+ * live in t6050-pmgr.dtsi.
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+&soc {
+	// J714c also has a dockchannel UART (aapl,dock-channels,
+	// 0x88e28000/0x10004 + 0x88e0c000/0x18, AIC IRQ 360). The in-tree
+	// apple,dockchannel-uart driver expects three named windows
+	// (data/config/irq) and its observability from this laptop without
+	// a debug cable is unverified, so it is left out of the first boot.
+	// Add it with the window layout resolved when it is needed.
+
+	cpufreq_m0: cpufreq@210e20000 {
+		compatible = "apple,t6050-cluster-cpufreq";
+		reg = <0x2 0x10e20000 0x0 0x1000>;
+		#performance-domain-cells = <0>;
+	};
+
+	cpufreq_m1: cpufreq@211e20000 {
+		compatible = "apple,t6050-cluster-cpufreq";
+		reg = <0x2 0x11e20000 0x0 0x1000>;
+		#performance-domain-cells = <0>;
+	};
+
+	cpufreq_p0: cpufreq@212e20000 {
+		compatible = "apple,t6050-cluster-cpufreq";
+		reg = <0x2 0x12e20000 0x0 0x1000>;
+		#performance-domain-cells = <0>;
+	};
+
+	aic: interrupt-controller@280400000 {
+		compatible = "apple,t6050-aic3", "apple,t8142-aic3", "apple,t8122-aic3";
+		reg = <0x2 0x80400000 0x0 0x1cc000>,
+		      <0x2 0x80440000 0x0 0x4000>;
+		reg-names = "core", "event";
+		#interrupt-cells = <3>;
+		interrupt-controller;
+	};
+
+	pmgr: pmgr0: power-management@280600000 {
+		compatible = "apple,t6050-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		reg = <0x2 0x80600000 0 0x4000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+
+	pmgr1: power-management@280900000 {
+		compatible = "apple,t6050-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		reg = <0x2 0x80900000 0 0x4000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+
+	pmgr2: power-management@288300000 {
+		compatible = "apple,t6050-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		reg = <0x2 0x88300000 0 0xc000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+
+	wdt: watchdog@28836c000 {
+		compatible = "apple,t6050-wdt", "apple,t8103-wdt";
+		reg = <0x2 0x8836c000 0x0 0x4000>;
+		clocks = <&clkref>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 721 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	// MTP coprocessor and dockchannel HID (keyboard, trackpad), on the
+	// t8142 J813 layout. Addresses from the J714c ADT: mtp 0x294600000,
+	// dart-mtp 0x294800000 (0xc000), dockchannel-mtp 0x294b14000 (irq) and
+	// 0x294b28000.. (data windows). The ADT lists no power or clock gates.
+	mtp: mtp@294600000 {
+		compatible = "apple,t6050-mtp", "apple,t8142-rtk-helper-asc4",
+			     "apple,mtp", "apple,rtk-helper-asc4";
+		/* The second region is firmware SRAM, not the ASC control window. */
+		reg = <0x2 0x94600000 0x0 0x4000>, <0x2 0x94c00000 0x0 0x100000>;
+		reg-names = "asc", "sram";
+		iommus = <&mtp_dart 0>;
+		mboxes = <&mtp_mbox>;
+
+		status = "disabled";
+	};
+
+	mtp_mbox: mailbox@294608000 {
+		compatible = "apple,t6050-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x2 0x94608000 0x0 0x4000>;
+		interrupts = <AIC_IRQ 676 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 677 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 678 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 679 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty", "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+
+		status = "disabled";
+	};
+
+	mtp_dart: iommu@294800000 {
+		compatible = "apple,t6050-dart", "apple,t8142-dart", "apple,t8110-dart";
+		reg = <0x2 0x94800000 0x0 0xc000>;
+		interrupts = <AIC_IRQ 659 IRQ_TYPE_LEVEL_HIGH>;
+		#iommu-cells = <1>;
+		/* Keep host allocations clear of firmware's low IOVA mappings. */
+		apple,dma-range = <0 0x02000000 0 0x10000000>;
+
+		status = "disabled";
+	};
+
+	mtp_dockchannel: fifo@294b14000 {
+		compatible = "apple,t6050-dockchannel", "apple,dockchannel";
+		reg = <0x2 0x94b14000 0x0 0x1000>;
+		reg-names = "irq";
+		ranges = <0 0x2 0x94b28000 0x20000>;
+		#address-cells = <1>;
+		#interrupt-cells = <2>;
+		interrupt-controller;
+		interrupts = <AIC_IRQ 660 IRQ_TYPE_LEVEL_HIGH>;
+		nonposted-mmio;
+		#size-cells = <1>;
+
+		status = "disabled";
+
+		mtp_hid: input@8000 {
+			compatible = "apple,dockchannel-hid";
+			reg = <0x8000 0x1000>, <0xc000 0x1000>,
+			      <0x0000 0x1000>, <0x4000 0x1000>;
+			reg-names = "config", "data", "rmt-config", "rmt-data";
+			interrupt-parent = <&mtp_dockchannel>;
+			interrupts = <2 IRQ_TYPE_LEVEL_HIGH>, <3 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "tx", "rx";
+			iommus = <&mtp_dart 0>;
+			apple,fifo-size = <0x800>;
+			apple,helper-cpu = <&mtp>;
+		};
+	};
+
+	// AP GPIO block. ADT /arm-io/gpio0: 0x9c000000 + 0x44000, 221 pins,
+	// seven AIC interrupts, no-restore-gpio-pins 5 6 7 112 141. The t8140
+	// driver variant: slots in the block fault when read, so the regmap is
+	// not cache-initialised and stays inside the valid pins minus the
+	// reserved ranges (the firmware's no-restore pins, as t8140.dtsi).
+	// Enabled by the board DT together with its first users, the audio
+	// codec reset, shutdown and interrupt lines.
+	pinctrl_ap: pinctrl@29c000000 {
+		compatible = "apple,t6050-pinctrl", "apple,t8140-pinctrl";
+		reg = <0x2 0x9c000000 0x0 0x44000>;
+		#gpio-cells = <2>;
+		gpio-controller;
+		gpio-ranges = <&pinctrl_ap 0 0 221>;
+		gpio-reserved-ranges = <5 3>, <112 1>, <141 1>;
+		#interrupt-cells = <2>;
+		interrupt-controller;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 486 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 487 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 488 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 489 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 490 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 491 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 492 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_gpio>;
+		apple,npins = <221>;
+
+		status = "disabled";
+	};
+
+	// I2C controllers. ADT /arm-io/i2c1..3: 0x305014000, 0x305018000,
+	// 0x30501c000 (+ 0x4000 each), AIC interrupts 1376-1378, pmgr I2C1-3.
+	// SCL/SDA are AP pins 60/61, 62/63 and 64/65; iBoot leaves them muxed
+	// (it drives the speaker amps for the boot chime), so no pin groups are
+	// set here. i2c1 and i2c3 carry the speaker amps, i2c2 the jack codec.
+	i2c1: i2c@505014000 {
+		compatible = "apple,t6050-i2c", "apple,t8103-i2c";
+		reg = <0x5 0x05014000 0x0 0x4000>;
+		#address-cells = <1>;
+		clocks = <&clkref>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1376 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_i2c1>;
+		#size-cells = <0>;
+
+		status = "disabled";
+	};
+
+	i2c2: i2c@505018000 {
+		compatible = "apple,t6050-i2c", "apple,t8103-i2c";
+		reg = <0x5 0x05018000 0x0 0x4000>;
+		#address-cells = <1>;
+		clocks = <&clkref>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1377 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_i2c2>;
+		#size-cells = <0>;
+
+		status = "disabled";
+	};
+
+	i2c3: i2c@50501c000 {
+		compatible = "apple,t6050-i2c", "apple,t8103-i2c";
+		reg = <0x5 0x0501c000 0x0 0x4000>;
+		#address-cells = <1>;
+		clocks = <&clkref>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1378 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_i2c3>;
+		#size-cells = <0>;
+
+		status = "disabled";
+	};
+
+	fpwm0: pwm@505040000 {
+		compatible = "apple,t6050-fpwm", "apple,s5l-fpwm";
+		reg = <0x5 0x05040000 0x0 0x4000>;
+		clocks = <&clkref>;
+		power-domains = <&ps_fpwm0>;
+		#pwm-cells = <2>;
+
+		status = "disabled";
+	};
+
+	serial0: serial@505200000 {
+		compatible = "apple,s5l-uart";
+		reg = <0x5 0x05200000 0x0 0x4000>;
+		clocks = <&clkref>, <&clkref>;
+		clock-names = "uart", "clk_uart_baud0";
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1359 IRQ_TYPE_LEVEL_HIGH>;
+		reg-io-width = <4>;
+	};
+
+	pmgr3: power-management@2300e80000 {
+		compatible = "apple,t6050-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		reg = <0x23 0xe80000 0 0x4000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+
+	pmgr4: power-management@2380600000 {
+		compatible = "apple,t6050-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		reg = <0x23 0x80600000 0 0xc000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+
+	pmgr5: power-management@2388300000 {
+		compatible = "apple,t6050-pmgr", "apple,t8103-pmgr", "syscon", "simple-mfd";
+		reg = <0x23 0x88300000 0 0x4000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+	};
+};

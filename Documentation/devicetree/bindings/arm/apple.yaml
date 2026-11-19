@@ -360,6 +360,12 @@ properties:
           - const: apple,t8142
           - const: apple,arm-platform
 
+      - description: Apple M5 Max SoC based platforms
+        items:
+          - const: apple,j714c # MacBook Pro (14-inch, M5 Max, 2026)
+          - const: apple,t6050
+          - const: apple,arm-platform
+
       - description: Apple M6 SoC based platforms
         items:
           - const: apple,j873g # Mac mini (M6)
