@@ -15,6 +15,11 @@
  * Copyright The Asahi Linux Contributors
  */
 
+/* The node the DCPs live under: /soc on t6021, die 0 (&die0) on t6022. */
+#ifndef DISPLAY2_SOC
+#define DISPLAY2_SOC &{/soc}
+#endif
+
 / {
 	aliases {
 		dcpext2 = &dcpext2;
@@ -36,7 +41,7 @@
 	};
 };
 
-&{/soc} {
+DISPLAY2_SOC {
 
 	dispext2_dart: iommu@48d304000 {
 		compatible = "apple,t6020-dart", "apple,t8110-dart";
