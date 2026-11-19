@@ -3,6 +3,7 @@
 
 #include <linux/firmware.h>
 #include <linux/unaligned.h>
+#include <kunit/static_stub.h>
 
 #include "isp-cam.h"
 #include "isp-cmd.h"
@@ -343,14 +344,20 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 	u32 magic;
 	int err;
 
+	KUNIT_STATIC_STUB_REDIRECT(isp_ch_load_setfile, isp, ch);
+
 	if (WARN_ON_ONCE(setfile->size > isp->data_surf->size))
 		return -ENOSPC;
 
 	err = firmware_request_nowarn(&fw, setfile->path, isp->dev);
 	if (err) {
-		dev_warn_once(isp->dev,
-			      "setfile '%s' not loaded (%d), streaming without calibration\n",
-			      setfile->path, err);
+		if (err == -ENOENT)
+			dev_warn_once(isp->dev,
+				      "setfile '%s' missing, streaming without sensor tuning\n",
+				      setfile->path);
+		else
+			dev_err(isp->dev, "failed to read setfile '%s': %d\n",
+				setfile->path, err);
 		return err;
 	}
 
@@ -373,8 +380,16 @@ static int isp_ch_load_setfile(struct apple_isp *isp, u32 ch)
 	memset(isp->data_surf->virt + len, 0, setfile->size - len);
 	release_firmware(fw);
 
-	return isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
-					setfile->size);
+	err = isp_cmd_ch_set_file_load(isp, ch, isp->data_surf->iova,
+				       setfile->size);
+	if (err)
+		dev_err(isp->dev, "ch %u: setfile '%s' load failed: %d\n",
+			ch, setfile->path, err);
+	else
+		dev_dbg(isp->dev, "ch %u: loaded sensor tuning '%s' (0x%zx bytes)\n",
+			ch, setfile->path, setfile->size);
+
+	return err;
 }
 
 static int isp_ch_configure_frame_rate(struct apple_isp *isp, u32 ch)
@@ -432,11 +447,12 @@ static int isp_ch_configure_capture(struct apple_isp *isp, u32 ch)
 	isp_cmd_flicker_sensor_set(isp, 0);
 
 	/*
-	 * The setfile isn't requisite but then we don't get calibration. If
-	 * loading it was interrupted by a signal, give up on the stream.
+	 * Missing sensor tuning is optional. A present but invalid setfile or
+	 * a failed firmware upload must not silently select firmware defaults.
+	 * This model-wide tuning is separate from per-module factory data.
 	 */
 	err = isp_ch_load_setfile(isp, ch);
-	if (err == -EINTR)
+	if (err && err != -ENOENT)
 		return err;
 
 	if (isp->hw->lpdp) {
@@ -661,3 +677,7 @@ void apple_isp_stop_capture(struct apple_isp *isp)
 	/* ... until its buffers are back. */
 	apple_isp_wdt_stop(isp);
 }
+
+#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
+#include "isp-cam-test.c"
+#endif
