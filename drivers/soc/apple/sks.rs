@@ -46,6 +46,22 @@ impl Drop for KeybagCreateIntent<'_> {
     }
 }
 
+/// Closes the xART guard's first-setup window when dropped. On a 13.5 enclave
+/// (T8103) the create's COPY_KEYBAG and the first activation's LOAD_KEYBAG
+/// rewrite pre-Linux lockers, so the window spans both.
+pub(crate) struct SetupWindow<'a> {
+    pub(crate) sep: &'a SepData,
+    pub(crate) open: bool,
+}
+
+impl Drop for SetupWindow<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.sep.with_store(|store| store.close_first_setup());
+        }
+    }
+}
+
 impl SepData {
     pub(crate) fn on_sks(&self, msg: Message) {
         let r = crate::sks::decode_sks(&msg);
@@ -689,11 +705,9 @@ impl SepData {
             // The create is sent under the guard: matching follows.
             crate::diag::xart_guard_setup_recorded();
         }
+        // Left open for the first activation's LOAD_KEYBAG (activate_touchid).
         intent.sending();
         let exchanged = self.sks_exchange(request.name, request.msg, &request.img);
-        if first_setup {
-            self.with_store(|store| store.close_first_setup());
-        }
         let Some(out) = exchanged else {
             dev_err!(
                 self.dev,

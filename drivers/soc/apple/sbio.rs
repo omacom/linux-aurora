@@ -1392,6 +1392,8 @@ impl SepData {
         if self.touchid_failed.load(Relaxed) {
             return Err(EIO);
         }
+        // A first-setup window provisioning opened this boot ends here.
+        let _window = crate::sks::SetupWindow { sep: self, open: true };
 
         let mut store = store::Store::open().inspect_err(|e| {
             dev_err!(
