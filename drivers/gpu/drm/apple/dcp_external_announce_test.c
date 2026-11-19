@@ -111,6 +111,7 @@ static struct announce_test *announce_test_init(struct kunit *test)
 	INIT_DELAYED_WORK(&dcp->typec_relink_wq, announce_test_noop);
 	INIT_DELAYED_WORK(&dcp->hdmi_settle_wq, announce_test_noop);
 	INIT_DELAYED_WORK(&dcp->hdmi_recheck_wq, announce_test_noop);
+	INIT_DELAYED_WORK(&dcp->hdmi_resume_wq, announce_test_noop);
 	INIT_DELAYED_WORK(&dcp->bl_fallback_wq, announce_test_noop);
 	INIT_DELAYED_WORK(&dcp->backlight.fade_work, announce_test_noop);
 	INIT_WORK(&dcp->external_stop_work, announce_test_noop);
