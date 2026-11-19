@@ -55,6 +55,14 @@ properties:
           - const: apple,asc-mailbox-v4
 
       - description:
+          The T8152 ACIO (USB4/Thunderbolt) co-processor mailbox. Its status
+          word counts the receive occupancy and the free transmit slots, unlike
+          the full/empty flags of the ASC mailboxes, so it has no ASC
+          fallback. Only its recv-not-empty and send-empty interrupts are
+          known.
+        const: apple,t8152-acio-mailbox
+
+      - description:
           M3 GPU ASC mailboxes with no generic mailbox fallback. This keeps
           older kernels from binding before the GPU handoff is supported.
         enum:
@@ -145,6 +153,7 @@ allOf:
             enum:
               - apple,t6021-ane-mailbox
               - apple,t8112-ane-mailbox
+              - apple,t8152-acio-mailbox
     then:
       properties:
         interrupt-names:
@@ -163,6 +172,7 @@ allOf:
               enum:
                 - apple,t6021-ane-mailbox
                 - apple,t8112-ane-mailbox
+                - apple,t8152-acio-mailbox
                 - apple,t8140-aop-setup-mailbox
     then:
       properties:

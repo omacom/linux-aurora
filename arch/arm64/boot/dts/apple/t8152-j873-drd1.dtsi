@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * usb-drd1 (ATC1, rear BACK-LEFT port, port-number 2, HPM hpm1 at SPMI 0xa) as a fixed USB2 host.
+ * Addresses, IRQs and TLBI aperture from the saved M6 ADT: usb-drd1 core 0x40a430000, atc-phy1 0x40a418000 /
+ * 0x40a448000, dart-usb1 0x40b020000 / 0x40b040000 (sid-count 16, tlbi-aperture-offset 384 = 0x180, irq 1679),
+ * drd irq 1692. Same node layout as the drd3/drd2 hosts (both DARTs, SIDs 0 and 1).
+ *
+ * The m1n1 loader must export the port-1 USB2 PHY and DRD tunables (aliases usb2phy1 / usbdrd1), otherwise the
+ * PHY fails probe with -ENOENT "Invalid default tunables", exactly as drd2 did before its exporter line.
+ */
+/ {
+	aliases {
+		usb2phy1 = &usb2phy1;
+		usbdrd1 = &usbdrd1;
+	};
+
+	soc {
+		usb1_dart0: iommu@40b020000 {
+			compatible = "apple,t8152-dart";
+			reg = <0x4 0x0b020000 0x0 0xc000>,
+			      <0x2 0x00000180 0x0 0x10>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1679 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,static-topology;
+			apple,num-streams = <16>;
+			power-domains = <&psd_atc1_usb>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+
+		usb1_dart1: iommu@40b040000 {
+			compatible = "apple,t8152-dart";
+			reg = <0x4 0x0b040000 0x0 0xc000>,
+			      <0x2 0x00000180 0x0 0x10>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 1679 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			apple,static-topology;
+			apple,num-streams = <16>;
+			power-domains = <&psd_atc1_usb>;
+			apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+			apple,tunable = <0x20c 0x80000121 0x80000121>,
+					<0x220 0x00000f0f 0x00000f0f>,
+					<0x224 0x0000ffff 0x00000909>,
+					<0x300 0x00001f31 0x00000001>,
+					<0x308 0x3ffffffc 0x10000000>,
+					<0x310 0x3ffffffc 0x3ffffffc>,
+					<0x4600 0x00000002 0x00000002>;
+		};
+
+		usb2phy1: phy@40a418000 {
+			compatible = "apple,t8152-usb2-phy";
+			reg = <0x4 0x0a418000 0x0 0x4000>,
+			      <0x4 0x0a448000 0x0 0x4000>;
+			reg-names = "usb2", "eusb2";
+			#phy-cells = <0>;
+			power-domains = <&ps_atc1_usb_aon>, <&psd_atc1_usb>;
+			power-domain-names = "usb-aon", "usb";
+		};
+
+		usbdrd1: usb@40a430000 {
+			compatible = "apple,t8152-dwc3";
+			reg = <0x4 0x0a430000 0x0 0xcd00>,
+			      <0x4 0x0a43cd00 0x0 0x4b00>,
+			      <0x4 0x0a414000 0x0 0x4000>,
+			      <0x4 0x0a410000 0x0 0x4000>,
+			      <0x4 0x0a444000 0x0 0x4000>,
+			      <0x4 0x0a450000 0x0 0x4000>;
+			reg-names = "dwc3-core", "dwc3-apple", "pipe-handler",
+				    "pwr-ctrl", "bulk-fabric", "ausbc-debug";
+			interrupts = <AIC_IRQ 1692 IRQ_TYPE_LEVEL_HIGH>;
+			iommus = <&usb1_dart0 0>, <&usb1_dart0 1>, <&usb1_dart1 0>, <&usb1_dart1 1>;
+			power-domains = <&psd_atc1_usb>;
+			phys = <&usb2phy1>;
+			phy-names = "usb2-phy";
+			dr_mode = "host";
+			maximum-speed = "high-speed";
+		};
+	};
+};
