@@ -1621,6 +1621,10 @@ int dcp_dptx_connect(struct apple_dcp *dcp, u32 port)
 	struct dcp_fabric_session session = {};
 	int ret;
 
+	/* A converter that was powered down connects the display once it has booted. */
+	if (!dcp_is_typec_output(dcp) && dcp_fabric_hdmi_converter_wake(dcp))
+		return -EAGAIN;
+
 	if (!dcp_is_external_h17p(dcp)) {
 		if (dcp_typec_sessionless(dcp)) {
 			ret = dcp_dptx_connect_raw(dcp, port, NULL, NULL, false, false);
@@ -2645,6 +2649,7 @@ static int dcp_enable_dp2hdmi_hpd(struct apple_dcp *dcp)
 
 	if (dcp->hdmi_hpd_irq)
 		dcp_fabric_run_resume(&dcp_resume_ops, dcp);
+	dcp_fabric_hdmi_converter_idle(dcp);
 
 	return 0;
 }
@@ -3587,6 +3592,8 @@ VISIBLE_IF_KUNIT void dcp_disable_typec_work(struct apple_dcp *dcp, bool release
 	cancel_delayed_work_sync(&dcp->external_stop_retry_wq);
 	disable_delayed_work_sync(&dcp->hdmi_settle_wq);
 	disable_delayed_work_sync(&dcp->hdmi_recheck_wq);
+	disable_delayed_work_sync(&dcp->hdmi_wake_wq);
+	disable_delayed_work_sync(&dcp->hdmi_converter_off_wq);
 	dcp_hdmi_disable(dcp);
 }
 
@@ -3600,6 +3607,8 @@ VISIBLE_IF_KUNIT void dcp_enable_typec_work(struct apple_dcp *dcp)
 	enable_delayed_work(&dcp->announce_wq);
 	enable_delayed_work(&dcp->hdmi_settle_wq);
 	enable_delayed_work(&dcp->hdmi_recheck_wq);
+	enable_delayed_work(&dcp->hdmi_wake_wq);
+	enable_delayed_work(&dcp->hdmi_converter_off_wq);
 	dcp_hdmi_enable(dcp);
 	scoped_guard(mutex, &dcp->hpd_mutex)
 		dcp->typec_work_enabled = true;
@@ -4540,6 +4549,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 		}
 		if (IS_ERR(dcp->dp2hdmi_pwren))
 			return PTR_ERR(dcp->dp2hdmi_pwren);
+		dcp->hdmi_converter_on = !!dcp->dp2hdmi_pwren;
 
 		/*
 		 * A DCP may have both a fixed HDMI/DP route and allocatable Type-C
@@ -5074,6 +5084,7 @@ static int dcp_platform_resume(struct device *dev)
 	/* Observe future edges before sampling any edges lost in sleep. */
 	if (dcp->hdmi_hpd_irq)
 		dcp_fabric_run_resume(&dcp_resume_ops, dcp);
+	dcp_fabric_hdmi_converter_idle(dcp);
 	if (dcp->external_native)
 		enable_work(&dcp->external_audio_work);
 
