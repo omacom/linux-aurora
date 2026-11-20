@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/dts-v1/;
+/plugin/;
+
+/*
+ * A DCP's Type-C route suppliers: an available and a disabled DP PHY, and an
+ * available and a disabled crossbar. Nothing binds to these nodes; the tests
+ * read them, and disable one route.
+ */
+&{/} {
+	dcp-route-supplier-test {
+		phy_ok: phy-ok {
+			#phy-cells = <1>;
+		};
+
+		phy_off: phy-off {
+			#phy-cells = <1>;
+			status = "disabled";
+		};
+
+		xbar_ok: xbar-ok {
+			#mux-control-cells = <1>;
+		};
+
+		xbar_off: xbar-off {
+			#mux-control-cells = <1>;
+			status = "disabled";
+		};
+
+		dcp {
+			phys = <&phy_ok 6>, <&phy_off 6>, <&phy_ok 6>, <&phy_ok 6>;
+			phy-names = "typec0", "typec1", "typec2", "typec3";
+			mux-controls = <&xbar_ok 0>, <&xbar_ok 1>, <&xbar_off 0>;
+			mux-control-names = "typec0", "typec1", "typec3";
+
+			typec-routes {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				route@1 {
+					reg = <1>;
+				};
+			};
+		};
+	};
+};

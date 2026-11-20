@@ -1676,9 +1676,14 @@ static void apple_rtkit_rx(struct apple_mbox *mbox, struct apple_mbox_msg msg,
 				     msg.msg0);
 	}
 
-	if (!test_bit(ep, rtk->endpoints))
+	/*
+	 * Firmware that leaves the crashlog endpoint out of its map (the AOP)
+	 * still reports a crash there, and apple_rtkit_crashlog_rx() says so.
+	 * Warning about it here too reads as if the AP sent the message.
+	 */
+	if (!test_bit(ep, rtk->endpoints) && ep != APPLE_RTKIT_EP_CRASHLOG)
 		dev_warn(rtk->dev,
-			 "RTKit: Message to undiscovered endpoint 0x%02x\n",
+			 "RTKit: Message from undiscovered endpoint 0x%02x\n",
 			 ep);
 
 	if (ep >= APPLE_RTKIT_APP_ENDPOINT_START &&

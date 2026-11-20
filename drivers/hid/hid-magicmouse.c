@@ -289,8 +289,10 @@ struct effect_job {
  * @haptic_deep_work: Plays the waveform of a deep click.
  * @haptic_deep_release_work: Plays the release waveform on leaving a deep click.
  * @force_input: Input device for the deep-click key, NULL if none.
+ * @haptic_lock: Serializes input queueing with system-sleep state changes.
  * @haptic_button_down: The host-derived button is pressed.
  * @haptic_deep_down: The host-derived click is in its deep stage.
+ * @haptic_suspended: The transport is suspending or suspended; send nothing.
  * @hdev: Pointer to the underlying HID device.
  * @work: Workqueue to handle initialization retry for quirky devices.
  * @work_held: @work was pending at suspend and must run again on resume.
@@ -332,8 +334,11 @@ struct magicmouse_sc {
 	struct work_struct haptic_deep_work;
 	struct work_struct haptic_deep_release_work;
 	struct input_dev *force_input;
+	/* PM state and input queueing; auto_trigger_mutex nests outside this. */
+	spinlock_t haptic_lock;
 	bool haptic_button_down;
 	bool haptic_deep_down;
+	bool haptic_suspended;
 
 	struct hid_device *hdev;
 	struct delayed_work work;
@@ -1833,6 +1838,9 @@ static void magicmouse_haptic_pulses(struct magicmouse_sc *msc, u16 usage,
 		return;
 
 	guard(mutex)(&msc->haptics->auto_trigger_mutex);
+	if (msc->haptic_suspended)
+		return;
+
 	actuator = magicmouse_get_actuator(msc);
 
 	if (!actuator) {
@@ -1879,6 +1887,18 @@ static void magicmouse_haptic_pulses(struct magicmouse_sc *msc, u16 usage,
 	}
 }
 
+static bool magicmouse_haptic_effects_loaded(struct magicmouse_sc *msc)
+{
+	unsigned int i;
+
+	if (msc->haptic_effects) {
+		for (i = 0; i < FF_MAX_EFFECTS; i++)
+			if (READ_ONCE(msc->haptic_effects[i].effect_type))
+				return true;
+	}
+	return false;
+}
+
 /*
  * Hand click feedback back to the actuator's firmware, unless userspace still
  * has effects uploaded and so still wants host-controlled mode.
@@ -1886,16 +1906,13 @@ static void magicmouse_haptic_pulses(struct magicmouse_sc *msc, u16 usage,
 static void magicmouse_haptic_release_mode_locked(struct magicmouse_sc *msc)
 {
 	struct hid_device *actuator;
-	unsigned int i;
 
-	if (READ_ONCE(msc->haptics->mode) != HID_HAPTIC_MODE_HOST)
+	if (msc->haptic_suspended ||
+	    READ_ONCE(msc->haptics->mode) != HID_HAPTIC_MODE_HOST)
 		return;
 
-	if (msc->haptic_effects) {
-		for (i = 0; i < FF_MAX_EFFECTS; i++)
-			if (READ_ONCE(msc->haptic_effects[i].effect_type))
-				return;
-	}
+	if (magicmouse_haptic_effects_loaded(msc))
+		return;
 
 	actuator = magicmouse_get_actuator(msc);
 	if (actuator && !apple_taptic_switch_modes(actuator,
@@ -1994,6 +2011,11 @@ static bool magicmouse_haptic_click(struct magicmouse_sc *msc, u32 pressure,
 	if (!msc->haptics || !msc->haptics->wq)
 		return firmware_button;
 
+	/* Do not leave a suspended report queued to play after resume. */
+	guard(spinlock_irqsave)(&msc->haptic_lock);
+	if (msc->haptic_suspended)
+		return firmware_button;
+
 	host_mode = READ_ONCE(msc->haptics->mode) == HID_HAPTIC_MODE_HOST;
 
 	if (!haptic_press && !host_mode) {
@@ -2056,24 +2078,82 @@ static bool magicmouse_haptic_click(struct magicmouse_sc *msc, u32 pressure,
 }
 
 /*
- * The actuator leaves system sleep in device-controlled mode whatever it was
- * in before: the transport resumes the keyboard and the trackpad, not the
- * actuator, and nothing reports the change. A cached host-controlled mode then
- * makes the next press skip the switch and play a pulse while the firmware is
- * playing its own, which is felt as two clicks. Forget it instead; the next
- * press takes the mode again if it needs it.
+ * The transport stops taking requests once its children have suspended, but
+ * keeps passing reports on, and they queue clicks. Send nothing until resume;
+ * the clicks in between are dropped.
  */
-static void magicmouse_haptic_forget_mode(struct magicmouse_sc *msc)
+static void magicmouse_haptic_suspend(struct magicmouse_sc *msc)
 {
-	if (!msc->haptics)
+	unsigned int i;
+
+	if (!msc->haptics || !msc->haptics->wq)
 		return;
 
-	WRITE_ONCE(msc->haptics->mode, HID_HAPTIC_MODE_DEVICE);
-	msc->haptic_button_down = false;
-	if (msc->haptic_deep_down) {
-		msc->haptic_deep_down = false;
-		magicmouse_force_key(msc, false);
+	scoped_guard(mutex, &msc->haptics->auto_trigger_mutex)
+		scoped_guard(spinlock_irqsave, &msc->haptic_lock)
+			msc->haptic_suspended = true;
+
+	/* Producers cannot queue after this flag; drain without their locks. */
+	cancel_work_sync(&msc->haptic_press_work);
+	cancel_work_sync(&msc->haptic_release_work);
+	cancel_work_sync(&msc->haptic_deep_work);
+	cancel_work_sync(&msc->haptic_deep_release_work);
+	if (msc->haptic_effects)
+		for (i = 0; i < FF_MAX_EFFECTS; i++)
+			cancel_work_sync(&msc->haptic_effects[i].work);
+}
+
+/*
+ * Nothing reports the actuator's mode after system sleep: it may come back
+ * device-controlled, or keep host-controlled mode, as the J714s one does
+ * across suspend-to-idle. Believing the wrong one either plays a pulse on top
+ * of the firmware's click, felt as two clicks, or leaves a pad whose firmware
+ * neither clicks nor reports the button. Assert the wanted mode instead. On
+ * failure, cache the mode that makes the next frames retry it: device mode
+ * makes the next press take host mode, host mode keeps the button derived
+ * and the release retried.
+ */
+static void magicmouse_haptic_resume(struct magicmouse_sc *msc)
+{
+	struct hid_device *actuator;
+	u32 mode;
+	int ret;
+
+	if (!msc->haptics || !msc->haptics->wq)
+		return;
+
+	/* The workers see the flag and the mode change together. */
+	guard(mutex)(&msc->haptics->auto_trigger_mutex);
+	scoped_guard(spinlock_irqsave, &msc->haptic_lock) {
+		msc->haptic_button_down = false;
+		if (msc->haptic_deep_down) {
+			msc->haptic_deep_down = false;
+			magicmouse_force_key(msc, false);
+		}
+		msc->haptic_suspended = false;
 	}
+
+	if (haptic_press || magicmouse_haptic_effects_loaded(msc))
+		mode = HID_HAPTIC_MODE_HOST;
+	else
+		mode = HID_HAPTIC_MODE_DEVICE;
+
+	if (mode == HID_HAPTIC_MODE_DEVICE &&
+	    READ_ONCE(msc->haptics->mode) == HID_HAPTIC_MODE_DEVICE)
+		return;
+
+	actuator = magicmouse_get_actuator(msc);
+	if (!actuator)
+		return;
+
+	ret = apple_taptic_switch_modes(actuator, mode);
+	if (ret && ret != -EOPNOTSUPP)
+		hid_warn(msc->hdev, "cannot restore haptic mode %u (%d)\n",
+			 mode, ret);
+	if (ret)
+		mode = mode == HID_HAPTIC_MODE_HOST ? HID_HAPTIC_MODE_DEVICE :
+						      HID_HAPTIC_MODE_HOST;
+	WRITE_ONCE(msc->haptics->mode, mode);
 }
 #else
 static bool magicmouse_haptic_click(struct magicmouse_sc *msc, u32 pressure,
@@ -2082,7 +2162,11 @@ static bool magicmouse_haptic_click(struct magicmouse_sc *msc, u32 pressure,
 	return firmware_button;
 }
 
-static void magicmouse_haptic_forget_mode(struct magicmouse_sc *msc)
+static void magicmouse_haptic_suspend(struct magicmouse_sc *msc)
+{
+}
+
+static void magicmouse_haptic_resume(struct magicmouse_sc *msc)
 {
 }
 #endif
@@ -2296,6 +2380,8 @@ static int apple_upload_effects(struct input_dev *trackpad_idev,
 	}
 
 	guard(mutex)(&haptics->auto_trigger_mutex);
+	if (msc->haptic_suspended)
+		return -EBUSY;
 	actuator = magicmouse_get_actuator(msc);
 	if (!actuator)
 		return -ENODEV;
@@ -2344,6 +2430,8 @@ static void haptic_playback_worker(struct work_struct *ws)
 	if (!type)
 		return;
 	guard(mutex)(&job->msc->haptics->auto_trigger_mutex);
+	if (job->msc->haptic_suspended)
+		return;
 	if (READ_ONCE(job->msc->haptics->mode) != HID_HAPTIC_MODE_HOST) {
 		ret = apple_taptic_switch_modes(actuator, HID_HAPTIC_MODE_HOST);
 		if (ret) {
@@ -2361,6 +2449,9 @@ static int apple_taptic_playback(struct input_dev *trackpad_idev, int effect_id,
 	struct hid_device *trackpad_hdev = input_get_drvdata(trackpad_idev);
 	struct magicmouse_sc *msc = hid_get_drvdata(trackpad_hdev);
 
+	guard(spinlock_irqsave)(&msc->haptic_lock);
+	if (msc->haptic_suspended)
+		return 0;
 	if (value)
 		queue_work(msc->haptics->wq, &msc->haptic_effects[effect_id].work);
 
@@ -2384,6 +2475,8 @@ static int apple_taptic_erase(struct input_dev *trackpad_idev, int effect_id)
 	/* Drain workers before taking the mutex they need. */
 	flush_workqueue(msc->haptics->wq);
 	guard(mutex)(&msc->haptics->auto_trigger_mutex);
+	if (msc->haptic_suspended)
+		return 0;
 	/* Return to device-controlled mode if there are no effects left */
 	if (READ_ONCE(msc->haptics->mode) == HID_HAPTIC_MODE_HOST) {
 		ret = magicmouse_switch_mode(trackpad_idev, HID_HAPTIC_MODE_DEVICE);
@@ -2482,6 +2575,7 @@ static int apple_taptic_init_mtp(struct magicmouse_sc *msc,
 	haptic_dev->hdev = trackpad_hdev;
 	haptic_dev->input_dev = msc->input;
 	mutex_init(&haptic_dev->auto_trigger_mutex);
+	spin_lock_init(&msc->haptic_lock);
 
 	msc->haptic_effects = kzalloc_objs(struct effect_job, FF_MAX_EFFECTS);
 	if (!msc->haptic_effects) {
@@ -2855,8 +2949,10 @@ static int magicmouse_suspend(struct hid_device *hdev, pm_message_t message)
 	 * can fire while the system is still suspending or before the
 	 * transport has resumed, so stop it here and re-arm it on resume.
 	 */
-	if (msc)
+	if (msc) {
 		msc->work_held = cancel_delayed_work_sync(&msc->work);
+		magicmouse_haptic_suspend(msc);
+	}
 	return 0;
 }
 
@@ -2872,7 +2968,7 @@ static int magicmouse_resume(struct hid_device *hdev)
 		msc->work_held = false;
 		schedule_delayed_work(&msc->work, msecs_to_jiffies(10));
 	}
-	magicmouse_haptic_forget_mode(msc);
+	magicmouse_haptic_resume(msc);
 	return 0;
 }
 
@@ -2890,7 +2986,7 @@ static int magicmouse_reset_resume(struct hid_device *hdev)
 		schedule_delayed_work(&msc->work, msecs_to_jiffies(500));
 
 	if (msc)
-		magicmouse_haptic_forget_mode(msc);
+		magicmouse_haptic_resume(msc);
 
 	return 0;
 }

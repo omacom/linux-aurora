@@ -349,7 +349,26 @@ static void preload_profiles_test(struct kunit *test)
 	}
 }
 
+static void preload_26b123_ce_script_test(struct kunit *test)
+{
+	struct preload_fixture *f = test->priv;
+	u8 baseline[SHA256_DIGEST_SIZE], digest[SHA256_DIGEST_SIZE];
+	static const u32 positions[] = { 0xb9040, 0xba094, 0xbd03f };
+	unsigned int i;
+
+	f->rule = ane_h16_preload_26b123;
+	KUNIT_ASSERT_EQ(test, preload_digest(f, baseline), 0);
+	/* The entire live CE script stays in the identity, including its padding. */
+	for (i = 0; i < ARRAY_SIZE(positions); i++) {
+		f->text[positions[i]] ^= 1;
+		KUNIT_ASSERT_EQ(test, preload_digest(f, digest), 0);
+		KUNIT_EXPECT_NE(test, memcmp(digest, baseline, sizeof(digest)), 0);
+		f->text[positions[i]] ^= 1;
+	}
+}
+
 static struct kunit_case preload_cases[] = {
+	KUNIT_CASE(preload_26b123_ce_script_test),
 	KUNIT_CASE(preload_identity_test),
 	KUNIT_CASE(preload_mutable_test),
 	KUNIT_CASE(preload_framing_test),

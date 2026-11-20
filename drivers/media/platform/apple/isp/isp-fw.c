@@ -5,6 +5,7 @@
 #include "isp-ipc-layout.h"
 
 #include <asm/io.h>
+#include <linux/cacheflush.h>
 #include <linux/delay.h>
 #include <linux/highmem.h>
 #include <linux/io.h>
@@ -419,10 +420,19 @@ static int isp_reset_coproc(struct apple_isp *isp)
 	return 0;
 }
 
+/* Write CPU stores out to memory, for a coprocessor that might not snoop them. */
+static void isp_clean_to_poc(void *addr, size_t size)
+{
+#ifdef CONFIG_ARM64
+	dcache_clean_poc((unsigned long)addr, (unsigned long)addr + size);
+#endif
+}
+
 /*
  * With hw->fw_restore, put the firmware memory back as the boot loader left
  * it: the data segment, and a heap the boot loader provides, from their
- * copies, and the host-backed main memory above the data cleared.
+ * copies, and the host-backed main memory above the data cleared. All of it
+ * is cleaned to the point of coherency before the coprocessor starts.
  */
 static void isp_restore_fw_memory(struct apple_isp *isp)
 {
@@ -432,11 +442,16 @@ static void isp_restore_fw_memory(struct apple_isp *isp)
 		return;
 
 	memcpy(isp->fw_data, isp->fw_data_copy, isp->fw_data_size);
-	if (isp->fw_heap)
+	isp_clean_to_poc(isp->fw_data, isp->fw_data_size);
+	if (isp->fw_heap) {
 		memcpy(isp->fw_heap, isp->fw_heap_copy, isp->fw_heap_size);
+		isp_clean_to_poc(isp->fw_heap, isp->fw_heap_size);
+	}
 	if (tail)
-		for (u32 i = 0; i < tail->num_pages; i++)
+		for (u32 i = 0; i < tail->num_pages; i++) {
 			clear_highpage(tail->pages[i]);
+			isp_clean_to_poc(page_address(tail->pages[i]), PAGE_SIZE);
+		}
 }
 
 /*

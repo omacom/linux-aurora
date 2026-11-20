@@ -1884,6 +1884,9 @@ impl AopData {
         } else {
             bootargs.copy_to_slice(&mut bytes);
         }
+        let ed0p_key = from_fourcc(b"ED0p");
+        let need_ed0p = patches.iter().any(|&(k, v)| k == ed0p_key && v.is_some());
+        let mut seen_ed0p = false;
         let first = offset - start;
         let arg_bytes = &mut bytes[first..first + size];
         let mut idx = 0;
@@ -1901,10 +1904,17 @@ impl AopData {
                 if *k != key {
                     continue;
                 }
-                // `None` keeps the value the firmware image carries.
+                // `None` keeps the value the firmware image carries (including
+                // an unused `ED0p` entry on firmware without `__EDATA`).
                 let Some(v) = v else {
                     break;
                 };
+                if key == ed0p_key {
+                    if seen_ed0p || len != mem::size_of::<u64>() {
+                        return Err(EINVAL);
+                    }
+                    seen_ed0p = true;
+                }
                 if len > mem::size_of::<u64>() {
                     return Err(EINVAL);
                 }
@@ -1912,6 +1922,9 @@ impl AopData {
                 break;
             }
             idx += len;
+        }
+        if need_ed0p && !seen_ed0p {
+            return Err(EINVAL);
         }
         if word_access {
             for (i, chunk) in bytes.chunks_exact(4).enumerate() {
@@ -2029,9 +2042,12 @@ impl AopData {
     /// IOMMU core maps them in the default domain when the device is added
     /// (one to one when the IOVA is the physical address, translated
     /// otherwise), so they are only checked here. Every page has to be mapped
-    /// where the DT says, the external code (`__ETEXT`) at `ec0p` and any
-    /// other segment (`__OS_LOG`) at its physical address.
-    fn check_fw_regions(dev: &device::Device, ec0p: u64) -> Result<()> {
+    /// where the DT says, with the external code (`__ETEXT`) at `ec0p`.
+    /// Other segments may also use translated IOVAs: macOS 27 firmware adds
+    /// `__EDATA` after the external code, while `__OS_LOG` remains
+    /// identity-mapped. Returns the unique additional translated region for
+    /// `ED0p`, if any, requiring it to follow and not overlap `__ETEXT`.
+    fn check_fw_regions(dev: &device::Device, ec0p: u64) -> Result<Option<(u64, u64)>> {
         // SAFETY: `dev` is a live device being probed.
         let np = unsafe { (*dev.as_raw()).of_node };
         if np.is_null() {
@@ -2056,11 +2072,14 @@ impl AopData {
             return Err(ENODEV);
         }
         let mut etext = false;
+        let mut etext_end = 0;
+        let mut external_data = None;
         for idx in 0..count {
             let (phys, iova, size) = Self::fw_region(np, idx).inspect_err(|e| {
                 dev_err!(dev, "Invalid firmware memory-region {} ({:?})", idx, e);
             })?;
             if phys % FW_REGION_PAGE != 0
+                || size == 0
                 || size % FW_REGION_PAGE != 0
                 || size > FW_REGION_MAX_SIZE
                 || iova % FW_REGION_PAGE != 0
@@ -2076,14 +2095,9 @@ impl AopData {
                     return Err(EINVAL);
                 }
                 etext = true;
-            } else if iova != phys {
-                dev_err!(
-                    dev,
-                    "Firmware memory-region {} at IOVA {:#x}, neither EC0p {:#x} nor its physical address",
-                    idx,
-                    iova,
-                    ec0p
-                );
+                etext_end = iova + size;
+            } else if iova != phys && external_data.replace((iova, size)).is_some() {
+                dev_err!(dev, "Multiple translated external data regions");
                 return Err(EINVAL);
             }
             let mut off = 0;
@@ -2107,7 +2121,22 @@ impl AopData {
             dev_err!(dev, "No firmware memory-region at EC0p {:#x}", ec0p);
             return Err(ENOENT);
         }
-        Ok(())
+        if let Some((iova, size)) = external_data {
+            if iova < etext_end {
+                dev_err!(
+                    dev,
+                    "External data region precedes or overlaps the external code"
+                );
+                return Err(EINVAL);
+            }
+            dev_info!(
+                dev,
+                "Validated external data region at IOVA {:#x}, size {:#x}",
+                iova,
+                size
+            );
+        }
+        Ok(external_data)
     }
 
     /// Leaks every allocation the firmware may still access. Called when the
@@ -3174,10 +3203,12 @@ impl platform::Driver for AopDriver {
         let asc_req = pdev.io_request_by_index(1).ok_or(EINVAL)?;
         let asc_mmio = asc_req.iomap_sized::<ASC_MMIO_SIZE>()?;
         let asc_mmio = asc_mmio.as_view().relaxed();
-        if cfg.fw_regions {
+        let ed0p = if cfg.fw_regions {
             // Before anything is written to the AOP: no mapping, no start.
-            AopData::check_fw_regions(pdev.as_ref(), cfg.ec0p)?;
-        }
+            AopData::check_fw_regions(pdev.as_ref(), cfg.ec0p)?.map(|(iova, _)| iova)
+        } else {
+            None
+        };
         let data = AopData::new(pdev, cfg)?;
         // Whatever fails below leaves the AOP running and its children
         // registering; the same teardown as unbind's cleans that up.
@@ -3188,6 +3219,7 @@ impl platform::Driver for AopDriver {
                 &aop_mmio,
                 &[
                     (from_fourcc(b"EC0p"), Some(cfg.ec0p)),
+                    (from_fourcc(b"ED0p"), ed0p),
                     (from_fourcc(b"nCal"), cfg.ncal),
                     (from_fourcc(b"alig"), Some(cfg.alig)),
                     (from_fourcc(b"AOPt"), Some(cfg.aopt)),

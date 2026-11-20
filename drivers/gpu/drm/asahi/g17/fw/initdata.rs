@@ -28,6 +28,7 @@ use kernel::prelude::*;
 use super::clear;
 
 pub(crate) mod v25g83;
+pub(crate) mod v26b123;
 
 /// Interface version at root `+0x00`; the firmware rejects any other.
 pub(crate) const INTERFACE_VERSION: [u16; 4] = [0x04c0, 0x0396, 0xa322, 0x0c8a];

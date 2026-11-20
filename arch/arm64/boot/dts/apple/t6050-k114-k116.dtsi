@@ -190,11 +190,26 @@
 	status = "disabled";
 };
 
+/* The MTP and its DockChannel FIFO, which carry the keyboard and trackpad */
+&mtp_mbox {
+	status = "okay";
+};
+
+&mtp_dart {
+	status = "okay";
+};
+
+&mtp {
+	status = "okay";
+};
+
 /*
  * The keyboard, trackpad and touchscreen: the HID transport on the MTP's
  * DockChannel FIFO, laid out as on J716c (ADT dockchannel-mtp/mtp-transport).
  */
 &mtp_dockchannel {
+	status = "okay";
+
 	mtp_hid: input@8000 {
 		compatible = "apple,dockchannel-hid";
 		reg = <0x8000 0x1000>, <0xc000 0x1000>,

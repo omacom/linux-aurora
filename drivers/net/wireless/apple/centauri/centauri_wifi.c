@@ -2522,6 +2522,14 @@ int centauri_wifi_register(struct centauri *c)
 	set_wiphy_dev(wifi->wiphy, &c->pdev->dev);
 	wifi->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
 	wifi->wiphy->max_scan_ssids = 1;
+	/*
+	 * cfg80211 refuses a scan whose IEs exceed this. wpa_supplicant 2.11
+	 * adds 15 bytes to every scan (Extended Capabilities and an empty
+	 * Mesh ID); 512, wl1251's limit for the same reason, leaves room for
+	 * optional ones such as WPS or Interworking. build_scan() follows the
+	 * macOS request, which carries no IEs, so they are dropped.
+	 */
+	wifi->wiphy->max_scan_ie_len = 512;
 	wifi->wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 	wifi->wiphy->reg_notifier = wifi_regulatory;
 	wifi->wiphy->cipher_suites = cipher_suites;

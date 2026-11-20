@@ -460,12 +460,14 @@
 };
 
 /*
- * The ISP DART's address filter, from the J616c ADT's dart-isp0
+ * The ISP DART's address filter, from the full-die J616c ADT's dart-isp0
  * dapf-instance-0 (its sixth reg window), in the ADT's order: the
  * firmware's PMGR, PMP and DSID windows, with one window for each of the
- * six AMCCs. The filter goes off with the ISP system domain and is written
- * back when the DART powers up again, so the ISP firmware can start again
- * after the ISP has been powered down between streams, as on T6040.
+ * eight AMCCs (aura syncs apple,dapf-ranges from this boot's ADT so six-AMCC
+ * parts get their six windows). The filter goes off with the ISP system
+ * domain and is written back when the DART powers up again, so the ISP
+ * firmware can start again after the ISP has been powered down between
+ * streams, as on T6040.
  */
 &isp_dart0 {
 	reg = <0x5 0x828c0000 0x0 0xc000>,
@@ -483,5 +485,7 @@
 				     0x224004000 0x2241d62fc
 				     0x226004000 0x2261d62fc
 				     0x228004000 0x2281d62fc
-				     0x22a004000 0x22a1d62fc>;
+				     0x22a004000 0x22a1d62fc
+				     0x22c004000 0x22c1d62fc
+				     0x22e004000 0x22e1d62fc>;
 };

@@ -165,6 +165,14 @@ struct mca_cluster {
 	 */
 	size_t capture_synced;
 	ktime_t capture_synced_at;
+
+	/* Its registers across a sleep that cuts the power: mca_saved_regs, mca_saved_status */
+	u32 saved[32];
+	u32 saved_status[6];
+	u32 saved_dma[2];
+	u32 saved_port[3];
+	/* What was saved: 1 the port words only (a back end), 2 the whole cluster (a front end) */
+	u8 saved_kind;
 };
 
 struct mca_data {
@@ -1469,14 +1477,65 @@ static const struct of_device_id apple_mca_of_match[] = {
 MODULE_DEVICE_TABLE(of, apple_mca_of_match);
 
 /*
- * hw_params is the only place a stream's cluster and serdes setup is written. A
- * sleep that takes the registers would leave an open stream silent, and nothing
- * here restores them yet.
+ * hw_params, startup and prepare are the only places a stream's cluster, serdes, port and
+ * DMA adapter setup is written; an open stream (speakersafetyd keeps the sense capture open)
+ * keeps it across a sleep. A sleep that cuts the power (suspend-to-RAM through the
+ * platform's firmware path) takes the registers, so each cluster's are saved here, after
+ * ASoC suspended every stream, and written back before anything resumes them: the
+ * configuration first, then the port routing, the enables last. The NCO channels feeding the
+ * clusters come back in their own resume_early, which runs first (probe order). A sleep that
+ * kept the power writes the same values again.
  */
+static const u16 mca_saved_regs[] = {
+	/* configuration */
+	REG_MCLK_CONF, REG_SYNCGEN_HI_PERIOD, REG_SYNCGEN_LO_PERIOD, REG_SYNCGEN_MCLK_SEL,
+	CLUSTER_RXA_OFF + 0x4, CLUSTER_RXA_OFF + 0x8, CLUSTER_RXA_OFF + 0xc,
+	CLUSTER_RXA_OFF + 0x10, CLUSTER_RXA_OFF + 0x14, CLUSTER_RXA_OFF + 0x18,
+	CLUSTER_TXA_OFF + 0x4, CLUSTER_TXA_OFF + 0x8, CLUSTER_TXA_OFF + 0xc,
+	CLUSTER_TXA_OFF + 0x10, CLUSTER_TXA_OFF + 0x14, CLUSTER_TXA_OFF + 0x18,
+	CLUSTER_RXB_OFF + 0x4, CLUSTER_RXB_OFF + 0x8, CLUSTER_RXB_OFF + 0xc,
+	CLUSTER_RXB_OFF + 0x10, CLUSTER_RXB_OFF + 0x14, CLUSTER_RXB_OFF + 0x18,
+	CLUSTER_TXB_OFF + 0x4, CLUSTER_TXB_OFF + 0x8, CLUSTER_TXB_OFF + 0xc,
+	CLUSTER_TXB_OFF + 0x10, CLUSTER_TXB_OFF + 0x14, CLUSTER_TXB_OFF + 0x18,
+	REG_INTMASK,
+	/* routing, then the enables */
+	REG_PORT_CLOCK_SEL, REG_PORT_DATA_SEL, REG_PORT_ENABLES,
+};
+
+static_assert(ARRAY_SIZE(mca_saved_regs) <= 32);
+
+/* After the list above: the clock enable, the sync generator, each serdes unit's status. */
+static const u16 mca_saved_status[] = {
+	REG_STATUS, REG_SYNCGEN_STATUS,
+	CLUSTER_RXA_OFF, CLUSTER_TXA_OFF, CLUSTER_RXB_OFF, CLUSTER_TXB_OFF,
+};
+
+static_assert(ARRAY_SIZE(mca_saved_status) == 6);
+
+/* Port words, the only ones a back end writes (startup), on a block its front end powers. */
+static const u16 mca_saved_port[] = { REG_PORT_CLOCK_SEL, REG_PORT_DATA_SEL, REG_PORT_ENABLES };
+
+/*
+ * 2: a front end holding its cluster's power domain (pd_link: clocks or sync generator on),
+ * every register the driver writes there. 1: a back end in use, only its port words, as the
+ * driver touches no other there. 0: neither.
+ */
+static u8 mca_cluster_saved_kind(struct mca_cluster *cl)
+{
+	if (cl->pd_link || cl->syncgen_in_use)
+		return 2;
+	if (cl->clocks_in_use[SNDRV_PCM_STREAM_PLAYBACK] ||
+	    cl->clocks_in_use[SNDRV_PCM_STREAM_CAPTURE] ||
+	    cl->port_clk_started[SNDRV_PCM_STREAM_PLAYBACK] ||
+	    cl->port_clk_started[SNDRV_PCM_STREAM_CAPTURE])
+		return 1;
+	return 0;
+}
+
 static int __maybe_unused apple_mca_suspend_late(struct device *dev)
 {
 	struct mca_data *mca = dev_get_drvdata(dev);
-	int i;
+	int i, j, n = 0;
 
 	if (!pm_suspend_via_firmware())
 		return 0;
@@ -1484,18 +1543,76 @@ static int __maybe_unused apple_mca_suspend_late(struct device *dev)
 	for (i = 0; i < mca->nclusters; i++) {
 		struct mca_cluster *cl = &mca->clusters[i];
 
-		if (cl->pd_link || cl->clocks_in_use[SNDRV_PCM_STREAM_PLAYBACK] ||
-		    cl->clocks_in_use[SNDRV_PCM_STREAM_CAPTURE]) {
-			dev_err(dev, "cluster %d is in use, refusing the sleep\n", i);
-			return -EBUSY;
+		cl->saved_kind = mca_cluster_saved_kind(cl);
+		if (!cl->saved_kind)
+			continue;
+		n++;
+		if (cl->saved_kind == 1) {
+			for (j = 0; j < ARRAY_SIZE(mca_saved_port); j++)
+				cl->saved_port[j] = readl_relaxed(cl->base + mca_saved_port[j]);
+			continue;
 		}
+		for (j = 0; j < ARRAY_SIZE(mca_saved_regs); j++)
+			cl->saved[j] = readl_relaxed(cl->base + mca_saved_regs[j]);
+		for (j = 0; j < ARRAY_SIZE(mca_saved_status); j++)
+			cl->saved_status[j] = readl_relaxed(cl->base + mca_saved_status[j]);
+		cl->saved_dma[0] = readl_relaxed(mca->switch_base + REG_DMA_ADAPTER_A(cl->no));
+		cl->saved_dma[1] = readl_relaxed(mca->switch_base + REG_DMA_ADAPTER_B(cl->no));
 	}
+	if (n)
+		dev_info(dev, "%d cluster(s) in use: registers saved for the sleep\n", n);
+
+	return 0;
+}
+
+static int __maybe_unused apple_mca_resume_early(struct device *dev)
+{
+	struct mca_data *mca = dev_get_drvdata(dev);
+	int i, j, n = 0;
+
+	if (!pm_resume_via_firmware())
+		return 0;
+
+	for (i = 0; i < mca->nclusters; i++) {
+		struct mca_cluster *cl = &mca->clusters[i];
+		const u32 *st = cl->saved_status;
+		u8 kind = cl->saved_kind;
+
+		if (!kind)
+			continue;
+		n++;
+		if (kind == 1)
+			continue;	/* after every front end, below */
+		writel_relaxed(cl->saved_dma[0], mca->switch_base + REG_DMA_ADAPTER_A(cl->no));
+		writel_relaxed(cl->saved_dma[1], mca->switch_base + REG_DMA_ADAPTER_B(cl->no));
+		for (j = 0; j < ARRAY_SIZE(mca_saved_regs); j++)
+			writel_relaxed(cl->saved[j], cl->base + mca_saved_regs[j]);
+		/* Serdes units held in reset or off as they were; their enables after the clock. */
+		for (j = 2; j < ARRAY_SIZE(mca_saved_status); j++)
+			writel_relaxed(st[j] & ~SERDES_STATUS_EN, cl->base + mca_saved_status[j]);
+		writel_relaxed(st[1], cl->base + REG_SYNCGEN_STATUS);
+		writel_relaxed(st[0], cl->base + REG_STATUS);
+		for (j = 2; j < ARRAY_SIZE(mca_saved_status); j++)
+			if (st[j] & SERDES_STATUS_EN)
+				writel_relaxed(st[j], cl->base + mca_saved_status[j]);
+	}
+	/* The back ends' ports, once the front ends driving them are back. */
+	for (i = 0; i < mca->nclusters; i++) {
+		struct mca_cluster *cl = &mca->clusters[i];
+
+		if (cl->saved_kind == 1)
+			for (j = 0; j < ARRAY_SIZE(mca_saved_port); j++)
+				writel_relaxed(cl->saved_port[j], cl->base + mca_saved_port[j]);
+		cl->saved_kind = 0;
+	}
+	if (n)
+		dev_info(dev, "%d cluster(s) in use: registers back after the sleep\n", n);
 
 	return 0;
 }
 
 static const struct dev_pm_ops apple_mca_pm_ops = {
-	LATE_SYSTEM_SLEEP_PM_OPS(apple_mca_suspend_late, NULL)
+	LATE_SYSTEM_SLEEP_PM_OPS(apple_mca_suspend_late, apple_mca_resume_early)
 };
 
 static struct platform_driver apple_mca_driver = {

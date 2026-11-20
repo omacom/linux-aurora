@@ -159,8 +159,11 @@ static void isp_test_p010_format(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, fmt->strides[0], 2560);
 	KUNIT_EXPECT_EQ(test, fmt->total_size, (size_t)2764800);
 	/* NV12 remains the default and restores the existing pool capacity. */
+	f.fmt.pix.quantization = V4L2_QUANTIZATION_FULL_RANGE;
 	KUNIT_ASSERT_EQ(test, isp_set_preset(isp, fmt, &preset, V4L2_PIX_FMT_NV12), 0);
+	isp_get_sp_pix_format(isp, &f, fmt);
 	KUNIT_EXPECT_EQ(test, fmt->pixelformat, V4L2_PIX_FMT_NV12);
+	KUNIT_EXPECT_EQ(test, f.fmt.pix.quantization, V4L2_QUANTIZATION_LIM_RANGE);
 	KUNIT_EXPECT_EQ(test, fmt->total_size, (size_t)1382400);
 	KUNIT_EXPECT_EQ(test, isp_num_rendered(isp), ISP_MAX_BUFFERS);
 	KUNIT_EXPECT_EQ(test, isp_num_meta(isp), ISP_MAX_BUFFERS);

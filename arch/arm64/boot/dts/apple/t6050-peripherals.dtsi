@@ -1545,7 +1545,7 @@
 
 
 
-#ifndef T6050_J716C
+#if !defined(T6050_J714S) && !defined(T6050_J716C)
 	apciec0_dart: iommu@2a4000000 {
 		compatible = "apple,t6050-dart", "apple,t8110-dart";
 		reg = <0x2 0xa4000000 0x0 0x20000>;

@@ -1,0 +1,727 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * J714s left-back USB-C port (ATC0), next to MagSafe: USB 2/3, the PD controller, and the
+ * USB4/Thunderbolt router and its PCIe tunnel.
+ *
+ * ADT /arm-io/nub-spmi-a0/hpm0 (SN201202x at 0xc), atc-phy0, acio-phy-cpu0, usb-drd0 and
+ * dart-usb0; acio0, acio-cpu0, dart-acio0, apciec0 and dart-apciec0. They are the left-front
+ * port's (ATC1, t6050-j714s-left-usb4.dtsi) at its addresses and interrupts, as J716c
+ * describes its ATC0 (t6050-j716c-left-usb4.dtsi) and as in the T6050 inventory
+ * (t6050-peripherals.dtsi): every ATC0 register block is ATC1's less 0x8000000, every
+ * interrupt ATC1's less 32 (the PHY's and the router CPU's mailboxes' less 10).
+ *
+ * This is Apple's debug (DFU) port, as the ADT marks it (hpm0's uart-hpm-rids, usb-drd0's NCM
+ * debug gadget settings), and the boot loader's debug link: the console (serial0, the
+ * dockchannel UART) and, on request, its USB proxy, whose USB2 route it sets with one DVEn
+ * action in a short DBMa session. Describing the port hands it to Linux: tipd, the PHY and the
+ * DRD's role switch then decide what the USB2 pair carries, and genpd may power the port's
+ * domains off while unused. Every ATC0 device starts disabled. Aura may enable the
+ * handoff group only after excluding debug/proxy ownership, proving USB DMA stopped,
+ * and exporting this machine's ADT tunables. Older producers leave the port reserved.
+ */
+
+/*
+ * The inventory gives ATC0_COMMON the FAB3 SoC domain as a parent, which is not described here.
+ * ATC1's and ATC2's common domains have none: do the same. J716c enables ps_fab3_soc instead,
+ * which would hand that fabric domain, and its other undescribed users, to genpd's unused
+ * power-off; left out, it stays as the boot loader leaves it, on.
+ */
+&ps_atc0_common {
+	/delete-property/ power-domains;
+	status = "disabled";
+};
+
+&ps_atc0_usb_aon {
+	status = "disabled";
+};
+
+&ps_atc0_usb {
+	status = "disabled";
+};
+
+&ps_atc0_phymxwrap {
+	status = "disabled";
+};
+
+&{/soc@200000000} {
+	/* acio-phy-cpu0 reg[0]: the PHY firmware's mailbox (it runs, pre-loaded by iBoot) */
+	atc0_phy_mbox: mailbox@2a3148000 {
+		status = "disabled";
+		compatible = "apple,t6050-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x2 0xa3148000 0x0 0x4000>;
+		interrupts = <AIC_IRQ 0 841 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 842 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 843 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 844 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty", "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+
+	/*
+	 * atc-phy0 regs [2] [0] usb-drd0[4] [39] [40] [41] [42] [43] [38] [37] usb-drd0[3], and
+	 * the DP clock source register: ATC1's (0x58) less 0x10, as J716c's atc0_phy (the ADT
+	 * does not give the per-port address).
+	 */
+	atc0_phy: phy@2a3000000 {
+		status = "disabled";
+		compatible = "apple,t6050-combo-phy";
+		reg = <0x2 0xa3000000 0x0 0x2c000>,
+		      <0x2 0xa2a90000 0x0 0x4000>,
+		      <0x2 0xa2800000 0x0 0x4000>,
+		      <0x2 0xa3200000 0x0 0x4000>,
+		      <0x2 0xa3244000 0x0 0x4000>,
+		      <0x2 0xa0000000 0x0 0x8000>,
+		      <0x2 0xa0020000 0x0 0x4000>,
+		      <0x2 0xa3250000 0x0 0x4000>,
+		      <0x2 0xa3140000 0x0 0x4000>,
+		      <0x2 0xa30c0000 0x0 0x10000>,
+		      <0x2 0xa2a84000 0x0 0x4000>,
+		      <0x2 0x80000048 0x0 0x10>;
+		reg-names = "core", "usb2phy", "usb2-digital", "reset", "fabric", "axi2af", "lioa",
+			    "common-cfg", "usb-control", "firmware-data", "pipehandler",
+			    "dp-clock-source";
+		#phy-cells = <1>;
+		#reset-cells = <1>;
+		apple,port-index = <0>;
+		mode-switch;
+		orientation-switch;
+		mboxes = <&atc0_phy_mbox>;
+		power-domains = <&ps_atc0_usb_aon>, <&ps_atc0_common>, <&ps_atc0_phymxwrap>,
+				<&ps_atc0_usb>;
+		power-domain-names = "usb-aon", "common", "wrapper", "usb";
+
+		port {
+			atc0_phy_typec: endpoint {
+				remote-endpoint = <&typec2_ss>;
+			};
+		};
+	};
+};
+
+/* /arm-io/dart-usb0 reg[0] and reg[1], interrupt 1423; vm-base 0x10000004000 +0xffff0000 */
+&usb0_dart {
+	apple,dma-range = <0x100 0x4000 0x0 0xffff0000>;
+	status = "disabled";
+};
+
+&usb0_dart1 {
+	apple,dma-range = <0x100 0x4000 0x0 0xffff0000>;
+	status = "disabled";
+};
+
+/*
+ * /arm-io/usb-drd0: the inventory's registers and interrupt (1419), with usb-drd1's setup and
+ * tunables (the DRD tables are the same on every port, as on J716c).
+ */
+&usb_drd0 {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "host";
+	resets = <&atc0_phy 0>;
+	phys = <&atc0_phy PHY_TYPE_USB2>, <&atc0_phy PHY_TYPE_USB3>;
+	phy-names = "usb2-phy", "usb3-phy";
+	apple,tunable-gbl-default = <0x64 0x2 0x0>, <0x10 0xfff80000 0x00680000>;
+	apple,tunable-gbl-host = <0x4 0x0001ef00 0x00002f00>, <0x1c 0x00000100 0x0>,
+		<0x2c 0x000a07ff 0x000800c8>, <0x100 0x02000100 0x02000100>,
+		<0x504 0x00001000 0x0>, <0x528 0xff0000ff 0x06000006>,
+		<0x52c 0xff0000ff 0x08000008>, <0x580 0xffffffff 0x6f000006>,
+		<0x584 0xffffffff 0x00060000>;
+	apple,tunable-dbg = <0x0 0x8 0x8>;
+	apple,tunable-cfg-host = <0x20 0xff 0x1b>;
+	apple,tunable-link = <0x10 0xff000000 0xff000000>, <0x20 0x7ff00000 0x4e900000>,
+		<0x24 0x001f8000 0x000b8000>, <0x60 0x0003ffff 0x00000600>;
+	apple,tunable-cio = <0x20 0x00ff0000 0x001e0000>;
+	status = "disabled";
+
+	port {
+		usb_drd0_hs: endpoint {
+			remote-endpoint = <&typec2_hs>;
+		};
+	};
+};
+
+/*
+ * typec2: the third connector, after the right (typec0) and left-front (typec1) ports, so
+ * those keep their names.
+ */
+&nub_spmi_a0 {
+	hpm0: usb-pd@c {
+		status = "disabled";
+		compatible = "apple,sn201202x";
+		reg = <0xc SPMI_USID>;
+
+		typec2: connector {
+			compatible = "usb-c-connector";
+			label = "USB-C Left-back";
+			power-role = "dual";
+			data-role = "dual";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+					typec2_hs: endpoint {
+						remote-endpoint = <&usb_drd0_hs>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+					typec2_ss: endpoint {
+						remote-endpoint = <&atc0_phy_typec>;
+					};
+				};
+			};
+		};
+	};
+};
+
+/* All per-machine PHY tables are supplied by aura only at a successful handoff. */
+
+/* ==== The USB4/Thunderbolt router and its PCIe tunnel ==== */
+
+&ps_atc0_cio {
+	power-domains = <&ps_atc0_common>;
+	status = "disabled";
+};
+
+&ps_atc0_cio_pcie {
+	power-domains = <&ps_atc0_cio>;
+	status = "disabled";
+};
+
+&ps_atc0_cio_usb {
+	power-domains = <&ps_atc0_cio>;
+	status = "disabled";
+};
+
+&ps_atc0_cio_auss {
+	power-domains = <&ps_atc0_cio>, <&ps_auss>;
+	status = "disabled";
+};
+
+/* With the ATC0 USB always-on clock gate, as ATC1_PCIE and ATC2_PCIE */
+&ps_atc0_pcie {
+	power-domains = <&ps_atc0_common>, <&ps_atc0_usb_aon>;
+	status = "disabled";
+};
+
+/* LSTX: AOP GPIO pin 77 (0x4d), function 1 for the router, as J716c's acio0 */
+&pinctrl_aop {
+	acio0_lstx_pins: acio0-lstx-pins {
+		pinmux = <0x1004d>;	/* APPLE_PINMUX(77, 1) */
+	};
+};
+
+&{/soc@200000000} {
+	/* /arm-io/acio-cpu0 reg[0]: the router CPU's mailbox, inside its wrapper */
+	acio0_mbox: mailbox@2a1108000 {
+		status = "disabled";
+		compatible = "apple,t6050-asc-mailbox", "apple,asc-mailbox-v4";
+		reg = <0x2 0xa1108000 0x0 0x4000>;
+		interrupts = <AIC_IRQ 0 837 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 838 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 839 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 840 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "send-empty", "send-not-empty",
+				  "recv-empty", "recv-not-empty";
+		#mbox-cells = <0>;
+	};
+
+	acio0: acio@2a1ac0000 {
+		status = "disabled";
+		compatible = "apple,t6050-usb4-acio";
+		reg = <0x2 0xa1ac0000 0x0 0xc000>,
+		      <0x2 0xa1080000 0x0 0x26000>,
+		      <0x2 0xa1e44000 0x0 0x4000>,
+		      <0x2 0xa1100000 0x0 0x4000>,
+		      <0x2 0xa1c80000 0x0 0x4000>;
+		reg-names = "rc", "sram", "pcie-adapter", "cpu", "router-ap-fw";
+		mboxes = <&acio0_mbox>;
+		resets = <&cio_reconfig0 0>;
+		/* ATC0_PCIE last: the PCIe tunnel root port, set up before it is populated */
+		power-domains = <&ps_atc0_cio>, <&ps_atc0_cio_pcie>,
+				<&ps_atc0_cio_usb>, <&ps_atc0_cio_auss>, <&ps_atc0_pcie>;
+		thunderbolt-switch;
+		apple,pcie-tunnel = <&acio0_pcie_tunnel>;
+		pinctrl-0 = <&acio0_lstx_pins>;
+		pinctrl-names = "lstx";
+		lstx-gpios = <&pinctrl_aop 77 GPIO_ACTIVE_HIGH>;
+
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x2 0xa1000000 0x1000000>;
+		nonposted-mmio;
+
+		acio0_dart: iommu@a80000 {
+			status = "disabled";
+			compatible = "apple,t6050-dart", "apple,t8110-dart";
+			reg = <0xa80000 0xc000>;
+			interrupts = <AIC_IRQ 0 1606 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc0_cio>;
+			#iommu-cells = <1>;
+			apple,dma-range = <0x100 0x4000 0x0 0xffff0000>;
+			apple,bypass-sids = <15>;
+			apple,full-error-reporting;
+			apple,ctc-flush;
+		};
+
+		/* Interrupts 0x62b.. (1579) are the TX rings and 0x637.. (1591) the RX rings */
+		acio0_nhi: nhi@f00000 {
+			status = "disabled";
+			compatible = "apple,t6050-usb4-nhi";
+			reg = <0xf00000 0x100000>;
+			reg-names = "nhi";
+			interrupts = <AIC_IRQ 0 1579 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1580 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1581 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1582 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1583 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1584 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1585 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1586 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1587 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1588 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1589 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1590 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1591 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1592 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1593 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1594 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1595 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1596 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1597 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1598 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1599 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1600 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1601 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1602 IRQ_TYPE_LEVEL_HIGH>,
+				     <AIC_IRQ 0 1608 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "txring0", "txring1", "txring2", "txring3",
+					  "txring4", "txring5", "txring6", "txring7",
+					  "txring8", "txring9", "txring10", "txring11",
+					  "rxring0", "rxring1", "rxring2", "rxring3",
+					  "rxring4", "rxring5", "rxring6", "rxring7",
+					  "rxring8", "rxring9", "rxring10", "rxring11",
+					  "parity";
+			iommus = <&acio0_dart 0>,
+				 <&acio0_dart 1>,
+				 <&acio0_dart 2>,
+				 <&acio0_dart 3>,
+				 <&acio0_dart 4>,
+				 <&acio0_dart 5>,
+				 <&acio0_dart 6>,
+				 <&acio0_dart 7>,
+				 <&acio0_dart 8>,
+				 <&acio0_dart 9>,
+				 <&acio0_dart 10>,
+				 <&acio0_dart 11>,
+				 <&acio0_dart 16>,
+				 <&acio0_dart 17>,
+				 <&acio0_dart 18>,
+				 <&acio0_dart 19>,
+				 <&acio0_dart 20>,
+				 <&acio0_dart 21>,
+				 <&acio0_dart 22>,
+				 <&acio0_dart 23>,
+				 <&acio0_dart 24>,
+				 <&acio0_dart 25>,
+				 <&acio0_dart 26>,
+				 <&acio0_dart 27>;
+		};
+	};
+};
+
+/*
+ * ATC0's PCIe tunnel: /arm-io/apciec0 and dart-apciec0, the PCIe-C root port behind the router's
+ * PCIe down adapter, set up as ATC1's. Its config space and windows are J716c's apciec0's, below
+ * ATC1's; MSIs use the bridge's 32-vector slice (128-159) and PCI domain 1, both unused so far.
+ */
+/ {
+	acio0_pcie_tunnel: pcie-tunnel-0 {
+		status = "disabled";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		nonposted-mmio;
+
+		apciec0_dart: iommu@2a4000000 {
+			status = "disabled";
+			compatible = "apple,t6050-dart", "apple,t8110-dart";
+			reg = <0x2 0xa4000000 0x0 0x20000>;
+			interrupts = <AIC_IRQ 0 1406 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc0_pcie>;
+			#iommu-cells = <1>;
+			apple,bypass-sids = <253 255>;
+			apple,full-error-reporting;
+			apple,ctc-flush;
+		};
+
+		apciec0: pcie@1c50000000 {
+			status = "disabled";
+			compatible = "apple,t6050-pciec";
+			device_type = "pci";
+			reg = <0x1c 0x50000000 0x0 0x10000000>,
+			      <0x2 0xa4034000 0x0 0x4000>,
+			      <0x2 0xa4020000 0x0 0x8000>,
+			      <0x2 0xa4038000 0x0 0x4000>,
+			      <0x2 0xa4060000 0x0 0x4000>,
+			      <0x2 0xa402c000 0x0 0x4000>,
+			      <0x2 0xa4028000 0x0 0x4000>;
+			reg-names = "config", "rc", "port0", "fabric", "debug", "ltssm", "intr2axi";
+			/* The port's: link events and INTx */
+			interrupts = <AIC_IRQ 0 1405 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc0_pcie>;
+			/* No boot loader hands the port over: the kernel cold-initializes it. */
+			apple,pciec-kernel-init;
+
+			msi-controller;
+			msi-parent = <&apciec0>;
+			msi-ranges = <&aic AIC_IRQ 0 1952 IRQ_TYPE_EDGE_RISING 32>;
+			apple,msi-vector-base = <128>;
+
+			iommu-map = <0x0 &apciec0_dart 0x0 0x40>;
+			iommu-map-mask = <0x3f>;
+			linux,pci-domain = <1>;
+			bus-range = <0x0 0x7f>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x43000000 0x8 0x0 0x8 0x0 0x2 0x0>,
+				 <0x02000000 0x0 0x00100000 0xa 0x00100000 0x0 0x3ff00000>,
+				 <0x42000000 0x0 0x40000000 0xa 0x40000000 0x0 0x40000000>;
+
+			apciec0_port: pci@0,0 {
+				device_type = "pci";
+				reg = <0x0 0x0 0x0 0x0 0x0>;
+				external-facing;
+
+				#address-cells = <3>;
+				#size-cells = <2>;
+				ranges;
+
+				interrupt-controller;
+				#interrupt-cells = <1>;
+				interrupt-map-mask = <0 0 0 7>;
+				interrupt-map = <0 0 0 1 &apciec0_port 0 0 0 0>,
+						<0 0 0 2 &apciec0_port 0 0 0 1>,
+						<0 0 0 3 &apciec0_port 0 0 0 2>,
+						<0 0 0 4 &apciec0_port 0 0 0 3>;
+			};
+		};
+	};
+};
+
+/*
+ * The PHY's CIO80 RX_TOP tunables (ADT atc-phy0 tunable_LN0/LN1_RX_TOP_CIO_DFLT): 0x200, as on
+ * the left-front port (the right port's is 0x0).
+ */
+&atc0_phy {
+	apple,tunable-lane0-rx-top-cio = <0x35c 0xe00 0x200>;
+	apple,tunable-lane1-rx-top-cio = <0x35c 0xe00 0x200>;
+};
+
+&typec2 {
+	ports {
+		port@3 {
+			reg = <3>;
+			typec2_usb4: endpoint {
+				remote-endpoint = <&acio0_tbt>;
+			};
+		};
+	};
+};
+
+/*
+ * The router's tunables and its DP IN interrupts (atc0-dpin0..3 in the T6050 inventory, as J716c's
+ * acio0). The router, NHI, DART and tunnel tunables are the same on ATC1 and ATC2 here and on
+ * J716c's ATC0 and ATC1.
+ */
+&acio0 {
+	interrupts = <AIC_IRQ 0 1603 IRQ_TYPE_LEVEL_HIGH>, <AIC_IRQ 0 1604 IRQ_TYPE_LEVEL_HIGH>,
+		     <AIC_IRQ 0 1609 IRQ_TYPE_LEVEL_HIGH>, <AIC_IRQ 0 1610 IRQ_TYPE_LEVEL_HIGH>;
+	interrupt-names = "dpin0", "dpin1", "dpin2", "dpin3";
+	apple,tunable-rc = <0x0 0xfff0 0x4020>,
+			   <0x2c 0x4 0x0>,
+			   <0x4004 0x1ff01ff 0x1000100>,
+			   <0x4008 0x801f 0x4>,
+			   <0x4010 0x7f 0x40>,
+			   <0x4014 0x801f 0x4>,
+			   <0x401c 0x7f 0x40>,
+			   <0x4024 0x801f 0x4>,
+			   <0x402c 0x7f 0x40>,
+			   <0x4030 0x801f 0x4>,
+			   <0x4038 0xffffffff 0x1010101>,
+			   <0x403c 0xffff 0x101>,
+			   <0x4040 0x1 0x1>,
+			   <0x4044 0xffffffff 0x1010101>,
+			   <0x4048 0x1 0x1>,
+			   <0x404c 0x801f 0x4>,
+			   <0x8004 0x70007 0x40004>,
+			   <0x8008 0x801f 0x4>,
+			   <0x8010 0x70007 0x40004>,
+			   <0x8018 0x801f 0x4>,
+			   <0x8020 0x70007 0x40004>,
+			   <0x8028 0x801f 0x4>,
+			   <0x8030 0x801f 0x4>,
+			   <0x8038 0x801f 0x4>,
+			   <0x8040 0x801f 0x4>,
+			   <0x8048 0x801f 0x4>,
+			   <0x8050 0x801f 0x4>,
+			   <0x8058 0x801f 0x4>,
+			   <0x8060 0x801f 0x4>;
+	apple,tunable-pcie-adapter = <0x1008 0x6 0x6>;
+	apple,tunable-router-ap-fw = <0x8 0xff2 0x482>;
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@1 {
+			reg = <1>;
+			acio0_tbt: endpoint {
+				remote-endpoint = <&typec2_usb4>;
+			};
+		};
+	};
+};
+
+&acio0_dart {
+	apple,tunable = <0x20c 0x80000121 0x80000121>,
+			<0x220 0xf0f 0xf0f>,
+			<0x224 0xffff 0x909>,
+			<0x300 0x1f31 0x1>,
+			<0x308 0x3ffffffc 0x10000000>,
+			<0x310 0x3ffffffc 0x3ffffffc>,
+			<0x800 0xf003f 0x10000>,
+			<0x804 0xf003f 0x10002>,
+			<0x808 0xf003f 0x10004>,
+			<0x80c 0xf003f 0x20006>,
+			<0x810 0xf003f 0x2000a>,
+			<0x814 0xf003f 0x2000e>,
+			<0x818 0xf003f 0x20012>,
+			<0x81c 0xf003f 0x20016>,
+			<0x820 0xf003f 0x2001a>,
+			<0x824 0xf003f 0x2001e>,
+			<0x828 0xf003f 0x20022>,
+			<0x82c 0xf003f 0x20026>,
+			<0x830 0xf003f 0x2002a>,
+			<0x834 0xf003f 0x2002e>,
+			<0x838 0xf003f 0x20032>,
+			<0x83c 0xf003f 0x10036>;
+};
+
+/*
+ * The host DROM: the J714sAP ADT's /arm-io/acio0 thunderbolt-drom (acio1's with the router's
+ * port entries for port 0 and UID 0). The boot loader does not replace it on this board (no
+ * usb4_N_nhi alias).
+ */
+&acio0_nhi {
+	apple,tunable-nhi = <0xf8004 0xff 0x80>,
+			    <0xf8008 0x801f 0x4>,
+			    <0xf8010 0x3f 0x20>,
+			    <0xf8014 0x801f 0x4>,
+			    <0xf801c 0x1f 0x10>,
+			    <0xf8020 0x801f 0x4>,
+			    <0xf8028 0xff 0x80>,
+			    <0xf802c 0x801f 0x4>,
+			    <0xf8034 0xff 0x80>,
+			    <0xf8038 0x801f 0x4>,
+			    <0xf8040 0x3f 0x20>,
+			    <0xf8044 0x801f 0x4>,
+			    <0xf804c 0x8007 0x1>,
+			    <0xfc004 0x3 0x2>,
+			    <0xfc008 0x801f 0x4>,
+			    <0xfc010 0x7 0x4>,
+			    <0xfc014 0x801f 0x4>,
+			    <0xfc01c 0x7 0x4>,
+			    <0xfc020 0x801f 0x4>,
+			    <0xfc028 0x7 0x4>,
+			    <0xfc02c 0x801f 0x4>,
+			    <0xfc034 0x7 0x4>,
+			    <0xfc038 0x801f 0x4>,
+			    <0xfc040 0x3 0x2>,
+			    <0xfc044 0x801f 0x4>,
+			    <0xfc04c 0x8007 0x1>,
+			    <0x4000 0x1000000f 0x10000002>,
+			    <0x4004 0x1000000f 0x10000002>,
+			    <0x4008 0x1000000f 0x10000002>,
+			    <0x400c 0x1000000f 0x10000002>,
+			    <0x4010 0x1000000f 0x10000002>,
+			    <0x4014 0x1000000f 0x10000002>,
+			    <0x4018 0x1000000f 0x10000002>,
+			    <0x401c 0x1000000f 0x10000002>,
+			    <0x4020 0x1000000f 0x10000002>,
+			    <0x4024 0x1000000f 0x10000002>,
+			    <0x4028 0x1000000f 0x10000002>,
+			    <0x402c 0x1000000f 0x10000002>,
+			    <0x4040 0x1000000f 0x10000002>,
+			    <0x4044 0x1000000f 0x10000002>,
+			    <0x4048 0x1000000f 0x10000002>,
+			    <0x404c 0x1000000f 0x10000002>,
+			    <0x4050 0x1000000f 0x10000002>,
+			    <0x4054 0x1000000f 0x10000002>,
+			    <0x4058 0x1000000f 0x10000002>,
+			    <0x405c 0x1000000f 0x10000002>,
+			    <0x4060 0x1000000f 0x10000002>,
+			    <0x4064 0x1000000f 0x10000002>,
+			    <0x4068 0x1000000f 0x10000002>,
+			    <0x406c 0x1000000f 0x10000002>,
+			    <0x4080 0x1000000f 0x10000002>,
+			    <0x4084 0x1000000f 0x10000002>,
+			    <0x4088 0x1000000f 0x10000002>,
+			    <0x408c 0x1000000f 0x10000002>,
+			    <0x4090 0x1000000f 0x10000002>,
+			    <0x4094 0x1000000f 0x10000002>,
+			    <0x4098 0x1000000f 0x10000002>,
+			    <0x409c 0x1000000f 0x10000002>,
+			    <0x40a0 0x1000000f 0x10000002>,
+			    <0x40a4 0x1000000f 0x10000002>,
+			    <0x40a8 0x1000000f 0x10000002>,
+			    <0x40ac 0x1000000f 0x10000002>,
+			    <0x40c0 0x1000000f 0x10000002>,
+			    <0x40c4 0x1000000f 0x10000002>,
+			    <0x40c8 0x1000000f 0x10000002>,
+			    <0x40cc 0x1000000f 0x10000002>,
+			    <0x40d0 0x1000000f 0x10000002>,
+			    <0x40d4 0x1000000f 0x10000002>,
+			    <0x40d8 0x1000000f 0x10000002>,
+			    <0x40dc 0x1000000f 0x10000002>,
+			    <0x40e0 0x1000000f 0x10000002>,
+			    <0x40e4 0x1000000f 0x10000002>,
+			    <0x40e8 0x1000000f 0x10000002>,
+			    <0x40ec 0x1000000f 0x10000002>,
+			    <0x4100 0x1000000f 0x10000002>,
+			    <0x4104 0x1000000f 0x10000002>,
+			    <0x4108 0x1000000f 0x10000002>,
+			    <0x410c 0x1000000f 0x10000002>,
+			    <0x4110 0x1000000f 0x10000002>,
+			    <0x4114 0x1000000f 0x10000002>,
+			    <0x4118 0x1000000f 0x10000002>,
+			    <0x411c 0x1000000f 0x10000002>,
+			    <0x4120 0x1000000f 0x10000002>,
+			    <0x4124 0x1000000f 0x10000002>,
+			    <0x4128 0x1000000f 0x10000002>,
+			    <0x412c 0x1000000f 0x10000002>,
+			    <0x4140 0x1000000f 0x10000002>,
+			    <0x4144 0x1000000f 0x10000002>,
+			    <0x4148 0x1000000f 0x10000002>,
+			    <0x414c 0x1000000f 0x10000002>,
+			    <0x4150 0x1000000f 0x10000002>,
+			    <0x4154 0x1000000f 0x10000002>,
+			    <0x4158 0x1000000f 0x10000002>,
+			    <0x415c 0x1000000f 0x10000002>,
+			    <0x4160 0x1000000f 0x10000002>,
+			    <0x4164 0x1000000f 0x10000002>,
+			    <0x4168 0x1000000f 0x10000002>,
+			    <0x416c 0x1000000f 0x10000002>,
+			    <0x43e4 0x7 0x7>;
+	apple,thunderbolt-drom = [db 00 00 00 00 00 00 00 00 c0 49 a7 a6 00 5c 00
+			00 00 00 00 00 00 08 81 80 02 80 00 00 00 08 82
+			90 01 80 00 00 00 03 83 20 08 84 00 00 00 00 00
+			00 08 85 00 00 00 00 00 00 05 86 09 01 00 08 87
+			00 00 00 00 00 00 05 88 09 01 00 05 89 09 01 00
+			05 8a 09 01 00 0e 01 41 70 70 6c 65 2c 20 49 6e
+			63 2e 00 06 02 69 4f 53 00 00 00 00];
+};
+
+/* The tunnel's tunables: ATC1's and ATC2's, and J716c's ATC0's */
+&apciec0_dart {
+	apple,tunable = <0x20c 0x80000121 0x80000121>,
+			<0x220 0xf0f 0xf0f>,
+			<0x224 0xffff 0x909>,
+			<0x300 0x1f31 0x1>,
+			<0x308 0x3ffffffc 0x10000000>,
+			<0x310 0x3ffffffc 0x3ffffffc>;
+};
+
+&apciec0 {
+	apple,tunable-debug = <0x1000 0x1 0x0>;
+	apple,tunable-rc = <0x78 0x7000 0x0>,
+			   <0x718 0x7c000 0x0>,
+			   <0x814 0xffffffff 0x2020f060>,
+			   <0x8bc 0x1 0x0>;
+	apple,tunable-fabric = <0x4 0x3f003f 0x240024>,
+			       <0x8 0x1 0x1>,
+			       <0xc 0x1 0x1>,
+			       <0x10 0x801f 0x4>,
+			       <0x18 0x1ff 0x1e0>,
+			       <0x1c 0x1 0x1>,
+			       <0x20 0x801f 0x4>,
+			       <0x28 0x1f 0x10>,
+			       <0x2c 0x801f 0x4>,
+			       <0x34 0x3f 0x20>,
+			       <0x38 0x801f 0x4>,
+			       <0x40 0x3f 0x20>,
+			       <0x44 0x801f 0x4>,
+			       <0x4c 0x10001 0x10001>,
+			       <0x50 0x1 0x1>,
+			       <0x54 0x1 0x1>,
+			       <0x58 0x801f 0x4>,
+			       <0x60 0x7f007f 0x450045>,
+			       <0x64 0x801f 0x4>,
+			       <0x6c 0x1f001f 0x100010>,
+			       <0x70 0xf1 0x1>,
+			       <0x74 0x801f 0x4>,
+			       <0x7c 0x801f 0x4>,
+			       <0x84 0x1 0x1>,
+			       <0x88 0x1 0x1>,
+			       <0x8c 0x801f 0x4>,
+			       <0x94 0x1 0x1>,
+			       <0x98 0x801f 0x4>,
+			       <0xa0 0x1 0x1>,
+			       <0xa4 0x801f 0x4>,
+			       <0xac 0x1 0x1>,
+			       <0xb0 0x1 0x1>,
+			       <0xb4 0x801f 0x4>,
+			       <0xbc 0x801f 0x4>,
+			       <0xc4 0x801f 0x4>;
+};
+
+&apciec0_port {
+	apple,tunable = <0x140 0x1 0x1>,
+			<0x2a0 0x7e 0xa>;
+};
+
+/*
+ * The producer's all-or-nothing ATC0 activation group. Shared AUSS, AOP GPIO
+ * and CIO reset providers stay enabled for the existing ports. GPIO 77 stays
+ * reserved until the same handoff transaction releases only that pin.
+ */
+
+/ {
+	firmware {
+		atc0-handoff {
+			compatible = "apple,atc-handoff";
+			apple,phy = <&atc0_phy>;
+			apple,devices = <&ps_atc0_common>,
+				<&ps_atc0_usb_aon>,
+				<&ps_atc0_usb>,
+				<&ps_atc0_phymxwrap>,
+				<&ps_atc0_cio>,
+				<&ps_atc0_cio_pcie>,
+				<&ps_atc0_cio_usb>,
+				<&ps_atc0_cio_auss>,
+				<&ps_atc0_pcie>,
+				<&ps_atc0_common_dp_0>,
+				<&ps_atc0_common_dp_1>,
+				<&ps_atc0_common_dp_2>,
+				<&ps_atc0_common_dp_3>,
+				<&atc0_phy_mbox>,
+				<&atc0_phy>,
+				<&usb0_dart>,
+				<&usb0_dart1>,
+				<&usb_drd0>,
+				<&hpm0>,
+				<&acio0_mbox>,
+				<&acio0>,
+				<&acio0_dart>,
+				<&acio0_nhi>,
+				<&acio0_pcie_tunnel>,
+				<&apciec0_dart>,
+				<&apciec0>,
+				<&atc0_dpxbar>;
+		};
+	};
+};

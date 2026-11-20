@@ -7,8 +7,9 @@
  * that move with the boot firmware. The boot loader fills these
  * placeholders from the ADT's isp segment-ranges: reg, and
  * iommu-addresses where the firmware runs them, from 0x100_0000_0000 on.
- * It then sets apple,platform-id from the ADT isp sensor-type and enables
- * the ISP and its DARTs. The driver checks that the coprocessor's reset
+ * It then sets apple,platform-id from the ADT isp sensor-type, copies the
+ * address filter windows of the ADT's ISP DART into apple,dapf-ranges and
+ * enables the ISP and its DARTs. The driver checks that the coprocessor's reset
  * vector is this text before it starts the firmware.
  *
  * Copyright The Asahi Linux Contributors

@@ -39,6 +39,8 @@ struct ane_h16_sim {
 	u32 timeout_scratch;
 	u64 timeout_head;
 	u32 lock;
+	u32 protect[3];
+	u32 protect_reads;
 	u32 fault;
 	u32 fault_address_reads;
 	u32 channel_request;
@@ -89,8 +91,10 @@ static void sim_check_dart(struct ane_h16_sim *s, enum ane_h16_window w, u32 off
 	KUNIT_ASSERT_NOT_NULL(s->test, m);
 	if (off == m->dart_fault || off == m->dart_address_lo || off == m->dart_address_hi)
 		return;
+	if (off == m->dart_protect)
+		return;
 	KUNIT_EXPECT_EQ(s->test, w, ANE_H16_DART0 + s->soc.dapf_dart);
-	KUNIT_EXPECT_TRUE(s->test, off == m->dart_protect || off == m->dart_lock);
+	KUNIT_EXPECT_EQ(s->test, off, m->dart_lock);
 }
 
 static void sim_check_dapf(struct ane_h16_sim *s, u32 off, u32 width)
@@ -114,7 +118,11 @@ static u32 sim_read32(void *ctx, enum ane_h16_window w, u32 off)
 		sim_check_dart(s, w, off);
 		if (off == s->soc.dart_params)
 			return s->dart_params;
-		if (off == s->mmio.dart_protect || off == s->mmio.dart_lock)
+		if (off == s->mmio.dart_protect) {
+			s->protect_reads |= BIT(w - ANE_H16_DART0);
+			return s->protect[w - ANE_H16_DART0];
+		}
+		if (off == s->mmio.dart_lock)
 			return s->lock;
 		if (off == s->mmio.dart_fault)
 			return s->fault;
@@ -1128,6 +1136,29 @@ static void ane_h16_map_failure_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, s->pins, 0U);
 }
 
+/* Every DART is observed; only bit 0 prevents fresh translation ownership. */
+static void ane_h16_dart_protection_test(struct kunit *test)
+{
+	struct ane_h16_sim *s = test->priv;
+	unsigned int i;
+
+	KUNIT_EXPECT_EQ(test, ane_h16_dart_protection(&s->boot, true), -ENODEV);
+	KUNIT_EXPECT_EQ(test, s->protect_reads, 0U);
+	KUNIT_ASSERT_EQ(test, ane_h16_select_mmio(&s->boot), 0);
+	for (i = 0; i < 3; i++) {
+		s->protect[i] = BIT(0);
+		s->protect_reads = 0;
+		KUNIT_EXPECT_EQ(test, ane_h16_dart_protection(&s->boot, true), -EPERM);
+		KUNIT_EXPECT_EQ(test, s->protect_reads, 7U);
+		KUNIT_EXPECT_EQ(test, ane_h16_dart_protection(&s->boot, false), 0);
+		s->protect[i] = BIT(1) | BIT(2);
+	}
+	KUNIT_EXPECT_EQ(test, ane_h16_dart_protection(&s->boot, true), 0);
+	KUNIT_EXPECT_EQ(test, s->dapf_writes, 0U);
+	KUNIT_EXPECT_EQ(test, s->maps, 0U);
+	KUNIT_EXPECT_EQ(test, s->scratch_writes, 0U);
+}
+
 static void ane_h16_locked_matching_test(struct kunit *test)
 {
 	struct ane_h16_sim *s = test->priv;
@@ -1146,6 +1177,7 @@ static void ane_h16_dapf_program_test(struct kunit *test)
 	unsigned int i;
 
 	KUNIT_ASSERT_EQ(test, ane_h16_run(&s->boot, ANE_H16_PREFLIGHT), 0);
+	KUNIT_EXPECT_EQ(test, s->protect_reads, 7U);
 	KUNIT_EXPECT_EQ(test, s->dapf_writes, 0U);
 	KUNIT_ASSERT_EQ(test, ane_h16_run(&s->boot, ANE_H16_MAP), 0);
 	KUNIT_EXPECT_EQ(test, s->dapf_writes, 20U);
@@ -1319,6 +1351,7 @@ static void ane_h16_t8132_locked_test(struct kunit *test)
 static struct kunit_case ane_h16_boot_cases[] = {
 	KUNIT_CASE(ane_h16_alloc_reuse_test),
 	KUNIT_CASE(ane_h16_happy_test),
+	KUNIT_CASE(ane_h16_dart_protection_test),
 	KUNIT_CASE(ane_h16_locked_matching_test),
 	KUNIT_CASE(ane_h16_dapf_program_test),
 	KUNIT_CASE(ane_h16_dapf_partial_test),

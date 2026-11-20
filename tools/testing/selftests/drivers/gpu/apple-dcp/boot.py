@@ -187,3 +187,194 @@ int main(void)
     return 0;
 }
 '''
+
+
+def t6041_v27_admission(root):
+    display_h = (root / 'include/linux/soc/apple/display.h').read_text()
+    helper = display_h[display_h.index('#define APPLE_T6041_DCP_26B123_UUID'):
+                       display_h.index('\n#endif')]
+    iomfb_h = (root / 'drivers/gpu/drm/apple/iomfb.h').read_text()
+    methods_decl = iomfb_h[iomfb_h.index('enum dcpep_method {'):
+                           iomfb_h.index('#define IOMFB_MAX_CB')]
+    v27_c = (root / 'drivers/gpu/drm/apple/iomfb_v27.c').read_text()
+    v27_tables = v27_c[v27_c.index('static const struct dcp_method_entry dcp_methods_27_0'):
+                       v27_c.index('/* The template\'s calls resolve through')]
+    dcp_c = (root / 'drivers/gpu/drm/apple/dcp.c').read_text()
+    selector_full = block(dcp_c, 'static enum dcp_firmware_version dcp_check_firmware_version(')
+    cutoff = '\n\tret = dcp_read_fw_version(dev, "apple,firmware-compat", compat_str);\n\tif (ret < 0)'
+    selector = selector_full[:selector_full.index(cutoff)] + '\n\t(void)v14_board;\n\treturn DCP_FIRMWARE_UNKNOWN;\n}\n'
+    return r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+typedef uint32_t u32;
+enum dcp_firmware_version {
+    DCP_FIRMWARE_UNKNOWN,
+    DCP_FIRMWARE_V_26_6_DESKTOP,
+    DCP_FIRMWARE_V_27_0,
+};
+struct dcp_v14_board;
+struct apple_dcp_hw_data { enum dcp_firmware_version firmware_compat; };
+struct device_node {
+    const char *compatible;
+    const char *uuid;
+    int uuid_count;
+    u32 fw[3];
+    int fw_cells;
+    u32 compat[3];
+    int compat_cells;
+};
+struct device {
+    struct device_node *of_node;
+    const struct apple_dcp_hw_data *hw;
+};
+static int of_device_is_compatible(const struct device_node *np, const char *s)
+{
+    return np && np->compatible && !strcmp(np->compatible, s);
+}
+static int of_property_count_strings(const struct device_node *np, const char *name)
+{
+    assert(!strcmp(name, "apple,firmware-uuid"));
+    return np ? np->uuid_count : -1;
+}
+static int of_property_read_string(const struct device_node *np, const char *name, const char **out)
+{
+    assert(!strcmp(name, "apple,firmware-uuid"));
+    if (!np || np->uuid_count < 1 || !np->uuid)
+        return -1;
+    *out = np->uuid;
+    return 0;
+}
+static int of_property_count_u32_elems(const struct device_node *np, const char *name)
+{
+    if (!np)
+        return -1;
+    if (!strcmp(name, "apple,firmware-version"))
+        return np->fw_cells;
+    if (!strcmp(name, "apple,firmware-compat"))
+        return np->compat_cells;
+    return -1;
+}
+static int of_property_read_u32_array(const struct device_node *np, const char *name, u32 *out, size_t n)
+{
+    const u32 *src;
+    int cells;
+    if (!np || n != 3)
+        return -1;
+    if (!strcmp(name, "apple,firmware-version")) {
+        src = np->fw;
+        cells = np->fw_cells;
+    } else if (!strcmp(name, "apple,firmware-compat")) {
+        src = np->compat;
+        cells = np->compat_cells;
+    } else {
+        return -1;
+    }
+    if (cells != 3)
+        return -1;
+    memcpy(out, src, 3 * sizeof(u32));
+    return 0;
+}
+#define DCP_FW_VERSION_STR_LEN 32
+#define GFP_KERNEL 0
+#define dev_err(...) ((void)0)
+static void *devm_kmemdup(struct device *dev, const void *src, size_t len, unsigned int gfp)
+{
+    (void)dev; (void)src; (void)len; (void)gfp;
+    return NULL;
+}
+static const struct apple_dcp_hw_data *of_device_get_match_data(struct device *dev)
+{
+    return dev->hw;
+}
+static int dcp_read_fw_version(struct device *dev, const char *name, char *out)
+{
+    u32 v[3];
+    if (of_property_count_u32_elems(dev->of_node, name) != 3 ||
+        of_property_read_u32_array(dev->of_node, name, v, 3))
+        return -1;
+    snprintf(out, DCP_FW_VERSION_STR_LEN, "%u.%u.%u", v[0], v[1], v[2]);
+    return 3;
+}
+''' + helper + '\n' + methods_decl + '\n' + v27_tables + '\n' + selector + r'''
+static struct device_node node;
+static struct apple_dcp_hw_data hw_t6041;
+static struct device dev = { .of_node = &node, .hw = &hw_t6041 };
+
+static void reset_t6041_26b123(bool ext)
+{
+    node = (struct device_node){
+        .compatible = ext ? "apple,t6041-dcpext" : "apple,t6041-dcp",
+        .uuid = APPLE_T6041_DCP_26B123_UUID,
+        .uuid_count = 1,
+        .fw = { 27, 2, 0 },
+        .fw_cells = 3,
+        .compat = { 27, 2, 0 },
+        .compat_cells = 3,
+    };
+}
+
+static void expect_rejected(void)
+{
+    assert(!apple_t6041_dcp_v27_2(&node));
+    assert(!apple_t6041_dcpext_v27_2(&node));
+    assert(dcp_check_firmware_version(&dev) == DCP_FIRMWARE_UNKNOWN);
+}
+
+int main(void)
+{
+    assert(!apple_t6041_dcp_v27_2(NULL));
+    assert(!apple_t6041_dcpext_v27_2(NULL));
+
+    /*
+     * Internal only matches apple_t6041_dcp_v27_2; external only matches
+     * apple_t6041_dcpext_v27_2. No of_machine_is_compatible() stub is defined
+     * in this translation unit, enforcing at compile time that admission keys
+     * solely on the DCP IP compatible and firmware identity.
+     */
+    reset_t6041_26b123(false);
+    assert(apple_t6041_dcp_v27_2(&node));
+    assert(!apple_t6041_dcpext_v27_2(&node));
+    assert(dcp_check_firmware_version(&dev) == DCP_FIRMWARE_V_27_0);
+
+    reset_t6041_26b123(true);
+    assert(!apple_t6041_dcp_v27_2(&node));
+    assert(apple_t6041_dcpext_v27_2(&node));
+    assert(dcp_check_firmware_version(&dev) == DCP_FIRMWARE_V_27_0);
+
+    for (unsigned ext = 0; ext < 2; ext++) {
+        /* Reject non-T6041 DCP compatibles. */
+        reset_t6041_26b123(ext); node.compatible = "apple,t6031-dcp"; expect_rejected();
+
+        /* Reject missing, multi-string, or non-26B123 firmware UUIDs (including 26B131). */
+        reset_t6041_26b123(ext); node.uuid_count = 0; expect_rejected();
+        reset_t6041_26b123(ext); node.uuid_count = 2; expect_rejected();
+        reset_t6041_26b123(ext); node.uuid = "00000000-0000-0000-0000-000000000000"; expect_rejected();
+        reset_t6041_26b123(ext); node.uuid = "71F140DC-F18D-31B3-9772-537A5CC8400D"; expect_rejected();
+
+        /* Reject malformed or non-27.2.0 firmware/compat tuples. */
+        reset_t6041_26b123(ext); node.fw_cells = 2; expect_rejected();
+        reset_t6041_26b123(ext); node.compat_cells = 4; expect_rejected();
+        reset_t6041_26b123(ext); node.fw[1] = 0; expect_rejected();
+        reset_t6041_26b123(ext); node.compat[1] = 0; expect_rejected();
+        reset_t6041_26b123(ext); node.fw[2] = 1; node.compat[2] = 1; expect_rejected();
+    }
+
+    /* Desktop 26.5.2 and 26.6.2 remain DCP_FIRMWARE_V_26_6_DESKTOP on internal and external. */
+    for (unsigned minor = 5; minor <= 6; minor++) {
+        for (unsigned ext = 0; ext < 2; ext++) {
+            reset_t6041_26b123(ext);
+            node.uuid = "other";
+            node.fw[0] = 26; node.fw[1] = minor; node.fw[2] = 2;
+            node.compat[0] = 26; node.compat[1] = minor; node.compat[2] = 2;
+            assert(!apple_t6041_dcp_v27_2(&node));
+            assert(!apple_t6041_dcpext_v27_2(&node));
+            assert(dcp_check_firmware_version(&dev) == DCP_FIRMWARE_V_26_6_DESKTOP);
+        }
+    }
+    puts("PASS T6041 26B123 v27.2 internal/external admission, refusal controls, and desktop 26.x preservation");
+    return 0;
+}
+'''

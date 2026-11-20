@@ -14,7 +14,10 @@
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <linux/sizes.h>
+#include <linux/sort.h>
 #include <linux/suspend.h>
+#include <linux/sysfs.h>
 #include <linux/workqueue.h>
 
 #include "isp-cam.h"
@@ -283,6 +286,8 @@ static int apple_isp_copy_fw_data(struct apple_isp *isp)
  * trees from before those were described run it resident instead
  * (hw->resident_fallback), as it ran before.
  */
+#define ISP_T6041_NON_AMCC_MMIO	7
+
 static void apple_isp_select_hw(struct apple_isp *isp)
 {
 	struct device *dev = isp->dev;
@@ -293,6 +298,36 @@ static void apple_isp_select_hw(struct apple_isp *isp)
 
 	struct device_node *dart __free(device_node) =
 		of_parse_phandle(dev->of_node, "iommus", 0);
+
+	/*
+	 * apple,t6041-isp is also the T6040 ISP: T6040 has four AMCCs, T6041
+	 * six on binned parts and eight on full-die parts. Trim the mapped DSID
+	 * windows and broadcast-clear count to the AMCC ranges described on
+	 * isp_dart0. Without them, keep the four that every part has, as
+	 * before T6041's own windows were described.
+	 */
+	if (of_device_is_compatible(dev->of_node, "apple,t6041-isp")) {
+		unsigned int amccs = 4;
+		int n = dart ? of_property_count_u64_elems(dart, "apple,dapf-ranges") : -EINVAL;
+
+		if (n > 0 && !(n % 2)) {
+			unsigned int found = 0;
+
+			for (int i = 0; i < n; i += 2) {
+				u64 start = 0;
+
+				if (!of_property_read_u64_index(dart, "apple,dapf-ranges",
+								i, &start) &&
+				    start >= 0x220004000ULL && start <= 0x22e004000ULL &&
+				    !((start - 0x220004000ULL) % 0x2000000ULL))
+					found++;
+			}
+			if (found >= 4 && found <= 8)
+				amccs = found;
+		}
+		hw->dsid_count = amccs;
+		hw->num_fw_mmio = ISP_T6041_NON_AMCC_MMIO + amccs;
+	}
 
 	/*
 	 * Resident firmware that starts again (hw->fw_restart) runs from its own
@@ -325,6 +360,107 @@ static void apple_isp_select_hw(struct apple_isp *isp)
 	hw->dapf = NULL;
 	hw->num_dapf = 0;
 	hw->fw_idle_ms = 0;
+}
+
+/* A T8132 address filter bank has 16 slices. */
+#define ISP_MAX_DT_DAPF 16
+
+static int isp_mmio_window_cmp(const void *a, const void *b)
+{
+	const struct isp_mmio_window *wa = a, *wb = b;
+
+	return wa->base < wb->base ? -1 : wa->base > wb->base;
+}
+
+/*
+ * The firmware reaches the address filter windows through its DART at their
+ * physical addresses: the 16 KiB pages that contain them, sorted, with
+ * overlapping and adjacent ones merged so that each is mapped once. Returns
+ * their count; @out has room for @num.
+ */
+static unsigned int isp_dapf_mmio_windows(const struct isp_dapf_window *dapf,
+					  unsigned int num,
+					  struct isp_mmio_window *out)
+{
+	unsigned int used = 0;
+
+	for (unsigned int i = 0; i < num; i++) {
+		u64 base = ALIGN_DOWN(dapf[i].start, SZ_16K);
+
+		out[i].base = base;
+		out[i].size = ALIGN(dapf[i].end + 1, SZ_16K) - base;
+	}
+	sort(out, num, sizeof(*out), isp_mmio_window_cmp, NULL);
+
+	for (unsigned int i = 0; i < num; i++) {
+		struct isp_mmio_window *last = used ? &out[used - 1] : NULL;
+
+		if (last && out[i].base <= last->base + last->size) {
+			last->size = max(last->size,
+					 out[i].base + out[i].size - last->base);
+			continue;
+		}
+		out[used++] = out[i];
+	}
+
+	return used;
+}
+
+/*
+ * With hw->dapf_from_dt, apple,dapf-ranges has the address filter windows of
+ * the ADT's ISP DART, inclusive start and end pairs in record order, which
+ * the boot loader copies. Without them the firmware cannot run again after
+ * its first power-down, so the camera is not used.
+ */
+static int apple_isp_of_dapf(struct apple_isp *isp)
+{
+	struct device *dev = isp->dev;
+	struct apple_isp_hw *hw = &isp->hw_local;
+	struct isp_dapf_window *dapf;
+	struct isp_mmio_window *mmio;
+	unsigned int num;
+	u64 *ranges;
+	int n;
+
+	if (!hw->dapf_from_dt)
+		return 0;
+
+	n = of_property_count_u64_elems(dev->of_node, "apple,dapf-ranges");
+	if (n == -EINVAL)
+		return dev_err_probe(dev, -ENODEV,
+				     "the boot loader gave no address filter (apple,dapf-ranges)\n");
+	if (n <= 0 || n % 2 || n / 2 > ISP_MAX_DT_DAPF)
+		return dev_err_probe(dev, -EINVAL,
+				     "apple,dapf-ranges needs 1 to %d start and end pairs\n",
+				     ISP_MAX_DT_DAPF);
+	num = n / 2;
+
+	ranges = devm_kcalloc(dev, n, sizeof(*ranges), GFP_KERNEL);
+	dapf = devm_kcalloc(dev, num, sizeof(*dapf), GFP_KERNEL);
+	mmio = devm_kcalloc(dev, num, sizeof(*mmio), GFP_KERNEL);
+	if (!ranges || !dapf || !mmio)
+		return -ENOMEM;
+
+	n = of_property_read_u64_array(dev->of_node, "apple,dapf-ranges", ranges, n);
+	if (n)
+		return dev_err_probe(dev, n, "failed to read apple,dapf-ranges\n");
+
+	for (unsigned int i = 0; i < num; i++) {
+		dapf[i].start = ranges[2 * i];
+		dapf[i].end = ranges[2 * i + 1];
+		if (dapf[i].end < dapf[i].start || dapf[i].end > U64_MAX - SZ_16K)
+			return dev_err_probe(dev, -EINVAL,
+					     "address filter window %u 0x%llx-0x%llx is invalid\n",
+					     i, dapf[i].start, dapf[i].end);
+	}
+	devm_kfree(dev, ranges);
+
+	hw->dapf = dapf;
+	hw->num_dapf = num;
+	hw->fw_mmio = mmio;
+	hw->num_fw_mmio = isp_dapf_mmio_windows(dapf, num, mmio);
+
+	return 0;
 }
 
 /*
@@ -751,6 +887,10 @@ static int apple_isp_probe(struct platform_device *pdev)
 	}
 
 	apple_isp_select_hw(isp);
+
+	err = apple_isp_of_dapf(isp);
+	if (err)
+		goto free_isp;
 
 	err = apple_isp_attach_genpd(isp);
 	if (err) {
@@ -1224,34 +1364,76 @@ static const struct apple_isp_hw apple_isp_hw_t6040 = {
 	.meta_exposure = true,
 };
 
-/* T8132: the firmware's MMIO windows, from the J713 ADT's DART address filter */
-static const struct isp_mmio_window apple_isp_fw_mmio_t8132[] = {
+/*
+ * T6041: the seven PMGR/PMP/fabric windows of J616c's dart-isp0 filter
+ * followed by up to eight AMCC DSID broadcast-clear windows (six on binned
+ * parts, eight on full-die parts; apple_isp_select_hw() trims to the active
+ * AMCCs listed on isp_dart0).
+ */
+static const struct isp_mmio_window apple_isp_fw_mmio_t6041[] = {
+	{ 0x485660000, 0x4000 },
+	{ 0x5003c0000, 0x28000 },	/* PMGR, with the PMP clock scratch */
+	{ 0x500e3c000, 0x4000 },
+	{ 0x502284000, 0x4000 },	/* PMGR, ISP power states */
+	{ 0x502880000, 0x8000 },
+	{ 0x504824000, 0x4000 },	/* PMP bandwidth scratch */
+	{ 0x51062c000, 0x20000 },
 	{ 0x220004000, 0x1d4000 },	/* DSID broadcast-clear windows */
 	{ 0x222004000, 0x1d4000 },
-	{ 0x3803c0000, 0x28000 },	/* PMGR, with the PMP clock scratch */
-	{ 0x380704000, 0x4000 },	/* PMGR, ISP power states */
-	{ 0x380730000, 0x4000 },
-	{ 0x380e3c000, 0x4000 },
-	{ 0x382824000, 0x4000 },	/* PMP bandwidth scratch */
-	{ 0x39062c000, 0x20000 },
-	{ 0x501660000, 0x4000 },
+	{ 0x224004000, 0x1d4000 },
+	{ 0x226004000, 0x1d4000 },
+	{ 0x228004000, 0x1d4000 },
+	{ 0x22a004000, 0x1d4000 },
+	{ 0x22c004000, 0x1d4000 },
+	{ 0x22e004000, 0x1d4000 },
 };
 
-/* The ADT's DART address filter windows, in its order and with its ends */
-static const struct isp_dapf_window apple_isp_dapf_t8132[] = {
-	{ 0x380704000, 0x380704063 },	/* PMGR, ISP power states */
-	{ 0x380730000, 0x380733fff },
-	{ 0x380e3c000, 0x380e3c003 },
-	{ 0x39062c000, 0x390648003 },
-	{ 0x501660000, 0x501660003 },
-	{ 0x220004000, 0x2200162fc },	/* DSID broadcast-clear windows */
-	{ 0x220044000, 0x2200562fc },
-	{ 0x2201c4000, 0x2201d62fc },
-	{ 0x222004000, 0x2220162fc },
-	{ 0x222044000, 0x2220562fc },
-	{ 0x2221c4000, 0x2221d62fc },
-	{ 0x3803c0000, 0x3803e4000 },	/* PMGR, with the PMP clock scratch */
-	{ 0x382824000, 0x382824004 },	/* PMP bandwidth scratch */
+static const u64 apple_isp_dsid_t6041[] = {
+	0x2201d4000,
+	0x2221d4000,
+	0x2241d4000,
+	0x2261d4000,
+	0x2281d4000,
+	0x22a1d4000,
+	0x22c1d4000,
+	0x22e1d4000,
+};
+
+static const struct apple_isp_hw apple_isp_hw_t6041 = {
+	.gen = ISP_GEN_T6040,
+	.fw_abi = ISP_FW_ABI_H17,
+	.pmu_base = 0x0,
+
+	.dsid_count = ARRAY_SIZE(apple_isp_dsid_t6041),
+	.dsid_slots = 8,
+	.dsid_clr_bases = apple_isp_dsid_t6041,
+	.dsid_clr_range0 = 0x2fc,
+
+	.clock_scratch = 0x5003d0fa8,
+	.clock_base = 0x0,
+	.clock_bit = 0x0,
+	.clock_size = 0x8,
+	.bandwidth_scratch = 0x504824000,
+	.bandwidth_base = 0x0,
+	.bandwidth_bit = 0x0,
+	.bandwidth_size = 0x8,
+	.mbox_irq_enable = ISP_MBOX_IRQ_ENABLE_T6031,
+
+	.scl1 = true,
+	.lpdp = false,
+	.meta_size = ISP_META_SIZE_T8140,
+	.fw_mmio = apple_isp_fw_mmio_t6041,
+	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t6041),
+
+	.coproc_control = ISP_COPROC_CONTROL_T8140,
+	.coproc_status = ISP_COPROC_STATUS_T8140,
+	.coproc_quiesce = ISP_COPROC_QUIESCE_T8140,
+	.boot_mode = 1,
+	.shared_size = 0xde600000,
+	.resident_fw = true,
+	.fw_restart = true,
+	.fw_idle_ms = 5000,
+	.meta_exposure = true,
 };
 
 /*
@@ -1261,7 +1443,7 @@ static const struct isp_dapf_window apple_isp_dapf_t8132[] = {
  * sent: T8132's PMP scratch offsets are not established. Its firmware
  * starts again from its data segment as loaded once the coprocessor was
  * quiesced before the power-down, so the ISP is powered only while the
- * camera is in use.
+ * camera is in use. The boot loader gives its address filter windows.
  */
 static const struct apple_isp_hw apple_isp_hw_t8132 = {
 	.gen = ISP_GEN_T6040,
@@ -1278,10 +1460,7 @@ static const struct apple_isp_hw apple_isp_hw_t8132 = {
 	.scl1 = true,
 	.lpdp = false,
 	.meta_size = ISP_META_SIZE_T8140,
-	.fw_mmio = apple_isp_fw_mmio_t8132,
-	.num_fw_mmio = ARRAY_SIZE(apple_isp_fw_mmio_t8132),
-	.dapf = apple_isp_dapf_t8132,
-	.num_dapf = ARRAY_SIZE(apple_isp_dapf_t8132),
+	.dapf_from_dt = true,
 
 	.coproc_control = ISP_COPROC_CONTROL_T8140,
 	.coproc_status = ISP_COPROC_STATUS_T8140,
@@ -1445,7 +1624,7 @@ static const struct of_device_id apple_isp_of_match[] = {
 	{ .compatible = "apple,t6031-isp", .data = &apple_isp_hw_t6031 },
 	{ .compatible = "apple,t8140-isp", .data = &apple_isp_hw_t8140 },
 	{ .compatible = "apple,t8142-isp", .data = &apple_isp_hw_t8142 },
-	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6040 },
+	{ .compatible = "apple,t6041-isp", .data = &apple_isp_hw_t6041 },
 	{ .compatible = "apple,t8132-isp", .data = &apple_isp_hw_t8132 },
 	{},
 };
@@ -1594,11 +1773,35 @@ static void apple_isp_shutdown(struct platform_device *pdev)
 	mutex_unlock(&isp->video_lock);
 }
 
+static ssize_t sensor_show(struct device *dev, struct device_attribute *attr,
+			   char *buf)
+{
+	struct apple_isp *isp = dev_get_drvdata(dev);
+	const char *sensor;
+
+	if (!isp)
+		return -ENODATA;
+
+	sensor = apple_isp_sensor_name(isp);
+	if (!sensor)
+		return -ENODATA;
+
+	return sysfs_emit(buf, "%s\n", sensor);
+}
+static DEVICE_ATTR_RO(sensor);
+
+static struct attribute *apple_isp_attrs[] = {
+	&dev_attr_sensor.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(apple_isp);
+
 static struct platform_driver apple_isp_driver = {
 	.driver	= {
 		.name		= "apple-isp",
 		.of_match_table	= apple_isp_of_match,
 		.pm		= pm_ptr(&apple_isp_pm_ops),
+		.dev_groups	= apple_isp_groups,
 	},
 	.probe	= apple_isp_probe,
 	.remove	= apple_isp_remove,

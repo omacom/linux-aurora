@@ -1254,8 +1254,11 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 	unsigned int n, nr_ports = dcp_typec_nr_ports();
 	bool fixed = dcp_typec_fixed_crtcs();
 	unsigned int slots = fixed ? num_dcp : (dcp_typec_dual_stream() ? 2 : 1);
-	/* T6050 creates its tunnel-only port/pipeline pairs in a second pass. */
-	unsigned int passes = fixed ? 2 : 1;
+	/*
+	 * Connectors are created in passes, by connector group; on T6050, in a
+	 * group, the tunnel-only port/pipeline pairs after the others.
+	 */
+	unsigned int passes = dcp_typec_nr_passes();
 	int i, ret;
 
 	/* Keep the existing physical-port connector numbers stable. On the
@@ -1283,13 +1286,14 @@ static int apple_probe_typec_ports(struct drm_device *drm,
 		if (fixed) {
 			if (!dcp_typec_port_has_candidate(port_idx, pipeline))
 				continue;
-			/* T6050: tunnel-only pairs in the second pass */
-			if (dcp_typec_port_tunnel_only(port_idx, pipeline) != pass)
+			if (dcp_typec_port_pass(port_idx, pipeline) != pass)
 				continue;
 			mask = crtc_mask[idx / nr_ports];
 			if (!mask)
 				continue;
 		} else {
+			if (dcp_typec_port_pass(port_idx, NULL) != pass)
+				continue;
 			for (i = 0; i < num_dcp; i++) {
 				if (!dcp_typec_port_has_candidate(port_idx, dcp[i]))
 					continue;

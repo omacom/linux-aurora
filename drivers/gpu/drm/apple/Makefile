@@ -23,6 +23,7 @@ appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += iomfb_external_hdr_hints_test.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += apple_resume_test.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += apple_boot_display_test.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp-syslog-test.o
+appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp-route-supplier-test.dtbo.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += parser_mode_test.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp_external_resume_test.o
 appledrm-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp_external_ready_test.o

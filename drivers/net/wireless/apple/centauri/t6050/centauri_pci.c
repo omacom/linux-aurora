@@ -784,8 +784,15 @@ static int centauri_t6050_quiesce(struct centauri_t6050 *c)
 	centauri_t6050_free_irqs(&c->irqs);
 	c->firmware_sleep = true;
 	c->boot_phase = CEN_BOOT_STOPPED;
-	if (!ret && (!centauri_t6050_domain_fence(c->recovery) ||
-		     !centauri_t6050_ipc_fenced(c->ipc)))
+	/*
+	 * A completed teardown already released every published DMA tuple. After
+	 * the host resets N1, the old Alpha/Beta PCI devices can still exist in
+	 * software while only Control is visible in ROM. Do not fence those
+	 * retired functions again unless there is backing left to release.
+	 */
+	if (!ret && (c->ipc || c->firmware || c->descriptor || c->recovery->arena) &&
+	    (!centauri_t6050_domain_fence(c->recovery) ||
+	     !centauri_t6050_ipc_fenced(c->ipc)))
 		ret = -EBUSY;
 	mutex_unlock(&c->boot_lock);
 	if (!ret)
@@ -824,8 +831,10 @@ static int centauri_t6050_rewake_teardown(struct centauri_t6050_rewake *rw)
 	/* F0 may have unbound already; the independent owner holds its resources. */
 	if (!ret)
 		ret = centauri_t6050_beta_call(rw, false);
-	if (!ret && (!centauri_t6050_domain_fence(rw) ||
-		     !centauri_t6050_ipc_fenced(rw->ipc)))
+	/* The independent owner needs a fence only for tuples it still holds. */
+	if (!ret && (rw->ipc || rw->firmware || rw->descriptor || rw->arena) &&
+	    (!centauri_t6050_domain_fence(rw) ||
+	     !centauri_t6050_ipc_fenced(rw->ipc)))
 		ret = -EBUSY;
 	if (!ret)
 		ret = centauri_t6050_beta_call(rw, true);

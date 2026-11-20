@@ -141,6 +141,10 @@
 };
 
 /* The port controllers put in system power state S3 before the commit, then SLEEP */
+&hpm0 {
+	apple,sleep-ssps;
+};
+
 &hpm1 {
 	apple,sleep-ssps;
 };

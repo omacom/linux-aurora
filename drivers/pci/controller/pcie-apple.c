@@ -5325,7 +5325,8 @@ static int apple_pcie_t6050_pm_notify(struct notifier_block *nb, unsigned long a
 	 */
 	if (!pcie->t6050_dart)
 		pcie->t6050_dart = apple_pcie_neo_dart(pcie->dev, false);
-	if (!pm_suspend_default_s2idle())
+	/* A "freeze" is a suspend-to-idle with deep as the default too: its check wants the link. */
+	if (!pm_suspend_default_s2idle() && !pm_suspend_no_platform())
 		apple_pcie_t6050_park_cold(pcie);
 	return NOTIFY_DONE;
 }

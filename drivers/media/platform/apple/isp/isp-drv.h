@@ -223,6 +223,12 @@ struct apple_isp_hw {
 	unsigned int num_dapf;
 	u32 dapf_sidmask;
 
+	/*
+	 * The boot loader gives the address filter windows from the ADT, in
+	 * apple,dapf-ranges, instead of dapf; fw_mmio is then made from them.
+	 */
+	bool dapf_from_dt;
+
 	/* ISP_GPIO_6 boot mode */
 	u32 boot_mode;
 

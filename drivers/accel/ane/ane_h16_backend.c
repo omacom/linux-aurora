@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /* Staged H16 backend, using the accepted H16 cold-boot facts, round 5. */
+#include <drm/drm_mm.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/dma-map-ops.h>
@@ -36,6 +37,8 @@
 #define ANE_H16_TX_WORDS 272
 /* Private program window above the SHAREDMALLOC range; host policy. */
 #define ANE_H16_PROGRAM_WINDOW SZ_1G
+/* ane_h16_alloc_prot(): a DVA range from the program window. */
+#define ANE_H16_PROGRAM_ANY U64_MAX
 
 struct ane_h16_mapping {
 	struct list_head node;
@@ -45,6 +48,8 @@ struct ane_h16_mapping {
 	struct page **pages;
 	u32 blocks;
 	void *cpu;
+	/* The DVA range, for a mapping in the program window. */
+	struct drm_mm_node range;
 };
 
 struct ane_h16_device {
@@ -61,13 +66,23 @@ struct ane_h16_device {
 	u32 powered;
 	u32 darts_powered;
 	u64 preload_phys[2];
+	/*
+	 * Guards mappings and program_window. Program mappings come and go
+	 * under the session lock while the engine is up; SHAREDMALLOC may be
+	 * mapped at the same time.
+	 */
+	struct mutex window_lock;
 	struct list_head mappings;
 	struct iommu_domain *domain;
 	struct iommu_group *group;
 	bool claimed;
 	bool attached;
 	bool pinned;
-	/* While pinned: refuse system sleep (ane_fw_sleep.h). */
+	/*
+	 * Registered at probe, outside ane_h16_lock: the PM chain calls it with
+	 * its rwsem held and it takes ane_h16_lock. Until pinned it does nothing.
+	 * While pinned: refuse system sleep (ane_fw_sleep.h).
+	 */
 	struct notifier_block pm_notifier;
 	int irq;
 	/*
@@ -93,7 +108,9 @@ struct ane_h16_device {
 	u32 tx_write;
 	bool rtk_failed;
 	u64 shared_next;
-	u64 program_next;
+	/* Program sections and surfaces: [program_start, program_end). */
+	struct drm_mm program_window;
+	u64 program_start;
 	u64 program_end;
 	struct dentry *debugfs;
 	bool acquired;
@@ -745,6 +762,13 @@ static int ane_h16_pm_event(struct notifier_block *nb, unsigned long event, void
 	struct ane_h16_device *h = container_of(nb, struct ane_h16_device, pm_notifier);
 	bool pinned = READ_ONCE(h->pinned);
 
+	/*
+	 * Registered at probe, before the device is pinned: until then there
+	 * is nothing to cycle or refuse. Pinning happens under the system
+	 * sleep lock (ane_h16_start_work()), never inside a transition.
+	 */
+	if (!pinned)
+		return NOTIFY_DONE;
 	/* Without a sleep path on this platform, every sleep is refused as before. */
 	if (!h->boot.soc->sleep_warm && !h->boot.soc->sleep_cold) {
 		if (ane_fw_sleep_refused(event, pinned))
@@ -777,21 +801,18 @@ static int ane_h16_pm_event(struct notifier_block *nb, unsigned long event, void
 static int ane_h16_pin(void *ctx)
 {
 	struct ane_h16_device *h = ctx;
-	int ret;
 
 	/* A cold boot after sleep runs the boot again; pinned once for good. */
 	if (h->pinned)
 		return 0;
 	if (!try_module_get(THIS_MODULE))
 		return -ENODEV;
-	/* Pinned for good: the notifier stays registered until reboot. */
-	h->pm_notifier.notifier_call = ane_h16_pm_event;
-	ret = register_pm_notifier(&h->pm_notifier);
-	if (ret) {
-		module_put(THIS_MODULE);
-		return ret;
-	}
-	h->pinned = true;
+	/*
+	 * Pinned for good. The PM notifier was registered at probe: registering
+	 * it here, under ane_h16_lock, would order the PM chain rwsem after
+	 * ane_h16_lock, while ane_h16_pm_event() takes them the other way round.
+	 */
+	WRITE_ONCE(h->pinned, true);
 	ane_h16_released = true;
 	return 0;
 }
@@ -885,7 +906,9 @@ static int ane_h16_map_range(struct ane_h16_device *h, u64 dva, u64 pa,
 		return -ENOMEM;
 	m->dva = dva;
 	m->size = size;
+	mutex_lock(&h->window_lock);
 	list_add_tail(&m->node, &h->mappings);
+	mutex_unlock(&h->window_lock);
 	ret = iommu_map(h->domain, dva, pa, size, prot, GFP_KERNEL);
 	if (!ret)
 		m->mapped = size;
@@ -938,6 +961,10 @@ static int ane_h16_map(void *ctx)
 	unsigned int count = 0, i;
 	int ret;
 
+	/* Unmanaged domains can otherwise attach retained, firmware-owned roots. */
+	ret = ane_h16_dart_protection(b, true);
+	if (ret)
+		return ret;
 	if (of_count_phandle_with_args(h->dev->of_node, "iommus", "#iommu-cells") != 3) {
 		dev_err(h->dev, "H16 map requires only SID 0 on three DARTs; refusing extra streams\n");
 		return -EOPNOTSUPP;
@@ -1003,6 +1030,25 @@ static int ane_h16_map(void *ctx)
 	return 0;
 }
 
+/* Memory only: off h->mappings, its range (if any) already given back. */
+static void ane_h16_mapping_free(struct ane_h16_mapping *m)
+{
+	unsigned int i, pages_per_block = SZ_16K / PAGE_SIZE;
+
+	if (m->cpu)
+		vunmap(m->cpu);
+	for (i = 0; i < m->blocks; i++)
+		__free_pages(m->pages[i * pages_per_block], get_order(SZ_16K));
+	kvfree(m->pages);
+	kfree(m);
+}
+
+/*
+ * Map size bytes of fresh zeroed memory at dva, or with ANE_H16_PROGRAM_ANY
+ * at a range of the program window. Memory that never reached the IOMMU is
+ * freed on failure; a failed or partial iommu_map_sgtable() keeps the
+ * mapping, its memory and its range until reset.
+ */
 static int ane_h16_alloc_prot(struct ane_h16_device *h, u64 dva, size_t size, int prot,
 			      struct ane_fw_surface *out)
 {
@@ -1017,23 +1063,22 @@ static int ane_h16_alloc_prot(struct ane_h16_device *h, u64 dva, size_t size, in
 		dev_err(h->dev, "H16 private surfaces require a coherent client\n");
 		return -EOPNOTSUPP;
 	}
-	if (!size || !IS_ALIGNED(size, SZ_16K) || !IS_ALIGNED(dva, SZ_16K) ||
-	    PAGE_SIZE > SZ_16K)
+	if (!size || !IS_ALIGNED(size, SZ_16K) || PAGE_SIZE > SZ_16K ||
+	    (dva != ANE_H16_PROGRAM_ANY && !IS_ALIGNED(dva, SZ_16K)))
 		return -EINVAL;
 	m = kzalloc_obj(*m);
 	if (!m)
 		return -ENOMEM;
 	m->size = size;
-	m->dva = dva;
-	list_add_tail(&m->node, &h->mappings);
+	ret = -ENOMEM;
 	m->pages = kvcalloc(size / PAGE_SIZE, sizeof(*m->pages), GFP_KERNEL);
 	if (!m->pages)
-		return -ENOMEM;
+		goto free;
 	for (i = 0; i < size / SZ_16K; i++) {
 		struct page *page = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
 
 		if (!page)
-			return -ENOMEM;
+			goto free;
 		for (j = 0; j < pages_per_block; j++)
 			m->pages[i * pages_per_block + j] = page + j;
 		m->blocks++;
@@ -1041,10 +1086,26 @@ static int ane_h16_alloc_prot(struct ane_h16_device *h, u64 dva, size_t size, in
 	/* The coherent-client gate permits matching cached CPU/device aliases. */
 	m->cpu = vmap(m->pages, size / PAGE_SIZE, VM_MAP, PAGE_KERNEL);
 	if (!m->cpu)
-		return -ENOMEM;
+		goto free;
 	ret = sg_alloc_table_from_pages(&sgt, m->pages, size / PAGE_SIZE, 0, size, GFP_KERNEL);
 	if (ret)
-		return ret;
+		goto free;
+	mutex_lock(&h->window_lock);
+	if (dva == ANE_H16_PROGRAM_ANY) {
+		ret = drm_mm_insert_node_in_range(&h->program_window, &m->range, size,
+						  SZ_16K, 0, 0, ANE_H16_PROGRAM_WINDOW,
+						  DRM_MM_INSERT_LOW);
+		if (ret) {
+			mutex_unlock(&h->window_lock);
+			sg_free_table(&sgt);
+			goto free;
+		}
+		dva = h->program_start + m->range.start;
+	}
+	m->dva = dva;
+	/* Recorded before publication, including a failed/partial mapping. */
+	list_add_tail(&m->node, &h->mappings);
+	mutex_unlock(&h->window_lock);
 	/* A failed call has already unmapped what it mapped. */
 	mapped = iommu_map_sgtable(h->domain, dva, &sgt, prot);
 	sg_free_table(&sgt);
@@ -1053,6 +1114,9 @@ static int ane_h16_alloc_prot(struct ane_h16_device *h, u64 dva, size_t size, in
 	m->mapped = mapped;
 	*out = (struct ane_fw_surface) { .cpu = m->cpu, .dva = dva, .size = size };
 	return 0;
+free:
+	ane_h16_mapping_free(m);
+	return ret;
 }
 
 static int ane_h16_alloc_at(void *ctx, u64 dva, size_t size, struct ane_fw_surface *out)
@@ -1064,19 +1128,59 @@ static int ane_h16_alloc_at(void *ctx, u64 dva, size_t size, struct ane_fw_surfa
 static int ane_h16_program_map(void *ctx, size_t size, bool write, struct ane_fw_surface *out)
 {
 	struct ane_h16_device *h = ctx;
-	u64 dva = h->program_next;
 	int ret;
 
-	if (!size || size > h->program_end - dva)
+	if (!size || size > ANE_H16_PROGRAM_WINDOW)
 		return -ENOSPC;
-	/* A failed mapping keeps its range; DVAs are never reused before reset. */
-	h->program_next += size;
-	ret = ane_h16_alloc_prot(h, dva, size,
+	ret = ane_h16_alloc_prot(h, ANE_H16_PROGRAM_ANY, size,
 				 IOMMU_READ | IOMMU_CACHE | (write ? IOMMU_WRITE : 0), out);
 	if (!ret)
-		dev_info(h->dev, "H16 program mapping %llx bytes %zx%s\n", dva, size,
+		dev_info(h->dev, "H16 program mapping %llx bytes %zx%s\n", out->dva, size,
 			 write ? " writable" : "");
 	return ret;
+}
+
+/*
+ * A program surface the firmware no longer uses (ops->unmap). The session
+ * calls it with the engine up and its lock held. iommu_unmap() ends with
+ * the DART TLB invalidation, so the engine cannot reach the memory once it
+ * returns; only then do the pages and the DVA range go back. A short unmap
+ * keeps everything, as a failed mapping does. Only program-window mappings
+ * qualify: SHAREDMALLOC, preload, heap tail and MMIO stay until reset.
+ */
+static void ane_h16_program_unmap(void *ctx, const struct ane_fw_surface *s)
+{
+	struct ane_h16_device *h = ctx;
+	struct ane_h16_mapping *m, *found = NULL;
+	size_t unmapped;
+
+	mutex_lock(&h->window_lock);
+	list_for_each_entry(m, &h->mappings, node) {
+		if (m->dva == s->dva && m->size == s->size && m->mapped == m->size &&
+		    drm_mm_node_allocated(&m->range)) {
+			found = m;
+			list_del(&m->node);
+			break;
+		}
+	}
+	mutex_unlock(&h->window_lock);
+	if (WARN_ON_ONCE(!found))
+		return;
+	m = found;
+	unmapped = iommu_unmap(h->domain, m->dva, m->size);
+	if (unmapped != m->size) {
+		dev_err(h->dev, "H16 program unmap short at %llx: %zx of %zx; kept\n",
+			m->dva, unmapped, m->size);
+		mutex_lock(&h->window_lock);
+		list_add_tail(&m->node, &h->mappings);
+		mutex_unlock(&h->window_lock);
+		return;
+	}
+	dev_dbg(h->dev, "H16 program unmapped %llx bytes %zx\n", m->dva, m->size);
+	mutex_lock(&h->window_lock);
+	drm_mm_remove_node(&m->range);
+	mutex_unlock(&h->window_lock);
+	ane_h16_mapping_free(m);
 }
 
 static u64 ane_h16_load64(void *ctx, const void *p)
@@ -1439,6 +1543,7 @@ static void ane_h16_hung(void *ctx, int error)
 
 static const struct ane_h16_session_ops ane_h16_session_ops = {
 	.map = ane_h16_program_map,
+	.unmap = ane_h16_program_unmap,
 	.log = ane_h16_log,
 	.busy = ane_h16_busy,
 	.hung = ane_h16_hung,
@@ -1465,20 +1570,17 @@ static const struct ane_fw_transport_ops ane_h16_transport_ops = {
 static void ane_h16_release(struct ane_h16_device *h)
 {
 	struct ane_h16_mapping *m, *next;
-	unsigned int i, pages_per_block = SZ_16K / PAGE_SIZE;
+	unsigned int i;
 
 	if (h->boot.ran || h->pinned || !h->acquired)
 		return;
 	list_for_each_entry_safe_reverse(m, next, &h->mappings, node) {
 		if (m->mapped)
 			iommu_unmap(h->domain, m->dva, m->mapped);
-		if (m->cpu)
-			vunmap(m->cpu);
-		for (i = 0; i < m->blocks; i++)
-			__free_pages(m->pages[i * pages_per_block], get_order(SZ_16K));
-		kvfree(m->pages);
 		list_del(&m->node);
-		kfree(m);
+		if (drm_mm_node_allocated(&m->range))
+			drm_mm_remove_node(&m->range);
+		ane_h16_mapping_free(m);
 	}
 	if (h->attached)
 		iommu_detach_device(h->domain, h->dev);
@@ -1527,6 +1629,8 @@ static void ane_h16_release(struct ane_h16_device *h)
 		dev_pm_domain_detach(pd, true);
 	}
 	h->acquired = false;
+	vfree(h->pristine_data);
+	h->pristine_data = NULL;
 	dev_info(h->dev, "H16 pre-RUN rollback complete; no CPU release\n");
 }
 
@@ -1788,8 +1892,8 @@ static int ane_h16_preload_identity(struct ane_h16_device *h)
 		b->max_restarts = ANE_H16_STARTUP_RESTARTS;
 	}
 	h->shared_next = b->build->shared_dva;
-	h->program_next = b->build->shared_dva + ANE_FW_SHARED_TOTAL;
-	h->program_end = h->program_next + ANE_H16_PROGRAM_WINDOW;
+	h->program_start = b->build->shared_dva + ANE_FW_SHARED_TOTAL;
+	h->program_end = h->program_start + ANE_H16_PROGRAM_WINDOW;
 	dev_info(h->dev, "H16 preload identity %s accepted\n", identity);
 out:
 	vfree(second);
@@ -1827,7 +1931,7 @@ static int ane_h16_program_stage(struct ane_h16_device *h)
 	}
 	h->program_ready = true;
 	ane_h16_irq_wait_set(h, true);
-	dev_info(h->dev, "H16 stage 5 program window %llx..%llx%s\n", h->program_next,
+	dev_info(h->dev, "H16 stage 5 program window %llx..%llx%s\n", h->program_start,
 		 h->program_end - 1, h->clpc ? ", CLPC input attached" : "");
 	return 0;
 }
@@ -1946,6 +2050,7 @@ static ssize_t ane_h16_stage_write(struct file *file, const char __user *ubuf,
 				   size_t count, loff_t *ppos)
 {
 	struct ane_h16_device *h = file->private_data;
+	unsigned int flags;
 	char buf[16];
 	int stage, ret;
 
@@ -1958,9 +2063,12 @@ static ssize_t ane_h16_stage_write(struct file *file, const char __user *ubuf,
 	stage = ane_h16_stage_parse(buf);
 	if (stage <= ANE_H16_REFUSE)
 		return -EINVAL;
+	/* As the start work: a stage that pins never lands inside a sleep transition. */
+	flags = lock_system_sleep();
 	mutex_lock(&ane_h16_lock);
 	ret = ane_h16_advance(h, stage);
 	mutex_unlock(&ane_h16_lock);
+	unlock_system_sleep(flags);
 	return ret ? ret : count;
 }
 
@@ -2056,7 +2164,10 @@ int ane_h16_backend_probe(struct platform_device *pdev, const struct ane_fw_plat
 	h->irq = -1;
 	spin_lock_init(&h->irq_lock);
 	init_waitqueue_head(&h->irq_wq);
+	mutex_init(&h->window_lock);
 	INIT_LIST_HEAD(&h->mappings);
+	/* Offsets from program_start, which the preload's build decides. */
+	drm_mm_init(&h->program_window, 0, ANE_H16_PROGRAM_WINDOW);
 	h->boot.soc = soc;
 	/* The build, and with it the DVA layout, is chosen from the preload. */
 	h->boot.build = NULL;
@@ -2092,11 +2203,32 @@ int ane_h16_backend_probe(struct platform_device *pdev, const struct ane_fw_plat
 	platform_set_drvdata(pdev, h);
 	INIT_WORK(&h->recover, ane_h16_recover_work);
 	INIT_WORK(&h->start, ane_h16_start_work);
+	mutex_unlock(&ane_h16_lock);
+
+	/*
+	 * Outside ane_h16_lock (see pm_notifier), and before the start work
+	 * that can pin the device, so a pinned device always has it.
+	 */
+	h->pm_notifier.notifier_call = ane_h16_pm_event;
+	ret = register_pm_notifier(&h->pm_notifier);
+	if (ret) {
+		dev_err(h->dev, "H16 PM notifier refused, error %d\n", ret);
+		debugfs_remove_recursive(h->debugfs);
+		mutex_lock(&ane_h16_lock);
+		if (!--ane_h16_debugfs_users) {
+			debugfs_remove_recursive(ane_h16_debugfs);
+			ane_h16_debugfs = NULL;
+		}
+		mutex_unlock(&ane_h16_lock);
+		platform_set_drvdata(pdev, NULL);
+		kfree(h);
+		return ret;
+	}
 	schedule_work(&h->start);
-	ret = 0;
-	goto unlock;
+	return 0;
 free:
 	dev_err(h->dev, "H16 DT description refused, error %d\n", ret);
+	drm_mm_takedown(&h->program_window);
 	kfree(h);
 unlock:
 	mutex_unlock(&ane_h16_lock);
@@ -2106,6 +2238,7 @@ unlock:
 void ane_h16_backend_remove(struct platform_device *pdev)
 {
 	struct ane_h16_device *h = platform_get_drvdata(pdev);
+	bool keep;
 
 	if (!h)
 		return;
@@ -2118,16 +2251,26 @@ void ane_h16_backend_remove(struct platform_device *pdev)
 		flush_work(&h->session.export_work);
 	}
 	debugfs_remove_recursive(h->debugfs);
+	/*
+	 * Nothing can pin the device any more: the start work, the recovery
+	 * and the stage file are gone. An unpinned device drops its PM
+	 * notifier here, outside ane_h16_lock; a pinned one keeps it.
+	 */
+	scoped_guard(mutex, &ane_h16_lock)
+		keep = h->boot.ran || h->pinned;
+	if (!keep)
+		unregister_pm_notifier(&h->pm_notifier);
 	mutex_lock(&ane_h16_lock);
 	if (!--ane_h16_debugfs_users) {
 		debugfs_remove_recursive(ane_h16_debugfs);
 		ane_h16_debugfs = NULL;
 	}
-	if (h->boot.ran || h->pinned) {
+	if (keep) {
 		/* The module reference taken before RUN makes this unreachable by rmmod. */
 		dev_warn(h->dev, "H16 remove held; reboot reclaims firmware DMA\n");
 	} else {
 		ane_h16_release(h);
+		drm_mm_takedown(&h->program_window);
 		kfree(h);
 	}
 	mutex_unlock(&ane_h16_lock);

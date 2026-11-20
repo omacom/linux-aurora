@@ -1,0 +1,9 @@
+What:		/sys/bus/platform/drivers/apple-isp/<dev>/sensor
+Date:		November 2026
+Contact:	Artyom Astafurov <artyom.astafurov@gmail.com>
+Description:
+		Read-only identifier of the detected built-in camera sensor
+		module (for example "imx958-uw" or "imx558"), also reachable at
+		/sys/class/video4linux/videoX/device/sensor. On hardware with
+		deferred camera startup, reading this attribute before the
+		first stream detects the camera fails with -ENODATA.

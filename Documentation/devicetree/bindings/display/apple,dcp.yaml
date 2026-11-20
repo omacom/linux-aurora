@@ -526,6 +526,18 @@ properties:
             description:
               The route carries USB4 DP tunnels only, never a DP Alt Mode
               display. It is not a Type-C mode-switch.
+          apple,connector-group:
+            $ref: /schemas/types.yaml#/definitions/uint32
+            minimum: 0
+            maximum: 3
+            default: 0
+            description:
+              The order group of the route's display connector.
+              Connectors are created group by group, and in a group the
+              tunnel-only routes' after the others on SoCs that give every
+              port/pipeline pair a connector of its own (T6050), so a port
+              added to a board in a new group keeps the existing
+              connectors' names.
           port:
             $ref: /schemas/graph.yaml#/properties/port
         required:

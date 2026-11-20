@@ -349,7 +349,7 @@ pub(crate) enum DeviceControlOp {
     IdlePowerOff = 0x0a,
     /// Release a logical queue's scheduler state ([`SchedulerStateRelease`]).
     SchedulerStateRelease = 0x14,
-    /// M5 encoding of the same scheduler-state release.
+    /// M5 and 26B123 encoding of the same scheduler-state release.
     M5SchedulerStateRelease = 0x13,
     /// Release a free list's buffer slot ([`FreeListRelease`]).
     FreeListRelease = 0x2e,
@@ -363,7 +363,7 @@ impl DeviceControlOp {
     /// records it has drained and keeps the GPU cores powered while they
     /// differ.
     pub(crate) const fn asserts_gpu_power(self) -> bool {
-        !matches!(self, Self::FreeListRelease)
+        !matches!(self, Self::FreeListRelease | Self::M5SchedulerStateRelease)
     }
 }
 
@@ -673,6 +673,26 @@ mod tests {
         assert_eq!(u64::from_le_bytes(bytes[8..16].try_into().unwrap()), 0x70_0410_0000);
         assert_eq!(u64::from_le_bytes(bytes[16..24].try_into().unwrap()), 0x301);
         assert!(bytes[24..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn scheduler_state_release_opcodes_and_power() {
+        let legacy = ControlRecord::SchedulerStateRelease(SchedulerStateRelease::new(
+            0x70_0420_0000,
+            *b"Q001",
+        ));
+        assert_eq!(legacy.opcode(), DeviceControlOp::SchedulerStateRelease);
+        assert!(legacy.opcode().asserts_gpu_power());
+
+        let mut rel27 = SchedulerStateRelease::new(0x70_0420_0000, *b"Q001");
+        rel27.opcode = DeviceControlOp::M5SchedulerStateRelease as u32;
+        let record27 = ControlRecord::SchedulerStateRelease(rel27);
+        assert_eq!(record27.opcode(), DeviceControlOp::M5SchedulerStateRelease);
+        assert!(!record27.opcode().asserts_gpu_power());
+        assert_eq!(
+            u32::from_le_bytes(record27.bytes()[..4].try_into().unwrap()),
+            0x13
+        );
     }
 
     #[test]

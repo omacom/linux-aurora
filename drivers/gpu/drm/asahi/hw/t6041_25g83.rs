@@ -47,7 +47,7 @@ pub(super) const CONFIG: Config = Config {
     perf: Some(&PERF),
     region_c: Some(&REGION_C),
     chip: Some(&CHIP),
-    firmware: fw::variant::Firmware::Identified(&[t6041::BUILD_25G83]),
+    firmware: fw::variant::Firmware::Identified(&[t6041::BUILD_25G83, t6041::BUILD_26B123]),
     core_layout: CoreLayout {
         cores: Some((4, 32)),
         alternate_core_masks: None,

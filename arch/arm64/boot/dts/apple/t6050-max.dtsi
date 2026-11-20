@@ -139,6 +139,11 @@
  * +0x8000; interrupts [677, 676, 679, 678]: 676..679 in send-empty, send-not-empty, recv-empty,
  * recv-not-empty order), dart-mtp 0x294800000 (interrupt 659, SID 0, vm-base 0x100_00004000),
  * dockchannel-mtp 0x294b14000 for its interrupts (660) and 0x294b28000.. for the FIFOs.
+ *
+ * Only the laptops have this block: their ADTs carry mtp, dart-mtp and dockchannel-mtp, while
+ * the desktops' (J775c, J873s) carry none of them, and nothing brings the MTP up there. Its
+ * registers are then not live, so the first access at probe takes an SError. The four nodes are
+ * therefore off here, and each laptop board that adds the HID transport turns them on.
  */
 &die0 {
 	mtp_mbox: mailbox@294608000 {
@@ -151,6 +156,7 @@
 		interrupt-names = "send-empty", "send-not-empty",
 				  "recv-empty", "recv-not-empty";
 		#mbox-cells = <0>;
+		status = "disabled";
 	};
 
 	mtp_dart: iommu@294800000 {
@@ -159,6 +165,7 @@
 		interrupts = <AIC_IRQ 0 659 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
 		apple,dma-range = <0x100 0x4000 0x0 0xffff0000>;
+		status = "disabled";
 	};
 
 	mtp: mtp@294600000 {
@@ -170,6 +177,7 @@
 		mboxes = <&mtp_mbox>;
 		iommus = <&mtp_dart 0>;
 		#helper-cells = <0>;
+		status = "disabled";
 	};
 
 	mtp_dockchannel: fifo@294b14000 {
@@ -183,6 +191,7 @@
 		#size-cells = <1>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
+		status = "disabled";
 	};
 
 #if defined(T6050_J714C) || defined(T6050_J716C)

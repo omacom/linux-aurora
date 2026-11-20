@@ -238,12 +238,27 @@
 	status = "okay";
 };
 
+/* The MTP and its DockChannel FIFO, which carry the keyboard and trackpad */
+&mtp_mbox {
+	status = "okay";
+};
+
+&mtp_dart {
+	status = "okay";
+};
+
+&mtp {
+	status = "okay";
+};
+
 /*
  * The keyboard and trackpad: the HID transport on the MTP's DockChannel FIFO
  * (ADT dockchannel-mtp/mtp-transport: multi-touch, keyboard, stm, actuator,
  * tp-accel), as on J716s.
  */
 &mtp_dockchannel {
+	status = "okay";
+
 	mtp_hid: input@8000 {
 		compatible = "apple,dockchannel-hid";
 		reg = <0x8000 0x1000>, <0xc000 0x1000>,
@@ -296,12 +311,13 @@
 
 /*
  * Type-C, from the ADT:
- *   ATC0 usb-drd0 left-back  hpm0 nub-spmi-a0 0x0c (the debug port, not described)
+ *   ATC0 usb-drd0 left-back  hpm0 nub-spmi-a0 0x0c (the debug port)
  *   ATC1 usb-drd1 left-front hpm1 nub-spmi-a0 0x0a
  *   ATC2 usb-drd2 right      hpm2 nub-spmi-a1 0x0c
  *   hpm5 nub-spmi-a0 0x08 (MagSafe 3, power in only: no connector node)
  * There is no usb-drd3 and no nub-spmi-a2, so ATC3's USB chain and that bus stay
- * off. Both described ports are wired as on J716s.
+ * off. The left-front and right ports are wired as on J716s; the left-back port is in
+ * t6050-j714s-left-back.dtsi.
  */
 &atc3_phy_mbox {
 	status = "disabled";
@@ -423,6 +439,14 @@
 
 /* Left-front port (ATC1): the USB4/Thunderbolt router and its PCIe tunnel */
 #include "t6050-j714s-left-usb4.dtsi"
+
+/* Left-back port (ATC0) */
+#include "t6050-j714s-left-back.dtsi"
+
+/* Reserve ATC0 LSTX until aura hands it over; ATC1/2 retain their pins. */
+&pinctrl_aop {
+	gpio-reserved-ranges = <0 79>, <80 1>, <82 3>;
+};
 
 /*
  * The PMP (ADT pmp0, /chosen, /arm-io/pmgr). iBoot loads its firmware and the driver starts it
@@ -641,10 +665,14 @@
 #include "t6050-j716c-isp.dtsi"
 
 /*
- * The J714s camera sizes: sensor config 6 (two stacked 3040x2880 frames; the ISP processes
- * the first) cropped and scaled by the ISP per size. Each crop is centred on that frame;
- * the landscape sizes take two-thirds of its width, the portrait sizes the same length of
- * its height and the square that side.
+ * The J714s camera sizes: sensor config 8 (the 3040x2880 frame binned 2x2 to 1520x1440)
+ * cropped and scaled by the ISP per size. Binning averages four pixels: indoors it shows
+ * a third to a fifth of the luma noise and about half the colour noise of the
+ * full-resolution configs (5, 6, 7 and 0), for some fine detail. Each crop is centred on
+ * the frame, where the lens covers it: the landscape sizes take two-thirds of its width,
+ * the portrait sizes the same length of its height and the square that side. The binned
+ * crops are too small for the driver to derive 1280x960 and 960x1280 from them without
+ * upscaling, so those two are listed as well.
  */
 &isp0 {
 	/delete-node/ sensor-presets;
@@ -652,52 +680,66 @@
 	sensor-presets {
 		/* 1920x1080 */
 		preset0 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <1920 1080>;
-			apple,crop = <506 870 2026 1140>;
+			apple,crop = <254 434 1012 570>;
 		};
 		/* 640x480 */
 		preset1 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <640 480>;
-			apple,crop = <506 680 2026 1520>;
+			apple,crop = <254 340 1012 760>;
 		};
 		/* 1280x720 */
 		preset2 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <1280 720>;
-			apple,crop = <506 870 2026 1140>;
+			apple,crop = <254 434 1012 570>;
 		};
 		/* 1760x1328 */
 		preset3 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <1760 1328>;
-			apple,crop = <506 676 2026 1528>;
+			apple,crop = <254 338 1012 764>;
 		};
 		/* 1328x1760 */
 		preset4 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <1328 1760>;
-			apple,crop = <756 426 1528 2026>;
+			apple,crop = <378 214 764 1012>;
 		};
 		/* 1552x1552 */
 		preset5 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <1552 1552>;
-			apple,crop = <506 426 2026 2026>;
+			apple,crop = <254 214 1012 1012>;
 		};
 		/* 1080x1920 */
 		preset6 {
-			apple,config-index = <6>;
-			apple,input-size = <3040 5760>;
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
 			apple,output-size = <1080 1920>;
-			apple,crop = <950 426 1140 2026>;
+			apple,crop = <474 214 570 1012>;
+		};
+		/* 1280x960 */
+		preset7 {
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
+			apple,output-size = <1280 960>;
+			apple,crop = <254 340 1012 760>;
+		};
+		/* 960x1280 */
+		preset8 {
+			apple,config-index = <8>;
+			apple,input-size = <1520 1440>;
+			apple,output-size = <960 1280>;
+			apple,crop = <380 214 760 1012>;
 		};
 	};
 };

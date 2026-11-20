@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /*
- * J714s external displays: DisplayPort alt mode and USB4 DisplayPort tunnels on the left-front
- * and right ports. dcpext0 and dcpext2 drive the DP alt mode and tunnel routes, dcpext1 a third
- * tunnel on either port; dcpext3 is the pair for modes that need two pipelines. The left-back
- * port (ATC0) is the debug port and is not described.
+ * J714s external displays: DisplayPort alt mode and USB4 DisplayPort tunnels on all three
+ * ports. dcpext0 and dcpext2 drive the DP alt mode and tunnel routes, dcpext1 a third tunnel on
+ * any port; dcpext3 is the pair for modes that need two pipelines. Each DCP's routes are the
+ * right port (typec0, route@0), the left-front port (typec1, route@1) and the left-back port
+ * (typec2, route@2). The left-back routes were added last: connector group 1 gives their
+ * connectors the names after the other ports' (DP-7..DP-9), so DP-1..DP-6 keep theirs.
+ * Every DCP lists all three ports' PHYs and crossbars. A route whose PHY or crossbar node is
+ * disabled is left out. A PHY that is enabled but fails to probe holds every dcpext until
+ * deferred probing gives up (about 10 s); they then join the display subsystem as unusable
+ * pipes with no route: the panel works, and no external display does, on any port.
  * Addresses and interrupts are from the J714sAP ADT. The boot loader hands each engine over: it
  * enables the engine, its mailbox and DARTs, publishes its bandwidth scratch and adds its
  * display DART to the display subsystem.
@@ -14,30 +20,32 @@
 	apple,connector-type = "USB-C";
 	apple,dptx-die = <0>;
 	/*
-	 * A third pipeline for USB4 DP tunnels on the right and left-front
-	 * ports, so a dock on either can drive three displays as on macOS.
+	 * A third pipeline for USB4 DP tunnels on every port, so a dock on any
+	 * of them can drive three displays as on macOS.
 	 * Routing dcpext1 stops it being a merged-mode peer; dcpext0, dcpext1
 	 * and dcpext2 then pair with dcpext3, so only one display wider than
 	 * one pipeline runs at a time.
-	 * Crossbar source 2 (dispext1 port 0) on both crossbars follows the
+	 * Crossbar source 2 (dispext1 port 0) on all three crossbars follows the
 	 * 2 * dispext pattern of dcpext0 (0) and dcpext2 (4), and the T6040
 	 * dcpext1 (2).
-	 * No mode-switch: hpm1 and hpm2 already have TYPEC_MUX_MAX_DEVS (3)
-	 * mode-switch providers each (the ATC PHY, dcpext0 and dcpext2);
+	 * No mode-switch: hpm0, hpm1 and hpm2 already have TYPEC_MUX_MAX_DEVS
+	 * (3) mode-switch providers each (the ATC PHY, dcpext0 and dcpext2);
 	 * tunnels find the port through the endpoint, not the mux.
 	 * apple,tunnel-only keeps DP alt mode displays off it: only tunnels
 	 * have been driven through it.
 	 */
-	apple,typec-dptx-phys = <2 1>;
-	apple,typec-mux-indices = <2 2>;
-	phys = <&atc2_phy 6>, <&atc1_phy 6>;
-	phy-names = "typec0", "typec1";
+	apple,typec-dptx-phys = <2 1 0>;
+	apple,typec-mux-indices = <2 2 2>;
+	phys = <&atc2_phy 6>, <&atc1_phy 6>, <&atc0_phy 6>;
+	phy-names = "typec0", "typec1", "typec2";
 	mux-controls = <&atc2_xbar 0>, <&atc2_xbar 1>, <&atc2_xbar 2>, <&atc2_xbar 3>,
 		       <&atc2_xbar 4>, <&atc1_dpxbar 0>, <&atc1_dpxbar 1>, <&atc1_dpxbar 2>,
-		       <&atc1_dpxbar 3>, <&atc1_dpxbar 4>;
+		       <&atc1_dpxbar 3>, <&atc1_dpxbar 4>, <&atc0_dpxbar 0>, <&atc0_dpxbar 1>,
+		       <&atc0_dpxbar 2>, <&atc0_dpxbar 3>, <&atc0_dpxbar 4>;
 	mux-control-names = "typec0", "typec0-dpin0", "typec0-dpin1", "typec0-dpin2",
 			    "typec0-dpin3", "typec1", "typec1-dpin0", "typec1-dpin1",
-			    "typec1-dpin2", "typec1-dpin3";
+			    "typec1-dpin2", "typec1-dpin3", "typec2", "typec2-dpin0",
+			    "typec2-dpin1", "typec2-dpin2", "typec2-dpin3";
 
 	typec-routes {
 		#address-cells = <1>;
@@ -64,6 +72,18 @@
 				};
 			};
 		};
+
+		route@2 {
+			reg = <2>;
+			apple,tunnel-only;
+			apple,connector-group = <1>;
+
+			port {
+				dcpext1_left_back: endpoint {
+					remote-endpoint = <&typec2_dp2>;
+				};
+			};
+		};
 	};
 };
 
@@ -71,16 +91,18 @@
 	apple,dcp-index = <3>;
 	apple,connector-type = "USB-C";
 	apple,dptx-die = <0>;
-	apple,typec-dptx-phys = <2 1>;
-	apple,typec-mux-indices = <4 4>;
-	phys = <&atc2_phy 6>, <&atc1_phy 6>;
-	phy-names = "typec0", "typec1";
+	apple,typec-dptx-phys = <2 1 0>;
+	apple,typec-mux-indices = <4 4 4>;
+	phys = <&atc2_phy 6>, <&atc1_phy 6>, <&atc0_phy 6>;
+	phy-names = "typec0", "typec1", "typec2";
 	mux-controls = <&atc2_xbar 0>, <&atc2_xbar 1>, <&atc2_xbar 2>, <&atc2_xbar 3>,
 		       <&atc2_xbar 4>, <&atc1_dpxbar 0>, <&atc1_dpxbar 1>, <&atc1_dpxbar 2>,
-		       <&atc1_dpxbar 3>, <&atc1_dpxbar 4>;
+		       <&atc1_dpxbar 3>, <&atc1_dpxbar 4>, <&atc0_dpxbar 0>, <&atc0_dpxbar 1>,
+		       <&atc0_dpxbar 2>, <&atc0_dpxbar 3>, <&atc0_dpxbar 4>;
 	mux-control-names = "typec0", "typec0-dpin0", "typec0-dpin1", "typec0-dpin2",
 			    "typec0-dpin3", "typec1", "typec1-dpin0", "typec1-dpin1",
-			    "typec1-dpin2", "typec1-dpin3";
+			    "typec1-dpin2", "typec1-dpin3", "typec2", "typec2-dpin0",
+			    "typec2-dpin1", "typec2-dpin2", "typec2-dpin3";
 
 	typec-routes {
 		#address-cells = <1>;
@@ -107,6 +129,18 @@
 				};
 			};
 		};
+
+		route@2 {
+			reg = <2>;
+			mode-switch;
+			apple,connector-group = <1>;
+
+			port {
+				dcpext2_left_back: endpoint {
+					remote-endpoint = <&typec2_dp1>;
+				};
+			};
+		};
 	};
 };
 
@@ -117,16 +151,18 @@
 };
 
 &dcpext0 {
-	apple,typec-dptx-phys = <2 1>;
-	apple,typec-mux-indices = <0 0>;
-	phys = <&atc2_phy 6>, <&atc1_phy 6>;
-	phy-names = "typec0", "typec1";
+	apple,typec-dptx-phys = <2 1 0>;
+	apple,typec-mux-indices = <0 0 0>;
+	phys = <&atc2_phy 6>, <&atc1_phy 6>, <&atc0_phy 6>;
+	phy-names = "typec0", "typec1", "typec2";
 	mux-controls = <&atc2_xbar 0>, <&atc2_xbar 1>, <&atc2_xbar 2>, <&atc2_xbar 3>,
 		       <&atc2_xbar 4>, <&atc1_dpxbar 0>, <&atc1_dpxbar 1>, <&atc1_dpxbar 2>,
-		       <&atc1_dpxbar 3>, <&atc1_dpxbar 4>;
+		       <&atc1_dpxbar 3>, <&atc1_dpxbar 4>, <&atc0_dpxbar 0>, <&atc0_dpxbar 1>,
+		       <&atc0_dpxbar 2>, <&atc0_dpxbar 3>, <&atc0_dpxbar 4>;
 	mux-control-names = "typec0", "typec0-dpin0", "typec0-dpin1", "typec0-dpin2",
 			    "typec0-dpin3", "typec1", "typec1-dpin0", "typec1-dpin1",
-			    "typec1-dpin2", "typec1-dpin3";
+			    "typec1-dpin2", "typec1-dpin3", "typec2", "typec2-dpin0",
+			    "typec2-dpin1", "typec2-dpin2", "typec2-dpin3";
 
 	typec-routes {
 		route@0 {
@@ -140,6 +176,18 @@
 			port {
 				dcpext0_left: endpoint {
 					remote-endpoint = <&typec1_dp0>;
+				};
+			};
+		};
+
+		route@2 {
+			reg = <2>;
+			mode-switch;
+			apple,connector-group = <1>;
+
+			port {
+				dcpext0_left_back: endpoint {
+					remote-endpoint = <&typec2_dp0>;
 				};
 			};
 		};
@@ -194,6 +242,31 @@
 			typec1_dp2: endpoint@2 {
 				reg = <2>;
 				remote-endpoint = <&dcpext1_left>;
+			};
+		};
+	};
+};
+
+&typec2 {
+	ports {
+		port@2 {
+			reg = <2>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			typec2_dp0: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&dcpext0_left_back>;
+			};
+
+			typec2_dp1: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&dcpext2_left_back>;
+			};
+
+			typec2_dp2: endpoint@2 {
+				reg = <2>;
+				remote-endpoint = <&dcpext1_left_back>;
 			};
 		};
 	};
@@ -254,6 +327,29 @@
 	status = "okay";
 };
 
+/* The left-back crossbar (the inventory's, as atc1_dpxbar) and the PHY's tunnel clock gates */
+&atc0_dpxbar {
+	power-domains = <&ps_atc0_usb_aon>, <&ps_atc0_common>;
+	power-domain-names = "usb-aon", "common";
+	status = "disabled";
+};
+
+&ps_atc0_common_dp_0 {
+	status = "disabled";
+};
+
+&ps_atc0_common_dp_1 {
+	status = "disabled";
+};
+
+&ps_atc0_common_dp_2 {
+	status = "disabled";
+};
+
+&ps_atc0_common_dp_3 {
+	status = "disabled";
+};
+
 &atc2_phy {
 	reg = <0x3 0x83000000 0x0 0x2c000>,
 	      <0x3 0x82a90000 0x0 0x4000>,
@@ -295,6 +391,14 @@
 	power-domains = <&ps_atc1_usb_aon>, <&ps_atc1_common>, <&ps_atc1_phymxwrap>,
 			<&ps_atc1_usb>, <&ps_atc1_common_dp_0>, <&ps_atc1_common_dp_1>,
 			<&ps_atc1_common_dp_2>, <&ps_atc1_common_dp_3>;
+	power-domain-names = "usb-aon", "common", "wrapper", "usb", "dp0", "dp1", "dp2", "dp3";
+};
+
+/* The left-back PHY's tunnel clock gates, as the other ports' */
+&atc0_phy {
+	power-domains = <&ps_atc0_usb_aon>, <&ps_atc0_common>, <&ps_atc0_phymxwrap>,
+			<&ps_atc0_usb>, <&ps_atc0_common_dp_0>, <&ps_atc0_common_dp_1>,
+			<&ps_atc0_common_dp_2>, <&ps_atc0_common_dp_3>;
 	power-domain-names = "usb-aon", "common", "wrapper", "usb", "dp0", "dp1", "dp2", "dp3";
 };
 

@@ -705,6 +705,118 @@ static void isp_test_call_size_capabilities(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, isp->presets[8].output_dim.y, 1536);
 }
 
+static void isp_test_sensor_names(struct kunit *test)
+{
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	struct isp_format *fmt = isp_get_current_format(isp);
+
+	mutex_init(&isp->video_lock);
+	for (unsigned int i = 0; i < ARRAY_SIZE(isp_setfiles); i++) {
+		KUNIT_ASSERT_NOT_NULL_MSG(test, isp_setfiles[i].sensor,
+					  "setfile %u", i);
+		KUNIT_EXPECT_NE_MSG(test, isp_setfiles[i].sensor[0], '\0',
+				    "setfile %u", i);
+	}
+	KUNIT_EXPECT_STREQ(test, isp_setfiles[ISP_IMX248_1820_01].sensor,
+			   "imx248");
+	KUNIT_EXPECT_STREQ(test, isp_setfiles[ISP_IMX558_1925_03].sensor,
+			   "imx558");
+	KUNIT_EXPECT_STREQ(test, isp_setfiles[ISP_IMX958_2224_01].sensor,
+			   "imx958-uw");
+	KUNIT_EXPECT_STREQ(test, isp_setfiles[ISP_VD56G0_6221_01].sensor,
+			   "vd56g0");
+
+	KUNIT_EXPECT_NULL(test, apple_isp_sensor_name(isp));
+	fmt->id = ISP_IMX958_2224_01;
+	isp->camera_detected = true;
+	KUNIT_EXPECT_STREQ(test, apple_isp_sensor_name(isp), "imx958-uw");
+}
+
+static void isp_test_snf_flatten(u8 *snf)
+{
+	int k;
+
+	for (k = 0; k < SNF_POINTS; k++)
+		put_unaligned_le16(SNF_ONE, snf + 6 + 2 * k);
+}
+
+/*
+ * A synthetic setfile: a 1024x1024 shading frame of four 3x3 tables at
+ * 256-pixel steps, table t at (t + 1) x unity and twice that at the
+ * centre point, then the SNF section. Expected gains from a port of the
+ * computation: 16 / sum of the 16 interpolated gains, in Q12.
+ */
+static void isp_test_snf_radial(struct kunit *test)
+{
+	enum { GW = 3, GH = 3, LSC = 0x54 + 4 * GW * GH * 2,
+	       SNF = 6 + 2 * SNF_POINTS };
+	struct apple_isp *isp = isp_test_capture_alloc(test);
+	size_t len = 0x14 + 12 + LSC + 12 + SNF;
+	u8 *data = kunit_kzalloc(test, len, GFP_KERNEL);
+	u8 *lsc, *snf;
+	int t, k;
+
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	lsc = data + 0x14 + 12;
+	snf = lsc + LSC + 12;
+	put_unaligned_le32(8 + LSC, lsc - 12);
+	put_unaligned_le32(0xc003, lsc - 4);
+	put_unaligned_le32(8 + SNF, snf - 12);
+	put_unaligned_le32(0xc404, snf - 4);
+	put_unaligned_le16(1024, lsc + 6);
+	put_unaligned_le16(1024, lsc + 8);
+	for (t = 0; t < 4; t++) {
+		u8 *rec = lsc + 0xa + 18 * t;
+
+		put_unaligned_le16(256, rec + 2);
+		put_unaligned_le16(256, rec + 4);
+		put_unaligned_le16(t * GW * GH, rec + 6);
+		put_unaligned_le16(GW, rec + 14);
+		put_unaligned_le16(GH, rec + 16);
+		for (k = 0; k < GW * GH; k++)
+			put_unaligned_le16(SNF_ONE * (t + 1) * (k == GW + 1 ? 2 : 1),
+					   lsc + 0x54 + 2 * (t * GW * GH + k));
+	}
+
+	/* The corners are 724 pixels out: 4-pixel radius steps reach them. */
+	put_unaligned_le16(7, snf + 4);
+	isp_test_snf_flatten(snf);
+	isp_setfile_snf_radial(isp, data, len, 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 4), 2);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6), 819);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6 + 2 * 128), 1509);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6 + 2 * 256), 1638);
+	for (k = 1; k < SNF_POINTS; k++)
+		KUNIT_EXPECT_LE(test, get_unaligned_le16(snf + 6 + 2 * (k - 1)),
+				get_unaligned_le16(snf + 6 + 2 * k));
+
+	/* A table that does not ship flat is the setfile's own: kept. */
+	isp_setfile_snf_radial(isp, data, len, -128);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6), 819);
+
+	/* A centre 128 pixels up moves the peak off the frame's centre. */
+	isp_test_snf_flatten(snf);
+	isp_setfile_snf_radial(isp, data, len, -128);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6), 936);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6 + 2 * 256), 1591);
+
+	/*
+	 * Tables whose size wraps 32 bits to 4 bytes (2 x 33025 x 65026),
+	 * which fits the section, or that do not cover the frame, keep the
+	 * gains there.
+	 */
+	isp_test_snf_flatten(snf);
+	put_unaligned_le16(33025, lsc + 0xa + 18 * 3 + 14);
+	put_unaligned_le16(65026, lsc + 0xa + 18 * 3 + 16);
+	isp_setfile_snf_radial(isp, data, len, 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6), SNF_ONE);
+	put_unaligned_le16(GW, lsc + 0xa + 18 * 3 + 14);
+	put_unaligned_le16(GH, lsc + 0xa + 18 * 3 + 16);
+	put_unaligned_le16(128, lsc + 0xa + 18 * 3 + 2);
+	isp_setfile_snf_radial(isp, data, len, 0);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le16(snf + 6), SNF_ONE);
+}
+
 static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_call_crop),
 	KUNIT_CASE(isp_test_call_crop_bounds),
@@ -715,6 +827,7 @@ static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_command_ack_failures),
 	KUNIT_CASE(isp_test_stop_key_on_debug),
 	KUNIT_CASE(isp_test_sensor_geometry),
+	KUNIT_CASE(isp_test_sensor_names),
 	KUNIT_CASE(isp_test_sensor_config_list),
 	KUNIT_CASE(isp_test_sensor_config_failure),
 	KUNIT_CASE(isp_test_preview_stream),
@@ -722,6 +835,7 @@ static struct kunit_case isp_cam_test_cases[] = {
 	KUNIT_CASE(isp_test_temporal_filter_band0),
 	KUNIT_CASE(isp_test_temporal_filter_off),
 	KUNIT_CASE(isp_test_power_line_frequency),
+	KUNIT_CASE(isp_test_snf_radial),
 	{}
 };
 

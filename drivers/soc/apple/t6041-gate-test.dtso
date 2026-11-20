@@ -228,6 +228,11 @@
 				#iommu-cells = <1>;
 			};
 
+			dcp@402e00000 {
+				compatible = "apple,t6041-dcp";
+				status = "disabled";
+			};
+
 			display-subsystem {
 				compatible = "apple,display-subsystem";
 				iommus = <&disp_dart 0>;

@@ -14,6 +14,7 @@
 #define ISP_FRAME_RATE_DEFAULT 30
 
 int apple_isp_detect_camera(struct apple_isp *isp);
+const char *apple_isp_sensor_name(struct apple_isp *isp);
 
 int apple_isp_start_camera(struct apple_isp *isp);
 void apple_isp_stop_camera(struct apple_isp *isp);

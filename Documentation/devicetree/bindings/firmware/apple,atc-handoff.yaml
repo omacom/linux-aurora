@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/firmware/apple,atc-handoff.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Apple Type-C (ATC) port boot ownership handoff interface
+
+maintainers:
+  - Dj <hey@djdev.me>
+
+description: |
+  A Type-C port whose ATC the boot producer may be using, for example as its
+  USB debug port. The port's devices start disabled. This firmware interface
+  identifies the port's PHY and the group the producer may enable after
+  relinquishing USB/debug ownership, proving no DMA was retained, and
+  supplying the current machine's PHY tunables. Shared providers are
+  excluded. Older producers leave the group disabled; Linux does not
+  activate it.
+
+properties:
+  compatible:
+    const: apple,atc-handoff
+
+  apple,phy:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: |
+      The port's ATC PHY. It is also a member of apple,devices.
+
+  apple,devices:
+    $ref: /schemas/types.yaml#/definitions/phandle-array
+    minItems: 1
+    maxItems: 32
+    items:
+      maxItems: 1
+    description: |
+      The port's own devices: its power domains, PHY and mailbox, USB DARTs
+      and DRD, port controller, USB4 router and its mailbox/NHI/DART, PCIe
+      tunnel parent/DART/root controller, and display crossbar. Every member
+      must be disabled until handoff. Do not include providers shared with
+      other ports, such as the AOP GPIO, AUSS or CIO reset providers.
+
+required:
+  - compatible
+  - apple,phy
+  - apple,devices
+
+additionalProperties: false

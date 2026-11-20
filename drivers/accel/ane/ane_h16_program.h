@@ -2,6 +2,7 @@
 #ifndef __ANE_H16_PROGRAM_H__
 #define __ANE_H16_PROGRAM_H__
 
+#include <linux/bitmap.h>
 #include <linux/refcount.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -30,6 +31,14 @@
 #define ANE_H16_UNLOAD_SIZE 0xc
 #define ANE_H16_GATE_SIZE 0xc
 #define ANE_H16_REPORT_MAX 0x100
+/*
+ * One program's LOAD and CREATE, which stay in the command arena while the
+ * program lives, in a record of their own. 128 records take 136 KiB of the
+ * 256 KiB arena and leave the rest to EXECUTE batches and teardown.
+ */
+#define ANE_H16_RECORD_SIZE (ALIGN(ANE_H16_LOAD_SIZE, ANE_FW_SLOT_SIZE) + \
+			     ALIGN(ANE_H16_CREATE_SIZE, ANE_FW_SLOT_SIZE))
+#define ANE_H16_RECORDS 128
 /* First value of the firmware mcache DSID pool (custom-BAR facts, 4). */
 #define ANE_H16_MCACHE_DSID 36
 
@@ -150,10 +159,22 @@ int ane_h16_custom_bars(const struct ane_h16_hwx_snapshot *snapshot,
 			const struct ane_h16_hwx *hwx, u32 dsid,
 			struct ane_h16_custom_bar *bars, unsigned int *count);
 
-/* Private, pinned mappings in the firmware domain. Never released before reset. */
+/*
+ * Private, pinned mappings in the firmware domain. Without unmap they are
+ * never released before reset.
+ */
 struct ane_h16_session_ops {
 	int (*map)(void *ctx, size_t size, bool device_write,
 		   struct ane_fw_surface *surface);
+	/*
+	 * Optional. Give back a surface map() returned: unmap it from the
+	 * engine, free its memory and its DVA range. The session calls it
+	 * only for memory the firmware no longer uses (UNLOAD acknowledged,
+	 * the program lost to a new firmware, or never seen by the firmware),
+	 * only while the engine is up (not asleep, not parked), and with the
+	 * session lock held.
+	 */
+	void (*unmap)(void *ctx, const struct ane_fw_surface *surface);
 	void (*log)(void *ctx, const char *item, u64 a, u64 b);
 	/*
 	 * Optional. For a surface with a handle: before the engine uses it
@@ -236,6 +257,8 @@ struct ane_h16_program {
 	struct list_head deferred;
 	/* Firmware boot the program was loaded in; an older one means lost. */
 	u64 epoch;
+	/* Its LOAD and CREATE record in the session's arena range, or -1. */
+	int record;
 	/* In the session's list of programs to replay after a cold boot. */
 	struct list_head node;
 };
@@ -286,11 +309,15 @@ void ane_h16_exec_stats_add(struct ane_h16_exec_stats *st,
  */
 /*
  * Program memory given back by a program that the firmware unloaded. It
- * stays mapped until reset like every firmware-visible mapping, and serves
- * a later program's mapping of the same size and permission instead of a
- * new one, so loading the same model again and again uses no new memory.
+ * serves a later program's mapping of the same size and permission instead
+ * of a new one, so loading the same model again and again uses no new
+ * memory. With ops->unmap the oldest spares beyond ANE_H16_SPARES_KEEP
+ * entries or ANE_H16_SPARE_BYTES are freed, and all of them when a new
+ * mapping finds no room; without it, they stay mapped until reset.
  */
 #define ANE_H16_SPARES 64
+#define ANE_H16_SPARES_KEEP 32
+#define ANE_H16_SPARE_BYTES SZ_128M
 
 struct ane_h16_spare {
 	struct ane_fw_surface surface;
@@ -305,8 +332,10 @@ struct ane_h16_session {
 	struct ane_h16_pending_table pending;
 	/* The last loaded program. */
 	struct ane_h16_program *program;
+	/* Oldest first. */
 	struct ane_h16_spare spares[ANE_H16_SPARES];
 	unsigned int spare_count;
+	size_t spare_bytes;
 	/* Quiet time that ends serving the SHAREDMALLOC ring after UNLOAD. */
 	u64 settle_ns;
 	/*
@@ -349,6 +378,11 @@ struct ane_h16_session {
 	bool pipelined;
 	/* Reclaim a batch of command buffers only after its last caller ends. */
 	size_t execute_mark;
+	/*
+	 * Records in use in the transport's placed range (ane_h16_program
+	 * record), cleared when the firmware boots again.
+	 */
+	DECLARE_BITMAP(records, ANE_H16_RECORDS);
 	/* Firmware log lines printed after the last failed EXECUTE. */
 	unsigned int fwlog_lines;
 	bool quarantined;

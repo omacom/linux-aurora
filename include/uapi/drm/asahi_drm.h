@@ -780,6 +780,10 @@ struct drm_asahi_gem_create {
  * while the object lives. Device and PFN mappings, including CPU mappings of
  * other buffer objects, are refused (EFAULT).
  *
+ * In a process whose page size is smaller than the native one, a native page
+ * is accepted only where the process maps all of it, in order at consecutive
+ * addresses; otherwise the call fails with EFAULT.
+ *
  * The object cannot be mapped with DRM_IOCTL_ASAHI_GEM_MMAP_OFFSET, exported,
  * given advice with DRM_IOCTL_ASAHI_GEM_MADVISE, bound with
  * DRM_IOCTL_ASAHI_GEM_BIND_OBJECT or registered as a VM status mirror (all

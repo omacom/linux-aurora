@@ -544,16 +544,22 @@ static int dcp_dpxbar_tunnel_select_source(struct mux_control *mux, int state)
 	return ret;
 }
 
+static bool dcp_t6041_ext_v27(const struct apple_dcp *dcp)
+{
+	return dcp->fw_compat == DCP_FIRMWARE_V_27_0 && dcp->desktop_external;
+}
+
 /*
- * Desktop 26.x firmware does not power the DP PHY of a Type-C route itself:
- * the route does, once its crossbar points at the pipeline, and gives it
- * back before the crossbar is released.
+ * Desktop 26.x and T6041 firmware-27 external processors do not power the DP
+ * PHY of a Type-C route themselves: the route does, once its crossbar points at
+ * the pipeline, and gives it back before the crossbar is released.
  */
 static int dcp_typec_route_phy_on(struct apple_dcp_typec_route *route)
 {
 	int ret;
 
-	if (route->dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP ||
+	if ((route->dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP &&
+	     !dcp_t6041_ext_v27(route->dcp)) ||
 	    route->phy_powered)
 		return 0;
 	ret = phy_init(route->phy);
@@ -597,7 +603,8 @@ int dcp_typec_phy_on(struct apple_dcp *dcp)
 	 */
 	if (route->tunnel)
 		return 0;
-	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+	if ((dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ||
+	     dcp_t6041_ext_v27(dcp)) &&
 	    route->deactivate_xbar_done)
 		return -ENODEV;
 	return dcp_typec_route_phy_on(route);
@@ -925,7 +932,8 @@ static int dcp_typec_route_deactivate(struct apple_dcp_typec_route *route)
 		 * attached. Desktop 26.x powers the PHY with the route, so an
 		 * idle pipeline must not point at one.
 		 */
-		dcp->phy = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ?
+		dcp->phy = (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ||
+			    dcp_t6041_ext_v27(dcp)) ?
 			   NULL : dcp->typec_routes[0].phy;
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 			WRITE_ONCE(dcp->xbar, NULL);
@@ -2016,6 +2024,7 @@ static int dcp_typec_route_apply(struct typec_mux_dev *mux,
 		 * when HPD returns.
 		 */
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ||
+		    dcp_t6041_ext_v27(dcp) ||
 		    dcp_t8142_ext(dcp)) {
 			port->preferred_route = port->owner;
 			port->hpd = false;
@@ -2142,6 +2151,7 @@ static int dcp_typec_route_apply(struct typec_mux_dev *mux,
 	 */
 	if (!port->owner && !hpd &&
 	    (route->dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ||
+	     dcp_t6041_ext_v27(route->dcp) ||
 	     dcp_t8142_ext(route->dcp))) {
 		port->applied_valid = true;
 		return 0;
@@ -2613,13 +2623,15 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
 	struct mux_control *xbar = NULL;
 	int ret;
 
-	if (dcp->fw_compat == DCP_FIRMWARE_V_27_0)
+	if (dcp->fw_compat == DCP_FIRMWARE_V_27_0 && !dcp_t6041_ext_v27(dcp))
 		return dcp_direct_crossbar_link_t6050(dcp, up);
 	/*
-	 * On T6030, a T8132 dcpext and the selected native26 pipeline,
-	 * selecting a crossbar output only routes it; link-up enables clocks.
+	 * On T6030, a T6041 firmware-27 dcpext, a T8132 dcpext and the selected
+	 * native26 pipeline, selecting a crossbar output only routes it;
+	 * link-up enables clocks.
 	 */
 	if (!of_machine_is_compatible("apple,t6030") &&
+	    !dcp_t6041_ext_v27(dcp) &&
 	    !dcp_is_t8132_ext(dcp) && !dcp_is_ext26(dcp))
 		return 0;
 	guard(mutex)(&dcp->tb_lock);
@@ -4444,23 +4456,59 @@ bool dcp_typec_port_has_candidate(unsigned int idx, struct platform_device *pdev
 	return false;
 }
 
-/* Is @pdev's route to port @idx for DP tunnels only (apple,tunnel-only)? */
-bool dcp_typec_port_tunnel_only(unsigned int idx, struct platform_device *pdev)
+static unsigned int dcp_typec_route_pass(const struct apple_dcp_typec_route *route)
+{
+	return 2 * route->connector_group + (route->core.tunnel_only ? 1 : 0);
+}
+
+/*
+ * The number of passes in which the connectors are created: two (the other
+ * routes', then the tunnel-only ones') per apple,connector-group, up to the
+ * largest group any route has.
+ */
+unsigned int dcp_typec_nr_passes(void)
 {
 	struct apple_dcp_typec_port *port;
 	struct apple_dcp_typec_route *route;
+	u32 groups = 1;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+
+	list_for_each_entry(port, &dcp_typec_ports, link)
+		list_for_each_entry(route, &port->routes, port_link)
+			groups = max(groups, route->connector_group + 1);
+
+	return 2 * groups;
+}
+
+/*
+ * The pass in which the connector of @pdev's route to port @idx is created:
+ * connectors come group by group (apple,connector-group), and in a group a
+ * tunnel-only route's (apple,tunnel-only) after the others'. A port added to
+ * a board in the next group gets the next connector names, and the existing
+ * connectors keep theirs. With @pdev NULL (a port whose routes share its
+ * connectors), the port's: its largest group's first pass.
+ */
+unsigned int dcp_typec_port_pass(unsigned int idx, struct platform_device *pdev)
+{
+	struct apple_dcp_typec_port *port;
+	struct apple_dcp_typec_route *route;
+	u32 group = 0;
 
 	guard(mutex)(&dcp_typec_fabric_lock);
 
 	port = dcp_typec_port_by_index(idx);
 	if (!port)
-		return false;
+		return 0;
 
-	list_for_each_entry(route, &port->routes, port_link)
-		if (route->dcp->dev == &pdev->dev)
-			return route->core.tunnel_only;
+	list_for_each_entry(route, &port->routes, port_link) {
+		if (!pdev)
+			group = max(group, route->connector_group);
+		else if (route->dcp->dev == &pdev->dev)
+			return dcp_typec_route_pass(route);
+	}
 
-	return false;
+	return 2 * group;
 }
 
 /*
@@ -4669,6 +4717,104 @@ struct dcp_route_probe_context {
 	struct device_node *routes;
 };
 
+/*
+ * Is the provider that @dev's @names entry @name points to in @list available?
+ * A disabled one never registers, so looking it up would defer for ever. A
+ * missing or malformed entry counts as available: the lookup reports it.
+ */
+static bool dcp_typec_route_supplier_available(struct device *dev, const char *list,
+					       const char *cells, const char *names,
+					       const char *name)
+{
+	struct of_phandle_args args;
+	bool available;
+	int index;
+
+	index = of_property_match_string(dev->of_node, names, name);
+	if (index < 0 || of_parse_phandle_with_args(dev->of_node, list, cells, index, &args))
+		return true;
+	available = of_device_is_available(args.np);
+	of_node_put(args.np);
+	return available;
+}
+
+/*
+ * Disables @route, or every available route under @routes if @route is NULL,
+ * in the device tree, in one changeset, for good. A connector passes over
+ * unavailable routes when it looks for its display routes, so the port no
+ * longer waits for them. Returns the applied changeset, which stays (the live
+ * tree refers to it), or an ERR_PTR.
+ */
+static struct of_changeset *dcp_typec_routes_disable_nodes(struct device *dev,
+							   struct device_node *routes,
+							   struct device_node *route)
+{
+	struct of_changeset *cs;
+	struct device_node *np;
+	int ret = 0;
+
+	cs = kzalloc_obj(*cs);
+	if (!cs)
+		return ERR_PTR(-ENOMEM);
+	of_changeset_init(cs);
+	if (route) {
+		ret = of_changeset_update_prop_string(cs, route, "status", "disabled");
+	} else {
+		for_each_available_child_of_node(routes, np) {
+			ret = of_changeset_update_prop_string(cs, np, "status", "disabled");
+			if (ret) {
+				of_node_put(np);
+				break;
+			}
+		}
+	}
+	if (!ret)
+		ret = of_changeset_apply(cs);
+	if (ret) {
+		if (route)
+			dev_err(dev, "%pOF: could not disable the route: %d\n", route, ret);
+		else
+			dev_err(dev, "could not disable the Type-C display routes: %d\n", ret);
+		of_changeset_destroy(cs);
+		kfree(cs);
+		return ERR_PTR(ret);
+	}
+	return cs;
+}
+
+/*
+ * Which of @dev's suppliers for its Type-C route @name ("typecN") has a
+ * disabled node: "DP PHY", "display crossbar", or NULL if neither. Such a
+ * route is left out, here and in a failsafe dcpext's supplier preflight.
+ */
+const char *dcp_typec_route_supplier_disabled(struct device *dev, const char *name)
+{
+	if (!dcp_typec_route_supplier_available(dev, "phys", "#phy-cells", "phy-names", name))
+		return "DP PHY";
+	if (!dcp_typec_route_supplier_available(dev, "mux-controls", "#mux-control-cells",
+						"mux-control-names", name))
+		return "display crossbar";
+	return NULL;
+}
+
+/*
+ * A route whose PHY or crossbar node is disabled is skipped and disabled in
+ * turn, so that one port's disabled PHY costs only that port's displays, not
+ * every route of the processor. Returns NULL if the route is not skipped,
+ * else the changeset that disabled it, or an ERR_PTR if that failed.
+ */
+static struct of_changeset *dcp_typec_route_skip(struct device *dev,
+						 struct device_node *route_np,
+						 const char *name)
+{
+	const char *what = dcp_typec_route_supplier_disabled(dev, name);
+
+	if (!what)
+		return NULL;
+	dev_warn(dev, "%pOF: its %s is disabled, route skipped\n", route_np, what);
+	return dcp_typec_routes_disable_nodes(dev, NULL, route_np);
+}
+
 static int dcp_register_typec_routes_present(void *data)
 {
 	struct dcp_route_probe_context *ctx = data;
@@ -4709,6 +4855,10 @@ static int dcp_register_typec_routes_present(void *data)
 		if (!mux_name)
 			return -ENOMEM;
 
+		/* Skipped even if disabling it failed (logged): it cannot register */
+		if (dcp_typec_route_skip(dev, route_np, name))
+			continue;
+
 		route = &dcp->typec_routes[dcp->nr_typec_routes];
 		route->dcp = dcp;
 		INIT_LIST_HEAD(&route->port_link);
@@ -4717,6 +4867,7 @@ static int dcp_register_typec_routes_present(void *data)
 			return dev_err_probe(dev, PTR_ERR(route->phy),
 					     "%pOF: failed to get DP PHY\n", route_np);
 
+		/* A failure fails the probe, and devres puts the PHY */
 		route->xbar = devm_mux_control_get(dev, name);
 		if (IS_ERR(route->xbar))
 			return dev_err_probe(dev, PTR_ERR(route->xbar),
@@ -4731,6 +4882,15 @@ static int dcp_register_typec_routes_present(void *data)
 		/* A route for USB4 DP tunnels only is never given a DP-alt stream. */
 		route->core.tunnel_only =
 			of_property_read_bool(route_np, "apple,tunnel-only");
+		ret = of_property_read_u32(route_np, "apple,connector-group",
+					   &route->connector_group);
+		if (ret == -EINVAL)
+			route->connector_group = 0;
+		else if (ret)
+			return dev_err_probe(dev, ret, "%pOF: invalid connector group\n", route_np);
+		if (route->connector_group >= DCP_TYPEC_CONNECTOR_GROUPS)
+			return dev_err_probe(dev, -EINVAL, "%pOF: invalid connector group %u\n",
+					     route_np, route->connector_group);
 
 		ret = of_property_read_u32_index(dev->of_node, "apple,typec-dptx-phys",
 						 route_index, &route->dptx_phy);
@@ -4820,31 +4980,9 @@ void dcp_typec_routes_disable_dev(struct device *dev)
 {
 	struct device_node *routes __free(device_node) =
 		of_get_child_by_name(dev->of_node, "typec-routes");
-	struct device_node *route;
-	struct of_changeset *cs;
-	int ret = 0;
 
-	if (!routes)
-		return;
-	cs = kzalloc(sizeof(*cs), GFP_KERNEL);
-	if (!cs)
-		return;
-	of_changeset_init(cs);
-	for_each_available_child_of_node(routes, route) {
-		ret = of_changeset_update_prop_string(cs, route, "status", "disabled");
-		if (ret) {
-			of_node_put(route);
-			break;
-		}
-	}
-	if (!ret)
-		ret = of_changeset_apply(cs);
-	if (ret) {
-		dev_err(dev, "could not disable the Type-C display routes: %d\n", ret);
-		of_changeset_destroy(cs);
-		kfree(cs);
-	}
-	/* Applied, it stays: the live tree refers to it. */
+	if (routes)
+		dcp_typec_routes_disable_nodes(dev, routes, NULL);
 }
 
 int dcp_register_typec_routes(struct apple_dcp *dcp)

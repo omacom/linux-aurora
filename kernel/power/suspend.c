@@ -609,6 +609,9 @@ static int enter_state(suspend_state_t state)
 
 	pm_pr_dbg("Preparing system for sleep (%s)\n", mem_sleep_labels[state]);
 	pm_suspend_clear_flags();
+	/* Ahead of the PM notifiers: "freeze" is no platform sleep whatever "mem" stands for. */
+	if (state == PM_SUSPEND_TO_IDLE)
+		pm_set_suspend_no_platform();
 	error = suspend_prepare(state);
 	if (error)
 		goto Unlock;

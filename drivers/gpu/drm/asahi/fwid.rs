@@ -476,10 +476,14 @@ mod tests {
         else {
             panic!("T6041 must identify its loaded firmware");
         };
-        assert_eq!(builds.len(), 3);
-        // The last two admit the 25G83 images, with the 40- and the 32-core configuration.
+        assert_eq!(builds.len(), 5);
+        // Builds 1..=2 (25G83) and 3..=4 (26B123) admit the 40- and 32-core configurations.
         assert_eq!(builds[1].images.len(), builds[2].images.len());
         for (a, b) in builds[1].images.iter().zip(builds[2].images) {
+            assert_eq!((a.entropy, a.text_sha256), (b.entropy, b.text_sha256));
+        }
+        assert_eq!(builds[3].images.len(), builds[4].images.len());
+        for (a, b) in builds[3].images.iter().zip(builds[4].images) {
             assert_eq!((a.entropy, a.text_sha256), (b.entropy, b.text_sha256));
         }
         for (i, build) in builds[..2].iter().enumerate() {
@@ -489,10 +493,27 @@ mod tests {
                 let found = measured(build.images, image.data_size, entropy, digest);
                 assert!(core::ptr::eq(found.unwrap(), image));
                 assert!(measured(other.images, image.data_size, entropy, digest).is_none());
+                assert!(measured(builds[3].images, image.data_size, entropy, digest).is_none());
                 assert!(measured(build.images, 0x13c000, entropy, digest).is_none());
             }
         }
-        // Only the 25G83 build runs its own configuration: the 25G83 register map, 40 cores.
+        for image in builds[3].images {
+            let digest = image.text_sha256;
+            let found = lookup(builds[3].images, image.text_size, image.data_size, |_| {
+                Some(digest)
+            });
+            assert!(core::ptr::eq(found.unwrap(), image));
+            assert!(
+                lookup(builds[0].images, image.text_size, image.data_size, |_| Some(digest))
+                    .is_none()
+            );
+            assert!(
+                lookup(builds[1].images, image.text_size, image.data_size, |_| Some(digest))
+                    .is_none()
+            );
+            assert!(lookup(builds[3].images, 0x60000, image.data_size, |_| Some(digest)).is_none());
+        }
+        // 25F84 uses CONFIG directly; 25G83 and 26B123 pair 40- and 32-core configurations.
         assert!(builds[0].config.is_none());
         let g83 = builds[1].config.unwrap();
         let map = &crate::hw::t6041::REGISTER_WINDOWS_25G83;
@@ -514,6 +535,11 @@ mod tests {
         assert_eq!(g83_32.core_layout.cores, Some((4, 32)));
         assert!(g83_32.reserved_slots.is_empty());
         assert_eq!(g83_32.windows.len(), map.len());
+        let b123_40 = builds[3].config.unwrap();
+        assert_eq!(b123_40.core_layout.cores, Some((4, 40)));
+        let b123_32 = builds[4].config.unwrap();
+        assert_eq!(b123_32.core_layout.cores, Some((4, 32)));
+        assert_eq!(b123_32.windows.len(), map.len());
     }
 
     #[cfg(CONFIG_DRM_ASAHI_G16)]

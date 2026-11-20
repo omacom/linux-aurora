@@ -105,6 +105,22 @@ properties:
     description:
       Firmware temporal-filter strength selected for the attached sensor.
 
+  apple,dapf-ranges:
+    $ref: /schemas/types.yaml#/definitions/uint64-matrix
+    minItems: 1
+    maxItems: 16
+    items:
+      items:
+        - description: Physical start address, inclusive
+        - description: Physical end address, inclusive
+    description:
+      The address filter windows of the first ISP DART, in record order, as
+      the bootloader finds them in its hardware description. Each pair holds
+      inclusive 64-bit physical bounds, not a base and a length. The filter
+      loses them when the ISP powers down, so they are programmed again
+      before the firmware starts. The firmware reaches these registers
+      through identity mappings of the 16 KiB pages that contain them.
+
   sensor-presets:
     type: object
     description:
@@ -188,6 +204,8 @@ examples:
             memory-region-names = "text", "data", "heap";
             apple,dart-vm-size = /bits/ 64 <0xdec00000>;
             apple,platform-id = <0x17>;
+            apple,dapf-ranges = /bits/ 64 <0x380704000 0x380704063>,
+                                /bits/ 64 <0x382824000 0x382824004>;
 
             sensor-presets {
                 preset0 {

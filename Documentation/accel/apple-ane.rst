@@ -691,9 +691,10 @@ stage that has not run yet, up to the one written, for diagnosis.
 A stage at or below the completed one is refused with ``-EALREADY``. There
 is no module parameter and no H14 boot parameter changes the H16 path. H17 still refuses ownership and registration.
 All build-dependent boot values and ordered masked updates belong to the
-H16 27.0 (26A428) match-data profile. The existing preload validator must
-accept the resident image before that profile can run. Live mutable patchbay
-and firmware tunable values are preserved, with no disk firmware owner.
+H16 27.0 (26A428) match-data build shared by the supported H16 profiles
+(27.0 26A428, 27.2 26B123, 26.6.2 25G83, and 26.5.2 25F84). The preload
+validator must accept the resident image before a profile can run. Live mutable
+patchbay and firmware tunable values are preserved, with no disk firmware owner.
 
 ``preflight`` raises the five real domains through genpd, in DT order, and
 checks every requested/ACTUAL low byte twice before reading the engine.
@@ -702,7 +703,8 @@ three DART fault status/address words, version/protect/lock headers and four
 DAPF records per instance against ``apple,dapf-ranges``. The ANE backend
 writes no engine, DART or DAPF register at this rung. Genpd owns power writes.
 
-``map`` claims an exclusive, singleton IOMMU group and an unmanaged domain
+``map`` verifies that none of the three DARTs has TTBR/TCR protection (bit 0)
+set before claiming an exclusive, singleton IOMMU group and an unmanaged domain
 covering the three SID-0 DART instances. Private surfaces currently require
 a DMA-coherent client; noncoherent clients refuse pool allocation before RUN. No
 unexported architecture cache helper is called from the module. It checks
@@ -822,8 +824,9 @@ The ``ane-h16-boot`` KUnit suite uses a simulated engine, scratch cells,
 mailbox polling and rings. It covers startup including allocation service,
 missing READY, wrong/stale table publication, oversized IPC/heap requests,
 channel bounds, locked DAPF differences, nonzero acks, scratch-3 timeout,
-zero tick, default refusal and quarantine after RUN. It also covers matching
-locked DAPF, heap/shared overlap, native FREE, foreign FREE and control refusal.
+zero tick, default refusal and quarantine after RUN. It also covers DART
+protection refusal, matching locked DAPF, heap/shared overlap, native FREE,
+foreign FREE and control refusal.
 
 H16 program stage
 -----------------

@@ -17,6 +17,7 @@ use kernel::{c_str, prelude::*, sync::Arc};
 use t8140::{kernel_window as high, low};
 
 mod v25g83;
+mod v26b123;
 mod m5;
 mod work_pair;
 pub(crate) mod outer_credit;
@@ -172,6 +173,7 @@ impl WorkPublication<'_> {
 /// Session-long storage and mappings. Aliases are released before their backing objects.
 pub(super) struct InitData {
     m5: bool,
+    v26b123: bool,
     /// The M5 firmware build's layout, where [`Self::m5`].
     graph: &'static super::fw::m5::initdata::Graph,
     outer_credits: Option<Arc<outer_credit::Credits>>,
@@ -186,6 +188,7 @@ pub(super) struct InitData {
     cluster: usize,
     bundle: usize,
     region_c: usize,
+    region_c_shift: usize,
     qos: usize,
     pb: usize,
     page_pool: usize,
@@ -291,6 +294,7 @@ impl InitData {
     pub(super) fn new() -> Self {
         Self {
             m5: false,
+            v26b123: false,
             graph: &super::fw::m5::initdata::M5_GRAPH,
             outer_credits: None,
             _single_publisher: core::marker::PhantomData,
@@ -301,6 +305,7 @@ impl InitData {
             cluster: 0,
             bundle: 0,
             region_c: 0,
+            region_c_shift: 0,
             qos: 0,
             pb: 0,
             page_pool: 0,
@@ -477,7 +482,7 @@ impl InitData {
     /// A scheduler-state release record in the family's opcode.
     pub(super) fn scheduler_release(&self, page_va: u64, id: [u8; 4]) -> super::fw::channels::SchedulerStateRelease {
         let mut record = super::fw::channels::SchedulerStateRelease::new(page_va, id);
-        if self.m5 {
+        if self.m5 || self.v26b123 {
             record.opcode = super::fw::m5::queue::SCHEDULER_RELEASE_OPCODE;
         }
         record
@@ -1171,6 +1176,7 @@ impl InitData {
         variant: &super::fw::Variant,
     ) -> Result {
         self.pm_metrics_va = cfg.pm_metrics()?.va;
+        self.v26b123 = variant.v26b123;
         self.recovery_slot_keys = cfg.recovery_slot_keys;
         let range = uat.geometry().kernel_range();
         let env = BuildEnv {
@@ -1679,7 +1685,12 @@ impl InitData {
         let region = self.object(self.region_c)?;
         let (effort_offset, override_offset) = if self.m5 {
             (super::fw::m5::power::EFFORT, super::fw::m5::power::EFFORT_OVERRIDE)
-        } else { (abi::RegionC::EFFORT, abi::RegionC::UNK_E8) };
+        } else {
+            (
+                abi::RegionC::EFFORT + self.region_c_shift,
+                abi::RegionC::UNK_E8 + self.region_c_shift,
+            )
+        };
         let override_word = region.word(override_offset)?;
         let effort_word = region.word(effort_offset)?;
         let line = region.pointer(effort_offset, 4)?;
@@ -1697,7 +1708,11 @@ impl InitData {
     pub(super) fn effort(&self) -> Result<u32> {
         Ok(self
             .object(self.region_c)?
-            .word(if self.m5 { super::fw::m5::power::EFFORT } else { abi::RegionC::EFFORT })?
+            .word(if self.m5 {
+                super::fw::m5::power::EFFORT
+            } else {
+                abi::RegionC::EFFORT + self.region_c_shift
+            })?
             .load(Ordering::Relaxed))
     }
 
@@ -1876,8 +1891,11 @@ impl InitData {
         let ring = self.object(self.bundle)?.pointer(offset, record.len())?;
         let power = self
             .object(self.region_c)?
-            .pointer(if self.m5 { self.graph.power_assert_tally }
-                else { abi::RegionC::POWER_ASSERT_TALLY }, 4)?;
+            .pointer(if self.m5 {
+                self.graph.power_assert_tally
+            } else {
+                abi::RegionC::POWER_ASSERT_TALLY + self.region_c_shift
+            }, 4)?;
         let producer = self.control_producer()?;
         // SAFETY: The checked pointers remain valid for the lifetime of this non-Sync owner.
         // Firmware only reads records after the producer store and the device mutex serializes

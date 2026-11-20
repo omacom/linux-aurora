@@ -37,6 +37,8 @@ struct apple_dcp_typec_route {
 	struct mux_control *xbar;
 	struct mux_control *dpin[DCP_FABRIC_DPIN_MAX];
 	bool dual_stream;
+	/* apple,connector-group: its connector's order group */
+	u32 connector_group;
 	struct typec_mux_dev *typec_mux;
 	u32 dptx_phy;
 	u32 mux_index;
@@ -76,7 +78,10 @@ bool dcp_has_typec_routes(struct platform_device *pdev);
 unsigned int dcp_typec_nr_ports(void);
 struct device_node *dcp_typec_port_of_node(unsigned int idx);
 bool dcp_typec_port_has_candidate(unsigned int idx, struct platform_device *pdev);
-bool dcp_typec_port_tunnel_only(unsigned int idx, struct platform_device *pdev);
+/* Connectors by apple,connector-group; T6050's tunnel-only pairs after the others in each */
+#define DCP_TYPEC_CONNECTOR_GROUPS 4
+unsigned int dcp_typec_nr_passes(void);
+unsigned int dcp_typec_port_pass(unsigned int idx, struct platform_device *pdev);
 bool dcp_typec_port_unusable(unsigned int idx);
 void dcp_typec_port_set_connector(unsigned int idx, bool secondary,
 				  struct apple_connector *connector,
@@ -127,6 +132,7 @@ int dcp_fabric_sleep_withdraw(struct apple_dcp *dcp, s64 ms[2]);
 void dcp_fabric_sleep_done(struct apple_dcp *dcp);
 void dcp_typec_routes_disable(struct apple_dcp *dcp);
 void dcp_typec_routes_disable_dev(struct device *dev);
+const char *dcp_typec_route_supplier_disabled(struct device *dev, const char *name);
 void dcp_typec_retrain_work(struct work_struct *work);
 void dcp_fabric_init(struct apple_dcp *dcp);
 void dcp_fabric_hdmi_resume(struct apple_dcp *dcp);

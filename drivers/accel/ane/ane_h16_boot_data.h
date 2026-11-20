@@ -503,11 +503,30 @@ static const struct ane_h16_profile ane_t8132_profiles[] __maybe_unused = {
 	},
 };
 
+/* 27.2 (26B123) preload on T6041 (J616c): 26A428 DATA layout and zeroed range. */
+static const struct ane_h16_preload_rule ane_h16_preload_26b123 = {
+	.cells = ane_h16_patchbay_26a428,
+	.cell_count = ARRAY_SIZE(ane_h16_patchbay_26a428),
+	.zero_start = 0x17c80,
+	.zero_end = 0x18320,
+	.digest = {
+		0xd1, 0xbd, 0xb9, 0xd0, 0x4d, 0x6e, 0x35, 0xa7,
+		0x31, 0x71, 0xc2, 0xa8, 0xa9, 0x66, 0x38, 0xfe,
+		0xc2, 0x6c, 0x4c, 0xed, 0x7a, 0x0e, 0xfd, 0xc4,
+		0xb9, 0xde, 0x58, 0x5f, 0x70, 0x92, 0x33, 0x16,
+	},
+};
+
 /* Every supported H16 firmware build, matched against the live preload. */
 static const struct ane_h16_profile ane_h16_profiles[] __maybe_unused = {
 	{
 		.identity = "H16 27.0 26A428",
 		.preload = &ane_h16_preload_26a428,
+		.build = &ane_h16_build_26a428,
+	},
+	{
+		.identity = "H16 27.2 26B123",
+		.preload = &ane_h16_preload_26b123,
 		.build = &ane_h16_build_26a428,
 	},
 	{

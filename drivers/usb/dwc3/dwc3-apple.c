@@ -1727,7 +1727,8 @@ static int dwc3_apple_pm_notify(struct notifier_block *nb, unsigned long action,
 		return notifier_from_errno(-EBUSY);
 	}
 	appledwc->sleep_phase = DWC3_APPLE_SLEEP_PREPARING;
-	appledwc->sleep_deep = !pm_suspend_default_s2idle();
+	/* A "freeze" is a suspend-to-idle with deep as the default too: the host stays. */
+	appledwc->sleep_deep = !pm_suspend_default_s2idle() && !pm_suspend_no_platform();
 	/* Every admitted epoch must reach device prepare, including a retained host. */
 	dev_pm_syscore_device(appledwc->dev, false);
 	reinit_completion(&appledwc->sleep_stop_done);

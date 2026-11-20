@@ -4195,6 +4195,9 @@ static bool apple_cio_sleep_tears_down(struct apple_cio *acio)
 {
 	if (READ_ONCE(s2idle_teardown))
 		return true;
+	/* A "freeze" is a suspend-to-idle with deep as the default too: the port stays up. */
+	if (pm_suspend_no_platform())
+		return false;
 	/* A port whose router sleeps in place keeps its tunnels: its NHI owns the sleep. */
 	return apple_cio_t6050_sleep(acio) && !READ_ONCE(acio->sleep_in_place);
 }
@@ -4369,11 +4372,16 @@ static int apple_cio_sleep_dp_entry(struct apple_cio *acio, bool *paused)
 
 	*paused = false;
 	guard(mutex)(&acio->lock);
-	/* A restart owed from a sleep given up is this sleep's own from here. */
+	/*
+	 * A restart owed from a sleep given up is this sleep's own from here, if it powers
+	 * the port off. A suspend-to-idle doesn't: it is refused until the undo's work has run.
+	 */
+	if (acio->sleep_dp_undo && !apple_cio_sleep_tears_down(acio))
+		return -EBUSY;
 	acio->sleep_dp_undo = false;
 	acio->sleep_dp_released = 0;
 	if (!READ_ONCE(t6050_sleep_dp_all_first) || !READ_ONCE(t6050_sleep_dp_first) ||
-	    !apple_cio_t6050_sleep(acio) ||
+	    !apple_cio_t6050_sleep(acio) || pm_suspend_no_platform() ||
 	    acio->removing || acio->resume_recovery_failed || !acio->current_cable_info)
 		return 0;
 	if (!apple_cio_sleep_tears_down(acio)) {

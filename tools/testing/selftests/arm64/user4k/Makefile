@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-TEST_GEN_PROGS := page-contract proc-args
+TEST_GEN_PROGS := page-contract proc-args gem-userptr
 TEST_GEN_PROGS_EXTENDED := iommufd-init coarse-shmem-init bpf-uptr-init vhost-log-init uprobes-init user-events-init uffd-move-init swap-fixture-init exec-fixture-init mixed-process memory-interfaces advice reclaim-advice proc-pages proc-memory core-fixture-init context-stress-init mlock-fixture-init lazyfree-fixture-init thread-fixture-init splice-fixture-init dio-fixture-init uring-fixture-init gem-fixture-init compat-fixture-init granule-proc-init granule-swap-init aslr-fixture-init cpu-granule-init user16k-smoke-init cpu-granule16-init granule-threeway-init compat-mlock-init mglru-granule-init memcg-pressure-init memcg-accounting-init runtime-app-init fex-contract-init exec-policy-init uffd-wp-init shmem-uffd-swap-init compat-uffd-init shmem-hole-init shmem-thp-init shmem-collapse-init shmem-pin-init shmem-race-init shmem-pressure-init
 TEST_GEN_PROGS_EXTENDED += vfio-fixture-init sysv-shm-init perf-ring-init
 TEST_GEN_PROGS_EXTENDED += aio-ring-init numa-policy-init numa-balancing-init cow-pool
@@ -119,6 +119,8 @@ $(OUTPUT)/coarse-shmem-init: LDFLAGS += -static -Wl,-z,max-page-size=65536
 $(OUTPUT)/iommufd-init: LDFLAGS += -static -Wl,-z,max-page-size=65536
 $(OUTPUT)/iommufd-init: LDLIBS += -pthread
 $(OUTPUT)/iommufd-init: CFLAGS += $(KHDR_INCLUDES)
+
+$(OUTPUT)/gem-userptr: CFLAGS += $(KHDR_INCLUDES)
 
 # Privileged recording-domain fixture; run only in a disposable test VM.
 $(OUTPUT)/vfio-fixture-init: LDFLAGS += -static -Wl,-z,max-page-size=65536

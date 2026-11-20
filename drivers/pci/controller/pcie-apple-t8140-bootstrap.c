@@ -181,11 +181,9 @@ static int apple_piodma_pm_notify(struct notifier_block *nb,
 	switch (action) {
 	case PM_SUSPEND_PREPARE:
 		/*
-		 * The suspend core marks suspend-to-idle only after these
-		 * notifiers have run, so pm_suspend_no_platform() is still
-		 * false here for every suspend. apple_piodma_pm_prepare()
-		 * makes the same check once the target state is known, and
-		 * still vetoes everything but suspend-to-idle.
+		 * Nothing is vetoed here: apple_piodma_pm_prepare() makes
+		 * the check in the device prepare phase, which a suspend
+		 * through /dev/snapshot reaches too.
 		 */
 		return NOTIFY_DONE;
 	case PM_HIBERNATION_PREPARE:

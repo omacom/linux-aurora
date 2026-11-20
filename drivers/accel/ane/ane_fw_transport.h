@@ -145,6 +145,12 @@ struct ane_fw_transport {
 	u8 table[ANE_FW_TABLE_SIZE];
 	size_t table_offset;
 	size_t pool_used;
+	/*
+	 * The arena range a caller places commands into itself
+	 * (ane_fw_transport_reserve()); zero-sized until it is taken.
+	 */
+	size_t placed;
+	size_t placed_size;
 	size_t shared_bytes;
 	u32 shared_count;
 	u64 terminal_messages;
@@ -374,10 +380,17 @@ static inline bool ane_fw_transport_switch_safe(const struct ane_fw_transport *t
 	return t->soc->chip_family == 16 || t->soc->chip_family == 17;
 }
 
-/* Commands are copied into a monotonic pool arena, never external DMA memory. */
+/* ane_fw_transport_publish_at() offset that copies to the end of the arena. */
+#define ANE_FW_ARENA SIZE_MAX
+
+/*
+ * Commands are copied into the pool, never external DMA memory: by default
+ * (ANE_FW_ARENA) to the end of a monotonic arena, else to offset at of the
+ * caller's placed range (ane_fw_transport_reserve()).
+ */
 static inline int
 __ane_fw_transport_publish(struct ane_fw_transport *t, unsigned int ch,
-			   const void *command, size_t size, u64 deadline_ns)
+			   const void *command, size_t size, u64 deadline_ns, size_t at)
 {
 	struct ane_fw_transaction *tx;
 	size_t offset;
@@ -401,11 +414,19 @@ __ane_fw_transport_publish(struct ane_fw_transport *t, unsigned int ch,
 		return ane_fw_transport_fail(t, -EPROTO);
 	if (!(header & 1))
 		return -EBUSY;
-	if (t->pool_used > SIZE_MAX - (ANE_FW_SLOT_SIZE - 1))
-		return -ENOSPC;
-	offset = ALIGN(t->pool_used, ANE_FW_SLOT_SIZE);
-	if (offset > t->pool.size || size > t->pool.size - offset)
-		return -ENOSPC;
+	if (at != ANE_FW_ARENA) {
+		if (!IS_ALIGNED(at, ANE_FW_SLOT_SIZE) || at < t->placed ||
+		    at - t->placed > t->placed_size ||
+		    size > t->placed_size - (at - t->placed))
+			return -EINVAL;
+		offset = at;
+	} else {
+		if (t->pool_used > SIZE_MAX - (ANE_FW_SLOT_SIZE - 1))
+			return -ENOSPC;
+		offset = ALIGN(t->pool_used, ANE_FW_SLOT_SIZE);
+		if (offset > t->pool.size || size > t->pool.size - offset)
+			return -ENOSPC;
+	}
 	memcpy((u8 *)t->pool.cpu + offset, command, size);
 	*tx = (struct ane_fw_transaction) {
 		.dva = t->pool.dva + offset,
@@ -414,7 +435,8 @@ __ane_fw_transport_publish(struct ane_fw_transport *t, unsigned int ch,
 		.id = get_unaligned_le16((const u8 *)command + 4),
 		.active = true,
 	};
-	t->pool_used = offset + size;
+	if (at == ANE_FW_ARENA)
+		t->pool_used = offset + size;
 	if (ane_fw_transport_switch_safe(t))
 		ane_fw_transport_bar_context(t, (u8 *)t->pool.cpu + offset, size);
 	t->ops->store64(t->ctx, p + 8, size);
@@ -428,15 +450,22 @@ __ane_fw_transport_publish(struct ane_fw_transport *t, unsigned int ch,
 
 /* IO and DATA_CHAIN; mode and ownership commands are refused. */
 static inline int
-ane_fw_transport_publish(struct ane_fw_transport *t, unsigned int ch,
-			 const void *command, size_t size, u64 deadline_ns)
+ane_fw_transport_publish_at(struct ane_fw_transport *t, unsigned int ch,
+			    const void *command, size_t size, u64 deadline_ns, size_t at)
 {
 	if (ch != ANE_FW_IO && ch != ANE_FW_DATA_CHAIN)
 		return -EINVAL;
 	if (command && size >= 8 &&
 	    ane_fw_command_denied(get_unaligned_le16((const u8 *)command + 4)))
 		return -EPERM;
-	return __ane_fw_transport_publish(t, ch, command, size, deadline_ns);
+	return __ane_fw_transport_publish(t, ch, command, size, deadline_ns, at);
+}
+
+static inline int
+ane_fw_transport_publish(struct ane_fw_transport *t, unsigned int ch,
+			 const void *command, size_t size, u64 deadline_ns)
+{
+	return ane_fw_transport_publish_at(t, ch, command, size, deadline_ns, ANE_FW_ARENA);
 }
 
 /*
@@ -453,7 +482,7 @@ ane_fw_transport_publish_pmu_base(struct ane_fw_transport *t, u64 base, u64 dead
 	put_unaligned_le16(ANE_FW_CMD_SET_PMU_BASE, command + 4);
 	put_unaligned_le64(base, command + 8);
 	return __ane_fw_transport_publish(t, t->control_ch, command, sizeof(command),
-					  deadline_ns);
+					  deadline_ns, ANE_FW_ARENA);
 }
 
 /*
@@ -469,7 +498,7 @@ ane_fw_transport_publish_mode_stop(struct ane_fw_transport *t, u64 deadline_ns)
 		return -ENODEV;
 	put_unaligned_le16(ANE_FW_CMD_EXCLAVE_MODE_STOP, command + 4);
 	return __ane_fw_transport_publish(t, t->control_ch, command, sizeof(command),
-					  deadline_ns);
+					  deadline_ns, ANE_FW_ARENA);
 }
 
 /* Command arena position, for ane_fw_transport_release(). */
@@ -479,16 +508,43 @@ static inline size_t ane_fw_transport_mark(const struct ane_fw_transport *t)
 }
 
 /*
+ * Take size bytes at the end of the arena, once per firmware boot, for
+ * commands the caller places and reuses itself (ane_fw_transport_publish_at()).
+ * No ane_fw_transport_release() gives the range back; a new firmware boot
+ * (ane_fw_transport_init()) does.
+ */
+static inline int ane_fw_transport_reserve(struct ane_fw_transport *t, size_t size)
+{
+	size_t offset;
+
+	if (t->error)
+		return t->error;
+	if (t->placed_size || !size || !IS_ALIGNED(size, ANE_FW_SLOT_SIZE))
+		return -EINVAL;
+	if (t->pool_used > SIZE_MAX - (ANE_FW_SLOT_SIZE - 1))
+		return -ENOSPC;
+	offset = ALIGN(t->pool_used, ANE_FW_SLOT_SIZE);
+	if (offset > t->pool.size || size > t->pool.size - offset)
+		return -ENOSPC;
+	t->placed = offset;
+	t->placed_size = size;
+	t->pool_used = offset + size;
+	return 0;
+}
+
+/*
  * Give back the arena used by every command published since @mark. The caller
  * guarantees that the firmware is done with all of them, not only that they
  * were acknowledged: an EXECUTE is done once its completion report arrived.
- * Refused while any channel still has a command in flight.
+ * Refused while any channel still has a command in flight, and below the
+ * placed range.
  */
 static inline int ane_fw_transport_release(struct ane_fw_transport *t, size_t mark)
 {
 	unsigned int ch;
 
-	if (t->error || mark > t->pool_used || mark > t->pool.size)
+	if (t->error || mark > t->pool_used || mark > t->pool.size ||
+	    (t->placed_size && mark < t->placed + t->placed_size))
 		return -EINVAL;
 	for (ch = 0; ch < ANE_FW_CHANNELS; ch++)
 		if (t->pending[ch].active)

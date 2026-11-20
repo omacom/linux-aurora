@@ -80,6 +80,13 @@ struct prog_fw {
 	/* ops->hung calls and the error of the last one. */
 	unsigned int hung;
 	int hung_error;
+	/*
+	 * Bytes mapped and not unmapped, ops->unmap calls, the most bytes a
+	 * nonzero window lets be mapped at once (-ENOSPC beyond), and the
+	 * number of the map call that fails with -ENOMEM (0: none).
+	 */
+	u64 live, window;
+	unsigned int unmaps, map_fail_at;
 };
 
 static u64 fw_load(void *ctx, const void *p)
@@ -328,6 +335,12 @@ static int fw_map(void *ctx, size_t size, bool write, struct ane_fw_surface *s)
 {
 	struct prog_fw *f = ctx;
 
+	if (f->window && size > f->window - f->live)
+		return -ENOSPC;
+	if (f->map_fail_at && f->maps + 1 == f->map_fail_at) {
+		f->map_fail_at = 0;
+		return -ENOMEM;
+	}
 	*s = (struct ane_fw_surface) {
 		.cpu = fw_zalloc(f->test, size),
 		.dva = f->next_dva,
@@ -339,7 +352,19 @@ static int fw_map(void *ctx, size_t size, bool write, struct ane_fw_surface *s)
 	f->next_dva += size;
 	f->maps++;
 	f->writable_maps += write;
+	f->live += size;
 	return 0;
+}
+
+static void fw_unmap(void *ctx, const struct ane_fw_surface *s)
+{
+	struct prog_fw *f = ctx;
+
+	KUNIT_EXPECT_FALSE(f->test, f->s.asleep || f->s.parked);
+	KUNIT_EXPECT_GE(f->test, f->live, (u64)s->size);
+	f->live -= s->size;
+	f->unmaps++;
+	kunit_release_action(f->test, fw_kvfree, s->cpu);
 }
 
 static void fw_log(void *ctx, const char *item, u64 a, u64 b)
@@ -398,6 +423,16 @@ static void fw_hung(void *ctx, int error)
 	f->hung++;
 	f->hung_error = error;
 }
+
+/* As fw_session_ops, with a backend that frees what the session gives back. */
+static const struct ane_h16_session_ops fw_session_ops_unmap = {
+	.map = fw_map,
+	.unmap = fw_unmap,
+	.log = fw_log,
+	.busy = fw_busy,
+	.sync = fw_sync,
+	.hung = fw_hung,
+};
 
 /* As fw_session_ops, with a backend that recovers a quarantined session. */
 static const struct ane_h16_session_ops fw_session_ops_hung = {
@@ -2809,7 +2844,530 @@ static void program_hung_recovery_test(struct kunit *test)
 	ane_h16_session_put(&f->s, p);
 }
 
+/* Load, run, close and free one program. */
+static int fw_cycle(struct prog_fw *f)
+{
+	struct ane_h16_program *p = NULL;
+	int ret = fw_load_program(f, &p);
+
+	if (ret)
+		return ret;
+	ret = ane_h16_session_execute(&f->s, p);
+	if (!ret)
+		ret = ane_h16_session_close(&f->s, p);
+	if (!ret)
+		ane_h16_session_put(&f->s, p);
+	return ret;
+}
+
+/* Records the session holds in its placed range. */
+static unsigned int fw_records(struct prog_fw *f)
+{
+	return bitmap_weight(f->s.records, ANE_H16_RECORDS);
+}
+
+/* The LOAD and CREATE bytes of one program's record, as the firmware sees them. */
+static const u8 *fw_record(struct prog_fw *f, const struct ane_h16_program *p)
+{
+	return (const u8 *)f->pool.cpu + f->t.placed + p->record * ANE_H16_RECORD_SIZE;
+}
+
+/*
+ * One client's load/close cycles give back all of their arena: LOAD and
+ * CREATE through their record, the rest at the arena's end. A quarantined
+ * session keeps both.
+ */
+static void program_pool_rewind_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p = NULL;
+	size_t base, kept;
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	base = ane_fw_transport_mark(&f->t);
+	KUNIT_ASSERT_EQ(test, fw_cycle(f), 0);
+	/* The first LOAD of a firmware boot takes the records, once. */
+	KUNIT_EXPECT_EQ(test, f->t.placed, base);
+	KUNIT_EXPECT_EQ(test, f->t.placed_size, (size_t)ANE_H16_RECORDS * ANE_H16_RECORD_SIZE);
+	base = ane_fw_transport_mark(&f->t);
+	KUNIT_EXPECT_EQ(test, base, f->t.placed + f->t.placed_size);
+	for (i = 0; i < 1000; i++) {
+		KUNIT_ASSERT_EQ(test, fw_cycle(f), 0);
+		KUNIT_ASSERT_EQ(test, ane_fw_transport_mark(&f->t), base);
+		KUNIT_ASSERT_EQ(test, fw_records(f), 0U);
+	}
+
+	/* A quarantined session keeps the arena and the record as they are. */
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &p), 0);
+	KUNIT_EXPECT_EQ(test, p->record, 0);
+	kept = ane_fw_transport_mark(&f->t);
+	f->s.quarantined = true;
+	KUNIT_EXPECT_EQ(test, ane_h16_session_close(&f->s, p), -EIO);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_mark(&f->t), kept);
+	KUNIT_EXPECT_EQ(test, fw_records(f), 1U);
+	KUNIT_EXPECT_FALSE(test, list_empty(&f->s.held));
+}
+
+/*
+ * One client keeps a program loaded and runs it while another loads, runs
+ * and closes far more programs than the arena held before records (about
+ * 210): no cycle leaves anything behind, the resident program's LOAD and
+ * CREATE stay untouched, and its EXECUTEs keep working throughout.
+ */
+static void program_pool_resident_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *a = NULL, *b;
+	u8 *record = kunit_kzalloc(test, ANE_H16_RECORD_SIZE, GFP_KERNEL);
+	size_t base;
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, record);
+	f->strict = true;
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &a), 0);
+	KUNIT_ASSERT_EQ(test, ane_h16_session_execute(&f->s, a), 0);
+	memcpy(record, fw_record(f, a), ANE_H16_RECORD_SIZE);
+	base = ane_fw_transport_mark(&f->t);
+	for (i = 0; i < 1000; i++) {
+		b = NULL;
+		KUNIT_ASSERT_EQ(test, fw_load_program(f, &b), 0);
+		/* The lowest free record: the resident program holds record 0. */
+		KUNIT_ASSERT_EQ(test, b->record, 1);
+		KUNIT_ASSERT_EQ(test, ane_h16_session_execute(&f->s, b), 0);
+		KUNIT_ASSERT_EQ(test, ane_h16_session_execute(&f->s, a), 0);
+		KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, b), 0);
+		ane_h16_session_put(&f->s, b);
+		KUNIT_ASSERT_EQ(test, ane_fw_transport_mark(&f->t), base);
+		KUNIT_ASSERT_EQ(test, fw_records(f), 1U);
+	}
+	KUNIT_EXPECT_EQ(test, memcmp(fw_record(f, a), record, ANE_H16_RECORD_SIZE), 0);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+	KUNIT_ASSERT_EQ(test, ane_h16_session_execute(&f->s, a), 0);
+	KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, a), 0);
+	ane_h16_session_put(&f->s, a);
+	KUNIT_EXPECT_EQ(test, fw_records(f), 0U);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_mark(&f->t), base);
+}
+
+/*
+ * Programs closed out of order free their records for the next LOADs, lowest
+ * first; the programs still loaded keep theirs and keep running.
+ */
+static void program_pool_records_reuse_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p[24] = {};
+	size_t base = 0;
+	unsigned int i, round;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->strict = true;
+	for (round = 0; round < 50; round++) {
+		for (i = 0; i < ARRAY_SIZE(p); i++) {
+			if (p[i])
+				continue;
+			KUNIT_ASSERT_EQ(test, fw_load_program(f, &p[i]), 0);
+			if (!base)
+				base = ane_fw_transport_mark(&f->t);
+		}
+		for (i = 0; i < ARRAY_SIZE(p); i++)
+			KUNIT_ASSERT_EQ(test, p[i]->record, (int)i);
+		KUNIT_ASSERT_EQ(test, fw_records(f), (unsigned int)ARRAY_SIZE(p));
+		/* Close a different pattern each round: every 2nd, 3rd, ... program. */
+		for (i = round % 5; i < ARRAY_SIZE(p); i += 2 + round % 4) {
+			KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, p[i]), 0);
+			ane_h16_session_put(&f->s, p[i]);
+			p[i] = NULL;
+		}
+		for (i = 0; i < ARRAY_SIZE(p); i++)
+			if (p[i])
+				KUNIT_ASSERT_EQ(test, ane_h16_session_execute(&f->s, p[i]), 0);
+		KUNIT_ASSERT_EQ(test, ane_fw_transport_mark(&f->t), base);
+	}
+	for (i = 0; i < ARRAY_SIZE(p); i++) {
+		if (!p[i])
+			continue;
+		KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, p[i]), 0);
+		ane_h16_session_put(&f->s, p[i]);
+	}
+	KUNIT_EXPECT_EQ(test, fw_records(f), 0U);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_mark(&f->t), base);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+}
+
+/*
+ * With every record in use a LOAD is a clean -ENOSPC: nothing is sent or
+ * mapped and the session stays usable. The records taken by other programs
+ * are faked: the fake firmware holds 32 programs at most.
+ */
+static void program_pool_records_full_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p = NULL, *q = NULL;
+	unsigned int sent, maps;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_EQ(test, fw_cycle(f), 0);
+	bitmap_set(f->s.records, 0, ANE_H16_RECORDS - 1);
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &p), 0);
+	KUNIT_EXPECT_EQ(test, p->record, ANE_H16_RECORDS - 1);
+	KUNIT_EXPECT_TRUE(test, bitmap_full(f->s.records, ANE_H16_RECORDS));
+	sent = f->count;
+	maps = f->maps;
+	KUNIT_EXPECT_EQ(test, fw_load_program(f, &q), -ENOSPC);
+	KUNIT_EXPECT_NULL(test, q);
+	KUNIT_EXPECT_EQ(test, f->count, sent);
+	KUNIT_EXPECT_EQ(test, f->maps, maps);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+	/* EXECUTE does not use records: it still runs. */
+	KUNIT_EXPECT_EQ(test, ane_h16_session_execute(&f->s, p), 0);
+
+	/* A freed record in the middle serves the next LOAD, in place. */
+	__clear_bit(40, f->s.records);
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &q), 0);
+	KUNIT_EXPECT_EQ(test, q->record, 40);
+	/* The firmware read this LOAD from the record. */
+	KUNIT_EXPECT_EQ(test, memcmp(f->load + 8, fw_record(f, q) + 8,
+				     ANE_H16_LOAD_ID_OFFSET - 8), 0);
+	KUNIT_EXPECT_EQ(test, ane_h16_session_execute(&f->s, q), 0);
+	KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, q), 0);
+	ane_h16_session_put(&f->s, q);
+	KUNIT_EXPECT_FALSE(test, test_bit(40, f->s.records));
+	KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, p), 0);
+	ane_h16_session_put(&f->s, p);
+	KUNIT_EXPECT_EQ(test, fw_records(f), (unsigned int)ANE_H16_RECORDS - 2);
+}
+
+/* No room for the records at the first LOAD: a clean -ENOSPC, nothing sent. */
+static void program_pool_records_no_room_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p = NULL;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->t.pool_used = f->t.pool.size - ANE_H16_RECORDS * ANE_H16_RECORD_SIZE + 1;
+	KUNIT_EXPECT_EQ(test, fw_load_program(f, &p), -ENOSPC);
+	KUNIT_EXPECT_EQ(test, f->count, 0U);
+	KUNIT_EXPECT_EQ(test, f->t.placed_size, (size_t)0);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+	/* Once the arena's end came back, the records fit. */
+	f->t.pool_used = SZ_16K;
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &p), 0);
+	KUNIT_EXPECT_EQ(test, f->t.placed, (size_t)SZ_16K);
+	KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, p), 0);
+	ane_h16_session_put(&f->s, p);
+}
+
+/* Placed commands stay inside the placed range; releases stay above it. */
+static void program_pool_placed_bounds_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	u8 command[ANE_H16_UNLOAD_SIZE] = {};
+	size_t end;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	put_unaligned_le16(ANE_H16_UNLOAD_PROGRAM, command + 4);
+	/* Nothing is placed before the range exists. */
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_publish_at(&f->t, ANE_FW_IO, command,
+							  sizeof(command), U64_MAX, SZ_16K),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_reserve(&f->t, 100), -EINVAL);
+	KUNIT_ASSERT_EQ(test, ane_fw_transport_reserve(&f->t, SZ_4K), 0);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_reserve(&f->t, SZ_4K), -EINVAL);
+	end = f->t.placed + f->t.placed_size;
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_mark(&f->t), end);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_publish_at(&f->t, ANE_FW_IO, command,
+							  sizeof(command), U64_MAX,
+							  f->t.placed + 8),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_publish_at(&f->t, ANE_FW_IO, command,
+							  sizeof(command), U64_MAX,
+							  f->t.placed - ANE_FW_SLOT_SIZE),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_publish_at(&f->t, ANE_FW_IO, command,
+							  sizeof(command), U64_MAX, end),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_publish_at(&f->t, ANE_FW_IO, command,
+							  ANE_FW_SLOT_SIZE + 8, U64_MAX,
+							  end - ANE_FW_SLOT_SIZE),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, f->count, 0U);
+	/* The last slot of the range is fine, and leaves the arena's end alone. */
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_publish_at(&f->t, ANE_FW_IO, command,
+							  sizeof(command), U64_MAX,
+							  end - ANE_FW_SLOT_SIZE),
+			0);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_wait(&f->t, ANE_FW_IO), 0);
+	KUNIT_EXPECT_EQ(test, f->count, 1U);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_mark(&f->t), end);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_release(&f->t, end - 1), -EINVAL);
+	KUNIT_EXPECT_EQ(test, ane_fw_transport_release(&f->t, end), 0);
+}
+
+/*
+ * After a cold boot the replayed programs take records again from the
+ * start; a program closed while asleep, lost with the old firmware, does
+ * not free the record a replayed program now holds.
+ */
+static void program_pool_records_restart_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *a = NULL, *b = NULL;
+	struct mutex *lock = kunit_kzalloc(test, sizeof(*lock), GFP_KERNEL);
+	unsigned int replayed;
+	u64 first;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, lock);
+	mutex_init(lock);
+	f->s.lock = lock;
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &a), 0);
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &b), 0);
+	KUNIT_EXPECT_EQ(test, a->record, 0);
+	KUNIT_EXPECT_EQ(test, b->record, 1);
+	ane_h16_session_sleep(&f->s, true);
+	KUNIT_EXPECT_EQ(test, ane_h16_session_close(&f->s, a), -EINPROGRESS);
+	fw_cold_boot(f);
+	ane_h16_session_restart(&f->s);
+	KUNIT_EXPECT_EQ(test, fw_records(f), 0U);
+	KUNIT_ASSERT_EQ(test, ane_h16_session_replay(&f->s, &replayed, &first), 0);
+	KUNIT_EXPECT_EQ(test, replayed, 1U);
+	KUNIT_EXPECT_EQ(test, b->record, 0);
+	/* The deferred close of the lost program runs here. */
+	ane_h16_session_sleep(&f->s, false);
+	KUNIT_EXPECT_TRUE(test, test_bit(0, f->s.records));
+	KUNIT_EXPECT_EQ(test, fw_records(f), 1U);
+	mutex_lock(lock);
+	KUNIT_EXPECT_EQ(test, ane_h16_session_execute(&f->s, b), 0);
+	KUNIT_EXPECT_EQ(test, ane_h16_session_close(&f->s, b), 0);
+	mutex_unlock(lock);
+	ane_h16_session_put(&f->s, b);
+	KUNIT_EXPECT_EQ(test, fw_records(f), 0U);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+}
+
+/*
+ * Memory a program of another shape gave back: no later program of these
+ * tests maps a surface of this size, so only freeing it makes room.
+ */
+static bool fw_foreign_spare(struct prog_fw *f, size_t size)
+{
+	struct ane_fw_surface surface;
+
+	if (f->s.spare_count == ANE_H16_SPARES || fw_map(f, size, false, &surface))
+		return false;
+	f->s.spares[f->s.spare_count++] = (struct ane_h16_spare) { .surface = surface };
+	f->s.spare_bytes += size;
+	return true;
+}
+
+/* Larger than any region or section of the fixture programs. */
+#define FW_FOREIGN(i) (SZ_16K * (9 + (i) % 3))
+#define FW_WINDOW SZ_16M
+
+/*
+ * Programs of ever new shapes leave spares that no later program can use.
+ * Without ops->unmap a spare table full of them makes every close leave its
+ * memory mapped and unused, the DVA window fills, and every LOAD fails with
+ * -ENOSPC from then on, until reset. With it, the session frees the oldest
+ * spares beyond its limits: thousands of programs load into a window that
+ * holds a few dozen, with a new shape left behind before each.
+ */
+static void program_unmap_window_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test), *g = fw_create(test);
+	unsigned int i;
+	int ret = 0;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, g);
+	f->window = FW_WINDOW;
+	for (i = 0; i < ANE_H16_SPARES; i++)
+		KUNIT_ASSERT_TRUE(test, fw_foreign_spare(f, FW_FOREIGN(i)));
+	for (i = 0; i < 2000 && !ret; i++)
+		ret = fw_cycle(f);
+	KUNIT_EXPECT_EQ(test, ret, -ENOSPC);
+	KUNIT_EXPECT_LT(test, i, 2000U);
+	KUNIT_EXPECT_EQ(test, f->unmaps, 0U);
+
+	g->s.ops = &fw_session_ops_unmap;
+	g->window = FW_WINDOW;
+	for (i = 0; i < ANE_H16_SPARES; i++)
+		KUNIT_ASSERT_TRUE(test, fw_foreign_spare(g, FW_FOREIGN(i)));
+	for (i = 0; i < 2000; i++) {
+		fw_foreign_spare(g, FW_FOREIGN(i));
+		KUNIT_ASSERT_EQ(test, fw_cycle(g), 0);
+		KUNIT_ASSERT_LE(test, g->s.spare_count, ANE_H16_SPARES_KEEP);
+	}
+	KUNIT_EXPECT_GE(test, g->unmaps, 2000U);
+	KUNIT_EXPECT_FALSE(test, g->s.quarantined);
+	KUNIT_EXPECT_PTR_EQ(test, g->s.program, NULL);
+	/* What the spares hold is all that stays mapped. */
+	KUNIT_EXPECT_EQ(test, g->live, (u64)g->s.spare_bytes);
+}
+
+/* A mapping that finds no room frees every spare and tries again. */
+static void program_unmap_pressure_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->s.ops = &fw_session_ops_unmap;
+	f->window = SZ_2M;
+	for (i = 0; fw_foreign_spare(f, FW_FOREIGN(i)); i++)
+		;
+	/* Not even the smallest mapping fits beside them. */
+	f->window = f->live;
+	KUNIT_ASSERT_GT(test, i, 0U);
+	KUNIT_ASSERT_LT(test, i, ANE_H16_SPARES_KEEP);
+	KUNIT_ASSERT_EQ(test, fw_cycle(f), 0);
+	KUNIT_EXPECT_EQ(test, f->unmaps, i);
+	KUNIT_EXPECT_EQ(test, f->live, (u64)f->s.spare_bytes);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+}
+
+static u8 fw_dummy[SZ_16K];
+
+/* The spares stay within their byte limit too, freeing the oldest first. */
+static void program_unmap_bytes_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	const size_t half = ANE_H16_SPARE_BYTES / 2;
+	u64 newest = 0;
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->s.ops = &fw_session_ops_unmap;
+	/* Large spares with no memory behind them; never taken, only freed. */
+	for (i = 0; i < 3; i++) {
+		newest = f->next_dva;
+		f->s.spares[f->s.spare_count++] = (struct ane_h16_spare) {
+			.surface = { .cpu = fw_dummy, .dva = newest, .size = half },
+		};
+		f->s.spare_bytes += half;
+		f->next_dva += half;
+		f->live += half;
+	}
+	KUNIT_ASSERT_EQ(test, fw_cycle(f), 0);
+	KUNIT_EXPECT_LE(test, f->s.spare_bytes, (size_t)ANE_H16_SPARE_BYTES);
+	KUNIT_EXPECT_EQ(test, f->live, (u64)f->s.spare_bytes);
+	KUNIT_EXPECT_EQ(test, f->unmaps, 2U);
+	for (i = 0; i < f->s.spare_count; i++)
+		if (f->s.spares[i].surface.size == half)
+			KUNIT_EXPECT_EQ(test, f->s.spares[i].surface.dva, newest);
+}
+
+/*
+ * Nothing is freed while the engine is parked: the DART invalidation of an
+ * unmap could not reach it. The spares keep the memory until the next LOAD,
+ * which runs with the engine up.
+ */
+static void program_unmap_parked_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p = NULL;
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->s.ops = &fw_session_ops_unmap;
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &p), 0);
+	for (i = 0; i < ANE_H16_SPARES_KEEP + 8; i++)
+		KUNIT_ASSERT_TRUE(test, fw_foreign_spare(f, SZ_16K * 3));
+	f->s.parked = true;
+	KUNIT_ASSERT_EQ(test, ane_h16_session_close(&f->s, p), 0);
+	ane_h16_session_put(&f->s, p);
+	KUNIT_EXPECT_EQ(test, f->unmaps, 0U);
+	KUNIT_EXPECT_GT(test, f->s.spare_count, ANE_H16_SPARES_KEEP);
+	f->s.parked = false;
+	KUNIT_ASSERT_EQ(test, fw_cycle(f), 0);
+	KUNIT_EXPECT_GT(test, f->unmaps, 0U);
+	KUNIT_EXPECT_LE(test, f->s.spare_count, ANE_H16_SPARES_KEEP);
+}
+
+/*
+ * A LOAD that fails before the firmware saw the program (here, no memory
+ * for its third mapping) gives back what it mapped and frees the program.
+ */
+static void program_unmap_failed_map_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p = NULL;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	f->s.ops = &fw_session_ops_unmap;
+	f->map_fail_at = 3;
+	KUNIT_EXPECT_EQ(test, fw_load_program(f, &p), -ENOMEM);
+	KUNIT_EXPECT_PTR_EQ(test, p, NULL);
+	KUNIT_EXPECT_PTR_EQ(test, f->s.program, NULL);
+	KUNIT_EXPECT_EQ(test, f->count, 0U);
+	KUNIT_EXPECT_FALSE(test, f->s.quarantined);
+	KUNIT_EXPECT_EQ(test, f->s.spare_count, 2U);
+	KUNIT_EXPECT_EQ(test, f->live, (u64)f->s.spare_bytes);
+	/* The next LOAD takes them. */
+	KUNIT_ASSERT_EQ(test, fw_load_program(f, &p), 0);
+	KUNIT_EXPECT_EQ(test, f->s.spare_count, 0U);
+}
+
+/*
+ * A LOAD the firmware refused quarantines the session; the program is held
+ * with those closed while quarantined, and the verified power cycle of the
+ * recovery gives its memory back.
+ */
+static void program_unmap_refused_load_test(struct kunit *test)
+{
+	struct prog_fw *f = fw_create(test);
+	struct ane_h16_program *p = NULL;
+	struct mutex *lock = kunit_kzalloc(test, sizeof(*lock), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	KUNIT_ASSERT_NOT_NULL(test, lock);
+	mutex_init(lock);
+	f->s.ops = &fw_session_ops_unmap;
+	f->mode = FW_LOAD_NAK;
+	KUNIT_EXPECT_NE(test, fw_load_program(f, &p), 0);
+	KUNIT_EXPECT_PTR_EQ(test, p, NULL);
+	KUNIT_EXPECT_TRUE(test, f->s.quarantined);
+	KUNIT_EXPECT_EQ(test, f->hung, 1U);
+	KUNIT_EXPECT_FALSE(test, list_empty(&f->s.held));
+	KUNIT_EXPECT_EQ(test, f->s.spare_count, 0U);
+
+	f->s.lock = lock;
+	ane_h16_session_sleep(&f->s, true);
+	fw_cold_boot(f);
+	/* The backend's cold boot starts a new transport. */
+	memset(f->head, 0, sizeof(f->head));
+	KUNIT_ASSERT_EQ(test, ane_fw_transport_init(&f->t, &f->soc, &fw_ops, f, f->ipc, f->pool,
+						    SZ_16K, f->ipc.dva, ANE_FW_TABLE_SIZE), 0);
+	KUNIT_ASSERT_EQ(test, ane_fw_transport_arm(&f->t), 0);
+	f->mode = FW_OK;
+	ane_h16_session_restart(&f->s);
+	ane_h16_session_recovered(&f->s);
+	ane_h16_session_sleep(&f->s, false);
+	KUNIT_EXPECT_TRUE(test, list_empty(&f->s.held));
+	KUNIT_EXPECT_PTR_EQ(test, f->s.program, NULL);
+	KUNIT_EXPECT_GT(test, f->s.spare_count, 0U);
+	KUNIT_EXPECT_EQ(test, f->live, (u64)f->s.spare_bytes);
+	f->s.lock = NULL;
+	KUNIT_EXPECT_EQ(test, fw_cycle(f), 0);
+}
+
 static struct kunit_case program_cases[] = {
+	KUNIT_CASE_SLOW(program_pool_rewind_test),
+	KUNIT_CASE_SLOW(program_pool_resident_test),
+	KUNIT_CASE_SLOW(program_pool_records_reuse_test),
+	KUNIT_CASE(program_pool_records_full_test),
+	KUNIT_CASE(program_pool_records_no_room_test),
+	KUNIT_CASE(program_pool_placed_bounds_test),
+	KUNIT_CASE(program_pool_records_restart_test),
+	KUNIT_CASE_SLOW(program_unmap_window_test),
+	KUNIT_CASE(program_unmap_pressure_test),
+	KUNIT_CASE(program_unmap_bytes_test),
+	KUNIT_CASE(program_unmap_parked_test),
+	KUNIT_CASE(program_unmap_failed_map_test),
+	KUNIT_CASE(program_unmap_refused_load_test),
 	KUNIT_CASE(program_hung_recovery_test),
 	KUNIT_CASE(program_pipeline_out_of_order_test),
 	KUNIT_CASE(program_pipeline_same_program_test),

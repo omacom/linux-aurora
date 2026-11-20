@@ -56,6 +56,7 @@ struct centauri_t6050_rewake {
     unsigned slot, generation, work_generation;
     bool active, rerun;
     int error, node;
+    void *arena;
     struct kref ref;
     struct work_struct work;
 };

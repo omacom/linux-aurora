@@ -459,9 +459,13 @@ pub(crate) struct UserPages {
     mm: ARef<Mm>,
     /// Pages counted in `pinned_vm`: all of the range, including any not pinned yet.
     counted: i64,
+    /// The fragment pins of a process with a smaller page size, which hold `pages` (null when
+    /// `pages` are ordinary pins).
+    fragments: *mut core::ffi::c_void,
 }
 
-// SAFETY: The pinned pages may be released from any thread; the mm reference is thread-safe.
+// SAFETY: The pinned pages and fragment records may be released from any thread; the mm
+// reference is thread-safe.
 unsafe impl Send for UserPages {}
 // SAFETY: Shared access only reads the array.
 unsafe impl Sync for UserPages {}
@@ -475,7 +479,9 @@ impl UserPages {
     ///
     /// All of the range is pinned, long-term, or none of it. Fails with `EFAULT` when a page cannot
     /// be pinned: unmapped, a device or PFN mapping, or a writable pin of a mapping that is not
-    /// writable or whose filesystem tracks writes (`FOLL_LONGTERM` refuses those). Fails with
+    /// writable or whose filesystem tracks writes (`FOLL_LONGTERM` refuses those). In a process
+    /// whose page size is smaller than the native one, a native page is accepted only where the
+    /// process maps all of it, in order at consecutive addresses (`EFAULT` otherwise). Fails with
     /// `ENOMEM` when the pages would take the process past RLIMIT_MEMLOCK without CAP_IPC_LOCK,
     /// counting every page pinned this way or by other long-term pinners.
     ///
@@ -510,11 +516,32 @@ impl UserPages {
             writable,
             mm,
             counted: added,
+            fragments: core::ptr::null_mut(),
         };
         this.pages.reserve(count, GFP_KERNEL)?;
         let mut flags = kernel::bindings::FOLL_LONGTERM;
         if writable {
             flags |= kernel::bindings::FOLL_WRITE;
+        }
+        // SAFETY: No preconditions; it reads the current mm.
+        if unsafe { asahi_user_mm_is_subpage() } {
+            // SAFETY: The array has room for `count` entries. On success the call stored `count`
+            // pages, which the records it returned in `fragments` hold.
+            let ret = unsafe {
+                asahi_pin_user_fragments(
+                    addr as _,
+                    count as _,
+                    flags,
+                    this.pages.as_mut_ptr().cast(),
+                    &mut this.fragments,
+                )
+            };
+            if ret < 0 {
+                return Err(Error::from_errno(ret as i32));
+            }
+            // SAFETY: See above.
+            unsafe { this.pages.inc_len(count) };
+            return Ok(this);
         }
         while this.pages.len() < count {
             let done = this.pages.len();
@@ -556,7 +583,11 @@ impl UserPages {
 
 impl Drop for UserPages {
     fn drop(&mut self) {
-        if !self.pages.is_empty() {
+        if !self.fragments.is_null() {
+            // SAFETY: The records hold every page of the array and are released only here.
+            // Pages the device may have written are marked dirty.
+            unsafe { asahi_unpin_user_fragments(self.fragments, self.writable) };
+        } else if !self.pages.is_empty() {
             // SAFETY: The array holds pages pinned by `pin_user_pages_fast()` and not yet
             // unpinned. Pages the device may have written are marked dirty.
             unsafe {
@@ -983,6 +1014,19 @@ pub(crate) fn prepare_new_object_g15(gem: &Object) -> Result {
     }
     crate::pgtable::poc_barrier();
     Ok(())
+}
+
+// user_pages.c: long-term pins in a process whose page size is smaller than the native one.
+extern "C" {
+    fn asahi_user_mm_is_subpage() -> bool;
+    fn asahi_pin_user_fragments(
+        start: core::ffi::c_ulong,
+        nr_pages: core::ffi::c_ulong,
+        gup_flags: core::ffi::c_uint,
+        pages: *mut *mut core::ffi::c_void,
+        out: *mut *mut core::ffi::c_void,
+    ) -> core::ffi::c_long;
+    fn asahi_unpin_user_fragments(frags: *mut core::ffi::c_void, dirty: bool);
 }
 
 #[cfg(CONFIG_DRM_ASAHI_G15)]

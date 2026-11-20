@@ -1753,30 +1753,33 @@ mod ta_mode_tests {
         }
     }
 
-    /// The variants of the builds T6041 admits: 25F84, then 25G83, which the 40- and the
-    /// 32-core configurations run with the same rules.
-    fn t6041_variants() -> [&'static Variant; 2] {
+    /// The variants of the builds T6041 admits: 25F84, then 25G83 and 26B123, each of which the
+    /// 40- and the 32-core configurations run with the same rules.
+    fn t6041_variants() -> [&'static Variant; 3] {
         let Firmware::Identified(builds) = crate::hw::t6041::CONFIG.firmware else {
             panic!("T6041 must identify its loaded firmware");
         };
-        assert_eq!(builds.len(), 3);
-        let (g83, g83_32) = (builds[1].variant, builds[2].variant);
-        assert_eq!(g83.ta_mode_1, g83_32.ta_mode_1);
-        assert_eq!(g83.compute, g83_32.compute);
-        assert_eq!(g83.programs, g83_32.programs);
-        [builds[0].variant, g83]
+        assert_eq!(builds.len(), 5);
+        for (full, cut) in [(1, 2), (3, 4)] {
+            let (full, cut) = (builds[full].variant, builds[cut].variant);
+            assert_eq!(full.ta_mode_1, cut.ta_mode_1);
+            assert_eq!(full.compute, cut.compute);
+            assert_eq!(full.programs, cut.programs);
+        }
+        [builds[0].variant, builds[1].variant, builds[3].variant]
     }
 
     /// The TA mode of every admitted T6041 build.
     fn t6041_ta_mode_1() -> bool {
-        let [f84, g83] = t6041_variants();
+        let [f84, g83, b123] = t6041_variants();
         assert_eq!(f84.ta_mode_1, g83.ta_mode_1);
+        assert_eq!(f84.ta_mode_1, b123.ta_mode_1);
         f84.ta_mode_1
     }
 
     #[test]
     fn policy_is_local_to_the_admitted_t6041_builds() {
-        let [f84, g83] = t6041_variants();
+        let [f84, g83, b123] = t6041_variants();
         let pro = selected(&crate::hw::t6040::CONFIG.firmware);
         assert_eq!(f84.compute, crate::g17::fw::compute::ComputeProgram::V25F84);
         assert!(f84.split_firmware_area);
@@ -1786,7 +1789,10 @@ mod ta_mode_tests {
         assert_eq!(g83.opening_record, pro.opening_record);
         assert_eq!(g83.qid_floor, pro.qid_floor);
         assert_eq!(g83.registration, pro.registration);
-        for max in [f84, g83] {
+        // 26B123 runs 25F84's compute program with one firmware area.
+        assert_eq!(b123.compute, f84.compute);
+        assert!(!b123.split_firmware_area);
+        for max in [f84, g83, b123] {
             assert_eq!(max.programs, RegisterPrograms::V25G83);
             assert!(max.ta_mode_1);
         }

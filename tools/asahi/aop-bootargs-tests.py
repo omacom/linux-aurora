@@ -73,7 +73,34 @@ fn main(){
   let got=u32::from_le_bytes(d.bytes.borrow()[40..44].try_into().unwrap());
   let wanted=want.unwrap_or_else(||cfg.ncal.unwrap() as u32);assert_eq!(got,wanted,"{} nCal written",name);
  }
- println!("PASS aligned/unaligned byte and word access, unchanged writes, malformed tables, bounds, failed readback, None keeps the firmware value, per-SoC nCal");
+ // ED0p: writes 8-byte IOVA when an external data region is present, preserves unused ED0p when None,
+ // and rejects missing, duplicate, or non-8-byte ED0p entries without writing MMIO.
+ let ed0p=from_fourcc(b"ED0p");
+ let ec0p=from_fourcc(b"EC0p");
+ let ed0p_iova=0x1000_0020_000u64;
+ let mut t27=[0u8;32];
+ t27[0..4].copy_from_slice(&ec0p.to_le_bytes());t27[4..8].copy_from_slice(&8u32.to_le_bytes());
+ t27[16..20].copy_from_slice(&ed0p.to_le_bytes());t27[20..24].copy_from_slice(&8u32.to_le_bytes());
+ t27[24..32].copy_from_slice(&0xdead_beef_cafe_babeu64.to_le_bytes());
+ let d=fixture(32,&t27);
+ assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,Some(ed0p_iova))]),Ok(()));
+ assert_eq!(u64::from_le_bytes(d.bytes.borrow()[32+24..32+32].try_into().unwrap()),ed0p_iova,"ED0p not written");
+ let d=fixture(32,&t27);
+ assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,None)]),Ok(()));
+ assert_eq!(u64::from_le_bytes(d.bytes.borrow()[32+24..32+32].try_into().unwrap()),0xdead_beef_cafe_babeu64,"unused ED0p overwritten");
+ let d=fixture(32,&t27[..16]);
+ assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,Some(ed0p_iova))]),Err(EINVAL),"missing ED0p accepted");
+ assert!(d.writes.borrow().is_empty());
+ let mut dup=[0u8;32];
+ dup[0..16].copy_from_slice(&t27[16..32]);dup[16..32].copy_from_slice(&t27[16..32]);
+ let d=fixture(32,&dup);
+ assert_eq!(patch_with(&d,&[(ed0p,Some(ed0p_iova))]),Err(EINVAL),"duplicate ED0p accepted");
+ assert!(d.writes.borrow().is_empty());
+ let mut short=t27;short[20..24].copy_from_slice(&4u32.to_le_bytes());
+ let d=fixture(32,&short[..28]);
+ assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,Some(ed0p_iova))]),Err(EINVAL),"4-byte ED0p accepted");
+ assert!(d.writes.borrow().is_empty());
+ println!("PASS aligned/unaligned byte and word access, unchanged writes, malformed tables, bounds, failed readback, None keeps the firmware value, per-SoC nCal, ED0p external data");
 }
 '''
 
@@ -148,6 +175,11 @@ def main():
         result = compile_run(rustc, p, binary, bad)
         assert result.returncode != 0 and 'None overwrote the firmware value' in result.stderr, result.stderr
         print('PASS negative control: None written as 0')
+        bad = code.replace('if need_ed0p && !seen_ed0p {', 'if need_ed0p && false {')
+        assert bad != code
+        result = compile_run(rustc, p, binary, bad)
+        assert result.returncode != 0 and 'missing ED0p accepted' in result.stderr, result.stderr
+        print('PASS negative control: missing ED0p ignored')
         for soc, val in (('T8112', 'Some(0)'), ('T6040', 'Some(0)'), ('T6000', 'Some(1)')):
             start = code.index('const HW_CFG_%s: AopHwConfig' % soc)
             at = code.index('    ncal: ', start)

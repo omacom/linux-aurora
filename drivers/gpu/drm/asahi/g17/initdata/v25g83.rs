@@ -44,6 +44,18 @@ impl InitData {
         let objects = self.build_25g83_objects(env, variant.split_firmware_area)?;
         self.views = Some(objects.views);
         self.initialize_25g83(env, cfg, active_cores, &tables, &bundle, &objects, variant)?;
+        if variant.v26b123 {
+            self.upgrade_26b123(
+                env,
+                cfg,
+                active_cores,
+                &bundle,
+                objects.aon,
+                objects.power_state,
+                objects.firmware_area,
+                objects.views,
+            )?;
+        }
         if cfg.uat_quirks.clean_tables {
             // Write back every host-built byte before the firmware may read it.
             for object in self.objects.iter_mut() {

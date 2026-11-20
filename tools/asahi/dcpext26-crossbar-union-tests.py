@@ -57,7 +57,7 @@ struct apple_dcp {
     struct device *dev;
     struct apple_dcp_typec_route *active_typec_route;
     struct mux_control *fixed_xbar, *direct_xbar_up;
-    bool fixed_route_selected;
+    bool fixed_route_selected, desktop_external;
 };
 static const char *machine;
 static unsigned links, v27, locks;
@@ -120,10 +120,13 @@ int main(void) {
         d.fixed_route_selected = false; d.direct_xbar_up = NULL;
         reset(); assert(dcp_direct_crossbar_link(&d, true) == 0 && links == 0);
 
-        /* The V27 PHY helper precedes every family admission/lock. */
+        /* The V27 PHY helper precedes every family admission/lock except T6041 dcpext. */
         d.fw_compat = DCP_FIRMWARE_V_27_0;
         reset(); assert(dcp_direct_crossbar_link(&d, true) == 37);
         assert(v27 == 1 && links == 0 && locks == 0);
+        d.desktop_external = true; d.active_typec_route = &route;
+        reset(); assert(dcp_direct_crossbar_link(&d, true) == 0);
+        assert(v27 == 0 && links == 1 && locks == 1);
     }
     machine = "apple,other"; node.compatible = "apple,other-dcp";
     struct apple_dcp unrelated = { .dev = &dev, .active_typec_route = &route };
@@ -134,6 +137,7 @@ int main(void) {
 }
 '''
 unit = pre + function(header, 'dcp_is_ext26') + '\n'
+unit += function(source, 'dcp_t6041_ext_v27') + '\n'
 unit += function(source, 'dcp_is_t8132_ext') + '\n' + link + '\n' + cases
 with tempfile.TemporaryDirectory() as tmp:
     c = Path(tmp) / 'crossbar.c'

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /* Shared firmware backend. H17 is the first measured cold power provider. */
 #include <crypto/sha2.h>
+#include <drm/drm_mm.h>
 #include <linux/crash_dump.h>
 #include <linux/debugfs.h>
 #include <linux/dma-mapping.h>
@@ -31,6 +32,10 @@
 #define ANE_FW_IPC_DVA 0x100003d0000ULL
 #define ANE_FW_HEAP_DVA 0x100003e4000ULL
 #define ANE_FW_ALLOC_DVA 0x10001300000ULL
+/* SHAREDMALLOC and program mappings: DVAs from ANE_FW_ALLOC_DVA on. */
+#define ANE_FW_WINDOW SZ_512M
+/* ane_fw_alloc_mem(): a DVA range from the window. */
+#define ANE_FW_WINDOW_ANY U64_MAX
 #define ANE_FW_TIMEOUT_NS (3ULL * NSEC_PER_SEC)
 
 enum ane_fw_stage {
@@ -47,6 +52,8 @@ struct ane_fw_mapping {
 	struct list_head list;
 	struct ane_fw_surface surface;
 	dma_addr_t physical;
+	/* The DVA range, for a mapping in the window. */
+	struct drm_mm_node node;
 };
 
 struct ane_fw_backend {
@@ -113,7 +120,13 @@ struct ane_fw_backend {
 	u64 sys_off_at, sys_off_ns;
 	struct ane_fw_cold_state cold;
 	u64 ranges[ANE_FW_DAPF_MAX * 2];
-	u64 next_dva;
+	/*
+	 * The DVA window and the mappings list. Program mappings come and go
+	 * under the session lock while the engine is up; the others are made
+	 * with the session closed.
+	 */
+	struct drm_mm dva_window;
+	struct mutex window_lock;
 	enum ane_fw_stage stage;
 	bool retained;
 	/* Brings the engine up to the program stage after a loader hand-off. */
@@ -1198,6 +1211,13 @@ static int ane_fw_pm_event(struct notifier_block *nb, unsigned long event, void 
 	struct ane_fw_backend *b = container_of(nb, struct ane_fw_backend, pm_notifier);
 	bool retained = READ_ONCE(b->retained);
 
+	/*
+	 * Registered at init, before anything is retained: until then there
+	 * is nothing to cycle or refuse. Retaining happens under the system
+	 * sleep lock, so it never changes in the middle of a transition.
+	 */
+	if (!retained)
+		return NOTIFY_DONE;
 	if (event == PM_POST_SUSPEND) {
 		ane_fw_sleep_resume(b);
 		WRITE_ONCE(b->in_sleep, false);
@@ -1240,15 +1260,13 @@ static int ane_fw_retain(struct ane_fw_backend *b)
 		if (ret)
 			return ret;
 	}
-	b->pm_notifier.notifier_call = ane_fw_pm_event;
-	ret = register_pm_notifier(&b->pm_notifier);
-	if (ret) {
-		if (IS_BUILTIN(CONFIG_DRM_ACCEL_ANE))
-			kexec_unblock(&ane_fw_kexec);
-		return ret;
-	}
+	/*
+	 * The PM notifier was registered at init: registering it here, under
+	 * b->lock, would order the PM chain rwsem after b->lock, while
+	 * ane_fw_pm_event() takes them the other way round.
+	 */
 	__module_get(THIS_MODULE);
-	b->retained = true;
+	WRITE_ONCE(b->retained, true);
 	return 0;
 }
 
@@ -1282,6 +1300,10 @@ static int ane_fw_alloc_mem(struct ane_fw_backend *b, u64 dva, size_t size,
 	struct ane_fw_mapping *m;
 	int ret;
 
+	/* No memory for a range the window cannot hold. */
+	if (dva == ANE_FW_WINDOW_ANY && size > ANE_FW_WINDOW)
+		return -ENOSPC;
+
 	m = kzalloc_obj(*m);
 	if (!m)
 		return -ENOMEM;
@@ -1301,10 +1323,32 @@ static int ane_fw_alloc_mem(struct ane_fw_backend *b, u64 dva, size_t size,
 		dma_sync_single_for_device(b->memory, m->physical, size, DMA_BIDIRECTIONAL);
 		m->surface.handle = m->physical;
 	}
+	mutex_lock(&b->window_lock);
+	if (dva == ANE_FW_WINDOW_ANY) {
+		ret = drm_mm_insert_node_in_range(&b->dva_window, &m->node, size, SZ_16K, 0,
+						  ANE_FW_ALLOC_DVA,
+						  ANE_FW_ALLOC_DVA + ANE_FW_WINDOW,
+						  DRM_MM_INSERT_LOW);
+		if (ret) {
+			mutex_unlock(&b->window_lock);
+			if (cached)
+				dma_free_noncoherent(b->memory, size, m->surface.cpu,
+						     m->physical, DMA_BIDIRECTIONAL);
+			else
+				dma_free_coherent(b->memory, size, m->surface.cpu, m->physical);
+			kfree(m);
+			return ret;
+		}
+		dva = m->node.start;
+	}
 	m->surface.dva = dva;
 	m->surface.size = size;
-	/* Record before publication, including a failed/partial mapping. */
+	/*
+	 * Record before publication, including a failed/partial mapping: it
+	 * keeps its memory and range until reset.
+	 */
 	list_add_tail(&m->list, &b->mappings);
+	mutex_unlock(&b->window_lock);
 	ret = ane_fw_map(b, dva, m->physical, size, prot);
 	if (!ret)
 		*s = m->surface;
@@ -1322,14 +1366,11 @@ static int ane_fw_alloc(void *ctx, size_t size, u32 tag, struct ane_fw_surface *
 	struct ane_fw_backend *b = ctx;
 	int ret;
 
-	if (!size || size > ANE_FW_SHARED_TOTAL ||
-	    b->next_dva > ANE_FW_ALLOC_DVA + SZ_512M - size)
+	if (!size || size > ANE_FW_SHARED_TOTAL)
 		return -ENOSPC;
-	ret = ane_fw_alloc_at(b, b->next_dva, size, IOMMU_READ | IOMMU_WRITE, s);
-	if (!ret) {
-		b->next_dva += size;
+	ret = ane_fw_alloc_at(b, ANE_FW_WINDOW_ANY, size, IOMMU_READ | IOMMU_WRITE, s);
+	if (!ret)
 		dev_dbg(&b->pdev->dev, "SHAREDMALLOC tag=%#x bytes=%zu\n", tag, size);
-	}
 	return ret;
 }
 
@@ -1642,7 +1683,7 @@ static int ane_fw_prepare(struct ane_fw_backend *b)
 		return ret;
 	if (!(b->domain->pgsize_bitmap & SZ_16K) || !b->domain->ops->iotlb_sync_map ||
 	    b->domain->geometry.aperture_start ||
-	    b->domain->geometry.aperture_end < ANE_FW_ALLOC_DVA + SZ_512M)
+	    b->domain->geometry.aperture_end < ANE_FW_ALLOC_DVA + ANE_FW_WINDOW)
 		return -ERANGE;
 	b->memory = root_device_register("ane-fw-memory");
 	if (IS_ERR(b->memory))
@@ -1836,17 +1877,53 @@ static int ane_fw_startup(struct ane_fw_backend *b)
 static int ane_fw_program_map(void *ctx, size_t size, bool write, struct ane_fw_surface *out)
 {
 	struct ane_fw_backend *b = ctx;
-	int ret;
 
-	if (!size || !IS_ALIGNED(size, SZ_16K) ||
-	    b->next_dva > ANE_FW_ALLOC_DVA + SZ_512M - size)
+	if (!size || !IS_ALIGNED(size, SZ_16K))
 		return -ENOSPC;
-	ret = ane_fw_alloc_mem(b, b->next_dva, size,
-			       IOMMU_READ | (write ? IOMMU_WRITE : 0), true, out);
-	if (ret)
-		return ret;
-	b->next_dva += size;
-	return 0;
+	return ane_fw_alloc_mem(b, ANE_FW_WINDOW_ANY, size,
+				IOMMU_READ | (write ? IOMMU_WRITE : 0), true, out);
+}
+
+/*
+ * A program surface the firmware no longer uses (ops->unmap). The session
+ * calls it with the engine up, so the DART invalidation that iommu_unmap()
+ * ends with reaches the engine before its pages and its DVA range go back.
+ * A short unmap keeps everything, as a failed mapping does.
+ */
+static void ane_fw_program_unmap(void *ctx, const struct ane_fw_surface *s)
+{
+	struct ane_fw_backend *b = ctx;
+	struct ane_fw_mapping *m, *found = NULL;
+	size_t unmapped;
+
+	mutex_lock(&b->window_lock);
+	list_for_each_entry(m, &b->mappings, list) {
+		if (m->surface.dva == s->dva && m->surface.size == s->size &&
+		    m->surface.handle && drm_mm_node_allocated(&m->node)) {
+			found = m;
+			list_del(&m->list);
+			break;
+		}
+	}
+	mutex_unlock(&b->window_lock);
+	if (WARN_ON_ONCE(!found))
+		return;
+	m = found;
+	unmapped = iommu_unmap(b->domain, s->dva, s->size);
+	if (unmapped != s->size) {
+		dev_err(&b->pdev->dev, "H17 ANE: program unmap short at %#llx: %zu of %zu; kept\n",
+			s->dva, unmapped, s->size);
+		mutex_lock(&b->window_lock);
+		list_add_tail(&m->list, &b->mappings);
+		mutex_unlock(&b->window_lock);
+		return;
+	}
+	dma_free_noncoherent(b->memory, s->size, m->surface.cpu, m->physical,
+			     DMA_BIDIRECTIONAL);
+	mutex_lock(&b->window_lock);
+	drm_mm_remove_node(&m->node);
+	mutex_unlock(&b->window_lock);
+	kfree(m);
 }
 
 static void ane_fw_program_log(void *ctx, const char *item, u64 a, u64 c)
@@ -1876,6 +1953,7 @@ static void ane_fw_program_busy(void *ctx, bool busy)
 
 static const struct ane_h16_session_ops ane_fw_session_ops = {
 	.map = ane_fw_program_map,
+	.unmap = ane_fw_program_unmap,
 	.log = ane_fw_program_log,
 	.sync = ane_fw_program_sync,
 	.busy = ane_fw_program_busy,
@@ -2281,7 +2359,8 @@ int ane_fw_staged_init(struct platform_device *pdev, const struct ane_fw_platfor
 	b->pdev = pdev;
 	get_device(&pdev->dev);
 	b->soc = soc;
-	b->next_dva = ANE_FW_ALLOC_DVA;
+	drm_mm_init(&b->dva_window, ANE_FW_ALLOC_DVA, ANE_FW_WINDOW);
+	mutex_init(&b->window_lock);
 	mutex_init(&b->lock);
 	INIT_LIST_HEAD(&b->mappings);
 	if (of_property_count_strings(np, "reg-names") != soc->reg_count ||
@@ -2362,6 +2441,14 @@ int ane_fw_staged_init(struct platform_device *pdev, const struct ane_fw_platfor
 	ane_backend = b;
 	ret = device_create_file(&pdev->dev, &dev_attr_firmware_stage);
 	if (ret) {
+		ane_backend = NULL;
+		goto fail;
+	}
+	/* Once, outside b->lock (see ane_fw_retain()); it acts once retained. */
+	b->pm_notifier.notifier_call = ane_fw_pm_event;
+	ret = register_pm_notifier(&b->pm_notifier);
+	if (ret) {
+		device_remove_file(&pdev->dev, &dev_attr_firmware_stage);
 		ane_backend = NULL;
 		goto fail;
 	}
@@ -2476,6 +2563,7 @@ bool ane_fw_staged_exit(void)
 	/* A retained backend pins the module. No unload or in-place retry. */
 	if (WARN_ON(b->retained))
 		return true;
+	unregister_pm_notifier(&b->pm_notifier);
 	device_remove_file(&b->pdev->dev, &dev_attr_firmware_stage);
 	ane_backend = NULL;
 	ane_fw_observer_free(b);
