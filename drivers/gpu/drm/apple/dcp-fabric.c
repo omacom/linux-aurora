@@ -34,6 +34,11 @@ module_param(tiled_split, bool, 0644);
 MODULE_PARM_DESC(tiled_split,
 		 "Drive both halves of a tiled Thunderbolt display (LG UltraFine 5K) on one pipeline, through its two DPTX ports (default: on)");
 
+static bool hdmi_converter_idle_off = true;
+module_param(hdmi_converter_idle_off, bool, 0644);
+MODULE_PARM_DESC(hdmi_converter_idle_off,
+		 "Power the DP-to-HDMI converter only while an HDMI display is attached (default: on)");
+
 static bool typec_follow_crtc = true;
 module_param(typec_follow_crtc, bool, 0444);
 MODULE_PARM_DESC(typec_follow_crtc,
@@ -759,14 +764,141 @@ static void dcp_hdmi_recheck_work(struct work_struct *work)
 	mod_delayed_work(system_freezable_wq, &dcp->hdmi_recheck_wq, 0);
 }
 
+/*
+ * The DP-to-HDMI converter draws about 0.6 W whenever it is powered, with or
+ * without a display. The connector's HPD reaches the SoC without it, so it is
+ * powered only while an HDMI display is attached, as macOS does.
+ */
+#define DCP_HDMI_CONVERTER_OFF_MS	10000
+#define DCP_HDMI_CONVERTER_BOOT_MS	1500
+
+/* Only where it was measured and tried: the 14" M1 Pro MacBook Pro. */
+static bool dcp_hdmi_converter_managed(struct apple_dcp *dcp)
+{
+	return hdmi_converter_idle_off && dcp->dp2hdmi_pwren && dcp->hdmi_hpd_irq &&
+	       !dcp->external_native && of_machine_is_compatible("apple,j314s");
+}
+
+/* True if the converter's power changed. */
+static bool dcp_hdmi_converter_set(struct apple_dcp *dcp, bool on)
+{
+	guard(mutex)(&dcp->hdmi_converter_lock);
+	if (dcp->hdmi_converter_on == on)
+		return false;
+	gpiod_set_value_cansleep(dcp->dp2hdmi_pwren, on);
+	dcp->hdmi_converter_on = on;
+	return true;
+}
+
+/*
+ * An HDMI display is about to be connected. True if its converter had to be
+ * powered up first: it takes about two seconds to boot and a connect sent
+ * before that times out, so the display is connected from the delayed work,
+ * with its retries.
+ */
+bool dcp_fabric_hdmi_converter_wake(struct apple_dcp *dcp)
+{
+	bool woken;
+
+	if (!dcp->dp2hdmi_pwren)
+		return false;
+	woken = dcp_hdmi_converter_set(dcp, true);
+	/* A connect with no display there does not keep it powered. */
+	dcp_fabric_hdmi_converter_idle(dcp);
+	if (!woken)
+		return false;
+	dev_info(dcp->dev, "HDMI: display attached, converter powered up\n");
+	dcp->hdmi_wake_tries = 3;
+	mod_delayed_work(system_freezable_wq, &dcp->hdmi_wake_wq,
+			 msecs_to_jiffies(DCP_HDMI_CONVERTER_BOOT_MS));
+	return true;
+}
+
+/* HPD was sampled: no display starts the power-down delay, a display ends it. */
+void dcp_fabric_hdmi_converter_idle(struct apple_dcp *dcp)
+{
+	if (!dcp_hdmi_converter_managed(dcp))
+		return;
+	/* A failed GPIO read cannot establish absence. */
+	if (gpiod_get_value_cansleep(dcp->hdmi_hpd) != 0)
+		cancel_delayed_work(&dcp->hdmi_converter_off_wq);
+	else if (READ_ONCE(dcp->hdmi_converter_on))
+		queue_delayed_work(system_freezable_wq, &dcp->hdmi_converter_off_wq,
+				   msecs_to_jiffies(DCP_HDMI_CONVERTER_OFF_MS));
+}
+
+static void dcp_hdmi_converter_off_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work), struct apple_dcp,
+					     hdmi_converter_off_wq);
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+	if (!dcp_hdmi_converter_managed(dcp) ||
+	    gpiod_get_value_cansleep(dcp->hdmi_hpd) != 0)
+		return;
+	/*
+	 * The display has been gone for a while and the firmware has dropped
+	 * its link, which it learns of through the converter. With the CRTC
+	 * off nothing released the port then: do it now, and try again later
+	 * if the firmware does not let go of it.
+	 */
+	if (!dcp->active_typec_route && dcp->dptxport[0].connected &&
+	    dcp_dptx_disconnect(dcp, 0)) {
+		queue_delayed_work(system_freezable_wq, &dcp->hdmi_converter_off_wq,
+				   msecs_to_jiffies(DCP_HDMI_CONVERTER_OFF_MS));
+		return;
+	}
+	if (dcp_hdmi_converter_set(dcp, false))
+		dev_info(dcp->dev, "HDMI: no display, converter powered down\n");
+}
+
+/*
+ * The converter was powered up for a display that was just attached, see
+ * dcp_fabric_hdmi_converter_wake(). Connect the display now that it has
+ * booted, the way a new HPD does.
+ */
+static int dcp_hdmi_wake_connect(struct apple_dcp *dcp)
+{
+	int ret;
+
+	lockdep_assert_held(&dcp_typec_fabric_lock);
+	/* Nothing left to connect: lent out, connected, or the display is gone. */
+	if (dcp->active_typec_route || dcp->dptxport[0].connected ||
+	    gpiod_get_value_cansleep(dcp->hdmi_hpd) <= 0)
+		return -ESTALE;
+	ret = dcp_fixed_output_select(dcp);
+	if (!ret)
+		ret = dcp_dptx_connect(dcp, 0);
+	dev_dbg(dcp->dev, "HDMI: connect after converter power-up: %d\n", ret);
+	return ret;
+}
+
+static void dcp_hdmi_wake_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work),
+					     struct apple_dcp, hdmi_wake_wq);
+	int ret;
+
+	guard(mutex)(&dcp_typec_fabric_lock);
+	ret = dcp_hdmi_wake_connect(dcp);
+	if (ret && ret != -ESTALE && ret != -ESHUTDOWN && --dcp->hdmi_wake_tries)
+		mod_delayed_work(system_freezable_wq, &dcp->hdmi_wake_wq,
+				 msecs_to_jiffies(2000));
+}
+
 void dcp_fabric_init(struct apple_dcp *dcp)
 {
 	spin_lock_init(&dcp->hdmi_presence_lock);
 	dcp->hdmi_presence.state = DCP_FABRIC_ABSENT;
 	INIT_DELAYED_WORK(&dcp->hdmi_settle_wq, dcp_hdmi_settle_work);
 	INIT_DELAYED_WORK(&dcp->hdmi_recheck_wq, dcp_hdmi_recheck_work);
+	INIT_DELAYED_WORK(&dcp->hdmi_wake_wq, dcp_hdmi_wake_work);
+	mutex_init(&dcp->hdmi_converter_lock);
+	INIT_DELAYED_WORK(&dcp->hdmi_converter_off_wq, dcp_hdmi_converter_off_work);
 	disable_delayed_work(&dcp->hdmi_settle_wq);
 	disable_delayed_work(&dcp->hdmi_recheck_wq);
+	disable_delayed_work(&dcp->hdmi_wake_wq);
+	disable_delayed_work(&dcp->hdmi_converter_off_wq);
 }
 
 /* Caller enables the HPD IRQ first; a later edge invalidates this sample. */
@@ -3756,9 +3888,8 @@ static void dcp_hdmi_connect_failed(struct apple_dcp *dcp, int ret)
 		dcp_external_retry(dcp, "HDMI display link not set up", ret, 1000);
 }
 
-static void dcp_hdmi_connect_fixed(void *ctx)
+static int __dcp_hdmi_connect_fixed(struct apple_dcp *dcp)
 {
-	struct apple_dcp *dcp = ctx;
 	int ret = dcp_fixed_output_select(dcp);
 
 	/*
@@ -3775,6 +3906,12 @@ static void dcp_hdmi_connect_fixed(void *ctx)
 	else
 		ret = dcp_dptx_connect(dcp, 0);
 	dcp_hdmi_connect_failed(dcp, ret);
+	return ret;
+}
+
+static void dcp_hdmi_connect_fixed(void *ctx)
+{
+	__dcp_hdmi_connect_fixed(ctx);
 }
 
 /*
@@ -3788,6 +3925,9 @@ static void dcp_hdmi_connect_fixed(void *ctx)
  * order it would pair the returning display with the hybrid's CRTC again.
  * Without such a pipeline, or on dual-stream machines, the HDMI display
  * waits as before.
+ *
+ * DCP_RECLAIM_HDMI_MS bounds the wait for the HDMI display once its link
+ * has been requested.
  */
 #define DCP_RECLAIM_HDMI_MS	3000
 
@@ -3824,19 +3964,49 @@ static void dcp_reclaim_unplug(void *data)
 	}
 }
 
+/*
+ * The converter was powered down, so the connect was left to hdmi_wake_wq,
+ * for when it has booted.  That work takes the fabric lock, which the
+ * reclaim holds until the Type-C display is back: left to it, the HDMI
+ * display would always connect last, however long the reclaim waited.
+ * Connect here instead, as that work does and with its retries.
+ */
+static void dcp_reclaim_wake_hdmi(struct apple_dcp *dcp)
+{
+	unsigned int delay = DCP_HDMI_CONVERTER_BOOT_MS;
+	int tries = 3, ret;
+
+	do {
+		msleep(delay);
+		ret = dcp_hdmi_wake_connect(dcp);
+		delay = 2000;
+	} while (ret && ret != -ESTALE && ret != -ESHUTDOWN && --tries);
+}
+
 static void dcp_reclaim_connect_hdmi(void *data)
 {
 	struct dcp_hdmi_reclaim_context *ctx = data;
 	struct apple_dcp *dcp = ctx->from;
 	struct apple_connector *hdmi = dcp->fixed_connector;
-	unsigned long timeout;
+	unsigned long start, timeout;
 
 	/* Park revoked the old attachment before this fixed output starts. */
 	WRITE_ONCE(dcp->typec_follow_retiring, false);
-	dcp_hdmi_connect_fixed(dcp);
-	timeout = jiffies + msecs_to_jiffies(DCP_RECLAIM_HDMI_MS);
+	if (__dcp_hdmi_connect_fixed(dcp) == -EAGAIN &&
+	    cancel_delayed_work(&dcp->hdmi_wake_wq))
+		dcp_reclaim_wake_hdmi(dcp);
+	start = jiffies;
+	timeout = start + msecs_to_jiffies(DCP_RECLAIM_HDMI_MS);
 	while (hdmi && !READ_ONCE(hdmi->connected) && time_before(jiffies, timeout))
 		msleep(20);
+	if (!hdmi)
+		return;
+	if (READ_ONCE(hdmi->connected))
+		dev_info(dcp->dev, "HDMI display connected %u ms after its link request\n",
+			 jiffies_to_msecs(jiffies - start));
+	else
+		dev_warn(dcp->dev, "HDMI display not connected after %u ms, the Type-C display returns first\n",
+			 DCP_RECLAIM_HDMI_MS);
 }
 
 static int dcp_reclaim_activate(void *data, bool restore)
@@ -4006,6 +4176,7 @@ static void dcp_hdmi_update_locked(struct apple_dcp *dcp)
 		dcp_hdmi_sample(dcp, generation, level);
 	}
 	dcp_fabric_run_hdmi(&dcp_hdmi_ops, dcp);
+	dcp_fabric_hdmi_converter_idle(dcp);
 }
 
 irqreturn_t dcp_dp2hdmi_hpd(int irq, void *data)
