@@ -19,7 +19,7 @@ series_check = "kernel-makefile"
 [upstream]
 repo = "https://github.com/aurora-silicon/linux.git"
 ref = "integration/aurora"
-intake = "0abc2f385e54b8bf3226963e7f167eca5b68295f"
+intake = "de2c296969529a442d496fa8948c359e86bb9428"
 
 [inputs]
 repo = "https://github.com/omacom/linux-aurora.git"
