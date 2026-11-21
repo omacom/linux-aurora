@@ -50,6 +50,36 @@ impl Drop for KeybagCreateIntent<'_> {
     }
 }
 
+/// The xART guard's first-setup window while provisioning holds it (see
+/// [`crate::xart_guard`]): closed on drop, so every failed exit shuts it. A
+/// provisioned keybag hands it to the first activation, which closes it when
+/// it returns (`activate_touchid`).
+pub(crate) struct SetupWindow<'a> {
+    sep: &'a SepData,
+    open: bool,
+}
+
+impl<'a> SetupWindow<'a> {
+    /// The first activation's hold on a window provisioning may have left
+    /// open; closing a shut window does nothing.
+    pub(crate) fn for_activation(sep: &'a SepData) -> Self {
+        SetupWindow { sep, open: true }
+    }
+
+    /// Hands the window to the first activation.
+    fn leave_open_for_activation(mut self) {
+        self.open = false;
+    }
+}
+
+impl Drop for SetupWindow<'_> {
+    fn drop(&mut self) {
+        if self.open {
+            self.sep.with_store(|store| store.close_first_setup());
+        }
+    }
+}
+
 impl SepData {
     pub(crate) fn on_sks(&self, msg: Message) {
         let r = crate::sks::decode_sks(&msg);
@@ -695,16 +725,6 @@ impl SepData {
             }
         };
         let slot = proof.slot();
-        // A later boot compares this with Linux's list to tell whether the
-        // create left anything.
-        let unfinished = match self.with_store(|store| store.guard_listed_now()).flatten() {
-            Some(entries) => crate::xart_guard::Unfinished::Guarded(entries),
-            None => crate::xart_guard::Unfinished::Unguarded,
-        };
-        let mut intent = match KeybagCreateIntent::new(&self.dev, slot, unfinished) {
-            Some(intent) => intent,
-            None => return false,
-        };
         let mut secret_bytes = KVec::new();
         if secret_bytes.resize(SKS_SECRET_LEN, 0, GFP_KERNEL).is_err()
             || shim::random_bytes(&mut secret_bytes).is_err()
@@ -729,6 +749,37 @@ impl SepData {
                 );
                 return false;
             }
+        };
+        // A cold-boot Mac's first setup rewrites pre-Linux lockers after the
+        // create (XART-SAFETY.md). Under xart_guard_pins the guard gives the
+        // install's first setup a window that pins them; it is recorded in
+        // the list here, before the intent counts the list.
+        let first_setup = match self.with_store(|store| store.open_first_setup()) {
+            Some(Ok(open)) => open,
+            None => false,
+            // Nothing is sent and no intent is written.
+            Some(Err(e)) => {
+                dev_err_ratelimited!(
+                    self.dev,
+                    "sks: cannot record the xART guard's first-setup window ({:?}); not creating the keybag this boot\n",
+                    e
+                );
+                return false;
+            }
+        };
+        let window = SetupWindow {
+            sep: self,
+            open: first_setup,
+        };
+        // A later boot compares this with Linux's list to tell whether the
+        // create left anything.
+        let unfinished = match self.with_store(|store| store.guard_listed_now()).flatten() {
+            Some(entries) => crate::xart_guard::Unfinished::Guarded(entries),
+            None => crate::xart_guard::Unfinished::Unguarded,
+        };
+        let mut intent = match KeybagCreateIntent::new(&self.dev, slot, unfinished) {
+            Some(intent) => intent,
+            None => return false,
         };
         intent.sending();
         // The window's host writes and flushes land inside this exchange, so
@@ -838,6 +889,9 @@ impl SepData {
             return false;
         }
         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
+        // On a J313 the third locker is rewritten during the first
+        // activation, so a pinning window stays open until it returns.
+        window.leave_open_for_activation();
         dev_info_ratelimited!(self.dev, "sks: identity keybag provisioned\n");
         true
     }

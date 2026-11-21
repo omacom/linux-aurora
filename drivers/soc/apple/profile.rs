@@ -223,8 +223,10 @@ pub(crate) const T8103: PlatformProfile = PlatformProfile {
     },
     persistent_enrol: true,
     nonce_session: false,
-    // Off: Touch ID setup on a cold-boot SEP rewrites a session record that
-    // predates Linux, so the guard would only block it.
+    // Off: Touch ID setup on a cold-boot SEP rewrites session records that
+    // predate Linux, so the guard would only block it. On a J313,
+    // xart_guard=1 xart_guard_pins=1 keeps it on and pins those records
+    // (three SEP-xART lockers) instead.
     xart_guard: 0,
 };
 
@@ -265,7 +267,8 @@ pub(crate) const T6000: PlatformProfile = PlatformProfile {
     persistent_enrol: true,
     nonce_session: false,
     // As T8103. On J316s, creating the identity keybag also rewrites a
-    // session record that predates Linux.
+    // session record that predates Linux; xart_guard_pins=1 pinned it there
+    // (one locker), but enrolment has not been reached under the guard.
     xart_guard: 0,
 };
 
