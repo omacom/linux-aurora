@@ -1114,10 +1114,14 @@ impl SepData {
                 return Err(EINVAL);
             }
         }
+        let xart_setup = xart_guard::setup(
+            profile.bootstrap == profile::Bootstrap::Boot,
+            module_parameters::xart_guard_pins.value(),
+        );
         let store = match xart_store::Store::open_owner(xart_writes, xart_start) {
             Ok(mut store) => {
                 match xart_guard {
-                    Some(level) if store.writes_enabled() => store.set_guard(level)?,
+                    Some(level) if store.writes_enabled() => store.set_guard(level, xart_setup)?,
                     None if store.writes_enabled() => dev_info_ratelimited!(
                         dev,
                         "xART guard off: the enclave may rewrite any session record\n"
@@ -3043,7 +3047,13 @@ impl SepData {
                     module_parameters::xart_guard.value(),
                     self.profile.xart_guard,
                 ) {
-                    new.set_guard(level)?;
+                    new.set_guard(
+                        level,
+                        xart_guard::setup(
+                            self.profile.bootstrap == profile::Bootstrap::Boot,
+                            module_parameters::xart_guard_pins.value(),
+                        ),
+                    )?;
                 }
             }
             Ok(new)
@@ -3699,6 +3709,10 @@ module! {
         xart_guard: i8 {
             default: -1,
             description: "-1: the platform's level, 1 on M2 and M3 Macs and 0 on M1 Macs and the MacBook Neo; 0: off; 1: refuse the enclave's writes and deletes of xART session records this Linux install did not create; 2: also refuse writes to the shared root records",
+        },
+        xart_guard_pins: u8 {
+            default: 0,
+            description: "On a Mac that cold-boots its SEP (M1 family; run on a J313 only), with xart_guard=1 set explicitly (M1 defaults to 0): 1 lets the enclave rewrite the SEP-xART lockers from before Linux (up to three, read this boot) that this install's first Touch ID setup rewrites, from the keybag creation to the first activation, then and afterwards, while every other record stays guarded; 0: that rewrite is refused",
         },
         os_uuid_hi: u64 {
             default: 0,

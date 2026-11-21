@@ -357,11 +357,16 @@ impl Store {
                 self.save_previous(key, why)?;
             }
         }
-
         let old = self.find(key);
         // A new key skips the first free slot; a replacement reuses it.
         let fresh = self.find_free(usize::from(old.is_none())).ok_or(ENOSPC)?;
         let revision = self.revision.checked_add(1).ok_or(EINVAL)?;
+        // A locker the first-setup window pins is pinned only once its
+        // previous value is saved and the write has a slot, and before the
+        // write lands.
+        if let Some(guard) = self.guard.as_mut() {
+            guard.commit_pin(key)?;
+        }
         let crc = crc32_ieee(value);
 
         let mut raw = KVec::with_capacity(SLOT_SIZE, GFP_KERNEL)?;
@@ -459,11 +464,36 @@ impl Store {
     }
 
     /// From now on, refuses the enclave's writes to records Linux did not
-    /// create. See [`crate::xart_guard`].
-    pub(crate) fn set_guard(&mut self, level: u8) -> Result<()> {
+    /// create. `setup` is the platform's first-setup rule. See
+    /// [`crate::xart_guard`].
+    pub(crate) fn set_guard(&mut self, level: u8, setup: crate::xart_guard::Setup) -> Result<()> {
         let keys = self.live_keys()?;
-        self.guard = Some(crate::xart_guard::Guard::open(level, keys));
+        self.guard = Some(crate::xart_guard::Guard::open(level, keys, setup));
         Ok(())
+    }
+
+    /// Tells the guard that the enclave was handed the record under `key`.
+    pub(crate) fn note_enclave_read(&mut self, key: &Key) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.note_read(key);
+        }
+    }
+
+    /// Opens the guard's first-setup window (see [`crate::xart_guard`]).
+    /// `Ok(false)` without a guard, off level 1, without `xart_guard_pins` on
+    /// a cold-boot Mac, on a warm-attach Mac, or once this install has listed
+    /// anything.
+    pub(crate) fn open_first_setup(&mut self) -> Result<bool> {
+        self.guard
+            .as_mut()
+            .map_or(Ok(false), |guard| guard.open_first_setup())
+    }
+
+    /// Closes the guard's first-setup window, if one is open.
+    pub(crate) fn close_first_setup(&mut self) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.close_first_setup();
+        }
     }
 
     /// Entries in the guard's list now, or `None` without a guarded list.
