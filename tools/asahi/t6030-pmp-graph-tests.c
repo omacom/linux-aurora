@@ -584,6 +584,10 @@ static const struct apple_pmp_start_ops apple_pmp_start_hw_ops = { hw_check,
 								   hw_bound };
 static const struct apple_pmp_start_timing apple_pmp_start_timing = { 2, 0, 2,
 								      2 };
+/* The extracted probe compares rep->offsets with the T6001 table and tells the AGX vote that a report came back. This harness has neither: the table is empty and
+ * never matches, and the call does nothing. */
+static const struct apple_pmp_report_offsets apple_pmp_offsets_t600x;
+static void apple_pmp_agx_activity_resume(void) {}
 #include "production.h"
 static const struct apple_pmp_report_offsets *
 of_device_get_match_data(struct device *d)

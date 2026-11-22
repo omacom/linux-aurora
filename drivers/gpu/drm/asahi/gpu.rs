@@ -1284,6 +1284,9 @@ impl GpuManager::ver {
             .with(|raw, _inner| raw.pending_submissions.fetch_add(1, Ordering::Acquire));
 
         mod_dev_dbg!(self.dev, "OP start (pending: {})\n", val + 1);
+        // SAFETY: Takes no arguments and does nothing unless pmp_report.agx_vote is set on a T6001. The matching end call is made
+        // by OpGuard's Drop, and the guard is created right below, so every path out of here (including a failed kick) pairs it.
+        unsafe { kernel::bindings::apple_pmp_agx_activity_begin() };
         let guard = OpGuard(self.clone());
         self.kick_firmware()?;
         Ok(guard)
@@ -1804,5 +1807,7 @@ impl GpuManagerPriv for GpuManager::ver {
             .with(|raw, _inner| raw.pending_submissions.fetch_sub(1, Ordering::Release));
 
         mod_dev_dbg!(self.dev, "OP end (pending: {})\n", val - 1);
+        // SAFETY: Pairs with the begin call in start_op(); callable from any context.
+        unsafe { kernel::bindings::apple_pmp_agx_activity_end() };
     }
 }
