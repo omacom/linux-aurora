@@ -20,13 +20,24 @@ struct sim {
 	int kicks;           // reconciliations the operations asked for
 };
 
+/* The kernel's mod_delayed_work() overwrites a pending timer, even with a later expiry. */
 static void arm(struct sim *s, uint32_t delay_ms)
 {
-	uint32_t at = s->now + delay_ms;
-	if (!s->armed || (int32_t)(at - s->timer_at) < 0) {
-		s->armed = true;
-		s->timer_at = at;
+	s->armed = true;
+	s->timer_at = s->now + delay_ms;
+}
+
+/* The kernel glue: delay <= 1 ms is "due now" and re-arms to 0; a later deadline re-arms only
+ * when it shortens the pending one. A running work item is not pending, so a kick from inside
+ * reconcile always re-arms. */
+static void kick(struct sim *s, uint32_t delay_ms)
+{
+	if (delay_ms <= 1) {
+		arm(s, 0);
+		return;
 	}
+	if (!s->armed || (int32_t)(s->now + delay_ms - s->timer_at) < 0)
+		arm(s, delay_ms);
 }
 
 static void begin(struct sim *s);
@@ -67,7 +78,7 @@ static void reconcile(struct sim *s)
 		agx_vote_applied(&s->v, act, ret, s->now);
 	uint32_t next = agx_vote_next(&s->v, s->now);
 	if (next)
-		arm(s, next);
+		kick(s, next);
 }
 
 static void begin(struct sim *s)
@@ -75,8 +86,7 @@ static void begin(struct sim *s)
 	agx_ms_t d = agx_vote_begin(&s->v, s->now);
 	if (d) {
 		s->kicks++;
-		/* delay 1 is "due now": the glue runs it within the same tick */
-		arm(s, d == 1 ? 0 : d);
+		kick(s, d);
 	}
 }
 
@@ -84,14 +94,23 @@ static void end(struct sim *s)
 {
 	uint32_t d = agx_vote_end(&s->v, s->now);
 	if (d)
-		arm(s, d);
+		kick(s, d);
 }
 
 static void advance_to(struct sim *s, uint32_t t)
 {
+	int stuck = 0;
+
 	while (s->armed && (int32_t)(s->timer_at - t) <= 0) {
-		if ((int32_t)(s->timer_at - s->now) > 0)
+		if ((int32_t)(s->timer_at - s->now) > 0) {
 			s->now = s->timer_at;
+			stuck = 0;
+		} else if (++stuck > 1000) {
+			/* a re-arm at the same instant is the owed-set kick; a mutant that re-arms
+			 * forever is a hot spin in the kernel too: fail it, do not hang */
+			fprintf(stderr, "FAIL: reconcile re-armed without advancing past %u\n", s->now);
+			exit(1);
+		}
 		reconcile(s);
 	}
 	s->now = t;
@@ -193,11 +212,11 @@ int main(void)
 		struct sim s = fresh(true, 100, 0);
 		begin(&s); advance_to(&s, 0); end(&s);
 		CHECK(s.bit && s.armed);
-		if (agx_vote_release(&s.v)) { s.clears++; s.bit = false; }
+		if (agx_vote_release(&s.v, AGX_STOP_GPU)) { s.clears++; s.bit = false; }
 		CHECK(!s.bit && s.clears == 1 && !s.v.voted);
 		advance_to(&s, 500);                       // the pending timer fires and finds nothing to do
 		CHECK(s.clears == 1 && !s.armed);
-		CHECK(!agx_vote_release(&s.v));            // a second release writes nothing
+		CHECK(!agx_vote_release(&s.v, AGX_STOP_GPU));            // a second release writes nothing
 	}
 	// 11. w7X's reproduction: jiffies_to_msecs is 32 bits wide, so a vote whose last operation ended at 0xFFFFFFF0 must still clear
 	// 100 ms later, after the clock has wrapped to 0x54 (a 64-bit compare of idle_at + idle_ms never decided it)
@@ -255,7 +274,7 @@ int main(void)
 		struct sim s = fresh(true, 100, 0);
 		begin(&s); advance_to(&s, 0);
 		CHECK(s.bit && s.v.users == 1);
-		if (agx_vote_release(&s.v)) { s.clears++; s.bit = false; }
+		if (agx_vote_release(&s.v, AGX_STOP_GPU)) { s.clears++; s.bit = false; }
 		CHECK(!s.bit && s.v.stopped && s.clears == 1);
 		end(&s); begin(&s); advance_to(&s, 50);            // an ioctl already past the unplug check starts an operation
 		CHECK(!s.bit && s.sets == 1 && !s.armed);
@@ -265,7 +284,7 @@ int main(void)
 		arm(&s, 0); advance_to(&s, 51);
 		CHECK(!s.bit && s.sets == 1);
 		// the GPU probes again: the vote is allowed, and the operation still in flight gets its set
-		CHECK(agx_vote_resume(&s.v));
+		CHECK(agx_vote_resume(&s.v, AGX_STOP_GPU));
 		arm(&s, 0); advance_to(&s, 52);
 		CHECK(s.bit && s.sets == 2 && !s.v.stopped);
 	}
@@ -275,15 +294,15 @@ int main(void)
 		struct sim s = fresh(true, 250, 0);
 		begin(&s); advance_to(&s, 0);
 		CHECK(s.bit);
-		if (agx_vote_release(&s.v)) { s.clears++; s.bit = false; }     // suspend prepare
+		if (agx_vote_release(&s.v, AGX_STOP_SLEEP)) { s.clears++; s.bit = false; }   // suspend prepare
 		CHECK(!s.bit && s.v.stopped && s.clears == 1);
-		if (agx_vote_resume(&s.v)) arm(&s, 0);                         // resume
+		if (agx_vote_resume(&s.v, AGX_STOP_SLEEP)) arm(&s, 0);                       // resume
 		advance_to(&s, 10);
 		CHECK(s.bit && s.sets == 2 && s.v.voted);
 		end(&s);
-		if (agx_vote_release(&s.v)) { s.clears++; s.bit = false; }     // a second sleep while idle inside the hold
+		if (agx_vote_release(&s.v, AGX_STOP_SLEEP)) { s.clears++; s.bit = false; }   // a second sleep while idle inside the hold
 		CHECK(!s.bit && s.clears == 2);
-		CHECK(!agx_vote_resume(&s.v));                                 // idle: nothing is owed
+		CHECK(!agx_vote_resume(&s.v, AGX_STOP_SLEEP));                               // idle: nothing is owed
 		advance_to(&s, 1000);
 		CHECK(!s.bit && s.sets == 2 && s.clears == 2);
 		begin(&s); advance_to(&s, 1001);                               // the next operation after resume votes as usual
@@ -292,20 +311,20 @@ int main(void)
 	// 17. disabled and stopped never set, whatever begins
 	{
 		struct sim s = fresh(false, 100, 0);
-		s.v.stopped = true;
+		s.v.stopped = AGX_STOP_GPU;
 		begin(&s); advance_to(&s, 1);
 		CHECK(!s.bit && s.sets == 0 && !s.armed);
-		CHECK(!agx_vote_resume(&s.v));                                 // disabled: resume owes nothing
+		CHECK(!agx_vote_resume(&s.v, AGX_STOP_GPU));                                 // disabled: resume owes nothing
 	}
 	// 18. mutants that survived the first review: begin() must itself refuse while stopped (not only decide()), a failed set must schedule the retry
 	// deadline and not the 1 ms owed-set kick (a 1 kHz spin for the whole 1000 ms window otherwise), and agx_vote_refuse() must stop votes.
 	{
 		struct agx_vote v = {.enabled = true, .idle_ms = 100};
-		agx_vote_refuse(&v);
+		agx_vote_refuse(&v, AGX_STOP_GPU);
 		CHECK(v.stopped && !v.voted);
 		CHECK(!agx_vote_begin(&v, 0));                         // a user, but no kick
 		CHECK(agx_vote_decide(&v, 0) == AGX_VOTE_NONE && agx_vote_next(&v, 0) == 0);
-		CHECK(agx_vote_resume(&v));                            // work in flight: the reconcile step must run
+		CHECK(agx_vote_resume(&v, AGX_STOP_GPU));                            // work in flight: the reconcile step must run
 		struct agx_vote w = {.enabled = true, .idle_ms = 100};
 		CHECK(agx_vote_begin(&w, 0));
 		agx_vote_applied(&w, AGX_VOTE_SET, -110, 500);          // the set was not acknowledged
@@ -416,8 +435,8 @@ int main(void)
 		CHECK(v.voted && v.failures == 0 && agx_vote_next(&v, 6000) == 0);
 		// the cancel-on-release/resume variant: the retry survives the cycle
 		struct agx_vote w = {.enabled = true, .failures = 1, .retry_at = 6000};
-		CHECK(!agx_vote_release(&w));                         // idle release: no clear write
-		CHECK(!agx_vote_resume(&w));                          // idle resume: still no immediate kick
+		CHECK(!agx_vote_release(&w, AGX_STOP_GPU));                         // idle release: no clear write
+		CHECK(!agx_vote_resume(&w, AGX_STOP_GPU));                          // idle resume: still no immediate kick
 		CHECK(agx_vote_begin(&w, 6100) == 1);                 // past the deadline the kick is back
 	}
 	// 25. the residual w7X flagged on the delay contract: the end lands inside a failed SET write and no new
@@ -468,6 +487,41 @@ int main(void)
 		// 1 ms before the deadline
 		struct agx_vote w = {.enabled = true, .failures = 1, .retry_at = 6000};
 		CHECK(agx_vote_begin(&w, 5999) == 1);
+	}
+	// 27. Marcelo's re-arm review: several begins before the worker runs must not postpone the set.
+	// mod_delayed_work overwrites, so an unvoted begin that re-armed to now+1 each time would slide
+	// the set out one tick per begin; the glue's due-now kick can only pull earlier.
+	{
+		struct sim s = fresh(true, 100, 0);
+		for (int i = 0; i < 5; i++)
+			begin(&s);                                     // five begins before the worker ever runs
+		CHECK(s.armed && s.timer_at == 0);                 // every due-now kick armed 0; none pushed later
+		advance_to(&s, 1);
+		CHECK(s.sets == 1 && s.bit && s.v.voted && s.v.users == 5);
+		CHECK(!s.armed);                                   // nothing left pending from the pile-up
+	}
+	// 28. Marcelo's stop-reason review: the stop mask is per owner. PM_POST_SUSPEND after a GPU
+	// unbind must not re-enable the vote, and a GPU re-probe does not cancel a sleep stop.
+	{
+		struct agx_vote v = {.enabled = true, .idle_ms = 100, .users = 1};
+		CHECK(agx_vote_release(&v, AGX_STOP_GPU) == false);      // unvoted unbind: nothing written
+		CHECK(!agx_vote_resume(&v, AGX_STOP_SLEEP));             // post-suspend: the GPU stop still holds
+		CHECK(v.stopped == AGX_STOP_GPU);
+		CHECK(agx_vote_decide(&v, 0) == AGX_VOTE_NONE);
+		CHECK(!agx_vote_resume(&v, AGX_STOP_REPORT));            // a report rebind: still held by the GPU stop
+		CHECK(v.stopped == AGX_STOP_GPU);
+		CHECK(agx_vote_resume(&v, AGX_STOP_GPU));                // the GPU probes again: work in flight kicks
+		CHECK(!v.stopped);
+	}
+	{
+		struct agx_vote v = {.enabled = true, .idle_ms = 100, .users = 1};
+		agx_vote_refuse(&v, AGX_STOP_GPU);
+		agx_vote_refuse(&v, AGX_STOP_SLEEP);
+		CHECK(v.stopped == (AGX_STOP_GPU | AGX_STOP_SLEEP));
+		CHECK(!agx_vote_resume(&v, AGX_STOP_GPU));               // sleep still holds
+		CHECK(v.stopped == AGX_STOP_SLEEP);
+		CHECK(agx_vote_resume(&v, AGX_STOP_SLEEP));              // both cleared: owed kick
+		CHECK(!v.stopped);
 	}
 	printf("AGX-VOTE-SELFCHECK-OK\n");
 	return 0;

@@ -54,6 +54,21 @@ def header_text(ref):
     return (ROOT / HEADER).read_text()
 
 
+_ASLR_PREFIX = None
+
+
+def aslr_prefix():
+    """['setarch', '-R'] when it actually works here; [] when absent or personality() is blocked."""
+    global _ASLR_PREFIX
+    if _ASLR_PREFIX is None:
+        _ASLR_PREFIX = []
+        if shutil.which('setarch'):
+            probe = subprocess.run(['setarch', '-R', 'true'], capture_output=True)
+            if probe.returncode == 0:
+                _ASLR_PREFIX = ['setarch', '-R']
+    return _ASLR_PREFIX
+
+
 def compile_and_run(out, text):
     out.mkdir(parents=True, exist_ok=True)
     (out / 'pmp-agx-vote.h').write_text(text)
@@ -66,7 +81,7 @@ def compile_and_run(out, text):
     (out / 'build.log').write_text(built.stdout + built.stderr)
     if built.returncode:
         return {'build_rc': built.returncode, 'run_rc': None, 'note': 'compilation failure is not regression evidence'}
-    prefix = ['setarch', '-R'] if shutil.which('setarch') else []  # ASan startup can crash under ASLR on a loaded host
+    prefix = aslr_prefix()  # ASan startup can crash under ASLR on a loaded host
     ran = subprocess.run(prefix + [str(out / 'vote')], capture_output=True, text=True)
     (out / 'run.log').write_text(ran.stdout + ran.stderr)
     return {'build_rc': 0, 'run_rc': ran.returncode}
