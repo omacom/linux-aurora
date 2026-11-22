@@ -52,9 +52,10 @@ note = "its branch carries copies (new SHAs) of #2146/#2147, so only its own 27 
 [[carry]]
 pr = "aurora-silicon/linux#2149"
 commit = "ae6c455e0679c607bb90da3ec4fbf48af676489f"
-after = "5a2b02ae5cdcd8ab0cf304ed770897fc1e9d1510"
+commits = ["555099395c72f4b1921b2fe2b7d220e9282f63e8", "bcb99bfb3480fe7bcf0531d4d111049395af9e61", "ae6c455e0679c607bb90da3ec4fbf48af676489f"]
 deps = ["aurora-silicon/linux#2148"]
 why = "M3 camera on 14.7 firmware"
+note = "its first commit (T8122 ISP PMU base, 111f73220d21) is upstream as aa89283bd25d (#2670); only the other three"
 
 [[carry]]
 pr = "aurora-silicon/linux#2150"
@@ -63,11 +64,11 @@ why = "M4 Pro 16-inch (J616s) GPU: admit the fourth 25G83 firmware image"
 
 [[carry]]
 pr = "aurora-silicon/linux#2151"
-commit = "9e20c880b86b6c82fee84a175d5e07c240414dd4"
-after = "e835a867cfdb0a10108485c3191e1290de615fcf"
+commit = "cb8d647d831c28ae2e8d5e5d6bf102b14e5349a0"
+after = "13535c7426ff7c8b95aa67c33b0c4da823abe793"
 deps = ["aurora-silicon/linux#2148"]
 why = "M1 Air (J313) backlight, handed-over panel, keyboard"
-note = "rebased onto 0abc2f385e54 with a keep-both resolution in dcp.c; only its own 6 commits"
+note = "stacked on #2148; its branch carries copies of #2148's commits, so only its own 6"
 
 [[carry]]
 pr = "aurora-silicon/linux#2152"
@@ -110,3 +111,9 @@ ours = "omacom/linux-aurora#370"
 commit = "3a936edf2c49afddf0e173ad7c8593ae2ba4d885"
 why = "brcmfmac PCIe: don't drop ring completions in the hard IRQ handler"
 upstream = "merged on omacom 7.2 (Naeem Malik); no aurora-silicon PR yet. Needs one from its author"
+
+[[carry]]
+ours = "xart-pin-7.3"
+commit = "7d15e097880b49a4f07fa203b6bae0fd5c3a189f"
+why = "M1 Air (J313) Touch ID: the owner can pin the shared xART lockers setup rewrites (7.3 port, Naeem's J313 stage C/D pass)"
+upstream = "port of omacom/linux-aurora#486 and #506 (7.2 line, open); drops when they land upstream"
