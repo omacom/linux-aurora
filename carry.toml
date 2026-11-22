@@ -19,7 +19,7 @@ series_check = "kernel-makefile"
 [upstream]
 repo = "https://github.com/aurora-silicon/linux.git"
 ref = "integration/aurora"
-intake = "de2c296969529a442d496fa8948c359e86bb9428"
+intake = "00cbc67d1a0cb9212d4228961db6a02b95e75b24"
 
 [inputs]
 repo = "https://github.com/omacom/linux-aurora.git"
@@ -98,13 +98,6 @@ why = "Touch ID tooling (aurora-sep mesa-m3) hardening"
 pr = "aurora-silicon/linux#2199"
 commit = "b96b83d10ef7e2e3405fca8517ecd084c059cee0"
 why = "cpufreq: no boost control without turbo mode"
-
-[[carry]]
-pr = "aurora-silicon/linux#1598"
-commit = "b8761033979a53ae01cd3877c4953574b9ba57d3"
-commits = ["3f09f2d2925839c8196f3b4f2dc0fd73ea05c48a", "f1c9d85fa75a39fe936392243c6fb470d2670c61"]
-why = "M3 Air Touch ID: SPI2/SPI4 from the 24 MHz reference"
-note = "only the two t8122 DT clock commits; the PR's two spi-apple.c commits are not carried"
 
 [[carry]]
 ours = "j613-touchid-data-ready"
