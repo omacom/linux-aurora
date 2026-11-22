@@ -67,10 +67,11 @@ static void msleep(unsigned int ms)
 #define ENOLINK 67
 /* ACTUAL_REGS */
 struct tb_switch;
+struct tb_xdomain;
 struct tb_port {
 	struct tb_switch *sw;
-	struct tb_port *remote;
-	void *xdomain;
+	struct tb_port *remote, *next;
+	struct tb_xdomain *xdomain;
 	int port;
 	bool null, host_dp;
 	struct {
@@ -162,7 +163,7 @@ static int fault, nth, ops, writes, hop_writes, drained, adapters, resumes, read
 	allocated, pm_roles, saves;
 static bool ctl, physical, clients_awake, uid_wrong;
 #define list_for_each_entry(t, h, m) for ((t) = *(h), (void)sizeof(#m); (t); (t) = (t)->next)
-#define tb_switch_for_each_port(s, p) for ((p) = (s)->ports; (p); (p) = NULL)
+#define tb_switch_for_each_port(s, p) for ((p) = (s)->ports; (p); (p) = (p)->next)
 static void mutex_lock(int *l)
 {
 	assert(!*l);
@@ -188,6 +189,9 @@ static void drop(int **l)
 #define guard(type) \
 	int *CAT(g_, __COUNTER__) __maybe_unused __cleanup(drop) = take
 #define lockdep_assert_held(l) assert(*(l))
+#define scoped_guard(type, l) \
+	for (int *CAT(sg_, __LINE__) __cleanup(drop) = take(l), CAT(sgo_, __LINE__) = 1; \
+	     CAT(sgo_, __LINE__); CAT(sgo_, __LINE__) = 0)
 static void panic(const char *s, ...)
 {
 	assert(false);
@@ -470,6 +474,112 @@ static int tb_ctl_frames_sleep_check(void *c, char *buf, size_t size)
 	return 0;
 }
 void tb_cio_sleep_complete(struct tb *t);
+/*
+ * XDomain peers (another host at the end of a link), as the bus keeps them: found by the
+ * route of the adapter they hang off, released as an unplug releases them.
+ */
+struct tb_xdomain {
+	bool is_unplugged, present;
+	int refs, removed, paths, unregistered;
+	unsigned long route;
+	struct tb_port *port;
+};
+static struct tb_xdomain xds[2];
+static struct tb_port xports[2];
+static int xd_unconfigured;
+#define tb_port_dbg(p, ...) ((void)(p))
+#define tb_port_info(p, ...) ((void)(p))
+static bool tb_is_upstream_port(struct tb_port *p)
+{
+	return p == &link[1];
+}
+static unsigned long tb_downstream_route(struct tb_port *p)
+{
+	return (tb_route(p->sw) << 8) | (unsigned long)p->port;
+}
+static struct tb_xdomain *tb_xdomain_find_by_route(struct tb *t, unsigned long route)
+{
+	for (int i = 0; i < 2; i++)
+		if (xds[i].present && !xds[i].is_unplugged && xds[i].route == route) {
+			xds[i].refs++;
+			return &xds[i];
+		}
+	return NULL;
+}
+static void tb_xdomain_remove(struct tb_xdomain *xd)
+{
+	assert(tb.lock && xd->is_unplugged);
+	xd->removed++;
+}
+static void __tb_disconnect_xdomain_paths(struct tb *t, struct tb_xdomain *xd, int a, int b,
+					  int c, int d)
+{
+	assert(tb.lock && xd->is_unplugged);
+	xd->paths++;
+}
+static void tb_xdomain_put(struct tb_xdomain *xd)
+{
+	assert(xd->refs > 0);
+	xd->refs--;
+}
+static void tb_port_unconfigure_xdomain(struct tb_port *p)
+{
+	assert(tb.lock);
+	xd_unconfigured++;
+}
+/* Its services unbind and give back their rings: never under the domain lock. */
+static void tb_domain_unregister_unplugged_xdomains(struct tb *t)
+{
+	assert(!tb.lock);
+	for (int i = 0; i < 2; i++)
+		if (xds[i].present && xds[i].is_unplugged && xds[i].removed &&
+		    !xds[i].unregistered)
+			xds[i].unregistered++;
+}
+/* A peer on the root router (index 0) or on the device router behind it (index 1). */
+static void add_xdomain(int i)
+{
+	struct tb_switch *sw = i ? &child : &root;
+
+	xports[i] = (struct tb_port){ .sw = sw, .port = 5 + i, .null = true };
+	xds[i] = (struct tb_xdomain){ .present = true, .port = &xports[i],
+				      .route = tb_downstream_route(&xports[i]) };
+	xports[i].xdomain = &xds[i];
+	if (i) {
+		child.ports = &link[1];
+		link[1].next = &xports[1];
+	} else {
+		link[0].next = &xports[0];
+	}
+}
+/* The refused path's rescan: a released peer whose link is still up is found again. */
+static int rescans, cleanups;
+static void tb_resume_cleanup(struct tb *t)
+{
+	assert(tb.lock);
+	cleanups++;
+}
+static void tb_scan_switch(struct tb_switch *sw)
+{
+	assert(tb.lock && sw == &root);
+	rescans++;
+	for (int i = 0; i < 2; i++)
+		if (xds[i].present && xds[i].unregistered && !xports[i].xdomain) {
+			xds[i] = (struct tb_xdomain){ .present = true, .port = &xports[i],
+						      .route = xds[i].route };
+			xports[i].xdomain = &xds[i];
+		}
+}
+static void check_released(int i)
+{
+	assert(xds[i].is_unplugged && xds[i].removed == 1 && xds[i].paths == 1 &&
+	       xds[i].unregistered == 1 && !xds[i].refs && !xports[i].xdomain);
+}
+static void check_untouched(int i)
+{
+	assert(!xds[i].is_unplugged && !xds[i].removed && !xds[i].paths &&
+	       !xds[i].unregistered && !xds[i].refs && xports[i].xdomain == &xds[i]);
+}
 /* ACTUAL_CM */
 static int pre_activate(struct tb_tunnel *t)
 {
@@ -495,7 +605,13 @@ static void setup(void)
 	root = (struct tb_switch){ .usb4 = true, .uid = 1, .ports = &link[0] };
 	child = (struct tb_switch){ .usb4 = true, .uid = 2 };
 	link[0].remote = &link[1];
+	link[0].next = link[1].next = NULL;
+	link[0].null = link[1].null = true;
+	rescans = cleanups = 0;
 	link[1].sw = &child;
+	memset(xds, 0, sizeof(xds));
+	memset(xports, 0, sizeof(xports));
+	xd_unconfigured = 0;
 	nhi.ops = &nhi_ops;
 	nhi.quirks = 0;
 	tb = (struct tb){ .cm_ops = &tb_cm_ops,
@@ -804,6 +920,108 @@ int main(void)
 	for (int i = 0; i < 4; i++)
 		assert(ports[i].hw.enable);
 	complete();
+	cases++;
+	/* An XDomain peer on the root router: released once, outside the lock for its services. */
+	for (int n = 0; n < 2; n++) {
+		setup();
+		add_xdomain(0);
+		assert(!tb_cio_sleep_prepare(&tb));
+		check_released(0);
+		assert(xd_unconfigured == 1);
+		clients_awake = false;
+		assert(!tb_cio_sleep(&tb));
+		poweroff();
+		physical = true;
+		assert(!tb_cio_wake(&tb, NULL));
+		check_restored();
+		complete();
+		/* Released once: neither the wake nor complete touches it again. */
+		check_released(0);
+		assert(xd_unconfigured == 1);
+		cases++;
+	}
+	/* One behind the device router: the release follows the link down. */
+	setup();
+	add_xdomain(1);
+	assert(!tb_cio_sleep_prepare(&tb));
+	check_released(1);
+	assert(xd_unconfigured == 1);
+	complete();
+	cases++;
+	/* Both at once. */
+	setup();
+	add_xdomain(0);
+	add_xdomain(1);
+	assert(!tb_cio_sleep_prepare(&tb));
+	check_released(0);
+	check_released(1);
+	assert(xd_unconfigured == 2);
+	complete();
+	cases++;
+	/* A tunnel's prepare refused after the release: the release stands. */
+	for (int n = 1; n <= 2; n++) {
+		setup();
+		add_xdomain(0);
+		inject(1, n);
+		assert(tb_cio_sleep_prepare(&tb) == -ENOMEM);
+		assert(!allocated && !cm.cio_prepared && cm.hotplug_active);
+		/* Past the release: the peer is gone as after an unplug, its services unbound. */
+		check_released(0);
+		cases++;
+	}
+	/* One refused before the release (hotplug already stopped) leaves the peer alone. */
+	setup();
+	add_xdomain(1);
+	cm.hotplug_active = false;
+	assert(tb_cio_sleep_prepare(&tb) == -EBUSY);
+	check_untouched(1);
+	assert(!xd_unconfigured);
+	cases++;
+	/*
+	 * A prepare refused later, on the NHI side (PHY, DART, rings): the CM's refused path
+	 * completes, unregisters and rescans, which finds the still-linked peers again.
+	 */
+	setup();
+	add_xdomain(0);
+	add_xdomain(1);
+	assert(!tb_cio_sleep_prepare(&tb));
+	check_released(0);
+	check_released(1);
+	clients_awake = true;
+	tb_cio_sleep_refused(&tb);
+	assert(!cm.cio_prepared && cm.hotplug_active && !cm.resume_cleanup_pending);
+	assert(rescans == 1 && cleanups == 1);
+	check_untouched(0);
+	check_untouched(1);
+	cases++;
+	/* The CM's own refusal after the release (a tunnel's prepare): the same. */
+	setup();
+	add_xdomain(0);
+	inject(1, 1);
+	assert(tb_cio_sleep_prepare(&tb) == -ENOMEM);
+	check_released(0);
+	tb_cio_sleep_refused(&tb);
+	assert(rescans == 1 && !cm.resume_cleanup_pending);
+	check_untouched(0);
+	cases++;
+	/* Refused before anything was released: an ordinary rescan, the peer stays as it is. */
+	setup();
+	add_xdomain(0);
+	cm.stopping = true;
+	assert(tb_cio_sleep_prepare(&tb) == -EBUSY);
+	cm.stopping = false;
+	tb_cio_sleep_refused(&tb);
+	assert(rescans == 1 && !cleanups);
+	check_untouched(0);
+	cases++;
+	/* A connection manager that is stopping is not rescanned. */
+	setup();
+	add_xdomain(0);
+	cm.stopping = true;
+	assert(tb_cio_sleep_prepare(&tb) == -EBUSY);
+	tb_cio_sleep_refused(&tb);
+	assert(!rescans);
+	check_untouched(0);
 	cases++;
 	printf("PASS %u native tunnel replay cases\n", cases);
 }

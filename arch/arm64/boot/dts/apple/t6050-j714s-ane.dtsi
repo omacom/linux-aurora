@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /*
- * The J714s Neural Engine. iBoot preloads the personalized firmware (ADT ane0
- * segment-ranges, TEXT 0xc0000 and DATA 0x2ac000 bytes). The boot loader fills
- * the two reservations from that boot's ADT, renames them to their physical
- * addresses and enables them; until then the ANE driver leaves the engine off.
+ * The Neural Engine of the J714s and the J716c, which share its layout. iBoot
+ * preloads the personalized firmware (ADT ane0 segment-ranges, TEXT 0xc0000 and
+ * DATA 0x2ac000 bytes). The boot loader fills the two reservations from that
+ * boot's ADT, renames them to their physical addresses and enables them; until
+ * then the ANE driver leaves the engine off.
  */
 
 / {

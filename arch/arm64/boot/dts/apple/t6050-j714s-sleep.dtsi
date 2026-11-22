@@ -140,17 +140,23 @@
 	status = "okay";
 };
 
-/* The port controllers put in system power state S3 before the commit, then SLEEP */
+/*
+ * The port controllers put in system power state S3 before the commit, then SLEEP; the USB-C
+ * ports' also get macOS's power state sequence at a cable change.
+ */
 &hpm0 {
 	apple,sleep-ssps;
+	apple,cable-change-ssps;
 };
 
 &hpm1 {
 	apple,sleep-ssps;
+	apple,cable-change-ssps;
 };
 
 &hpm2 {
 	apple,sleep-ssps;
+	apple,cable-change-ssps;
 };
 
 &hpm5 {

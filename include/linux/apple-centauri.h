@@ -42,5 +42,7 @@ bool apple_centauri_control_ready(struct pci_dev *pdev);
 bool apple_centauri_sleep_reboot(struct pci_dev *fn);
 /* From a resume that found its function torn down by a suspend that stopped short */
 void apple_centauri_sleep_rewake(struct pci_dev *fn);
+/* Beta fell back to teardown during suspend; Control must also tear down and warm-reset. */
+void apple_centauri_sleep_mark_fallback(struct pci_dev *fn);
 
 #endif

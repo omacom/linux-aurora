@@ -71,7 +71,6 @@ static struct {
 	bool cold;
 	bool sepos13;
 	bool xart;
-	bool provision_keybag;
 	bool trusted_keys;
 	bool filevault_api;
 	bool xarm_trace;
@@ -164,7 +163,11 @@ static ssize_t xart_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(xart);
 
-/* Parameter policy is captured at probe; the identity choice is cached later. */
+/*
+ * Parameter policy is captured at probe; the identity choice is cached later.
+ * provision_keybag stays in the line for ABI 3 readers: the parameter is gone
+ * and the driver always provisions (an existing keybag is kept).
+ */
 static ssize_t policy_show(struct device *dev, struct device_attribute *attr,
 			   char *buf)
 {
@@ -185,20 +188,18 @@ static ssize_t policy_show(struct device *dev, struct device_attribute *attr,
 		break;
 	}
 	return sysfs_emit(buf,
-		"xart_writes=%u provision_keybag=%u xart_guard=%u "
+		"xart_writes=%u provision_keybag=1 xart_guard=%u "
 		"trusted_keys=%u filevault_api=%u xarm_trace=%u "
 		"refkey_v2=%u identity_override=%u identity_source=%s\n",
-		sep_diag.xart, sep_diag.provision_keybag, sep_diag.xart_guard,
+		sep_diag.xart, sep_diag.xart_guard,
 		sep_diag.trusted_keys, sep_diag.filevault_api, sep_diag.xarm_trace,
 		sep_diag.refkey_v2, sep_diag.identity_override, identity);
 }
 static DEVICE_ATTR_RO(policy);
 
-void sep_diag_set_policy(bool provision_keybag, bool trusted_keys,
-			 bool filevault_api, bool xarm_trace, bool refkey_v2,
-			 bool identity_override)
+void sep_diag_set_policy(bool trusted_keys, bool filevault_api,
+			 bool xarm_trace, bool refkey_v2, bool identity_override)
 {
-	sep_diag.provision_keybag = provision_keybag;
 	sep_diag.trusted_keys = trusted_keys;
 	sep_diag.filevault_api = filevault_api;
 	sep_diag.xarm_trace = xarm_trace;

@@ -26,10 +26,11 @@ Manual fan speed is available on the fans whose Devicetree node has
 apple,fan-manual-control, which a machine's Devicetree sets once its SMC
 firmware is known to accept a manual speed and to take the fan back. On
 those fans fanX_target is writable; writing 0 hands the fan back to the
-firmware. The fan_control module parameter, disabled by default and marked
-as unsafe, allows manual speeds on every fan with a mode key whatever the
-Devicetree says. It cannot be proven that the system will fail safe if it
-overheats under a manual fan speed.
+firmware. On other fans fanX_target is read-only; there is no module
+parameter to override the Devicetree. The SMC does not check a manual speed
+against its own thermal policy, so a machine's Devicetree should set
+apple,fan-manual-control only where the firmware is known to take the fan
+back.
 
 The driver leaves fan policy to the SMC until userspace writes a nonzero
 ``fanX_target``. Thermal zones do not take fans into manual mode. Suspend,

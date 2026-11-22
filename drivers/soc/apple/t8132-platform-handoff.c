@@ -319,7 +319,7 @@ static int __init t8132_platform_handoff(void)
 	unsigned int added = 0, changed = 0;
 	int root, node, ret;
 
-	if (!apple_t8132_firmware_path() || !of_machine_is_compatible("apple,t8132"))
+	if (!apple_t8132_firmware_path())
 		return 0;
 	if (fdt_check_header(data))
 		return -EINVAL;

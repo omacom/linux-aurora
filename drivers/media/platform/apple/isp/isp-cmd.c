@@ -5,11 +5,8 @@
 #include "isp-drv.h"
 #include "isp-iommu.h"
 #include "isp-ipc.h"
-#include <linux/unaligned.h>
-
-#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
 #include <kunit/static_stub.h>
-#endif
+#include <linux/unaligned.h>
 
 #define CISP_OPCODE_SHIFT     32UL
 #define CISP_OPCODE(x)	      (((u64)(x)) << CISP_OPCODE_SHIFT)
@@ -78,9 +75,7 @@ int isp_cmd_send(struct apple_isp *isp, void *args, u32 insize, u32 outsize, int
 	if (READ_ONCE(isp->ipc_error))
 		return READ_ONCE(isp->ipc_error);
 
-#if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)
 	KUNIT_STATIC_STUB_REDIRECT(isp_cmd_send, isp, args, insize, outsize, timeout);
-#endif
 	return isp_cmd_send_chan(isp, isp->chan_io, args, insize, outsize,
 				 timeout);
 }
@@ -288,6 +283,7 @@ int isp_cmd_fid_exit(struct apple_isp *isp)
 
 int isp_cmd_ch_start(struct apple_isp *isp, u32 chan)
 {
+	KUNIT_STATIC_STUB_REDIRECT(isp_cmd_ch_start, isp, chan);
 	struct cmd_ch_start args = {
 		.opcode = CISP_OPCODE(CISP_CMD_CH_START),
 		.chan = chan,
@@ -297,6 +293,7 @@ int isp_cmd_ch_start(struct apple_isp *isp, u32 chan)
 
 int isp_cmd_ch_stop(struct apple_isp *isp, u32 chan)
 {
+	KUNIT_STATIC_STUB_REDIRECT(isp_cmd_ch_stop, isp, chan);
 	struct cmd_ch_stop args = {
 		.opcode = CISP_OPCODE(CISP_CMD_CH_STOP),
 		.chan = chan,
@@ -370,6 +367,7 @@ int isp_cmd_ch_camera_config_select(struct apple_isp *isp, u32 chan, u32 preset)
 
 int isp_cmd_ch_buffer_return(struct apple_isp *isp, u32 chan)
 {
+	KUNIT_STATIC_STUB_REDIRECT(isp_cmd_ch_buffer_return, isp, chan);
 	struct cmd_ch_buffer_return args = {
 		.opcode = CISP_OPCODE(CISP_CMD_CH_BUFFER_RETURN),
 		.chan = chan,

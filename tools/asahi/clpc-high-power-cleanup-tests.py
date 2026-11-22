@@ -231,7 +231,7 @@ def main():
                                      cwd=ROOT, text=True) if args.old_ref else (ROOT / DRIVER).read_text())
     # This is the action whose callback runs after devres removes the profile.
     assert source.index('devm_add_action_or_reset(dev, apple_clpc_stop, clpc)') < source.index(
-        'devm_platform_profile_register(dev, "apple-clpc"')
+        'devm_platform_profile_register(dev,')
     defines = '\n'.join(re.findall(r'^#define APPLE_CLPC_(?:ZETM_\w+|FLOAT_ONE)\s+[^\n]+', source, re.M))
     body = '\n\n'.join(function(source, n) for n in (
         'apple_clpc_send_high_power', 'apple_clpc_profile_set', 'apple_clpc_halt', 'apple_clpc_stop'))

@@ -48,8 +48,14 @@ def build(src, out, baseline):
         match = re.search(r'^#define ' + name + r'\s+[^\n]+', header, re.M)
         if match:
             code += match[0] + '\n'
+    # Every firmware build's text CRC and the rate-control modes: ave-layout.c and
+    # ave-sess.c name them, and each new build adds one, so take them all.
+    defined = set(re.findall(r'^#define (\w+)', code, re.M))
+    for m in re.finditer(r'^#define ((?:AVE_FW_TEXT_CRC|AVE_RC)_\w+)\s+[^\n]+', header, re.M):
+        if m[1] not in defined:
+            code += m[0] + '\n'
     # Later firmware builds; an older baseline does not define them.
-    for name in ('AVE_FW_TEXT_CRC_T6040_25G83', 'AVE_MCTF_BUFS', 'AVE_MCTF_IN_BUFS',
+    for name in ('AVE_MCTF_BUFS', 'AVE_MCTF_IN_BUFS',
                  'AVE_MCTF_OUT_BUFS', 'AVE_MCTF_POOL_LENT', 'AVE_MCTF_POOL_READY'):
         m = re.search(r'^#define ' + name + r'\s+[^\n]+', header, re.M)
         if m:
@@ -101,6 +107,8 @@ def build(src, out, baseline):
     (out / 'host.c').write_text(code)
     subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-g',
                     '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                    # host.c pastes whole driver files: helpers the tests don't call are fine.
+                    '-Wno-unused-function',
                     '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
                     str(out / 'host.c'), '-o', str(out / 'ave-test')], check=True)
     return out / 'ave-test'

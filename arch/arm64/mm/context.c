@@ -41,11 +41,11 @@ static unsigned long *pinned_asid_map;
 
 #ifdef CONFIG_ARM64_USER4K_EXPERIMENTAL
 /*
- * Experimental mixed-granule userspace is off unless booted with user4k=on.
- * Early parameters are parsed in setup_arch(), before page_ext sizing and
- * CPU capability detection read this.
+ * Mixed-granule userspace is on unless booted with user4k=off. Early
+ * parameters are parsed in setup_arch(), before page_ext sizing and CPU
+ * capability detection read this.
  */
-bool arm64_user4k_on __ro_after_init;
+bool arm64_user4k_on __ro_after_init = true;
 
 static int __init user4k_setup(char *str)
 {

@@ -39,4 +39,6 @@ int asahi_sysfs_register(struct device *dev, const void *snapshot,
 int asahi_sysfs_register_idle(struct device *dev, u32 *word);
 void asahi_sysfs_unregister(struct device *dev, void *handle);
 
+void asahi_set_mem_limit_pct(u32 pct);
+
 #endif /* _ASAHI_SYSFS_H */

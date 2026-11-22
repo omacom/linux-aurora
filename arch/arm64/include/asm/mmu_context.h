@@ -30,7 +30,7 @@
 #define arch_mm_init_exec arch_mm_init_exec
 static inline void arch_mm_init_exec(struct mm_struct *mm, unsigned int page_shift)
 {
-	/* Without user4k=on every exec gets the native granule. */
+	/* With user4k=off every exec gets the native granule. */
 	if (!user4k_enabled())
 		return;
 	if (page_shift == 12)

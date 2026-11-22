@@ -139,6 +139,12 @@ pub(crate) use residency::{Gate as ResidencyGate, VmShrinker};
 
 /// PPL magic number for the handoff region
 const PPL_MAGIC: u64 = 0x4b1d000000000002;
+/// Written by the G18G GFX firmware of macOS 27.2 (RTKit 3514.41.1) to the
+/// handoff's firmware magic while it maps the handoff region during its own
+/// boot, whether or not a peer exists. It is not a
+/// PPL handshake reply (that is [`PPL_MAGIC`]); 3514.0.15 writes nothing.
+#[cfg(CONFIG_DRM_ASAHI_G18)]
+const FW_BOOT_MAGIC_V3: u64 = 0x4b1d000000000003;
 
 /// Number of supported context entries in the TTBAT
 const UAT_NUM_CTX: usize = 64;
@@ -236,8 +242,8 @@ pub(crate) struct UatQuirks {
     /// Keep the shared pool window and the client-private window at their original split
     /// (`hw::t8140::dynamic::LOWER`, `CLIENT_LOWER`) instead of the A18 Pro's
     /// (`WIDE_LOWER`, `WIDE_CLIENT_LOWER`), which holds the render pools of every execution
-    /// context at once. The M4 Pro/Max could also use the wider pool window, for its larger
-    /// compute pools.
+    /// context at once. The M4 Max uses the wider pool window too: with 40 cores its compute
+    /// pools outgrow the largest free range of the narrow one. The M4 Pro could too.
     pub(crate) narrow_pool_window: bool,
 }
 
@@ -2332,7 +2338,7 @@ impl Handoff {
     fn init(&self, firmware: UatFirmware, slot: u32, unk2: u8) -> Result {
         #[cfg(CONFIG_DRM_ASAHI_G18)]
         if firmware.is_no_peer()
-            && (self.magic_fw.load(Ordering::Acquire) != 0
+            && (!matches!(self.magic_fw.load(Ordering::Acquire), 0 | FW_BOOT_MAGIC_V3)
                 || self.lock_fw.load(Ordering::Acquire) != 0)
         {
             pr_err!("T8152 handoff: unexpected firmware peer; refusing no-peer mode\n");

@@ -19,6 +19,7 @@
 #include "audio.h"
 #include "afk.h"
 #include "av.h"
+#include "cec.h"
 #include "dcp.h"
 #include "dcp-internal.h"
 
@@ -994,19 +995,7 @@ static const struct apple_epic_service_ops av_desktop_ops[] = {
 		.report = av_audiosrv_report,
 		.teardown = av_audiosrv_teardown,
 	},
-	{
-		/*
-		 * The same endpoint also publishes the processor's CEC
-		 * interface, cut to "dcpav-cec-interface-ep" as above. The
-		 * host makes no use of CEC: take it and drop its reports.
-		 */
-		.name = "dcpav-cec-interface-epic",
-		.compact_full = "dcpav-cec-interface-epic:0",
-		.singleton = true,
-		.init = av_cec_init,
-		.report = av_cec_report,
-		.teardown = av_cec_teardown,
-	},
+	DCP_CEC_COMPACT_SERVICE_OPS,
 	{
 		/*
 		 * And its video interface, cut to "dcpav-video-interface-" on
@@ -1055,6 +1044,14 @@ void av_service_connect(struct apple_dcp *dcp)
 	struct apple_epic_service *service;
 	struct audiosrv_data *asrv = dcp->audiosrv;
 	int ret;
+
+	/*
+	 * dcp->avep alone does not mean an audio service: an HDMI processor
+	 * whose audio is not started gets the endpoint for CEC only
+	 * (dcp_cec_init_avep()), with no audio owner.
+	 */
+	if (!asrv)
+		return;
 
 	scoped_guard(rwsem_write, &asrv->srv_rwsem) {
 		service = afk_service_pin(asrv->srv);
@@ -1141,6 +1138,10 @@ static void __av_service_disconnect(struct apple_dcp *dcp, const u64 *gen)
 	struct apple_epic_service *service;
 	struct audiosrv_data *asrv = dcp->audiosrv;
 	int ret;
+
+	/* A CEC-only endpoint has no audio owner (av_service_connect()). */
+	if (!asrv)
+		return;
 
 	scoped_guard(rwsem_write, &asrv->srv_rwsem) {
 #if IS_ENABLED(CONFIG_DRM_APPLE_DCP_T6030_AUDIO)

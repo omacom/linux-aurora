@@ -8,6 +8,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 559 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_debug_gated>;
 		status = "disabled";
 	};
 
@@ -105,6 +106,7 @@
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x2 0x85020000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_venc0_sys>;
 	};
 
 	dart_ave03: filter@285044000 {
@@ -137,6 +139,7 @@
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x3 0xc5020000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_venc1_sys>;
 	};
 
 	dart_ave13: filter@3c5044000 {
@@ -155,12 +158,14 @@
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x3 0x8e4b0000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_isp_sys>;
 	};
 
 	dart_isp0_companion4: iommu@38e4b8000 {
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x3 0x8e4b8000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_isp_sys>;
 	};
 
 	dart_isp0_companion5: filter@38e4ac000 {
@@ -179,6 +184,7 @@
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x3 0x85300000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_disp_fe>;
 	};
 
 	dart_ane0_companion3: filter@3c9804000 {
@@ -191,24 +197,28 @@
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x3 0x05300000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_dispext0_cpu>;
 	};
 
 	dart_dispext1_companion1: iommu@449300000 {
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x4 0x49300000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_dispext1_cpu>;
 	};
 
 	dart_dispext2_companion1: iommu@44d300000 {
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x4 0x4d300000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_dispext2_cpu>;
 	};
 
 	dart_dispext3_companion1: iommu@2c9300000 {
 		compatible = "apple,t6031-dart-smmu", "apple,dart-smmu";
 		reg = <0x2 0xc9300000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_dispext3_cpu>;
 	};
 
 	apcie0_piodma: dma-controller@594010000 {
@@ -842,17 +852,20 @@
 	ave0: video-encoder@285100000 {
 		compatible = "apple,t6031-ave", "apple,ave";
 		reg = <0x2 0x85100000 0x0 0x45c000>,
-		      <0x2 0x85800000 0x0 0x800000>,
 		      <0x2 0x85050000 0x0 0x4000>,
+		      <0x2 0x85800000 0x0 0x800000>,
 		      <0x2 0x92800430 0x0 0x20c>,
 		      <0x2 0x84000000 0x0 0x1000000>;
+		reg-names = "codec", "mailbox", "coproc", "pmgr", "pio";
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 1207 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1201 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1200 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1203 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1202 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&ps_venc0_sys>, <&ps_venc0_pipe4>, <&ps_venc0_pipe5>, <&ps_venc0_me0>, <&ps_venc0_me1>, <&ps_venc0_dma>;
+			     <AIC_IRQ 0 1201 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1200 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1203 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1202 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_venc0_dma>, <&ps_venc0_pipe4>,
+				<&ps_venc0_pipe5>, <&ps_venc0_me0>, <&ps_venc0_me1>;
+		power-domain-names = "dma", "pipe4", "pipe5", "me0", "me1";
 		iommus = <&dart_ave00 0>, <&dart_ave01 0>;
 		status = "disabled";
 	};
@@ -860,17 +873,20 @@
 	ave1: video-encoder@3c5100000 {
 		compatible = "apple,t6031-ave", "apple,ave";
 		reg = <0x3 0xc5100000 0x0 0x45c000>,
-		      <0x3 0xc5800000 0x0 0x800000>,
 		      <0x3 0xc5050000 0x0 0x4000>,
+		      <0x3 0xc5800000 0x0 0x800000>,
 		      <0x2 0x92280510 0x0 0x7b14>,
 		      <0x3 0xc4000000 0x0 0x1000000>;
+		reg-names = "codec", "mailbox", "coproc", "pmgr", "pio";
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 1219 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1213 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1212 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1215 IRQ_TYPE_LEVEL_HIGH>,
-		             <AIC_IRQ 0 1214 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&ps_venc1_pipe4>, <&ps_venc1_pipe5>, <&ps_venc1_me0>, <&ps_venc1_me1>, <&ps_venc1_dma>;
+			     <AIC_IRQ 0 1213 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1212 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1215 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 0 1214 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_venc1_dma>, <&ps_venc1_pipe4>,
+				<&ps_venc1_pipe5>, <&ps_venc1_me0>, <&ps_venc1_me1>;
+		power-domain-names = "dma", "pipe4", "pipe5", "me0", "me1";
 		iommus = <&dart_ave10 0>, <&dart_ave11 0>;
 		status = "disabled";
 	};

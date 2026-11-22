@@ -57,7 +57,7 @@ struct centauri_t6050_wifi;
 struct centauri_t6050 { struct centauri_t6050_wifi *wifi; bool removing; };
 struct wiphy { struct centauri_t6050_wifi *wifi; };
 struct net_device { int unused; };
-struct cfg80211_wowlan { int unused; };
+struct cfg80211_wowlan { bool any; };
 '''
 
 STUBS = r'''
@@ -65,7 +65,7 @@ struct centauri_t6050_wifi {
     struct centauri_t6050 *control;
     struct { u8 *window, *bar; uint64_t window_dma; } a;
     int lock, connect_work, link_work, data_tx_queue;
-    bool command_failed, stopping, connect_abort, disconnect_pending, connected;
+    bool command_failed, stopping, connect_abort, disconnect_pending, connecting, connected;
     bool reply_valid, pm_prepared;
     u16 command_head, sequence, reply_capture, reply_sequence, reply_status;
     u32 reply_command;
@@ -188,7 +188,19 @@ int main(void)
     assert(!wifi.pm_disconnect.seen);
     expect_error(0); /* Missing transaction remains missing. */
     struct cfg80211_wowlan wowlan = {};
-    assert(call_registered_suspend(&wiphy, &wowlan) == -EOPNOTSUPP);
+    assert(call_registered_suspend(&wiphy, &wowlan) == 1);
+    wowlan.any = true;
+    assert(call_registered_suspend(&wiphy, &wowlan) == 0);
+    assert(!doorbells && !wifi.pm_disconnect.seen);
+    wifi.connected = false;
+    assert(call_registered_suspend(&wiphy, &wowlan) == 1);
+    wifi.connected = true;
+    wifi.connecting = true;
+    assert(call_registered_suspend(&wiphy, &wowlan) == 1);
+    wifi.connecting = false;
+    wifi.command_failed = true;
+    assert(call_registered_suspend(&wiphy, &wowlan) == 1);
+    wifi.command_failed = false;
     assert(!doorbells && !wifi.pm_disconnect.seen);
 
     firmware_status = 326;
@@ -365,11 +377,13 @@ static int call_registered_resume(struct wiphy *wiphy)
          "wifi->pm_prepared"),
         ("stale-reply", "receipt.replied = receipt.submitted && (!ret || ret == -EREMOTEIO);",
          "receipt.replied = true;"),
+        ("wowlan-ignores-trigger", "wowlan->any && ", ""),
     ]
     failures = {
         'lost-suspend-error': 'centauri_t6050_wifi_pm_error(&control) == expected',
         'overwritten-first-error': 'wifi.pm_disconnect.status == 777',
         'stale-reply': '!wifi.pm_disconnect.submitted && !wifi.pm_disconnect.replied',
+        'wowlan-ignores-trigger': 'call_registered_suspend(&wiphy, &wowlan) == 1',
     }
     for name, before, after in negative_controls if args.negative_controls else []:
         if before not in production:

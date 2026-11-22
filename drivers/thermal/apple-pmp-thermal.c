@@ -181,6 +181,7 @@ static void apple_pmp_power_work(struct work_struct *work)
 	 * for a read started in its own epoch, even if detach/attach was brief.
 	 */
 	u64 epoch = apple_pmp_gpu_epoch(pmp_thermal.sensors);
+	bool dark = false;
 	u64 now;
 	int ret = apple_pmp_power_read_rails(mw);
 	/* The running reader cannot read zero on both CPU rails. A firmware
@@ -194,8 +195,22 @@ static void apple_pmp_power_work(struct work_struct *work)
 	 */
 	mutex_lock(&pmp_thermal.lock);
 	now = ktime_get_ns();
-	if (!ret && (!pmp_thermal.enabled || pmp_thermal.cached_error ||
-		     now - pmp_thermal.cooling.last_ns > 500000000ULL))
+	/*
+	 * Every sensor dark (-ENODATA) is not a telemetry fault: the clusters are
+	 * powered down, the rails were read, and the thermal guard already holds
+	 * the floor for that sample. Skip this budget sample instead of resetting
+	 * every budget to full restriction, which then releases one step per
+	 * second and keeps a CPU that just woke up near its minimum for tens of
+	 * seconds. The GPU gets full protection for the dark sample instead.
+	 * A dark span longer than APPLE_PMP_POWER_STALE_NS still fails closed:
+	 * the guard and the GPU treat the budget as stale, and the first
+	 * sample after the span takes the policy's gap path.
+	 */
+	if (!ret && pmp_thermal.enabled && pmp_thermal.cached_error == -ENODATA &&
+	    now - pmp_thermal.cooling.last_ns <= 500000000ULL)
+		dark = true;
+	else if (!ret && (!pmp_thermal.enabled || pmp_thermal.cached_error ||
+			  now - pmp_thermal.cooling.last_ns > 500000000ULL))
 		ret = -EAGAIN;
 	pmp_thermal.power_error = ret;
 	if (!ret)
@@ -207,9 +222,18 @@ static void apple_pmp_power_work(struct work_struct *work)
 	if (epoch)
 		active |= BIT(2);
 	apple_pmp_power_set_active(p, active);
-	apple_pmp_power_sample(p, now, mw, pmp_thermal.cached_mc, ret);
-	apple_pmp_gpu_publish(pmp_thermal.sensors, epoch, p->level[2],
-			      active & BIT(2) ? p->last_ns : 0);
+	if (dark) {
+		/*
+		 * Nothing else restricts the GPU's budget while the sensors are
+		 * dark: a zero publication selects full protection, and the next
+		 * real budget sample republishes its level at once.
+		 */
+		apple_pmp_gpu_publish(pmp_thermal.sensors, epoch, 8, 0);
+	} else {
+		apple_pmp_power_sample(p, now, mw, pmp_thermal.cached_mc, ret);
+		apple_pmp_gpu_publish(pmp_thermal.sensors, epoch, p->level[2],
+				      active & BIT(2) ? p->last_ns : 0);
+	}
 	pr_debug("apple-pmp-thermal: power ns=%llu mc=%ld p_mw=%u e_mw=%u gpu_mw=%u total_mw=%d sustainable_mw=%d allowed_mw=%d credit_mj=%lld p_level=%u e_level=%u gpu_level=%u error=%d\n",
 		now, pmp_thermal.cached_mc, mw[0], mw[1], mw[2], p->total_mw,
 		p->sustainable_mw, p->allowed_mw, p->credit_mj,

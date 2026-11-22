@@ -43,6 +43,9 @@ enum nl80211_sae_pwe_mechanism { NL80211_SAE_PWE_UNSPECIFIED, NL80211_SAE_PWE_HU
 #define WLAN_AKM_SUITE_OWE 0x000fac12
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
 #define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define smp_load_acquire(p) (*(p))
+#define container_of(p,t,f) ((t*)((char*)(p)-offsetof(t,f)))
 #define BIT(n) (1U << (n))
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof(*(x)))
 #define GFP_ATOMIC 0
@@ -53,6 +56,7 @@ typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t
 #define NL80211_CHAN_WIDTH_40 1
 #define NL80211_CHAN_WIDTH_80 2
 #define WLAN_REASON_UNSPECIFIED 1
+#define WLAN_REASON_DISASSOC_DUE_TO_INACTIVITY 4
 #define WLAN_EID_HT_CAPABILITY 45
 struct element {u8 id,datalen,data[];};
 #define WLAN_EID_EXTENSION 255
@@ -62,7 +66,11 @@ struct element {u8 id,datalen,data[];};
 #define dev_dbg(...) ((void)0)
 #define spin_lock_irqsave(l,f) ((void)(l),(f)=0)
 #define spin_unlock_irqrestore(l,f) ((void)(l),(void)(f))
+#define spin_lock(l) ((void)(l))
+#define spin_unlock(l) ((void)(l))
 #define msecs_to_jiffies(x) (x)
+#define time_before(a,b) ((long)((a)-(b))<0)
+#define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
 static unsigned command_locked;
 #define mutex_unlock(l) do { assert(command_locked); command_locked=0; } while(0)
 #define mutex_lock(l) do { assert(!command_locked); command_locked=1; } while(0)
@@ -75,13 +83,16 @@ HEADERS
 struct completion {unsigned done;};
 static void complete(struct completion*c){if(c->done!=UINT_MAX)c->done++;}
 static void complete_all(struct completion*c){c->done=UINT_MAX;}
+static void reinit_completion(struct completion*c){c->done=0;}
+struct work_struct;
 struct ieee80211_channel {int center_freq;};
 struct cfg80211_chan_def {struct ieee80211_channel *chan;int width,center_freq1;};
 struct test_band {struct {bool ht_supported;}ht_cap;};
 struct test_wiphy {struct test_band *bands[NUM_NL80211_BANDS];};
 static struct test_wiphy wiphy;
 struct mt7932 {
- void *pdev,*netdev;struct test_wiphy *wiphy;int response_lock,command_mutex,cal_work,disconnect_work;
+ void *pdev,*netdev;struct test_wiphy *wiphy;int response_lock,command_mutex,cal_work,disconnect_work,data_lock;
+ bool data_ready,roam_moving;u32 station_rx_packets;unsigned long station_rx_time;u16 station_beacon_tu;
  struct completion assoc_start,assoc_done,discovery_done,disconnect_done,cal_response,response;
  bool connecting,connected,disconnecting,disconnect_seen,disconnect_event_received;
  bool disconnect_local,connect_open,assoc_request_seen,peer_valid,link_failed,stopping,rf_ready;
@@ -129,8 +140,15 @@ static void mt_packet_receive(struct mt7932*m,const u8*p,size_t n){}
 static void mt_hif_event(struct mt7932*m,const struct mt7932_event*e){}
 static void mt_wow_reason_event(struct mt7932*m,const struct mt7932_event*e){}
 static void mt_rf_fail_locked(struct mt7932*m,int e){m->rf_ready=false;m->link_failed=true;m->cal_state.error=e;m->cal_state.active=false;m->connect_error=e;complete_all(&m->assoc_done);complete_all(&m->cal_response);}
+static unsigned recoveries,reports,retires;static int quiesce_ret,retire_ret;static u16 reported_reason;static bool reported_local;
+static void mt_request_recovery(struct mt7932*m,const char*why){assert(m->link_failed&&why&&*why);recoveries++;}
+static int mt_scan_quiesce(struct mt7932*m){return quiesce_ret;}
+static int mt_retire_connection(struct mt7932*m){retires++;if(retire_ret)m->link_failed=true;return retire_ret;}
+static void mt_report_disconnected(struct mt7932*m,u16 reason,bool local,int gfp){reports++;reported_reason=reason;reported_local=local;}
+static void mt_reg_apply_deferred_locked(struct mt7932*m){}
 CHANNEL
 LINK
+LOSS
 RECEIVE
 static void receive(struct mt7932*m,u8 eid,u8 seq,const u8*body,size_t n,u32 selector){
  u8 packet[600]={};size_t offset=eid==0xee?48:36,total=offset+n;
@@ -179,7 +197,7 @@ out:
  assert(command_locked);command_locked=0;return ret?:m->connect_error;
 }
 static struct mt7932 fresh(void){return (struct mt7932){.netdev=(void*)1,.wiphy=&wiphy,.connecting=true,.rf_ready=true,.connect_channel=11,.smart_version=12,.peer_ids={{1,2},{3,4,5,6}}};}
-static void reset(struct mt7932*m,enum scenario s){*m=fresh();active=m;which=s;cal_calls=queue_calls=scheduled=first_waits=final_waits=total_wait_budget=0;queue_error=cal_error=0;usable=true;command_locked=0;jiffies=first_elapsed=cal_elapsed=queue_elapsed=0;retried=false;final_budget=10000;}
+static void reset(struct mt7932*m,enum scenario s){*m=fresh();active=m;which=s;cal_calls=queue_calls=scheduled=first_waits=final_waits=total_wait_budget=0;recoveries=reports=retires=0;quiesce_ret=retire_ret=0;queue_error=cal_error=0;usable=true;command_locked=0;jiffies=first_elapsed=cal_elapsed=queue_elapsed=0;retried=false;final_budget=10000;}
 int main(void){struct mt7932 m;unsigned cases=0;
  for(enum scenario s=SUCCESS;s<=DUP_FLOOD;s++){
   reset(&m,s);int e=worker_wait(&m);
@@ -228,6 +246,33 @@ int main(void){struct mt7932 m;unsigned cases=0;
  assert(!m.connect_error&&m.assoc_request_seen&&m.assoc_request_ie_len==28&&!memcmp(m.assoc_request_ies,ies+4,28)&&ht_lookups==1&&ht_found==m.assoc_request_ies);cases++;
  reset(&m,SUCCESS);ies[5]=25;ht_lookups=0;receive(&m,0xee,0,ies,sizeof(ies),0x5e);
  assert(m.connect_error==-EPROTO&&!m.assoc_request_seen&&!ht_lookups&&m.assoc_start.done&&m.assoc_done.done);cases++;
+ // EID 0x13: the firmware lost the station's AP; the host ends that connection, BSS 0 only.
+ u8 lost[4]={0,3,3,0};
+ #define CONNECTED(m) do{reset(&(m),SUCCESS);(m).connecting=false;(m).connected=true;(m).peer_valid=true;}while(0)
+ CONNECTED(m);receive(&m,0x13,0,lost,4,0);
+ assert(!m.connected&&m.disconnecting&&!m.disconnect_local&&m.disconnect_reason==WLAN_REASON_DISASSOC_DUE_TO_INACTIVITY&&scheduled==1);cases++;
+ receive(&m,0x13,0,lost,4,0);assert(scheduled==1);cases++;
+ CONNECTED(m);lost[0]=1;receive(&m,0x13,0,lost,4,0);assert(m.connected&&!m.disconnecting&&!scheduled);lost[0]=0;cases++;
+ CONNECTED(m);receive(&m,0x13,0,lost,3,0);assert(m.connected&&!scheduled);cases++;
+ // A frame from the AP within its beacon-loss span (7 beacon intervals: 717 ms at 100 TU) keeps it,
+ // whatever cause the firmware gives; an older one, or no known interval, doesn't.
+ CONNECTED(m);m.data_ready=true;m.station_rx_packets=1;m.station_beacon_tu=100;jiffies=5000;m.station_rx_time=4500;
+ receive(&m,0x13,0,lost,4,0);assert(m.connected&&!scheduled);cases++;
+ lost[1]=0x0e;receive(&m,0x13,0,lost,4,0);assert(m.connected&&!scheduled);lost[1]=3;cases++;
+ CONNECTED(m);m.data_ready=true;m.station_rx_packets=1;m.station_beacon_tu=100;jiffies=5000;m.station_rx_time=4000;
+ receive(&m,0x13,0,lost,4,0);assert(!m.connected&&scheduled==1);cases++;
+ CONNECTED(m);m.data_ready=true;m.station_rx_packets=1;m.station_beacon_tu=0;jiffies=5000;m.station_rx_time=4999;
+ receive(&m,0x13,0,lost,4,0);assert(!m.connected&&scheduled==1);cases++;
+ // AWDL's station-record command answers with ID 0x13 too: the reply goes to its waiter.
+ CONNECTED(m);m.waiting=7;m.waiting_eid=0x13;receive(&m,0x13,7,lost,4,0);
+ assert(m.connected&&!scheduled&&m.reply_length&&m.response.done);cases++;
+ // A disconnect whose scan never ends latches the link, asks for one reset, and is still reported.
+ CONNECTED(m);m.connected=false;m.disconnecting=true;m.disconnect_reason=3;m.disconnect_local=true;quiesce_ret=-EBUSY;
+ mt_disconnect_work((struct work_struct*)&m.disconnect_work);
+ assert(m.link_failed&&recoveries==1&&!retires&&reports==1&&reported_reason==3&&reported_local&&!m.disconnecting);cases++;
+ // A clean one asks for none; a failed retire latches it itself (its own request is in the retire).
+ CONNECTED(m);m.connected=false;m.disconnecting=true;mt_disconnect_work((struct work_struct*)&m.disconnect_work);
+ assert(!m.link_failed&&!recoveries&&retires==1&&reports==1);cases++;
  printf("PASS %u association event/wait/calibration ownership controls\n",cases);
 }
 '''
@@ -242,6 +287,7 @@ def main():
     root=args.source_root;out=args.out;out.mkdir(parents=True,exist_ok=True)
     link=(root/DRIVER/"link.c").read_text();rx=(root/DRIVER/"mt7932.c").read_text()
     parts={"CHANNEL":function(link,"mt_channel_event"),"LINK":function(link,"mt_link_event"),"RECEIVE":function(rx,"mt_receive")}
+    parts["LOSS"]="\n\n".join(function(link,n) for n in ("mt_end_connection_locked","mt_beacon_timeout_event","mt_disconnect_work"))
     worker=function(link,"mt_connect_attempt")
     start=worker.index("\t/* Genuine D7 requests")
     parts["WAIT"]=worker[start:worker.index("\nout:",start)]
@@ -259,6 +305,10 @@ def main():
     # The receive path's other events, by their production IDs: the firmware's HIF and WoW reports.
     headers.append(re.search(r"^#define MT7932_CID_HIF_CTRL\b.*$", rx, re.M).group(0))
     headers.append(re.search(r"^#define MT7932_EID_WOW_REASON\b.*$", (root/DRIVER/"wow.h").read_text(), re.M).group(0))
+    # The beacon-timeout event and its beacon-loss span.
+    mh=(root/DRIVER/"mt7932.h").read_text()
+    b=mh.index("#define MT7932_EID_BEACON_TIMEOUT");e=mh.index("\n}\n",mh.index("mt7932_beacon_loss_ms("))+3
+    headers.append(mh[b:e])
     parts["HEADERS"]="\n".join(headers)
     candidates={"production":parts}
     if args.old_source:
@@ -267,6 +317,14 @@ def main():
     bad=dict(parts);bad["LINK"]=parts["LINK"].replace("!mt7932_assoc_resources(","false && !mt7932_assoc_resources(");candidates["mutant-peer-ownership"]=bad
     bad=dict(parts);bad["RECEIVE"]=parts["RECEIVE"].replace("event.eid == 0xd6","event.eid == 0xff");candidates["mutant-d6-ownership"]=bad
     bad=dict(parts);bad["WAIT"]=parts["WAIT"].replace("10000","20000");candidates["mutant-deadline"]=bad
+    def mutant(name,key,old,new):
+        b=dict(parts);assert old in parts[key],name;b[key]=parts[key].replace(old,new);candidates[name]=b
+    mutant("mutant-beacon-any-bss","LOSS","if (body[0] || !m->connected","if ((body[0] && 0) || !m->connected")
+    mutant("mutant-beacon-dropped","RECEIVE","event.eid == MT7932_EID_BEACON_TIMEOUT &&","0 &&")
+    mutant("mutant-beacon-steals-reply","RECEIVE","!mt7932_event_matches(&event, m->waiting, m->waiting_eid)) {\n\t\tmt_beacon_timeout_event","1) {\n\t\tmt_beacon_timeout_event")
+    mutant("mutant-beacon-ignores-rx","LOSS","rx_recent = m->station_rx_packets &&","rx_recent = false && m->station_rx_packets &&")
+    mutant("mutant-beacon-span-doubled","LOSS","mt7932_beacon_loss_ms(m->station_beacon_tu)","mt7932_beacon_loss_ms(m->station_beacon_tu) * 2")
+    mutant("mutant-disconnect-no-recovery","LOSS","\t\tmt_request_recovery(m, \"a scan didn't end before the connection did\");\n","")
     results={}
     for name,content in candidates.items():
         c=out/(name+".c");s=PREFIX

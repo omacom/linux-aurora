@@ -103,6 +103,85 @@ static void afk_serialized_report_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, afk_compact_report_dictionary(dictionary, sizeof(dictionary)));
 }
 
+struct compact_call_report_capture {
+	unsigned int count;
+	size_t size;
+	u16 group;
+	u32 command;
+	u32 magic;
+	u16 pa;
+};
+
+static int compact_call_report_cb(struct apple_epic_service *service,
+				  enum epic_subtype type,
+				  const void *data, size_t data_size)
+{
+	struct compact_call_report_capture *cap = service->cookie;
+	const struct epic_service_call *call = data;
+
+	cap->count++;
+	cap->size = data_size;
+	if (data_size >= sizeof(*call) + sizeof(u16)) {
+		cap->group = le16_to_cpu(call->group);
+		cap->command = le32_to_cpu(call->command);
+		cap->magic = le32_to_cpu(call->magic);
+		cap->pa = get_unaligned_le16((const u8 *)(call + 1));
+	}
+	return 0;
+}
+
+static const struct apple_epic_service_ops compact_call_report_ops = {
+	.name = "compact-report-test",
+	.report = compact_call_report_cb,
+};
+
+static void afk_compact_service_call_report_test(struct kunit *test)
+{
+	struct apple_dcp_afkep *ep = test->priv;
+	struct compact_call_report_capture cap = {};
+	u8 wire[16 + sizeof(struct epic_compact_desc) +
+		sizeof(struct epic_service_call) + 0x50] = {};
+	struct epic_compact_sub_hdr *sub = (void *)(wire + 8);
+	struct epic_service_call *call;
+
+	ep->services[0].ops = &compact_call_report_ops;
+	ep->services[0].cookie = &cap;
+	sub->category = 0;
+	sub->type = EPIC_SUBTYPE_STD_SERVICE;
+
+	/* The bare service-call header immediately follows the subheader. */
+	call = (void *)(sub + 1);
+	call->group = cpu_to_le16(2);
+	call->command = cpu_to_le32(4);
+	call->data_len = cpu_to_le32(0x50);
+	call->magic = cpu_to_le32(EPIC_SERVICE_CALL_MAGIC);
+	put_unaligned_le16(0x2100, (u8 *)(call + 1));
+
+	afk_recv_compact_message(ep, 1, wire,
+				 16 + sizeof(*call) + 0x50);
+	KUNIT_EXPECT_EQ(test, cap.count, 1U);
+	KUNIT_EXPECT_EQ(test, cap.size, sizeof(*call) + 0x50);
+	KUNIT_EXPECT_EQ(test, cap.magic, (u32)EPIC_SERVICE_CALL_MAGIC);
+	KUNIT_EXPECT_EQ(test, cap.group, 2);
+	KUNIT_EXPECT_EQ(test, cap.command, 4U);
+	KUNIT_EXPECT_EQ(test, cap.pa, 0x2100);
+
+	/* Descriptor-wrapped struct epic_service_call report still strips 8 bytes. */
+	memset(wire + 16, 0, sizeof(wire) - 16);
+	call = (void *)((u8 *)(sub + 1) + sizeof(struct epic_compact_desc));
+	call->group = cpu_to_le16(2);
+	call->command = cpu_to_le32(4);
+	call->data_len = cpu_to_le32(0x50);
+	call->magic = cpu_to_le32(EPIC_SERVICE_CALL_MAGIC);
+	put_unaligned_le16(0x3400, (u8 *)(call + 1));
+
+	afk_recv_compact_message(ep, 1, wire, sizeof(wire));
+	KUNIT_EXPECT_EQ(test, cap.count, 2U);
+	KUNIT_EXPECT_EQ(test, cap.size, sizeof(*call) + 0x50);
+	KUNIT_EXPECT_EQ(test, cap.magic, (u32)EPIC_SERVICE_CALL_MAGIC);
+	KUNIT_EXPECT_EQ(test, cap.pa, 0x3400);
+}
+
 /*
  * Slot reuse for re-announced compact services. The firmware re-announces a
  * service under a fresh interface on every DP relink without closing the old
@@ -208,8 +287,60 @@ static void afk_compact_siblings_kept_test(struct kunit *test)
 	KUNIT_EXPECT_TRUE(test, first->enabled);
 }
 
+/* Named entries (exact or cut) beat "*", regardless of table order. */
+static void afk_compact_cut_before_wildcard_test(struct kunit *test)
+{
+	static const struct apple_epic_service_ops ops[] = {
+		{ .name = "dcpav-service-epic" },
+		{
+			.name = "dcpav-audio-interface-epic",
+			.compact_full = "dcpav-audio-interface-epic:0",
+		},
+		{ .name = "*" },
+		{},
+	};
+	static const struct apple_epic_service_ops wildcard_first_ops[] = {
+		{ .name = "*" },
+		{ .name = "dcpav-service-epic" },
+		{
+			.name = "dcpav-audio-interface-epic",
+			.compact_full = "dcpav-audio-interface-epic:0",
+		},
+		{},
+	};
+	struct apple_dcp_afkep *ep = test->priv;
+
+	ep->ops = ops;
+	/* "dispext0:dcpav-audio-interface-epic:0", cut to its 31 characters */
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "dispext0:dcpav-audio-interface-"),
+			    &ops[1]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "x:dcpav-audio-interface-epic:0"),
+			    &ops[1]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "dispext0:dcpav-service-epic:0"),
+			    &ops[0]);
+	/* Anything else, cut or not, is the wildcard's. */
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "ext:dcpav-cec-interface-epic:0"),
+			    &ops[2]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "dispext0:dcpav-video-interface-"),
+			    &ops[2]);
+
+	/* Listing "*" first still lets named entries win, exact or cut. */
+	ep->ops = wildcard_first_ops;
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "dispext0:dcpav-service-epic:0"),
+			    &wildcard_first_ops[1]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "x:dcpav-audio-interface-epic:0"),
+			    &wildcard_first_ops[2]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "dispext0:dcpav-audio-interface-"),
+			    &wildcard_first_ops[2]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "ext:dcpav-cec-interface-epic:0"),
+			    &wildcard_first_ops[0]);
+	KUNIT_EXPECT_PTR_EQ(test, afk_compact_match_service(ep, "dispext0:dcpav-video-interface-"),
+			    &wildcard_first_ops[0]);
+}
+
 static struct kunit_case afk_parser_cases[] = {
 	KUNIT_CASE(afk_serialized_report_test),
+	KUNIT_CASE(afk_compact_service_call_report_test),
 	KUNIT_CASE(afk_compact_header_test),
 	KUNIT_CASE(afk_short_epic_test),
 	KUNIT_CASE(afk_short_reply_test),
@@ -217,6 +348,7 @@ static struct kunit_case afk_parser_cases[] = {
 	KUNIT_CASE(afk_compact_singleton_replaces_test),
 	KUNIT_CASE(afk_compact_singleton_no_leak_test),
 	KUNIT_CASE(afk_compact_siblings_kept_test),
+	KUNIT_CASE(afk_compact_cut_before_wildcard_test),
 	{}
 };
 

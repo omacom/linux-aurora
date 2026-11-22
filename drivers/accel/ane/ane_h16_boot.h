@@ -66,6 +66,12 @@ struct ane_h16_tunables {
 	bool c1ppt;
 	u32 lock_offset;
 	u32 lock_mask;
+	/*
+	 * Load strobes: bits the block clears once it has taken the value
+	 * (a power cycle of a sub-block clears them while the lock and the
+	 * values stay). A locked group is checked without them.
+	 */
+	u32 strobe;
 };
 
 /* Selected only after the immutable resident firmware identity passes. */
@@ -116,6 +122,7 @@ struct ane_h16_profile {
 	const char *identity;
 	const struct ane_h16_preload_rule *preload;
 	const struct ane_h16_build *build;
+	bool require_dart_unlocked;
 };
 
 struct ane_h16_boot;
@@ -148,6 +155,7 @@ struct ane_h16_boot_ops {
 struct ane_h16_boot {
 	const struct ane_fw_platform *soc;
 	const struct ane_h16_build *build;
+	bool require_dart_unlocked;
 	/* Chosen from the DART revision in preflight. */
 	const struct ane_h16_mmio *mmio;
 	const struct ane_h16_boot_ops *ops;
@@ -448,18 +456,26 @@ static inline int ane_h16_prepare(struct ane_h16_boot *b)
 		if (group->lock_mask &&
 		    (b->ops->read32(b->ctx, group->window, group->base +
 				    group->lock_offset) & group->lock_mask)) {
+			unsigned int bad = 0, cleared = 0;
+
 			for (j = 0; j < group->count; j++) {
 				const struct ane_h16_tunable *v = &group->values[j];
 				u32 value = b->ops->read32(b->ctx, group->window,
 							group->base + v->offset);
+				u32 mask = v->mask & ~group->strobe;
 
-				if ((value & v->mask) != (v->value & v->mask)) {
+				if ((value ^ v->value) & v->mask & group->strobe)
+					cleared++;
+				if ((value & mask) != (v->value & mask)) {
 					b->ops->log(b->ctx, "locked tunable offset/value",
 						    group->base + v->offset, value);
-					return -EPERM;
+					bad++;
 				}
 			}
-			b->ops->log(b->ctx, "tunables locked match", group->window, group->count);
+			if (bad)
+				return -EPERM;
+			b->ops->log(b->ctx, "tunables locked match/strobes cleared",
+				    group->count, cleared);
 			continue;
 		}
 		for (j = 0; j < group->count; j++) {

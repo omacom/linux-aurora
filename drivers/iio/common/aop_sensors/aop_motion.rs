@@ -6,6 +6,12 @@
 //! acceleration and angular rate as two services, one fake-HID report per
 //! sample. A service starts reporting once it has been sent the machine's
 //! three calibration packets and a report interval.
+//!
+//! The reports run only while someone reads them: while a buffer is enabled,
+//! or for the length of one direct read. With nobody reading they stay off,
+//! as macOS keeps them (its accel and gyro drivers sit at report interval 0 on
+//! an idle desktop), so the AOP does not wake the application processor 50
+//! times a second per sensor.
 
 use core::{
     ffi::{c_int, c_void},
@@ -16,14 +22,15 @@ use core::{
 use kernel::{
     bindings, c_str,
     device::{self, Core},
-    module_platform_driver, new_spinlock, of, platform,
+    module_platform_driver, new_mutex, new_spinlock, of, platform,
     prelude::*,
     soc::apple::aop::{EPICService, FakehidListener, FakehidRegistration, AOP},
     sync::{
         aref::ARef,
         atomic::{Atomic, Relaxed},
-        Arc, SpinLock,
+        Arc, Mutex, SpinLock,
     },
+    time::{delay::fsleep, Delta},
     types::{ForeignOwnable, Opaque},
 };
 
@@ -33,6 +40,9 @@ const SUBTYPE_SET_PROPERTY: u16 = 4;
 const PROP_INTERVAL: u32 = 0;
 /// 50 Hz.
 const INTERVAL_US: u32 = 20_000;
+/// How long a direct read waits for the first report of a fresh start.
+const FIRST_SAMPLE_MS: i64 = 200;
+const FIRST_SAMPLE_POLL_MS: i64 = 5;
 /// The calibration properties of a service and the device tree properties the
 /// bootloader fills them from. They are written in this order, before the
 /// report interval.
@@ -132,12 +142,27 @@ fn location0_packet(prop: &[u8]) -> Option<&[u8]> {
     None
 }
 
+/// Who wants the reports of a service.
+#[derive(Default)]
+struct Stream {
+    /// A buffer is enabled.
+    buffer_on: bool,
+    /// Set across system sleep and after unbind: no reports.
+    parked: bool,
+    /// The reports were started for the buffer.
+    active: bool,
+}
+
 /// Starts and stops the reports of one service.
+#[pin_data]
 struct Control {
     dev: ARef<device::Device>,
     aop: Arc<dyn AOP>,
     service: EPICService,
     packets: [KVec<u8>; 3],
+    /// Serializes starting and stopping the reports.
+    #[pin]
+    stream: Mutex<Stream>,
 }
 
 impl Control {
@@ -159,15 +184,16 @@ impl Control {
             };
             packet.extend_from_slice(data, GFP_KERNEL)?;
         }
-        Ok(Arc::new(
-            Self {
+        Arc::pin_init(
+            pin_init!(Self {
                 dev: dev.into(),
                 aop,
                 service,
                 packets,
-            },
+                stream <- new_mutex!(Stream::default()),
+            }),
             GFP_KERNEL,
-        )?)
+        )
     }
 
     /// Writes a property and returns the firmware's status.
@@ -222,6 +248,40 @@ impl Control {
     fn stop(&self) -> Result {
         self.set(PROP_INTERVAL, &0u32.to_le_bytes())
     }
+
+    /// Starts or stops the buffer's reports to match their users. The caller
+    /// holds the stream lock.
+    fn sync_locked(&self, s: &mut Stream) -> Result {
+        match (s.buffer_on && !s.parked, s.active) {
+            (true, false) => {
+                self.start()?;
+                s.active = true;
+                Ok(())
+            }
+            (false, true) => {
+                s.active = false;
+                self.stop()
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn set_buffer(&self, on: bool) -> Result {
+        let mut s = self.stream.lock();
+        s.buffer_on = on;
+        let ret = self.sync_locked(&mut s);
+        if on && ret.is_err() {
+            // The IIO core does not call predisable after a failed enable.
+            s.buffer_on = false;
+        }
+        ret
+    }
+
+    fn set_parked(&self, parked: bool) -> Result {
+        let mut s = self.stream.lock();
+        s.parked = parked;
+        self.sync_locked(&mut s)
+    }
 }
 
 /// The latest sample, read by the IIO callbacks.
@@ -246,8 +306,37 @@ struct State {
     kind: &'static Kind,
     /// The IIO device, which outlives the report listener.
     iio: IioPtr,
+    control: Arc<Control>,
     #[pin]
     sample: SpinLock<Sample>,
+}
+
+impl State {
+    /// Returns the latest sample. Without a buffer the reports are started
+    /// only for this read and stopped again after it.
+    fn read_now(&self) -> Result<[i32; 3]> {
+        let s = self.control.stream.lock();
+        if !s.active {
+            if s.parked {
+                return Err(EBUSY);
+            }
+            // A sample from an earlier start may be stale.
+            self.sample.lock().valid = false;
+            self.control.start()?;
+            let mut waited = 0;
+            while waited < FIRST_SAMPLE_MS && !self.sample.lock().valid {
+                fsleep(Delta::from_millis(FIRST_SAMPLE_POLL_MS));
+                waited += FIRST_SAMPLE_POLL_MS;
+            }
+            self.control.stop()?;
+        }
+        let sample = *self.sample.lock();
+        if sample.valid {
+            Ok(sample.xyz)
+        } else {
+            Err(ENODATA)
+        }
+    }
 }
 
 struct IioPtr(*mut bindings::iio_dev);
@@ -318,11 +407,11 @@ unsafe extern "C" fn motion_read_raw(
     // SAFETY: `chan` is one of the registered channels.
     let axis = unsafe { (*chan).address };
     let (int, frac, ret) = if mask == bindings::BINDINGS_IIO_CHAN_INFO_RAW as isize {
-        let sample = *state.sample.lock();
-        if !sample.valid {
-            return ENODATA.to_errno();
-        }
-        let Some(&count) = sample.xyz.get(axis) else {
+        let xyz = match state.read_now() {
+            Ok(xyz) => xyz,
+            Err(e) => return e.to_errno(),
+        };
+        let Some(&count) = xyz.get(axis) else {
             return EINVAL.to_errno();
         };
         (count, 0, bindings::IIO_VAL_INT)
@@ -340,6 +429,42 @@ unsafe extern "C" fn motion_read_raw(
     }
     ret as i32
 }
+
+/// Starts the reports for an enabled buffer.
+///
+/// # Safety
+///
+/// The IIO core calls it with a device registered by [`MotionIio`].
+unsafe extern "C" fn buffer_postenable(indio_dev: *mut bindings::iio_dev) -> c_int {
+    // SAFETY: The private data is the `Arc<State>` stored by `MotionIio::new()`.
+    let state = unsafe { Arc::<State>::borrow((*indio_dev).priv_.cast()) };
+    match state.control.set_buffer(true) {
+        Ok(()) => 0,
+        Err(e) => e.to_errno(),
+    }
+}
+
+/// Stops the reports when the buffer is disabled.
+///
+/// # Safety
+///
+/// As [`buffer_postenable`].
+unsafe extern "C" fn buffer_predisable(indio_dev: *mut bindings::iio_dev) -> c_int {
+    // SAFETY: As in `buffer_postenable()`.
+    let state = unsafe { Arc::<State>::borrow((*indio_dev).priv_.cast()) };
+    match state.control.set_buffer(false) {
+        Ok(()) => 0,
+        Err(e) => e.to_errno(),
+    }
+}
+
+static BUFFER_OPS: bindings::iio_buffer_setup_ops = bindings::iio_buffer_setup_ops {
+    preenable: None,
+    postenable: Some(buffer_postenable),
+    predisable: Some(buffer_predisable),
+    postdisable: None,
+    validate_scan_mask: None,
+};
 
 fn axis_channel(chan_type: u32, modifier: u32, index: i32) -> bindings::iio_chan_spec {
     let mut chan = bindings::iio_chan_spec {
@@ -397,7 +522,11 @@ struct MotionIio {
 impl MotionIio {
     /// Allocates the device and its buffer; [`MotionIio::register`] makes it
     /// visible.
-    fn new(pdev: &platform::Device<Core<'_>>, kind: &'static Kind) -> Result<(Self, Arc<State>)> {
+    fn new(
+        pdev: &platform::Device<Core<'_>>,
+        kind: &'static Kind,
+        control: Arc<Control>,
+    ) -> Result<(Self, Arc<State>)> {
         let dev = pdev.as_ref();
         let spec = KBox::pin(
             Spec {
@@ -427,6 +556,7 @@ impl MotionIio {
             pin_init!(State {
                 kind,
                 iio: IioPtr(indio_dev),
+                control,
                 sample <- new_spinlock!(Sample::default()),
             }),
             GFP_KERNEL,
@@ -487,7 +617,7 @@ impl MotionIio {
         // platform device's resources; the IIO device holds its own
         // reference to it until it is freed. The poll function only stamps
         // the time and completes the trigger; the report listener pushes the
-        // scans.
+        // scans. The setup ops start the reports for the buffer.
         let ret = unsafe {
             bindings::devm_iio_triggered_buffer_setup_ext(
                 dev.as_raw(),
@@ -495,7 +625,7 @@ impl MotionIio {
                 Some(bindings::iio_pollfunc_store_time),
                 Some(motion_trigger_handler),
                 bindings::iio_buffer_direction_IIO_BUFFER_DIRECTION_IN,
-                ptr::null(),
+                &BUFFER_OPS,
                 ptr::null_mut(),
             )
         };
@@ -536,8 +666,9 @@ unsafe impl Send for MotionIio {}
 // SAFETY: See above; `MotionIio` has no methods taking `&self`.
 unsafe impl Sync for MotionIio {}
 
-/// Stops the reports around system sleep, so that the AOP does not wake the
-/// application processor 50 times a second, and starts them again after.
+/// Stops the buffer's reports around system sleep, so that the AOP does not
+/// wake the application processor 50 times a second, and starts them again
+/// after if a buffer still wants them.
 #[repr(C)]
 struct PmHook {
     /// First, so that the callback finds the hook from it.
@@ -559,8 +690,10 @@ unsafe extern "C" fn pm_event(
     // SAFETY: `nb` is the first field of a registered `PmHook`.
     let hook = unsafe { &*nb.cast::<PmHook>() };
     let ret = match action as u32 {
-        bindings::PM_SUSPEND_PREPARE | bindings::PM_HIBERNATION_PREPARE => hook.control.stop(),
-        bindings::PM_POST_SUSPEND | bindings::PM_POST_HIBERNATION => hook.control.start(),
+        bindings::PM_SUSPEND_PREPARE | bindings::PM_HIBERNATION_PREPARE => {
+            hook.control.set_parked(true)
+        }
+        bindings::PM_POST_SUSPEND | bindings::PM_POST_HIBERNATION => hook.control.set_parked(false),
         _ => return bindings::NOTIFY_DONE as c_int,
     };
     if let Err(e) = ret {
@@ -696,14 +829,14 @@ impl platform::Driver for IIOAopMotionDriver {
         let service = unsafe { *service };
 
         let control = Control::new(dev, aop.clone(), service)?;
-        let (mut iio, state) = MotionIio::new(pdev, kind)?;
+        let (mut iio, state) = MotionIio::new(pdev, kind, control.clone())?;
         let listener = FakehidRegistration::new(aop, service, state)?;
         let pm = PmHook::new(control.clone())?;
+        // Check once that the service takes the calibration and the interval,
+        // then leave the reports off until someone reads them.
         control.start()?;
-        if let Err(e) = iio.register() {
-            let _ = control.stop();
-            return Err(e);
-        }
+        control.stop()?;
+        iio.register()?;
         Ok(IIOAopMotionDriver {
             pm,
             listener,
@@ -714,7 +847,7 @@ impl platform::Driver for IIOAopMotionDriver {
 
     fn unbind(_dev: &platform::Device<Core<'_>>, this: Pin<&Self>) {
         this.pm.unregister();
-        let _ = this.control.stop();
+        let _ = this.control.set_parked(true);
         this.listener.unregister();
     }
 }

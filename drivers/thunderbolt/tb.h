@@ -806,6 +806,7 @@ int tb_cio_sleep_prepare(struct tb *tb);
 int tb_cio_sleep(struct tb *tb);
 int tb_cio_wake(struct tb *tb, bool *host_pci_lost);
 void tb_cio_sleep_complete(struct tb *tb);
+void tb_cio_sleep_refused(struct tb *tb);
 int tb_domain_freeze_noirq(struct tb *tb);
 int tb_domain_thaw_noirq(struct tb *tb);
 void tb_domain_complete(struct tb *tb);

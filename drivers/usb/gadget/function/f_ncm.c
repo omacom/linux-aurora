@@ -1158,7 +1158,17 @@ static enum hrtimer_restart ncm_tx_timeout(struct hrtimer *data)
 		 *
 		 * This will call directly into u_ether's eth_start_xmit()
 		 */
-		netdev->netdev_ops->ndo_start_xmit(NULL, netdev);
+		if (netdev->netdev_ops->ndo_start_xmit(NULL, netdev) == NETDEV_TX_BUSY &&
+		    !ncm->port.is_suspend) {
+			/*
+			 * All IN requests are in flight, so the pending NTB
+			 * was not sent. The timer is only started for a new
+			 * NTB, so nothing would send this one until it fills
+			 * up: try again after another timeout.
+			 */
+			hrtimer_forward_now(data, TX_TIMEOUT_NSECS);
+			return HRTIMER_RESTART;
+		}
 	}
 	return HRTIMER_NORESTART;
 }

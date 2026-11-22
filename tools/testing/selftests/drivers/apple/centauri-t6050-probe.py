@@ -40,7 +40,7 @@ struct pci_dev {
 struct centauri_t6050_ipc {
     struct pci_dev *function[3];
     void *bar[3];
-    bool owned[3], enabled[3], alpha_pm_domain;
+    bool owned[3], enabled[3], domain_lease[3], alpha_pm_domain;
 };
 struct centauri_t6050 {
     struct pci_dev *pdev;
@@ -53,7 +53,8 @@ static struct centauri_t6050_ipc ipc;
 static struct centauri_t6050 control;
 static int centauri_t6050_alpha_pm_domain;
 static int bound_driver;
-static enum { NONE, MAP_FAILURE, ENABLE_FAILURE, DMA_FAILURE, IRQ_FAILURE } fault;
+static enum { NONE, DOMAIN_FAILURE, MAP_FAILURE, ENABLE_FAILURE, DMA_FAILURE, IRQ_FAILURE } fault;
+static int domain_users[3];
 static pthread_mutex_t gate = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t changed = PTHREAD_COND_INITIALIZER;
 static bool beta_lock_attempted, enumeration_done;
@@ -91,6 +92,16 @@ static struct pci_dev *pci_get_domain_bus_and_slot(int domain, int busno, int de
     (void)busno;
     assert(devfn >= 0 && devfn < 3);
     return &functions[devfn];
+}
+static int iommu_device_use_default_domain(struct device *dev)
+{
+    /* A sibling's DMA domain is claimed only under its device lock. */
+    assert(dev->function != 0);
+    assert(pthread_mutex_trylock(&dev->mutex) == EBUSY);
+    if (fault == DOMAIN_FAILURE && dev->function == 2)
+        return -EBUSY;
+    domain_users[dev->function]++;
+    return 0;
 }
 static void *pci_iomap(struct pci_dev *pdev, int bar, int length)
 {
@@ -132,6 +143,7 @@ TESTS = r"""
 static void reset_fixture(void)
 {
     memset(&ipc, 0, sizeof(ipc));
+    memset(domain_users, 0, sizeof(domain_users));
     fault = NONE;
     beta_lock_attempted = enumeration_done = false;
     for (int i = 0; i < 3; i++) {
@@ -192,6 +204,9 @@ int main(void)
     for (int i = 0; i < 3; i++)
         assert(ipc.owned[i] && ipc.bar[i] && functions[i].master);
     assert(ipc.enabled[1] && ipc.enabled[2]);
+    /* F0's lease belongs to the Control owner; siblings take exactly one each. */
+    assert(!ipc.domain_lease[0] && ipc.domain_lease[1] && ipc.domain_lease[2]);
+    assert(!domain_users[0] && domain_users[1] == 1 && domain_users[2] == 1);
     assert_sibling_locks_released();
     puts("PASS: concurrent deferred Beta probe does not abort shared startup");
 
@@ -200,8 +215,17 @@ int main(void)
     assert(enumerate_functions(&control) == -EBUSY);
     assert(!ipc.owned[2] && !ipc.bar[2] && !functions[2].master);
     assert(functions[2].dev.driver == &bound_driver);
+    assert(!ipc.domain_lease[2] && !domain_users[2]);
     assert_sibling_locks_released();
     puts("PASS: genuinely bound Beta is rejected without taking ownership");
+
+    reset_fixture();
+    fault = DOMAIN_FAILURE;
+    assert(enumerate_functions(&control) == -EBUSY);
+    assert(ipc.owned[1] && ipc.domain_lease[1] && domain_users[1] == 1);
+    assert(!ipc.owned[2] && !ipc.domain_lease[2] && !ipc.bar[2] && !functions[2].master);
+    assert_sibling_locks_released();
+    puts("PASS: DMA-domain lease failure takes no ownership and releases the lock");
 
     reset_fixture();
     fault = MAP_FAILURE;

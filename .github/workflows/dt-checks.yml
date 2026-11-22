@@ -96,6 +96,16 @@ jobs:
             --baseline-manifest-dir "$RUNNER_TEMP/dt/manifests-base" \
             2>&1 | tee "$RUNNER_TEMP/dt/coverage.log"
 
+      - name: DART power domains, base vs head
+        if: ${{ !cancelled() && steps.dt.outputs.base != '' }}
+        run: |
+          set -o pipefail
+          python3 scripts/dtc/apple-dart-pd-check-test.py
+          python3 scripts/dtc/apple-dart-pd-check.py \
+            --dtb-dir "$RUNNER_TEMP/dt/out-head/arch/arm64/boot/dts/apple" \
+            --baseline-dtb-dir "$RUNNER_TEMP/dt/out-base/arch/arm64/boot/dts/apple" \
+            2>&1 | tee "$RUNNER_TEMP/dt/dart-pd.log"
+
       - name: Keep the warning lists
         if: always()
         uses: actions/upload-artifact@v4
@@ -104,4 +114,5 @@ jobs:
           path: |
             ${{ runner.temp }}/dt/*.warn
             ${{ runner.temp }}/dt/coverage.log
+            ${{ runner.temp }}/dt/dart-pd.log
           if-no-files-found: ignore

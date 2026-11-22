@@ -22,6 +22,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1250 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_apcie_sys_gp>;
 		status = "disabled";
 	};
 };

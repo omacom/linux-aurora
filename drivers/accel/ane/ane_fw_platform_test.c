@@ -86,11 +86,80 @@ static void ane_t8132_platform_test(struct kunit *test)
 			-EINVAL);
 	platform_device_put(pdev);
 }
+
+/*
+ * T8132: the 26.6.2 and 27.2 builds each admit their own preload layout and
+ * not the other's, and keep the M4 engine description.
+ */
+static void ane_t8132_builds_test(struct kunit *test)
+{
+	const struct ane_fw_platform *b25 = &ane_t8132_platform, *b27 = b25->next_build;
+	const struct ane_fw_platform *builds[] = { b25, b27 };
+	u64 phys[] = { 0x100000000, 0x200000000 };
+	unsigned int i, j;
+
+	KUNIT_ASSERT_NOT_NULL(test, b27);
+	KUNIT_EXPECT_NULL(test, b27->next_build);
+	KUNIT_EXPECT_EQ(test, b27->preload_size[0], 0xbc000ULL);
+	KUNIT_EXPECT_EQ(test, b27->preload_size[1], 0x2b0000ULL);
+	KUNIT_EXPECT_EQ(test, b27->preload_dva[1], 0x100000bc000ULL);
+	for (i = 0; i < ARRAY_SIZE(builds); i++) {
+		const struct ane_fw_platform *b = builds[i];
+
+		KUNIT_EXPECT_EQ(test, b->soc, 0x8132U);
+		KUNIT_EXPECT_EQ(test, b->owner, ANE_FW_OWNER_AP);
+		KUNIT_EXPECT_EQ(test, b->dapf_count, 5);
+		KUNIT_EXPECT_EQ(test, b->power_words[0], 0x570U);
+		KUNIT_EXPECT_NOT_NULL(test, b->build_name);
+		KUNIT_EXPECT_GT(test, b->h16_profile_count, 0U);
+		for (j = 0; j < ARRAY_SIZE(builds); j++)
+			KUNIT_EXPECT_EQ(test, ane_fw_preload_ranges_valid(builds[j], phys,
+									  b->preload_size,
+									  b->preload_dva),
+					i == j);
+	}
+	/* Without a hand-off in DT the SoC's own data stays selected. */
+	KUNIT_EXPECT_PTR_EQ(test, ane_fw_platform_build(NULL, b27), b27);
+}
+
+/*
+ * T6050: the 27.0 and 27.2 builds each admit their own preload layout and
+ * not the other's, and each has a code pin over two ordered TEXT sections.
+ */
+static void ane_t6050_builds_test(struct kunit *test)
+{
+	const struct ane_fw_platform *b27_0 = &ane_t6050_platform, *b27_2 = b27_0->next_build;
+	const struct ane_fw_platform *builds[] = { b27_0, b27_2 };
+	u64 phys[] = { 0x100000000, 0x200000000 };
+	unsigned int i, j;
+
+	KUNIT_ASSERT_NOT_NULL(test, b27_2);
+	KUNIT_EXPECT_NULL(test, b27_2->next_build);
+	KUNIT_EXPECT_NOT_NULL(test, b27_0->text_pin);
+	for (i = 0; i < ARRAY_SIZE(builds); i++) {
+		const struct ane_fw_platform *b = builds[i];
+
+		KUNIT_EXPECT_EQ(test, b->soc, 0x6050U);
+		KUNIT_EXPECT_NOT_NULL(test, b->text_code_pin);
+		KUNIT_EXPECT_NOT_NULL(test, b->build_name);
+		KUNIT_EXPECT_LT(test, (u64)b->text_env[0].offset + b->text_env[0].size,
+				(u64)b->text_env[1].offset + 1);
+		KUNIT_EXPECT_LE(test, (u64)b->text_env[1].offset + b->text_env[1].size,
+				b->preload_size[0]);
+		for (j = 0; j < ARRAY_SIZE(builds); j++)
+			KUNIT_EXPECT_EQ(test, ane_fw_preload_ranges_valid(builds[j], phys,
+									  b->preload_size,
+									  b->preload_dva),
+					i == j);
+	}
+}
 #endif
 
 static struct kunit_case ane_fw_platform_cases[] = {
 #if IS_BUILTIN(CONFIG_DRM_ACCEL_ANE) && IS_BUILTIN(CONFIG_DRM_ACCEL_ANE_FW_KUNIT_TEST)
 	KUNIT_CASE(ane_t8132_platform_test),
+	KUNIT_CASE(ane_t8132_builds_test),
+	KUNIT_CASE(ane_t6050_builds_test),
 #endif
 	KUNIT_CASE(ane_platform_staged_bind_test),
 	KUNIT_CASE(ane_platform_sleep_path_test),

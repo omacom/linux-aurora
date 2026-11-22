@@ -152,6 +152,12 @@ struct mca_cluster {
 
 	unsigned int bclk_ratio;
 
+	/* RX bit start of the DAI format, once set_fmt has run */
+	bool fmt_set;
+	u32 rx_bitstart;
+	/* BCLKs by which data received on this cluster's port arrives late */
+	u32 rx_delay;
+
 	/* Masks etc. picked up via the set_tdm_slot method */
 	int tdm_slots;
 	int tdm_slot_width;
@@ -608,6 +614,8 @@ static int mca_fe_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 		       cl->base + CLUSTER_TX_OFF + REG_TX_SERDES_BITSTART);
 	writel_relaxed(bitstart,
 		       cl->base + CLUSTER_RX_OFF + REG_RX_SERDES_BITSTART);
+	cl->rx_bitstart = bitstart;
+	cl->fmt_set = true;
 
 	return 0;
 
@@ -623,6 +631,19 @@ static int mca_set_bclk_ratio(struct snd_soc_dai *dai, unsigned int ratio)
 	cl->bclk_ratio = ratio;
 
 	return 0;
+}
+
+/* The largest apple,rx-delay-bclks of the ports in portmask */
+static u32 mca_ports_rx_delay(const struct mca_data *mca, int portmask)
+{
+	u32 delay = 0;
+	int port;
+
+	for (port = 0; port < mca->nclusters; port++)
+		if (portmask & BIT(port))
+			delay = max(delay, mca->clusters[port].rx_delay);
+
+	return delay;
 }
 
 static int mca_fe_hw_params(struct snd_pcm_substream *substream,
@@ -696,6 +717,11 @@ static int mca_fe_hw_params(struct snd_pcm_substream *substream,
 				   tdm_slot_width, is_tx, portmask);
 	if (ret)
 		return ret;
+
+	/* Sample late data as late as the slowest port it comes from */
+	if (!is_tx && cl->fmt_set)
+		writel_relaxed(cl->rx_bitstart + mca_ports_rx_delay(mca, portmask),
+			       cl->base + CLUSTER_RX_OFF + REG_RX_SERDES_BITSTART);
 
 	pad = 32 - params_width(params);
 
@@ -1376,6 +1402,13 @@ static int apple_mca_probe(struct platform_device *pdev)
 		cl->no = i;
 		cl->base = base + CLUSTER_STRIDE * i;
 		cl->port_clk_driver = -1;
+		of_property_read_u32_index(pdev->dev.of_node, "apple,rx-delay-bclks",
+					   i, &cl->rx_delay);
+		if (cl->rx_delay > 1) {
+			dev_warn(&pdev->dev, "port %d: RX delay %u not supported, using 0\n",
+				 i, cl->rx_delay);
+			cl->rx_delay = 0;
+		}
 		cl->clk_parent = of_clk_get(pdev->dev.of_node, i);
 		if (IS_ERR(cl->clk_parent)) {
 			dev_err(&pdev->dev, "unable to obtain clock %d: %ld\n",

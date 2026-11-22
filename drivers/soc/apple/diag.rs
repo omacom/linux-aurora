@@ -31,7 +31,6 @@ extern "C" {
         xart: bool,
     ) -> c_int;
     fn sep_diag_set_policy(
-        provision_keybag: bool,
         trusted_keys: bool,
         filevault_api: bool,
         xarm_trace: bool,
@@ -101,7 +100,6 @@ pub(crate) enum Restore {
 
 /// Boot-time policy, without identity values or key material.
 pub(crate) struct Policy {
-    pub provision_keybag: bool,
     pub trusted_keys: bool,
     pub filevault_api: bool,
     pub xarm_trace: bool,
@@ -156,7 +154,6 @@ pub(crate) fn register(
     // SAFETY: the facts are fixed before the attribute group is published.
     unsafe {
         sep_diag_set_policy(
-            policy.provision_keybag,
             policy.trusted_keys,
             policy.filevault_api,
             policy.xarm_trace,

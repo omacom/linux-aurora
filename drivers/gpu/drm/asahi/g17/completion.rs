@@ -380,6 +380,9 @@ pub(crate) struct Completion {
     /// `compute` alone does not identify the engine.
     is_compute: bool,
     feed: Option<Arc<super::feed::Feed>>,
+    /// The command's execution context, whose busy run its execution extends
+    /// ([`super::feed::Feed::note_work`]).
+    context_id: u32,
     usage: Arc<crate::usage::Lane<Arc<crate::usage::Client>>>,
     sources: Option<Arc<super::sync_input::Sources>>,
     #[pin]
@@ -453,6 +456,7 @@ impl Completion {
                 m5_compute <- new_mutex!(None, "M5 queue timestamps"),
                 is_compute,
                 feed,
+                context_id: context.id(),
                 usage,
                 sources,
                 vm_job <- new_mutex!(Some(vm_job), "G17 command VM pin"),
@@ -733,7 +737,7 @@ impl Completion {
 
     /// A non-poisoning ECANCELED or ENODATA (work a recovery discarded or dropped) stays out of
     /// the VM status, as the UAPI documents for work another VM's recovery discarded:
-    /// Honeykrisp reads any status error as a lost device. Every other failure reaches the client.
+    /// Borealis reads any status error as a lost device. Every other failure reaches the client.
     fn report(&self, error: Error) {
         if self.poisons(error) {
             self.status.record(error);
@@ -858,9 +862,13 @@ impl Completion {
             if self.is_compute {
                 if let Some([start, end]) = compute {
                     feed.note_pass(start, end);
+                    feed.note_work(self.context_id, start, end);
                 }
             } else {
                 feed.note_pass(ticks[2], ticks[3]);
+                // The whole render, from the first of its two halves that ran to the last.
+                let start = [ticks[0], ticks[2]].into_iter().filter(|&tick| tick != 0).min();
+                feed.note_work(self.context_id, start.unwrap_or(0), ticks[1].max(ticks[3]));
             }
         }
         if let Err(error) = result {

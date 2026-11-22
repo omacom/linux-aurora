@@ -32,6 +32,13 @@ properties:
   '#sound-dai-cells':
     const: 0
 
+  cirrus,ring-sense-detect:
+    description:
+      Take headset plug and unplug from the ring sense input, with tip sense
+      masked. Set this where the jack's ring sense switch reports the plug.
+      Without it, plug detection uses tip sense.
+    type: boolean
+
 required:
   - compatible
   - reg
@@ -55,5 +62,6 @@ examples:
           reset-gpios = <&pinctrl_nub 4 GPIO_ACTIVE_LOW>;
           interrupts-extended = <&pinctrl_ap 180 IRQ_TYPE_LEVEL_LOW>;
           #sound-dai-cells = <0>;
+          cirrus,ring-sense-detect;
       };
     };

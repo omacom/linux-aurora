@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * The audio of the M5 Mac Studio (J775c, J775d): the headphone jack (a
+ * CS42L84) and the built-in speaker (one SN012776), both reached through the
+ * AOP's audio services. The card waits for its CPU component, the AOP audio
+ * node, which exists only after the boot loader's AOP handoff.
+ *
+ * The speaker is described but stays off: the ADT's audio-speaker stream has
+ * no RX (sense) slot, and macaudio admits the speaker only once a protection
+ * owner for a speaker without sense exists for these machines.
+ *
+ * The board sets the card's compatible and model.
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+/ {
+	sound: sound {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		dai-link@0 {
+			reg = <0>;
+			link-name = "Headphone Jack";
+
+			cpu {
+				sound-dai = <&aop_audio 0>;
+			};
+
+			codec {
+				sound-dai = <&jack_codec>;
+			};
+		};
+
+		dai-link@1 {
+			reg = <1>;
+			link-name = "Speaker";
+
+			cpu {
+				sound-dai = <&aop_audio 3>;
+			};
+
+			codec {
+				sound-dai = <&speaker_amp>;
+			};
+		};
+	};
+};
+
+/* Amp IRQ 106 and shutdown 107; jack IRQ 134 and codec reset 139 (pinctrl_ap) */
+&i2c1 {
+	/*
+	 * The amp's V/I sense slots, as on the other SN012776 Macs; the AOP's
+	 * speaker stream carries no sense back. The firmware's speaker frame
+	 * is 250 BCLKs of 12 MHz (ADT iop-audio-controller/audio-speaker),
+	 * which the amp's ratio detection rejects, so the amp is told the
+	 * ratio.
+	 */
+	speaker_amp: codec@38 {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x38>;
+		shutdown-gpios = <&pinctrl_ap 107 GPIO_ACTIVE_HIGH>;
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		#sound-dai-cells = <0>;
+		ti,imon-slot-no = <2>;
+		ti,vmon-slot-no = <0>;
+		ti,bclk-ratio = <250>;
+	};
+};
+
+&i2c2 {
+	jack_codec: codec@4b {
+		compatible = "cirrus,cs42l84";
+		reg = <0x4b>;
+		reset-gpios = <&pinctrl_ap 139 GPIO_ACTIVE_HIGH>;
+		interrupts-extended = <&pinctrl_ap 134 IRQ_TYPE_LEVEL_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Jack";
+	};
+};

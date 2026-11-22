@@ -10,23 +10,35 @@
  * order, each record header and value inside DATA and clear of the previous
  * value, and the rewritten range after the last value.
  */
+static size_t ane_h16_preload_text_size(const struct ane_h16_preload_rule *rule)
+{
+	return rule->text_size ?: ANE_H16_PRELOAD_TEXT_SIZE;
+}
+
+static size_t ane_h16_preload_data_size(const struct ane_h16_preload_rule *rule)
+{
+	return rule->data_size ?: ANE_H16_PRELOAD_DATA_SIZE;
+}
+
 static bool ane_h16_preload_rule_valid(const struct ane_h16_preload_rule *rule)
 {
+	size_t data_size;
 	u32 next = 8;
 	unsigned int i;
 
 	if (!rule->cells || !rule->cell_count)
 		return false;
+	data_size = ane_h16_preload_data_size(rule);
 	for (i = 0; i < rule->cell_count; i++) {
 		const struct ane_h16_preload_cell *c = &rule->cells[i];
 
 		if (!c->width || c->value < next ||
-		    c->value + c->width > ANE_H16_PRELOAD_DATA_SIZE)
+		    c->value + c->width > data_size)
 			return false;
 		next = c->value + c->width + 8;
 	}
 	return rule->zero_start >= next - 8 && rule->zero_start <= rule->zero_end &&
-	       rule->zero_end <= ANE_H16_PRELOAD_DATA_SIZE;
+	       rule->zero_end <= data_size;
 }
 
 static void ane_h16_hash_zeros(struct sha256_ctx *ctx, size_t length)
@@ -51,8 +63,9 @@ int ane_h16_preload_digest(const struct ane_h16_preload_rule *rule,
 	size_t cursor = 0;
 	unsigned int i;
 
-	if (!rule || !text || !data || !digest || text_size != ANE_H16_PRELOAD_TEXT_SIZE ||
-	    data_size != ANE_H16_PRELOAD_DATA_SIZE || !ane_h16_preload_rule_valid(rule))
+	if (!rule || !text || !data || !digest ||
+	    text_size != ane_h16_preload_text_size(rule) ||
+	    data_size != ane_h16_preload_data_size(rule) || !ane_h16_preload_rule_valid(rule))
 		return -EINVAL;
 	/* Validate all framing before producing a digest. Odd offsets are valid. */
 	for (i = 0; i < rule->cell_count; i++) {

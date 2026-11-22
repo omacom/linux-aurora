@@ -274,6 +274,10 @@ static void __attribute__((unused)) typec_unregister_altmode(void *a)
 #define typec_set_orientation(...) ((void)0)
 #define typec_set_data_role(...) ((void)0)
 #define power_supply_changed(...) ((void)0)
+/* J714s only (tipd_boot_power_on()): this fixture's machine never keeps the boot power state. */
+static void __attribute__((unused)) tipd_boot_host_started(struct tps6598x *t, enum usb_role r)
+{ (void)t; (void)r; }
+static void __attribute__((unused)) tipd_boot_order_done(struct tps6598x *t) { (void)t; }
 '''
     tests = r'''
 static int failures, checks;
@@ -520,6 +524,43 @@ static void __attribute__((unused)) dcp_relink_link_up(int *s, u64 generation, u
  CHECK(!roles && port.pm.phase == CD321X_PM_REVALIDATE);
  CHECK(sink.connected && !notices && !port.display_route_active);
 ''')
+    # The J714s's macOS USBw after an attach is a port controller command, not part of these
+    # display scenarios: the update calls it, and here it does nothing.
+    if 'cd321x_macos_usbw(cd321x);' in funcs:
+        shim += ('\nstruct cd321x;\n'
+                 'static void cd321x_macos_usbw(struct cd321x *cd321x) { (void)cd321x; }\n')
+    # Whether DisplayPort pin D joins the running USB 3 link (typec_mux_dp_joins_usb()) is the
+    # scenario's choice: off in the display scenarios above, on in the ones added here.
+    if 'cd321x_dp_joins_usb(cd321x, &st)' in funcs:
+        shim += ('\nstruct cd321x; struct cd321x_status;\n'
+                 'static bool joins;\n'
+                 'static bool cd321x_dp_joins_usb(struct cd321x *cd321x,\n'
+                 '                                const struct cd321x_status *st)\n'
+                 '{ (void)cd321x; (void)st; return joins; }\n')
+        end = ' printf("%d assertions, %d failures\\n", checks, failures); return !!failures;\n}\n'
+        assert tests.count(end) == 1
+        tests = tests.replace(end, r''' /*
+  * Pin D comes to a connection that runs USB 3. Joined, the role is set only once, to the
+  * host it already is; a provider that still fails the change gets the role stopped and the
+  * update retried; without the mux's word the role stops first, as for any mode change.
+  */
+ for (int t = 0; t < 3; t++) {
+  init(); port.display_route_active = false; joins = t < 2;
+  port.tps.data_status = TPS_DATA_STATUS_USB2_CONNECTION | TPS_DATA_STATUS_USB3_CONNECTION;
+  port.update_status.status = TPS_STATUS_PLUG_PRESENT;
+  port.update_status.data_status = port.tps.data_status | TPS_DATA_STATUS_DP_CONNECTION;
+  port.update_status.data_status_changed = TPS_DATA_STATUS_DP_CONNECTION;
+  mode_error = t == 1 ? -EIO : 0;
+  cd321x_update_work(&port.update_work.work);
+  if (t == 0)
+   CHECK(roles == 1 && role == USB_ROLE_HOST && port.pm.phase == CD321X_PM_RUNNING);
+  else if (t == 1)
+   CHECK(roles == 1 && role == USB_ROLE_NONE && port.pm.phase == CD321X_PM_REVALIDATE);
+  else
+   CHECK(roles == 2 && role == USB_ROLE_HOST && port.pm.phase == CD321X_PM_RUNNING);
+ }
+ joins = false;
+''' + end)
     # How long a held mux has been retried is measured on the driver's clock.
     if 'jiffies_to_msecs(jiffies)' in funcs:
         shim += ('\nstatic unsigned long jiffies;\n'
@@ -557,7 +598,8 @@ def bounce(root):
          ' bool external, external_link_ready, crashed;\n'
          ' bool typec_work_enabled;' + ('' if '\n int fw_compat;' in unit else ' int fw_compat;') +
          ' struct { bool fw_14_7_endpoints; } hw;\n'
-         ' struct { bool active; } split;')
+         ' struct { bool active; } split;\n'
+         ' bool hdmi_hpd;')
     old_raw = unit[unit.index('static int dcp_dptx_connect_raw('):]
     old_raw = old_raw[:old_raw.index('return raw_error; }') + len('return raw_error; }')]
     sessions = bool(SESSION_RAW.search(dcp))
@@ -584,6 +626,7 @@ typedef uint8_t u8;
 #define dev_info(...) ((void)0)
 #define DRM_MODE_CONNECTOR_DisplayPort 10
 #define DCP_FIRMWARE_H17P 17
+#define DCP_FIRMWARE_V_13_5 2
 #define DPTX_CONNECT_TIMEOUT 2000
 #define DPTX_TUNNEL_CONNECT_TIMEOUT 8000
 static void mutex_lock(int *m) { (void)m; }

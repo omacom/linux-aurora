@@ -1,6 +1,6 @@
 # M3 Pro GPU performance profile
 
-The experimental T6030 profile pairs native Asahi OpenGL with the legacy Honeykrisp Vulkan driver. The current vkQuake demo1 result is approximately 230–232 FPS at an actual 1920×1080 render size, with the original game executable and rendering settings. M1 Air remains faster, approximately 300–340 FPS with run variation. This profile is not a general GPU conformance claim or an M3 firmware migration.
+The experimental T6030 profile pairs native Asahi OpenGL with the legacy Borealis Vulkan driver. The current vkQuake demo1 result is approximately 230–232 FPS at an actual 1920×1080 render size, with the original game executable and rendering settings. M1 Air remains faster, approximately 300–340 FPS with run variation. This profile is not a general GPU conformance claim or an M3 firmware migration.
 
 ## Kernel and driver selection
 

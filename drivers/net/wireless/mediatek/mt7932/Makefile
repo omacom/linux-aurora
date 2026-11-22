@@ -5,6 +5,7 @@ mt7932-fullmac-$(CONFIG_MT7932_AWDL) += awdl.o
 mt7932-fullmac-$(CONFIG_MT7932_AWDL_KUNIT_TEST) += awdl-test.o
 mt7932-fullmac-$(CONFIG_MT7932_RF_KUNIT_TEST) += rf-test.o
 mt7932-fullmac-$(CONFIG_MT7932_RF_KUNIT_TEST) += power-test.o
+mt7932-fullmac-$(CONFIG_MT7932_RF_KUNIT_TEST) += link-loss-test.o
 mt7932-fullmac-$(CONFIG_MT7932_KUNIT_TEST) += input-test.o
 mt7932-fullmac-$(CONFIG_MT7932_KUNIT_TEST) += regulatory-test.o
 mt7932-fullmac-$(CONFIG_MT7932_KUNIT_TEST) += association-test.o

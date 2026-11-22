@@ -1,0 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/* J413 with macOS 27 system firmware (27.2 stub). */
+#include "t8112-j413.dts"
+
+/*
+ * The 27.x MTP firmware cannot be restarted once quiesced: a boot stage that
+ * starts it hands it over running (apple,rtkit-handoff).
+ */
+&mtp {
+	apple,rtkit-keep-running;
+};
+
+/* The 27.x trackpad firmware answers only the two-stage power command. */
+&mtp_hid {
+	multi-touch {
+		apple,power-method = <2>;
+	};
+};

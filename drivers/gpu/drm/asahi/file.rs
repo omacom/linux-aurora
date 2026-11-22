@@ -137,7 +137,7 @@ pub(crate) const DRM_ASAHI_COMPUTE_USES_MATRIX: u32 =
 /// The compute command neither copies nor resets queries, so it cannot observe
 /// timestamps the host publishes after earlier commands complete
 /// (DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS). Accepted, and reported with
-/// DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS by the M5 command set.
+/// DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS by the G17 command sets.
 pub(crate) const DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS: u32 =
     uapi::drm_asahi_compute_flags_DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS as u32;
 
@@ -1665,7 +1665,9 @@ impl File {
             cls_pr_debug!(Errors, "queue_create: Invalid arguments\n");
             return Err(EINVAL);
         }
-        if data.flags != 0 || data.priority > uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME {
+        if data.flags & !uapi::drm_asahi_queue_create_flags_DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT != 0
+            || data.priority > uapi::drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME
+        {
             cls_pr_debug!(Errors, "queue_create: Invalid arguments\n");
             return Err(EINVAL);
         }
@@ -1738,6 +1740,9 @@ impl File {
         queue.reserve_render_scs(data.render_scs_layout)?;
         if data.compute_timeout_ms != 0 {
             data.compute_timeout_ms = queue.set_compute_timeout(data.compute_timeout_ms)?;
+        }
+        if data.flags & uapi::drm_asahi_queue_create_flags_DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT != 0 {
+            queue.set_async_submit()?;
         }
 
         data.queue_id = resv.index().try_into()?;

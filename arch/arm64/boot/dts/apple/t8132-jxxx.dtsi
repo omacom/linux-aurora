@@ -470,5 +470,6 @@
 		reg = <0x10000 0x0 0x0 0x0 0x0>;
 		local-mac-address = [00 00 00 00 00 00];
 		apple,antenna-sku = "XX";
+		brcm,ccode-map-trivial;
 	};
 };

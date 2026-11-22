@@ -133,6 +133,7 @@ struct rtkit {
 };
 struct tb {
 	bool prepared, stopped, lost, restarted;
+	int prepares, refusals;
 };
 struct apple_cio {
 	atomic_t fw_at_answers, fw_at_timeouts, fw_wake_seen, fw_lane_action;
@@ -222,7 +223,7 @@ static int apple_dart_cio_off(struct apple_dart_cio *d)
 		assert(!(reg[PORT_PERST / 4] & PORT_PERST_OFF) &&
 		       (reg[PORT_APPCLK / 4] & PORT_APPCLK_EN));
 	else
-		assert(tb.stopped && pc.cio_stopped);
+		assert(tb.stopped && (pc.cio_stopped || !nhi.cio_pcie));
 	if (d->id && fail(16))
 		return -EOPNOTSUPP;
 	d->off = true;
@@ -461,6 +462,8 @@ static void apple_pcie_tunnel_hierarchy_gone(struct device *d)
 /* ACTUAL_PCIE */
 static void put_device(struct device *d)
 {
+	if (!d)
+		return;
 	assert(d->refs);
 	d->refs--;
 }
@@ -513,6 +516,7 @@ static int apple_atcphy_cio_finish(struct phy *p)
 }
 static int tb_cio_sleep_prepare(struct tb *t)
 {
+	t->prepares++;
 	if (fail(6))
 		return -EBUSY;
 	t->prepared = true;
@@ -520,7 +524,8 @@ static int tb_cio_sleep_prepare(struct tb *t)
 }
 static int tb_cio_sleep(struct tb *t)
 {
-	assert(pc.cio_stopped);
+	/* The PCIe port behind the router is down first, if there is one. */
+	assert(pc.cio_stopped || !nhi.cio_pcie);
 	if (fail(19))
 		return -EIO;
 	t->stopped = true;
@@ -543,6 +548,13 @@ static void tb_cio_sleep_complete(struct tb *t)
 	assert(t->prepared && !t->stopped);
 	t->prepared = false;
 }
+/* A refused prepare: complete if the transaction is open, then the CM's rescan. */
+static void tb_cio_sleep_refused(struct tb *t)
+{
+	assert(!t->stopped);
+	t->prepared = false;
+	t->refusals++;
+}
 static int apple_rtkit_poweroff(struct rtkit *r)
 {
 	assert(tb.stopped && darts[0].off);
@@ -561,7 +573,7 @@ static int apple_cio_lstx_hold(struct apple_cio *a, bool high)
 }
 static void dev_pm_genpd_suspend(struct device *d)
 {
-	assert(rtk.off && darts[0].off && darts[1].off);
+	assert(rtk.off && darts[0].off && (darts[1].off || !nhi.cio_pcie));
 	balances[d->index]++;
 	d->on = !fail(23) ? false : true;
 	if (!pd[0].on && !pd[1].on && !pd[2].on && !pd[3].on)
@@ -713,12 +725,53 @@ int main(void)
 		cases++;
 	}
 	for (int point = 1; point <= 6; point++) {
+		/* 4 (no PCIe tunnel behind the router) is not a refusal: see below. */
+		if (point == 4)
+			continue;
 		setup();
 		inject(point);
 		assert(apple_nhi_cio_prepare(&nhi) < 0);
+		/* Every refusal after the CM's prepare rescans; none before it. */
+		assert(tb.refusals == tb.prepares);
 		clean();
 		cases++;
 	}
+	/*
+	 * T6050 without a PCIe tunnel refuses before the connection manager releases anything:
+	 * a host peer's link and services stay as they are.
+	 */
+	setup();
+	nhi.cio_t6050 = true;
+	inject(4);
+	assert(apple_nhi_cio_prepare(&nhi) == -ENODEV);
+	assert(!tb.prepares && !tb.refusals && !phy.prepared && !darts[0].active);
+	assert(pdev.dev.refs == 1 && !cio.native_sleep);
+	nhi.cio_t6050 = false;
+	clean();
+	cases++;
+	/*
+	 * A partner with no PCIe tunnel (a host-to-host cable): the router sleeps and wakes
+	 * with nothing behind it, and no PCIe callback runs.
+	 */
+	for (int cycle = 0; cycle < 2; cycle++) {
+		setup();
+		inject(4);
+		assert(!apple_nhi_cio_prepare(&nhi) && !nhi.cio_pcie && pdev.dev.refs == 1);
+		assert(!apple_nhi_cio_suspend(&nhi));
+		assert(nhi.cio_pd_suspended == 15 && phy.changed);
+		assert(!apple_nhi_cio_resume(&nhi));
+		assert(!pc.cio_prepared && !resets && !darts[1].active);
+		apple_nhi_cio_complete(&nhi);
+		clean();
+		cases++;
+	}
+	/* The same, refused after the prepare: complete gives back what prepare took. */
+	setup();
+	inject(4);
+	assert(!apple_nhi_cio_prepare(&nhi) && !nhi.cio_pcie);
+	apple_nhi_cio_complete(&nhi);
+	clean();
+	cases++;
 	setup();
 	assert(!apple_nhi_cio_prepare(&nhi));
 	apple_nhi_cio_complete(&nhi);

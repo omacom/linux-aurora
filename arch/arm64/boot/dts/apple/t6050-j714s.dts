@@ -515,6 +515,11 @@
 	apple,pmp = <&pmp0>;
 };
 
+/* The 14-inch M5 Pro has High Power mode */
+&clpc {
+	apple,high-power-mode;
+};
+
 &sgx {
 	power-domains = <&pmp0_gfx>;
 };
@@ -755,6 +760,34 @@
 
 /* The Neural Engine, started only after the boot loader's preload hand-off */
 #include "t6050-j714s-ane.dtsi"
+/*
+ * The port controllers: the sleep's command rules, a reset and more probe tries after a failed
+ * probe, and for the USB-C ports LOCK's key, the board number reversed ("417J"; their debug mode
+ * and a partner replug, "DISC", need it).
+ */
+&hpm0 {
+	apple,sleep-ssps-rules;
+	apple,reset-on-failed-probe;
+	apple,debug-lock-key = "417J";
+};
+
+&hpm1 {
+	apple,sleep-ssps-rules;
+	apple,reset-on-failed-probe;
+	apple,debug-lock-key = "417J";
+};
+
+&hpm2 {
+	apple,sleep-ssps-rules;
+	apple,reset-on-failed-probe;
+	apple,debug-lock-key = "417J";
+};
+
+&hpm5 {
+	apple,sleep-ssps-rules;
+	apple,reset-on-failed-probe;
+};
+
 #include "t6050-j714s-sleep.dtsi"
 #include "t6050-j714s-sleep-soc.dtsi"
 #include "t6050-j714s-sleep-adt.dtsi"

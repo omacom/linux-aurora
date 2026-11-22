@@ -171,6 +171,11 @@
 	status = "okay";
 };
 
+&pmp_report {
+	power-domains = <&ps_pms_sram>;
+	status = "okay";
+};
+
 &mtp_dart {
 	reg = <3 0x94800000 0 0xc000>;
 	/delete-property/ reg-names;

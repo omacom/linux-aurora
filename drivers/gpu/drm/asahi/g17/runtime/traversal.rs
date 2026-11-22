@@ -53,15 +53,16 @@ impl Gate {
         )
     }
 
-    /// Admission of the command whose job fence is `mine`, of `client`. `None`: it may go
-    /// on. `Some(fence)`: wait for that fence, then ask again.
-    fn admit(&self, client: u64, traces_rays: bool, mine: &Fence) -> Option<Fence> {
-        if !traces_rays && !self.busy.load(Ordering::Acquire) {
+    /// Admission of the command whose job fence is `mine`, of `client`; `exclusive`: it runs
+    /// for one client at a time, as a command that traces rays. `None`: it may go on.
+    /// `Some(fence)`: wait for that fence, then ask again.
+    fn admit(&self, client: u64, exclusive: bool, mine: &Fence) -> Option<Fence> {
+        if !exclusive && !self.busy.load(Ordering::Acquire) {
             return None;
         }
         let job = Job(mine.clone());
         let mut state = self.state.lock();
-        let wait = if traces_rays {
+        let wait = if exclusive {
             state.traversal(client, &job, Job::ended)
         } else {
             state.compute(client, &job, Job::ended)
@@ -88,8 +89,8 @@ impl Backend {
         if !self.shared.variant.traversal_exclusion {
             return None;
         }
-        let traces_rays = packet.command.traces_rays();
-        if !traces_rays && packet.engine() != Engine::Compute {
+        let exclusive = Self::exclusive(packet);
+        if !exclusive && packet.engine() != Engine::Compute {
             return None;
         }
         if packet.early_result().is_some()
@@ -100,20 +101,43 @@ impl Backend {
         }
         self.shared.traversal.admit(
             packet.context.vm().id(),
-            traces_rays,
+            exclusive,
             &packet.completion.scheduler_fence(),
         )
     }
 
-    /// Whether the command may be published from its submit ioctl: never one that traces
-    /// rays, and a compute command only while nothing is admitted or waiting. This only looks.
+    /// The command runs for one client at a time: it traces rays, or it is a render with mesh
+    /// shading. Two clients' mesh renders in the GPU together lose whole mesh workgroups or give
+    /// one view's primitives another view's per-primitive data; one after the other they are
+    /// correct. `aurora.g17_mesh_exclusion=0` lets mesh renders overlap again, for an A/B.
+    fn exclusive(packet: &Packet) -> bool {
+        packet.command.traces_rays()
+            || (packet.engine() == Engine::Render
+                && packet.command.mesh_output()
+                && mesh_exclusion())
+    }
+
+    /// Whether the command may be published from its submit ioctl: never one that runs for one
+    /// client at a time ([`Self::exclusive`]), and a compute command only while nothing is
+    /// admitted or waiting. This only looks.
     pub(super) fn traversal_inline(&self, packet: &Arc<Packet>) -> bool {
         if !self.shared.variant.traversal_exclusion {
             return true;
         }
-        if packet.command.traces_rays() {
+        if Self::exclusive(packet) {
             return false;
         }
         packet.engine() != Engine::Compute || self.shared.traversal.idle()
     }
+}
+
+unsafe extern "C" {
+    fn asahi_g17_mesh_exclusion() -> u32;
+}
+
+/// `aurora.g17_mesh_exclusion` (g17/mesh_exclusion.c): renders with mesh shading run for one
+/// client at a time.
+fn mesh_exclusion() -> bool {
+    // SAFETY: Reads a module parameter; no other effect.
+    unsafe { asahi_g17_mesh_exclusion() != 0 }
 }

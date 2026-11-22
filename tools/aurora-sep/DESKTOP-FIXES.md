@@ -1,6 +1,6 @@
 The installer leaves desktop packages unchanged unless `--desktop-fixes` is
 selected. This option requires a release containing a matched desktop manifest.
-It can accompany the normal install or `--read-only`.
+It accompanies the normal install.
 
 The supported Omarchy upgrade is the matching stable `omarchy` and
 `omarchy-settings` pair, `4.0.4-1` to `4.0.4-2`. The installer checks the

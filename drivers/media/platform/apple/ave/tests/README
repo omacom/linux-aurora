@@ -76,7 +76,7 @@ Hardware procedure (requires a qualified firmware/SoC and an approved lane)
    enable the normal PM/genpd tracing available in the test kernel. Confirm a
    fresh AVC and HEVC encode can each complete and decode correctly.
 2. Start a long encode with several OUTPUT and CAPTURE buffers queued. While
-   it runs, as root write 1 to /sys/kernel/debug/apple-ave/inject_wedge.
+   it runs, as root write 1 to /sys/kernel/debug/apple-ave-<dev>/inject_wedge.
    This software fault marks the current firmware broken and suppresses the
    recovery Halt attempt, modelling a command timeout without malformed DMA
    commands. It does not reproduce a real DART overrun or a firmware deadlock.

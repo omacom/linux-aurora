@@ -3,7 +3,9 @@
 
 #include <linux/firmware.h>
 #include <linux/gcd.h>
+#include <linux/of_platform.h>
 #include <linux/unaligned.h>
+#include <linux/soc/apple/display.h>
 #include <kunit/static_stub.h>
 
 #include "isp-cam.h"
@@ -66,7 +68,8 @@ static const struct isp_setfile isp_setfiles[] = {
 	[ISP_IMX514_2820_02] = {0x514, "imx514", 0x28200205, "apple/isp_2820_02XX.dat", 0xa198},
 	[ISP_IMX514_2820_03] = {0x514, "imx514", 0x28200305, "apple/isp_2820_03XX.dat", 0xa198},
 	[ISP_IMX514_2820_04] = {0x514, "imx514", 0x28200405, "apple/isp_2820_04XX.dat", 0xa198},
-	[ISP_IMX558_1921_01] = {0x558, "imx558", 0x19210106, "apple/isp_1921_01XX.dat", 0xad40},
+	[ISP_IMX558_1921_01] = {0x558, "imx558", 0x19210106, "apple/isp_1921_01XX.dat", 0xad40,
+				0, ISP_TEMPORAL_FILTER_OFF},
 	[ISP_IMX558_1922_02] = {0x558, "imx558", 0x19220201, "apple/isp_1922_02XX.dat", 0xad40},
 	[ISP_IMX558_1925_03] = {0x558, "imx558", 0x19250306, "apple/isp_1925_03XX.dat", 0xcbc0,
 				0xcba6, ISP_TEMPORAL_FILTER_OFF},
@@ -1086,9 +1089,7 @@ select_config:
 	if (err)
 		return err;
 
-	err = isp_cmd_ch_mbnr_enable(isp, ch, 0,
-				     isp->preview_26 ? ISP_MBNR_MODE_DISABLE :
-				     ISP_MBNR_MODE_ENABLE, 1);
+	err = isp_cmd_ch_mbnr_enable(isp, ch, 0, ISP_MBNR_MODE_ENABLE, 1);
 	if (err)
 		return err;
 
@@ -1122,11 +1123,7 @@ select_config:
 			return err;
 	}
 
-	/* Preview has no consumer for temporal history on this firmware. */
-	if (isp->preview_26)
-		err = isp_cmd_apple_ch_temporal_filter_disable(isp, ch);
-	else
-		err = isp_ch_configure_temporal_filter(isp, ch);
+	err = isp_ch_configure_temporal_filter(isp, ch);
 	if (err)
 		return err;
 
@@ -1247,29 +1244,81 @@ void apple_isp_wdt_stop(struct apple_isp *isp)
 	isp->wdt_running = false;
 }
 
+/*
+ * The DCP contract function is implemented by the DRM side. This wrapper is
+ * the seam the KUnit tests stub, and the only caller of the contract.
+ */
+static int apple_isp_dcp_indicator_set(struct device *dcp, bool on)
+{
+	KUNIT_STATIC_STUB_REDIRECT(apple_isp_dcp_indicator_set, dcp, on);
+	return apple_dcp_camera_indicator_set(dcp, on);
+}
+
+static struct platform_device *apple_isp_dcp_lookup(struct device_node *np)
+{
+	KUNIT_STATIC_STUB_REDIRECT(apple_isp_dcp_lookup, np);
+	return of_find_device_by_node(np);
+}
+
+/* The DCP may probe after the ISP, so it is looked up when a stream starts. */
+static void apple_isp_indicator_bind(struct apple_isp *isp)
+{
+	struct platform_device *pdev;
+
+	if (isp->dcp || !isp->dcp_np)
+		return;
+	pdev = apple_isp_dcp_lookup(isp->dcp_np);
+	if (!pdev) {
+		dev_warn_ratelimited(isp->dev,
+				     "camera indicator: its DCP is not probed, no indicator for this stream\n");
+		return;
+	}
+	isp->dcp = &pdev->dev;
+	dev_notice(isp->dev, "best-effort software camera indicator via the DCP; not a privacy guarantee, the camera does not depend on it\n");
+}
+
 int apple_isp_start_capture(struct apple_isp *isp)
 {
 	int err;
+
+	/*
+	 * Best-effort software indicator, not a privacy guarantee: the dot
+	 * is requested before the sensor may stream, but the camera does
+	 * not depend on it.
+	 */
+	apple_isp_indicator_bind(isp);
+	if (apple_isp_camera_indicator(isp)) {
+		err = apple_isp_dcp_indicator_set(isp->dcp, true);
+		if (err)
+			dev_warn_ratelimited(isp->dev, "camera indicator not shown: %d\n", err);
+	}
 
 	/* Serviced from before the channel starts... */
 	apple_isp_wdt_start(isp);
 
 	err = isp_cmd_ch_start(isp, 0); // TODO channel mask
-	if (err)
+	if (err) {
 		apple_isp_wdt_stop(isp);
+		if (apple_isp_camera_indicator(isp))
+			apple_isp_dcp_indicator_set(isp->dcp, false);
+	}
 
 	return err;
 }
 
 void apple_isp_stop_capture(struct apple_isp *isp)
 {
-	if (isp->ipc_failed || isp->fw_state != ISP_FW_RUNNING)
-		return;
-	if (!isp_cmd_ch_stop(isp, 0)) /* TODO channel mask */
-		isp_cmd_ch_buffer_return(isp, isp->current_ch);
+	if (!isp->ipc_failed && isp->fw_state == ISP_FW_RUNNING) {
+		if (!isp_cmd_ch_stop(isp, 0)) /* TODO channel mask */
+			isp_cmd_ch_buffer_return(isp, isp->current_ch);
 
-	/* ... until its buffers are back. */
-	apple_isp_wdt_stop(isp);
+		/* ... until its buffers are back. */
+		apple_isp_wdt_stop(isp);
+	}
+
+	/* The indicator follows the stream off, however the stream stopped. */
+	if (apple_isp_camera_indicator(isp))
+		apple_isp_dcp_indicator_set(isp->dcp, false);
 }
 
 #if IS_ENABLED(CONFIG_VIDEO_APPLE_ISP_KUNIT_TEST)

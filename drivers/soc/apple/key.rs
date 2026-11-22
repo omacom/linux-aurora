@@ -957,12 +957,12 @@ impl KeyGrant {
 
 /// Deletes an enclave credential context.
 pub(crate) trait ContextDelete {
-    fn delete_context(&self, handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]);
+    fn delete_context(&self, handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) -> Result<()>;
 }
 
 impl ContextDelete for SepData {
-    fn delete_context(&self, handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) {
-        self.close_unlock_evaluation(handle);
+    fn delete_context(&self, handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) -> Result<()> {
+        self.delete_unlock_evaluation(handle)
     }
 }
 
@@ -972,22 +972,38 @@ impl ContextDelete for SepData {
 pub(crate) struct OwnedContext<'a, D: ContextDelete + ?Sized> {
     owner: &'a D,
     handle: [u8; crate::scrd::SCRD_ACM_HANDLE_LEN],
+    disposed: bool,
 }
 
 impl<'a, D: ContextDelete + ?Sized> OwnedContext<'a, D> {
     pub(crate) fn new(owner: &'a D, handle: [u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) -> Self {
-        OwnedContext { owner, handle }
+        OwnedContext { owner, handle, disposed: false }
     }
 
     pub(crate) fn handle(&self) -> &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN] {
         &self.handle
     }
+
+    fn dispose(&mut self) -> Result<()> {
+        if self.disposed {
+            return Ok(());
+        }
+        self.disposed = true;
+        let result = self.owner.delete_context(&self.handle);
+        crate::image::wipe(&mut self.handle);
+        result
+    }
+
+    /// Dispose before publishing the result. Failure drops any owned output.
+    pub(crate) fn finish<T>(mut self, result: Result<T>) -> Result<T> {
+        self.dispose()?;
+        result
+    }
 }
 
 impl<D: ContextDelete + ?Sized> Drop for OwnedContext<'_, D> {
     fn drop(&mut self) {
-        self.owner.delete_context(&self.handle);
-        crate::image::wipe(&mut self.handle);
+        let _ = self.dispose();
     }
 }
 
@@ -1645,6 +1661,9 @@ impl SepData {
             errno_of(&job.result)
         );
         ended?;
+        if self.key_context_failed.load(Relaxed) {
+            return Err(EIO);
+        }
         Ok(job)
     }
 
@@ -2097,7 +2116,7 @@ impl SepData {
         digest: &[u8; DIGEST_LEN],
         sealed: &[u8],
         pw: &[u8],
-    ) -> Result<KVec<u8>> {
+    ) -> Result<crate::Secret> {
         let bag = bag_user(uid)?;
         // Not under `catacomb_writer`: a touch wait holds it for up to a
         // minute, and this path needs no capture.
@@ -2107,9 +2126,9 @@ impl SepData {
             dev_info_refusal!(self.dev, "sep-key: uid {}'s password refused by the enclave (status {})\n", uid, verify);
             Err(EACCES)
         } else {
-            self.key_op_in(Some(uid), op, blob, digest, sealed, Some(ctx.handle()))
+            self.key_op_in(Some(uid), op, blob, digest, sealed, Some(ctx.handle())).map(crate::Secret)
         };
-        drop(ctx);
+        let r = ctx.finish(r);
         dev_dbg!(
             self.dev,
             "sep-key: password-gated {:?} under uid {}'s bag: {}\n",
@@ -2245,6 +2264,9 @@ impl SepData {
         if self.shutting_down.load(Relaxed) {
             return Err(ENODEV);
         }
+        if cmd != IOC_INFO && cmd != IOC_CANCEL && self.key_context_failed.load(Relaxed) {
+            return Err(EIO);
+        }
         let user = UserPtr::from_addr(arg);
         match read_request(cmd, arg)? {
             KeyRequest::Info => write_user(user, &info_for(self.profile.key_store == crate::profile::KeyStore::Variant5)),
@@ -2348,7 +2370,7 @@ impl SepData {
                     require_admin_or(uid)?;
                     let pw = check_password(&req.password)?;
                     let digest = req.sign.digest;
-                    crate::Secret(self.key_op_with_password(uid, h.blob, TouchOp::Sign, &digest, &[], pw)?)
+                    self.key_op_with_password(uid, h.blob, TouchOp::Sign, &digest, &[], pw)?
                 };
                 put_signature(&sig, &mut req.sign)?;
                 // `req` wipes the password when it drops.
@@ -2360,7 +2382,7 @@ impl SepData {
                     let uid = check_password_handle(&h)?;
                     require_admin_or(uid)?;
                     let pw = check_password(&req.password)?;
-                    crate::Secret(self.key_op_with_password(uid, h.blob, TouchOp::Unseal, &[0; DIGEST_LEN], sealed, pw)?)
+                    self.key_op_with_password(uid, h.blob, TouchOp::Unseal, &[0; DIGEST_LEN], sealed, pw)?
                 };
                 put_secret(&secret, &mut req.seal)?;
                 // `secret` and `req` wipe the plaintext and password when they drop.
@@ -2510,9 +2532,10 @@ mod one_op_tests {
     }
 
     impl ContextDelete for Deleter {
-        fn delete_context(&self, handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) {
+        fn delete_context(&self, handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) -> Result<()> {
             self.deleted.set(self.deleted.get() + 1);
             self.last.set(*handle);
+            Ok(())
         }
     }
 
@@ -2551,6 +2574,45 @@ mod one_op_tests {
         assert_eq!(d.deleted.get(), 0);
         drop(maybe);
         assert_eq!(d.deleted.get(), 1);
+    }
+
+    struct RefusingDeleter(Cell<u32>);
+
+    impl ContextDelete for RefusingDeleter {
+        fn delete_context(&self, _handle: &[u8; crate::scrd::SCRD_ACM_HANDLE_LEN]) -> Result<()> {
+            self.0.set(self.0.get() + 1);
+            Err(EIO)
+        }
+    }
+
+    struct PendingOutput<'a>(&'a Cell<bool>);
+
+    impl Drop for PendingOutput<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    #[test]
+    fn cleanup_failure_discards_success_without_retrying_disposal() {
+        let d = RefusingDeleter(Cell::new(0));
+        let discarded = Cell::new(false);
+        let ctx = OwnedContext::new(&d, [0x51; crate::scrd::SCRD_ACM_HANDLE_LEN]);
+        let result = ctx.finish(Ok(PendingOutput(&discarded)));
+        assert!(matches!(result, Err(e) if e == EIO));
+        assert!(discarded.get());
+        assert_eq!(d.0.get(), 1);
+    }
+
+    #[test]
+    fn confirmed_disposal_preserves_the_operation_result() {
+        let d = deleter();
+        let ctx = OwnedContext::new(&d, [0x52; crate::scrd::SCRD_ACM_HANDLE_LEN]);
+        assert_eq!(ctx.finish(Ok(37)), Ok(37));
+        assert_eq!(d.deleted.get(), 1);
+        let ctx = OwnedContext::new(&d, [0x53; crate::scrd::SCRD_ACM_HANDLE_LEN]);
+        assert_eq!(ctx.finish::<()>(Err(ECANCELED)), Err(ECANCELED));
+        assert_eq!(d.deleted.get(), 2);
     }
 
     // Production kernels do not build the reuse measurements.

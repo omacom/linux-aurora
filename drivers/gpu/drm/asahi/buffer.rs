@@ -442,15 +442,17 @@ impl Buffer::ver {
         self.inner.lock().blocks.len() as u32
     }
 
-    /// Automatically grow the Buffer based on feedback from the statistics.
-    pub(crate) fn auto_grow(&self) -> Result<bool> {
+    /// Size the overflow statistics ask for, in blocks, or `None` if the buffer is big enough.
+    ///
+    /// This only reads the statistics: the firmware keeps accumulating them until
+    /// [`Self::reset_stats`], so a caller that cannot grow the buffer yet sees the same request
+    /// again on its next submission. If the buffer needs more than twice the pages it peaked at,
+    /// this asks for three times that (same logic as macOS).
+    pub(crate) fn stats_target_blocks(&self) -> Option<usize> {
         let inner = self.inner.lock();
 
-        let used_pages = inner.stats.with(|raw, _inner| {
-            let used = raw.max_pages.load(Ordering::Relaxed);
-            raw.reset.store(1, Ordering::Release);
-            used as usize
-        });
+        let used_pages =
+            inner.stats.with(|raw, _inner| raw.max_pages.load(Ordering::Relaxed) as usize);
 
         let need_blocks = (used_pages * 2)
             .div_ceil(PAGES_PER_BLOCK)
@@ -459,16 +461,13 @@ impl Buffer::ver {
             .div_ceil(PAGES_PER_BLOCK)
             .min(inner.max_blocks_nomemless);
 
-        let cur_count = inner.blocks.len();
+        (need_blocks > inner.blocks.len()).then_some(want_blocks)
+    }
 
-        if need_blocks <= cur_count {
-            Ok(false)
-        } else {
-            // Grow to 3x requested size (same logic as macOS)
-            core::mem::drop(inner);
-            self.ensure_blocks(want_blocks)?;
-            Ok(true)
-        }
+    /// Asks the firmware to restart the overflow statistics, after the buffer grew for them.
+    pub(crate) fn reset_stats(&self) {
+        let inner = self.inner.lock();
+        inner.stats.with(|raw, _inner| raw.reset.store(1, Ordering::Release));
     }
 
     /// Synchronously grow the Buffer.
@@ -483,7 +482,20 @@ impl Buffer::ver {
     }
 
     /// Ensure that the buffer has at least a certain minimum size in blocks.
+    ///
+    /// The buffer manager owns the buffer while scenes on it are in flight, so the new size is only
+    /// published if no scene is active.
     pub(crate) fn ensure_blocks(&self, min_blocks: usize) -> Result<bool> {
+        self.ensure_blocks_inner(min_blocks, false)
+    }
+
+    /// [`Self::ensure_blocks`] for a caller that guarantees all work that used this buffer has
+    /// completed: the new size is published although scenes of completed jobs may still be held.
+    pub(crate) fn ensure_blocks_idle(&self, min_blocks: usize) -> Result<bool> {
+        self.ensure_blocks_inner(min_blocks, true)
+    }
+
+    fn ensure_blocks_inner(&self, min_blocks: usize, fw_idle: bool) -> Result<bool> {
         let mut inner = self.inner.lock();
 
         let cur_count = inner.blocks.len();
@@ -528,7 +540,7 @@ impl Buffer::ver {
         });
 
         /* Only do this update if the buffer manager is idle (which means we own it) */
-        if inner.active_scenes == 0 {
+        if inner.active_scenes == 0 || fw_idle {
             let page_count = (new_count * PAGES_PER_BLOCK) as u32;
             inner.info.with(|raw, _inner| {
                 raw.page_count.store(page_count, Ordering::Relaxed);

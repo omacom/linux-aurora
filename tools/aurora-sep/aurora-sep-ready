@@ -140,7 +140,7 @@ blocked_reason() {
     optout="To match anyway, set 'options apple_sep xart_guard=0' in /etc/modprobe.d/ and reboot; the enclave may then rewrite session records another OS on this Mac (macOS) created, see XART-SAFETY.md"
     refusals=$(attr xart_guard_refusals)
     if [ "$(attr xart)" = disabled ]; then
-        echo "xART writes are disabled (xart_writes=0, or the gigalocker did not validate for writing), and a match must save state there"
+        echo "xART writes are disabled (the store is read-only this boot, or a leftover xart_writes setting under a kernel from before linux#2591), and a match must save state there"
     elif [ "$refusals" != absent ] && [ "$refusals" != 0 ]; then
         echo "the xART guard (level $(attr xart_guard)) refused $refusals write(s) of records this Linux install did not create. $optout"
     elif [ "$(attr xart_guard_list)" = unavailable ]; then

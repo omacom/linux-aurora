@@ -72,11 +72,19 @@ class UnsupportedSocTest(Base):
                     self.assertFalse(self.m1n1_conf.exists())
                     self.assertFalse(self.state.exists() and any(self.state.iterdir()))
 
-    def test_read_only_install_refuses_too(self):
-        self.mac("j713")
-        proc = self.run_sh("READ_ONLY=1\ninstall_all", check=False)
-        self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("apple,t8132", proc.stderr)
+    def test_install_options_refuse_too(self):
+        # An install with one of its options refuses the same way, before the option acts.
+        for option in ("ESP_ARCHIVE_HISTORY=1", "DESKTOP_FIXES=1", "M3_PRO_MESA=0"):
+            with self.subTest(option=option):
+                self.mac("j713")
+                before = self.boot.read_bytes()
+                proc = self.run_sh(f"esp_history_run() {{ echo ARCHIVE; }}\n{option}\ninstall_all",
+                                   check=False)
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("apple,t8132", proc.stderr)
+                self.assertNotIn("ARCHIVE", proc.stdout)
+                self.assertEqual(self.boot.read_bytes(), before)
+                self.assertEqual(self.downloaded(), [])
 
     def test_uninstall_refuses(self):
         for board, soc in UNSUPPORTED.items():

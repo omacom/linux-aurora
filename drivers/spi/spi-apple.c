@@ -326,7 +326,10 @@ static bool apple_spi_prep_transfer(struct apple_spi *spi, struct spi_transfer *
 
 	/* Calculate and program the clock rate */
 	cr = DIV_ROUND_UP(clk_get_rate(spi->clk), t->speed_hz);
-	reg_write(spi, APPLE_SPI_CLKDIV, min_t(u32, cr, APPLE_SPI_CLKDIV_MAX));
+	cr = min_t(u32, cr, APPLE_SPI_CLKDIV_MAX);
+	cr = max(cr, 1U);
+	reg_write(spi, APPLE_SPI_CLKDIV, cr);
+	t->effective_speed_hz = clk_get_rate(spi->clk) / cr;
 
 	/* Update bits per word */
 	reg_mask(spi, APPLE_SPI_SHIFTCFG, APPLE_SPI_SHIFTCFG_BITS,
@@ -339,7 +342,7 @@ static bool apple_spi_prep_transfer(struct apple_spi *spi, struct spi_transfer *
 	 *    200000 * bits_per_word * fifo_threshold <= hz
 	 */
 	fifo_threshold = APPLE_SPI_FIFO_DEPTH / 2;
-	return (200000 * t->bits_per_word * fifo_threshold) <= t->speed_hz;
+	return (200000 * t->bits_per_word * fifo_threshold) <= t->effective_speed_hz;
 }
 
 static int apple_spi_poll(struct apple_spi *spi, u32 fifo_bit, u32 xfer_bit)
@@ -615,7 +618,7 @@ static int apple_spi_transfer_one(struct spi_controller *ctlr, struct spi_device
 		/* Allow for the transfer itself on top of the usual timeout. */
 		unsigned long ms = APPLE_SPI_TIMEOUT_MS +
 			DIV_ROUND_UP_ULL((u64)words * t->bits_per_word * 1000,
-					 max(t->speed_hz, 1U));
+					 max(t->effective_speed_hz, 1U));
 
 		reinit_completion(&spi->done);
 		spin_lock_irqsave(&spi->lock, flags);

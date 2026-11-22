@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /* Shared SoC resources; firmware ownership and enables need qualification. */
 
+/ {
+	/*
+	 * As on T8140, the OS cannot request core power-down on T8152 (no
+	 * writable CYC_OVRD): the hardware power-gates an idle core after WFI,
+	 * so both of the driver's idle states are WFI. The driver must be bound
+	 * for s2idle to freeze the tick and suspend timekeeping. Every T8152
+	 * board has the same cores, so the node lives here.
+	 */
+	cpuidle {
+		compatible = "apple,t8152-cpuidle", "apple,t8140-cpuidle";
+	};
+};
+
 &{/soc} {
 	pcie2_dart: iommu@38a000000 {
 		compatible = "apple,t8152-dart", "apple,t8110-dart";

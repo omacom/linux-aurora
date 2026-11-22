@@ -7,6 +7,7 @@
 		reg = <0x4 0x8a000000 0x0 0x20000>;
 		interrupts = <AIC_IRQ 1481 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_apcie_sys_gp>;
 		status = "disabled";
 	};
 
@@ -71,6 +72,22 @@
 		reg = <0x3 0xa5060000 0x0 0x20000>;
 		interrupts = <AIC_IRQ 1259 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_sio>;
+		status = "disabled";
+	};
+
+	/*
+	 * ADT /arm-io/aes (aes,s8000, aes-version 5): the engine, shared control
+	 * and auxiliary control windows; DART-SIO mapper-aes is stream 1.
+	 */
+	aes: crypto@3a500c000 {
+		compatible = "apple,t8142-aes", "apple,aes";
+		reg = <0x3 0xa500c000 0x0 0x4000>,
+		      <0x3 0x882dc000 0x0 0x8000>,
+		      <0x3 0x88078000 0x0 0x4000>;
+		interrupts = <AIC_IRQ 1246 IRQ_TYPE_LEVEL_HIGH>;
+		power-domains = <&ps_aes>;
+		iommus = <&sio_dart 1>;
 		status = "disabled";
 	};
 
@@ -264,9 +281,32 @@
 		compatible = "apple,t8142-dart", "apple,t8110-dart";
 		reg = <0x3 0xa1020000 0x0 0xc000>,
 		      <0x3 0xa1034000 0x0 0x4000>;
+		/* ADT dart-apr instances DARTRT and SMMU. */
+		reg-names = "dart", "auxiliary";
 		interrupts = <AIC_IRQ 1381 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
-		status = "disabled";
+		power-domains = <&ps_scodec>;
+		/* ADT vm-base 0x100_0000_0000, vm-size 0x300_0000_0000 */
+		apple,dma-range = <0x100 0x0 0x300 0x0>;
+	};
+
+	/*
+	 * ProRes encoder (ADT /arm-io/apr, "apr,l0"): T6050's five windows at the
+	 * same offsets. macOS 27.2.1 drives it through SID 1.
+	 */
+	apr: prores@3a1000000 {
+		compatible = "apple,t8142-prores", "apple,prores";
+		reg = <0x3 0xa1000000 0x0 0x4000>,
+		      <0x3 0xa0000000 0x0 0x1000000>,
+		      <0x3 0xa10c0000 0x0 0x4000>,
+		      <0x3 0xa1070000 0x0 0x4000>,
+		      <0x3 0xa1071000 0x0 0x4000>;
+		reg-names = "core", "wrapper", "aux", "ctrl", "ctrl1";
+		interrupts = <AIC_IRQ 1382 IRQ_TYPE_LEVEL_HIGH>,
+			     <AIC_IRQ 1419 IRQ_TYPE_LEVEL_HIGH>;
+		iommus = <&apr_dart 1>;
+		power-domains = <&ps_scodec>;
+		resets = <&ps_scodec>;
 	};
 
 	scdc_dart: iommu@3a1040000 {
@@ -562,6 +602,37 @@
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
 		label = "jpg";
+		status = "disabled";
+	};
+
+	/* ADT pmgr device SCODEC (id 336): the ProRes engine and its DART. */
+	ps_scodec: power-controller@2c0 {
+		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x2c0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "scodec";
+	};
+
+	/* ADT pmgr device SIO (id 66). Owned by the firmware that runs the SIO. */
+	ps_sio: power-controller@2b0 {
+		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x2b0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "sio";
+		apple,firmware-owned;
+		status = "disabled";
+	};
+
+	/* ADT pmgr device AES (id 96), the SIO AES engine. */
+	ps_aes: power-controller@3a0 {
+		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x3a0 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "aes";
+		power-domains = <&ps_sio>;
 		status = "disabled";
 	};
 

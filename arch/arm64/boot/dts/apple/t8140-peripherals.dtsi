@@ -432,6 +432,7 @@
 		compatible = "apple,t8140-dart", "apple,t8110-dart";
 		reg = <0x3 0x099a0000 0x0 0xc000>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_debug_gated>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 305 IRQ_TYPE_LEVEL_HIGH>;
 		status = "disabled";

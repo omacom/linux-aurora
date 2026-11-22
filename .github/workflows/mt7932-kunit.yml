@@ -1,0 +1,50 @@
+name: MT7932 KUnit
+
+# The J700 Wi-Fi driver's KUnit suites (input validation, RF failure, connection
+# lifecycle, WoWLAN) on arm64 QEMU. They use synthetic devices, so they run
+# without the radio.
+
+on:
+  pull_request:
+    branches: [integration/aurora, aurora-wip]
+    paths:
+      - 'drivers/net/wireless/mediatek/mt7932/**'
+      - 'drivers/pci/controller/pcie-apple*'
+      - 'include/linux/soc/apple/pci-apple-piodma.h'
+      - 'include/linux/mt7932.h'
+      - 'net/wireless/**'
+      - 'include/net/cfg80211.h'
+      - '.github/workflows/mt7932-kunit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mt7932-kunit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kunit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Install kernel build and QEMU dependencies
+        run: |
+          # As sep-source.yml: avoid the hosted runner's Azure mirror.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' 'https://security.ubuntu.com/ubuntu/' | \
+              sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          fi
+          sudo apt-get update -o APT::Update::Error-Mode=any
+          sudo apt-get install -y clang lld llvm libelf-dev libssl-dev \
+            flex bison bc pkg-config make perl qemu-system-arm
+      - name: Run the MT7932 KUnit suites on arm64 QEMU
+        run: |
+          ./tools/testing/kunit/kunit.py run --arch=arm64 \
+            --make_options LLVM=1 \
+            --kunitconfig=drivers/net/wireless/mediatek/mt7932/mt7932.kunitconfig \
+            --jobs="$(nproc)" --timeout=900 --kernel_args=panic_on_warn=1

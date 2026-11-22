@@ -289,11 +289,39 @@ static void strict_6070_recovery(void)
 
  init();
  ave.layout = &layout;
+ /* A hung 6070 firmware is left alone while a session still holds it. */
  ave.fw_state = AVE_FW_BROKEN;
+ ave.sessions[0] = &ctx[0];
  *(u32 *)(ave.coproc + regs.ctrl) = AVE_COPROC_CTRL_RUN;
  assert(ave_runtime_suspend(&dev) == -EBUSY);
  assert(ave.fw_state == AVE_FW_BROKEN && !halts && !ave.recovery_count);
  assert(readl(ave.coproc + regs.ctrl) == AVE_COPROC_CTRL_RUN);
+
+ /* A core that does not stop keeps the encoder broken. */
+ ave.sessions[0] = NULL;
+ ctrl_sticky = true;
+ assert(ave_runtime_suspend(&dev) == -EIO);
+ assert(ave.fw_state == AVE_FW_BROKEN && ave.recovery_count == 1 && !stop_seen);
+ ctrl_sticky = false;
+
+ /*
+  * With the last session gone it is stopped: no ring means no Halt to send,
+  * CTRL goes to zero and the firmware counts as halted, so genpd may cycle
+  * the VENC power and the next session cold-starts it.
+  */
+ assert(ave_runtime_suspend(&dev) == 0);
+ assert(ave.fw_state == AVE_FW_HALTED && ave.recovery_count == 2 && !halts);
+ assert(readl(ave.coproc + regs.ctrl) == 0 && stop_seen && sleep_ms);
+
+ /* The third stop in a row is allowed, the fourth hits the limit. */
+ ave.fw_state = AVE_FW_BROKEN;
+ *(u32 *)(ave.coproc + regs.ctrl) = AVE_COPROC_CTRL_RUN;
+ assert(ave_runtime_suspend(&dev) == 0 && ave.recovery_count == 3);
+ ave.fw_state = AVE_FW_BROKEN;
+ *(u32 *)(ave.coproc + regs.ctrl) = AVE_COPROC_CTRL_RUN;
+ assert(ave_runtime_suspend(&dev) == -EBUSY && ave.recovery_count == 3);
+ assert(readl(ave.coproc + regs.ctrl) == AVE_COPROC_CTRL_RUN);
+
  ave.fw_state = AVE_FW_RECOVERING;
  assert(ave_runtime_suspend(&dev) == -EBUSY);
  assert(readl(ave.coproc + regs.ctrl) == AVE_COPROC_CTRL_RUN);

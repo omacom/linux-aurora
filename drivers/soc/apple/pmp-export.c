@@ -84,7 +84,6 @@ int apple_pmp_set_device_power(u8 command, u16 device_id, u32 enabled)
 	/* T6030 needs both the RTKit power vote and the PTD bandwidth report. */
 	report_gfx = IS_ENABLED(CONFIG_APPLE_T6030_GPU_PMP_LINK) &&
 		     command == 0x0f && device_id == 5 &&
-		     of_machine_is_compatible("apple,t6030") &&
 		     of_device_is_compatible(pmp_device->of_node, "apple,t6030-pmp-v2");
 	if (report_gfx) {
 		ret = apple_pmp_report_check_t6030_gfx(pmp_device);
@@ -152,13 +151,33 @@ static int apple_pmp_commit_stop_fn(void *unused)
 }
 
 /*
- * Retained J713 power votes have no teardown. On T8140 an unbind leaves the firmware running,
- * and a commit with it running reset the SoC: its sleep registration is what refuses
- * then, every sleep until reboot, since a rebind can't register again.
+ * Whether the PMP's stop can go to the sleep's last step: the sleep driver is built and the
+ * DT has a sleep controller for it (apple_pmp_commit_available() registers there).
+ */
+static bool apple_pmp_sleep_controller(void)
+{
+	struct device_node *np;
+
+	if (!IS_ENABLED(CONFIG_APPLE_SOC_SLEEP))
+		return false;
+	for_each_node_by_name(np, "sleep-controller") {
+		if (of_device_is_available(np)) {
+			of_node_put(np);
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Retained J713 power votes have no teardown. Where the PMP registers with the sleep driver,
+ * an unbind leaves the firmware running, and a commit with it running reset the SoC (seen on
+ * T8140): its sleep registration is what refuses then, every sleep until reboot, since a
+ * rebind can't register again. Nothing in that is particular to one SoC.
  */
 bool apple_pmp_keep_bound(void)
 {
-	return apple_pmp_display_retained_board() || of_machine_is_compatible("apple,t8140");
+	return apple_pmp_display_retained_board() || apple_pmp_sleep_controller();
 }
 
 /* Whether the sleep's last step takes the PMP: registered with the sleep driver, once. */

@@ -156,6 +156,13 @@
 	apple,platform-id = <0x72>;
 };
 
+&aop_audio {
+	/* The microphone card's name: AppleJ815HPAI. */
+	apple,chassis-name = "J815";
+	/* ADT iop-audio-controller/audio-speaker: 6 slots, 12 sense words. */
+	apple,speaker-amps = <6>;
+};
+
 /*
  * Ambient light sensor, the AOP's "als" service: an ST VD6286, as on the
  * M4 Pro, not T8140's CT817. aop_als sends it the per-device calibration
@@ -176,6 +183,61 @@
 	 */
 	aop_las: las {
 		compatible = "apple,t8142-aop-las", "apple,aop-las";
+	};
+};
+
+/* Names as in speakersafetyd's j815.conf; slots from ADT speaker-config. */
+&speaker_left_woofer {
+	sound-name-prefix = "Left Woofer 1";
+};
+
+&speaker_right_woofer {
+	sound-name-prefix = "Right Woofer 1";
+};
+
+&i2c3 {
+	speaker_left_woofer_2: codec@3a {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x3a>;
+		shutdown-gpios = <&pinctrl_ap 151 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Left Woofer 2";
+		ti,imon-slot-no = <18>;
+		ti,vmon-slot-no = <16>;
+		ti,bclk-ratio = <250>;
+	};
+
+	speaker_right_woofer_2: codec@3d {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x3d>;
+		shutdown-gpios = <&pinctrl_ap 151 GPIO_ACTIVE_HIGH>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Right Woofer 2";
+		ti,imon-slot-no = <22>;
+		ti,vmon-slot-no = <20>;
+		ti,bclk-ratio = <250>;
+	};
+};
+
+/ {
+	sound {
+		compatible = "apple,j815-macaudio", "apple,macaudio";
+		model = "MacBook Air J815";
+
+		dai-link@1 {
+			/*
+			 * ADT speaker-config order: macaudio gives codec k playback
+			 * slot k (left in 0, 2, 4; right in 1, 3, 5) as macOS does.
+			 * The TX idle masks are J813's: J815's amp-tx-zd-config has
+			 * the same words (left amps drive slots 0-3, 8-11, 16-19 on
+			 * line 0, right amps 4-7, 12-15, 20-23 on line 1).
+			 */
+			codec {
+				sound-dai = <&speaker_left_woofer>, <&speaker_right_woofer>,
+					    <&speaker_left_tweeter>, <&speaker_right_tweeter>,
+					    <&speaker_left_woofer_2>, <&speaker_right_woofer_2>;
+			};
+		};
 	};
 };
 
@@ -237,6 +299,7 @@
  */
 &smc {
 	hwmon {
+		apple,discover-temperatures;
 		apple,soc-die-keys = "Te04", "Te08", "Te0C", "Te0R",
 				     "Tp00", "Tp04", "Tp0C", "Tp0G", "Tp0O",
 				     "Tp0R", "Tp0X", "Tp0a", "Tp0p", "Tp0u",
@@ -371,103 +434,43 @@
 	gpio-reserved-ranges = <0 18>, <19 17>, <37 3>;
 };
 
-/*
- * J815 has six speaker amplifiers, not J813's four. Keep J813's sound card
- * and the AOP audio service off until the J815 speaker layout is described.
- */
-&aop_audio {
-	status = "disabled";
-};
-
-/ {
-	sound {
-		status = "disabled";
-	};
-};
-
 /* aura (mcc_init_m5) turns the system level cache on; the driver confirms it and flushes on shutdown. */
 &mcc {
 	status = "okay";
 };
 
-/*
- * Video encoder: ADT ave behind dart-ave (DART + CPUDART). aura hands over the
- * preloaded 26A428 firmware (memory regions, CRCs in /chosen) or disables the
- * node when the ADT has no preload.
- */
-&ps_venc_sys {
-	status = "okay";
+/* The port controllers follow the sleep's command rules (tipd: woken first, read at intervals) */
+&hpm0 {
+	apple,sleep-ssps-rules;
 };
 
-&ps_venc_dma {
-	status = "okay";
-};
-
-&ps_venc_pipe4 {
-	status = "okay";
-};
-
-&ps_venc_pipe5 {
-	status = "okay";
-};
-
-&ps_venc_me0 {
-	status = "okay";
-};
-
-&ps_venc_me1 {
-	status = "okay";
-};
-
-&ave_dart0 {
-	status = "okay";
-};
-
-&ave_dart1 {
-	status = "okay";
-};
-
-&ave {
-	status = "okay";
+&hpm1 {
+	apple,sleep-ssps-rules;
 };
 
 /*
- * The Neural Engine. It stays off until the first request: the firmware is
- * started then, from the preload, and system sleep cycles it cold.
+ * The MagSafe 3 port's PD controller: ADT hpm5 on nub-spmi-a0, SID 8, port-type
+ * 0x11. It has no USB data path, so it gets no connector node; tipd registers a
+ * Type-C port and a power supply for it, as on J714s. The bus is polled on
+ * T8142, so like hpm0 and hpm1 it has no interrupts. Its ADT features-supported
+ * is <3>, "Power In" only: no liquid detection.
  */
-&ps_ane_sys {
-	status = "okay";
+&nub_spmi_a0 {
+	hpm5: usb-pd@8 {
+		compatible = "apple,sn201202x";
+		reg = <0x8 SPMI_USID>;
+		apple,no-liquid-detection;
+		/* The same sleep rules as hpm0 and hpm1, as the J714s's hpm5 has them. */
+		apple,sleep-ssps-rules;
+	};
 };
 
-&ane_dart0 {
-	status = "okay";
-};
+#include "t8142-j813-j815-sleep.dtsi"
 
-&ane_dart1 {
-	status = "okay";
-};
-
-&ane_dart2 {
-	status = "okay";
-};
-
-&ane {
-	status = "okay";
-};
-
-/* Both JPEG engines and their DART. */
-&ps_jpg {
-	status = "okay";
-};
-
-&jpeg_dart {
-	status = "okay";
-};
-
-&jpeg0 {
-	status = "okay";
-};
-
-&jpeg1 {
-	status = "okay";
-};
+/*
+ * The external display processors (dispext0/1), their DARTs, the display
+ * crossbars and the USB-C ports' DisplayPort routes: the same two ports and
+ * blocks as the J813. The loader hands both processors over and enables
+ * them; without its hand-off they stay disabled.
+ */
+#include "t8142-j813-dcpext.dtsi"

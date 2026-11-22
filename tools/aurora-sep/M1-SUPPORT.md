@@ -57,9 +57,10 @@ not included in the production path.
 
 `j414s_persistent_enrol=1` remains available for explicitly testing the owner
 export/save order on other profiles. T8103 and T6020 no longer need it.
-Raw xART writes remain opt-in and subject to the extent ownership checks in
-[XART-SAFETY.md](XART-SAFETY.md). The kernel includes no raw private tracing
-or experimental dummy-keybag/enrollment protocol switches from the investigation.
+Raw xART writes are always on (aurora-silicon/linux#2591) and remain subject
+to the extent ownership checks in [XART-SAFETY.md](XART-SAFETY.md). The kernel
+includes no raw private tracing or experimental dummy-keybag/enrollment
+protocol switches from the investigation.
 
 ## Validation boundaries
 

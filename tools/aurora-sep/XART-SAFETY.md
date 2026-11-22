@@ -1,14 +1,24 @@
 # Shared xART gigalocker safety gate
 
-## Current default
+## SEP writes are always on
 
-`xart_writes=1` is the driver default. The APFS extent-ownership checks,
-record validation and write-ordering checks remain mandatory; unsupported
-layouts fail closed. `xart_writes=0 provision_keybag=0` explicitly selects
-read-only operation. `provision_keybag=1` is the default: create the Linux
-identity if missing and recover an existing identity without replacing it.
+xART writes and identity-keybag provisioning are always on. The `apple_sep`
+driver has no parameter that turns them off: `xart_writes` and
+`provision_keybag` were removed (aurora-silicon/linux#2591), and a stale value
+on the kernel command line or in modprobe.d is ignored. The APFS
+extent-ownership checks, record validation and write-ordering checks remain
+mandatory, and unsupported layouts fail closed. Provisioning creates the Linux
+identity keybag if it is missing and keeps an existing one without replacing
+it.
+
 The historical evidence below records the earlier opt-in deployments and
 does not establish qualification on every supported Mac or APFS layout.
+
+Kernels from before linux#2591 still have both parameters. They default to 1
+there, but a `0` is still honoured. So remove any `xart_writes=0` or
+`provision_keybag=0` that an earlier read-only install or an old version of
+these docs left in `/etc/modprobe.d/` or on the kernel command line.
+`aurora-xart status` names each one.
 
 ## Other OSes' records: `xart_guard`
 
@@ -369,14 +379,15 @@ same way; that is untested.
 
 ## Earlier deployment policy
 
-The iBoot APFS container and its XART `.gl` file are shared with macOS. The
-deployed `m2fix4` kernel remains read-only. The `m2fix5` source has an explicit
-`xart_writes=1` opt-in; it accepts writes only when the APFS-resolved extent is
-single-owner, unsnapshotted, un-cloned, and all existing records validate.
-`xart_start_sector` remains only an assertion against the APFS result. The
-opt-in is for the controlled J414s hardware test, not general APFS write
-support or a promise that restoring an old raw image reverses SEP anti-replay
-state. Do not enable it on other installations without equivalent checks.
+The iBoot APFS container and its XART `.gl` file are shared with macOS. At
+the time, the deployed `m2fix4` kernel was read-only, and the `m2fix5` source
+had an explicit `xart_writes=1` opt-in, a parameter since removed
+(aurora-silicon/linux#2591). It accepted writes only when the APFS-resolved
+extent was single-owner, unsnapshotted, un-cloned, and all existing records
+validated, as the driver still requires. `xart_start_sector` remains only an
+assertion against the APFS result. That opt-in was for the controlled J414s
+hardware test; it was not general APFS write support or a promise that
+restoring an old raw image reverses SEP anti-replay state.
 
 ## Evidence collected on 2026-09-21
 

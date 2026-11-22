@@ -32,6 +32,7 @@ select:
           - apple,t8122-aes
           - apple,t8132-aes
           - apple,t8140-aes
+          - apple,t8142-aes
   required:
     - compatible
 
@@ -127,6 +128,7 @@ allOf:
                       - apple,t8112-aes
                       - apple,t8122-aes
                       - apple,t8140-aes
+                      - apple,t8142-aes
                   - const: apple,aes
 
               reg:

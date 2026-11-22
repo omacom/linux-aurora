@@ -62,6 +62,19 @@ static size_t preload_frame(struct preload_fixture *f, size_t base, bool write)
 	return pos;
 }
 
+#define PRELOAD_TEST_TEXT_MAX ANE_H16_PRELOAD_TEXT_SIZE
+#define PRELOAD_TEST_DATA_MAX 0x2b0000
+
+static size_t preload_rule_text(const struct ane_h16_preload_rule *r)
+{
+	return r->text_size ?: ANE_H16_PRELOAD_TEXT_SIZE;
+}
+
+static size_t preload_rule_data(const struct ane_h16_preload_rule *r)
+{
+	return r->data_size ?: ANE_H16_PRELOAD_DATA_SIZE;
+}
+
 static void preload_free(void *allocation)
 {
 	kvfree(allocation);
@@ -74,18 +87,19 @@ static int preload_fixture_init(struct kunit *test)
 	if (!f)
 		return -ENOMEM;
 	test->priv = f;
-	f->text = kvmalloc(ANE_H16_PRELOAD_TEXT_SIZE, GFP_KERNEL);
+	/* Big enough for every rule's sizes; the 27.2 T8132 DATA is larger. */
+	f->text = kvmalloc(PRELOAD_TEST_TEXT_MAX, GFP_KERNEL);
 	if (!f->text)
 		return -ENOMEM;
 	if (kunit_add_action_or_reset(test, preload_free, f->text))
 		return -ENOMEM;
-	f->data = kvmalloc(ANE_H16_PRELOAD_DATA_SIZE, GFP_KERNEL);
+	f->data = kvmalloc(PRELOAD_TEST_DATA_MAX, GFP_KERNEL);
 	if (!f->data)
 		return -ENOMEM;
 	if (kunit_add_action_or_reset(test, preload_free, f->data))
 		return -ENOMEM;
-	memset(f->text, 0x5a, ANE_H16_PRELOAD_TEXT_SIZE);
-	memset(f->data, 0xa5, ANE_H16_PRELOAD_DATA_SIZE);
+	memset(f->text, 0x5a, PRELOAD_TEST_TEXT_MAX);
+	memset(f->data, 0xa5, PRELOAD_TEST_DATA_MAX);
 	return preload_frame(f, 0x5a18, true) == 0x5c79 ? 0 : -EINVAL;
 }
 
@@ -310,18 +324,18 @@ static void preload_profiles_check(struct kunit *test, const struct ane_h16_prof
 		KUNIT_ASSERT_NOT_NULL(test, p->build);
 		KUNIT_ASSERT_NOT_NULL(test, p->identity);
 		KUNIT_ASSERT_NOT_NULL(test, r);
-		memset(f->data, 0xa5, ANE_H16_PRELOAD_DATA_SIZE);
+		KUNIT_ASSERT_LE(test, preload_rule_text(r), (size_t)PRELOAD_TEST_TEXT_MAX);
+		KUNIT_ASSERT_LE(test, preload_rule_data(r), (size_t)PRELOAD_TEST_DATA_MAX);
+		memset(f->data, 0xa5, PRELOAD_TEST_DATA_MAX);
 		for (k = 0; k < r->cell_count; k++) {
 			memcpy(f->data + r->cells[k].value - 8, r->cells[k].tag, 4);
 			put_unaligned_le32(r->cells[k].width, f->data + r->cells[k].value - 4);
 		}
-		KUNIT_EXPECT_EQ(test, ane_h16_preload_digest(r, f->text,
-							     ANE_H16_PRELOAD_TEXT_SIZE, f->data,
-							     ANE_H16_PRELOAD_DATA_SIZE, digest),
+		KUNIT_EXPECT_EQ(test, ane_h16_preload_digest(r, f->text, preload_rule_text(r),
+							     f->data, preload_rule_data(r), digest),
 				0);
-		KUNIT_EXPECT_EQ(test, ane_h16_preload_validate(r, f->text,
-							       ANE_H16_PRELOAD_TEXT_SIZE, f->data,
-							       ANE_H16_PRELOAD_DATA_SIZE),
+		KUNIT_EXPECT_EQ(test, ane_h16_preload_validate(r, f->text, preload_rule_text(r),
+							       f->data, preload_rule_data(r)),
 				-ENOEXEC);
 		for (j = 0; j < i; j++) {
 			KUNIT_EXPECT_NE(test, memcmp(r->digest, profiles[j].preload->digest,
@@ -337,9 +351,25 @@ static void preload_profiles_test(struct kunit *test)
 
 	preload_profiles_check(test, ane_h16_profiles, ARRAY_SIZE(ane_h16_profiles));
 	preload_profiles_check(test, ane_t8132_profiles, ARRAY_SIZE(ane_t8132_profiles));
+	preload_profiles_check(test, ane_t8132_profiles_26b123,
+			       ARRAY_SIZE(ane_t8132_profiles_26b123));
+	/* The T8132 builds never share an identity across preload sizes. */
+	for (i = 0; i < ARRAY_SIZE(ane_t8132_profiles_26b123); i++) {
+		KUNIT_EXPECT_FALSE(test, ane_t8132_profiles_26b123[i].require_dart_unlocked);
+		for (j = 0; j < ARRAY_SIZE(ane_t8132_profiles); j++) {
+			KUNIT_EXPECT_NE(test, memcmp(ane_t8132_profiles_26b123[i].preload->digest,
+						     ane_t8132_profiles[j].preload->digest,
+						     SHA256_DIGEST_SIZE), 0);
+			KUNIT_EXPECT_STRNEQ(test, ane_t8132_profiles_26b123[i].identity,
+					    ane_t8132_profiles[j].identity);
+		}
+	}
 	/* The T6041 and the T8132 never accept each other's firmware. */
 	for (i = 0; i < ARRAY_SIZE(ane_t8132_profiles); i++) {
+		KUNIT_EXPECT_FALSE(test, ane_t8132_profiles[i].require_dart_unlocked);
 		for (j = 0; j < ARRAY_SIZE(ane_h16_profiles); j++) {
+			KUNIT_EXPECT_EQ(test, ane_h16_profiles[j].require_dart_unlocked,
+					ane_h16_profiles[j].preload == &ane_h16_preload_26b123);
 			KUNIT_EXPECT_NE(test, memcmp(ane_t8132_profiles[i].preload->digest,
 						     ane_h16_profiles[j].preload->digest,
 						     SHA256_DIGEST_SIZE), 0);
@@ -367,7 +397,47 @@ static void preload_26b123_ce_script_test(struct kunit *test)
 	}
 }
 
+/*
+ * A rule made for another preload size takes only snapshots of that size:
+ * the 27.2 T8132 rule refuses the 25G83 sizes, and the 25G83 rule its sizes.
+ */
+static void preload_sized_rule_test(struct kunit *test)
+{
+	const struct ane_h16_preload_rule *r = &ane_h16_preload_26b123_j713;
+	struct preload_fixture *f = test->priv;
+	u8 digest[SHA256_DIGEST_SIZE];
+	unsigned int k;
+
+	KUNIT_EXPECT_EQ(test, preload_rule_text(r), (size_t)0xbc000);
+	KUNIT_EXPECT_EQ(test, preload_rule_data(r), (size_t)0x2b0000);
+	for (k = 0; k < r->cell_count; k++) {
+		memcpy(f->data + r->cells[k].value - 8, r->cells[k].tag, 4);
+		put_unaligned_le32(r->cells[k].width, f->data + r->cells[k].value - 4);
+	}
+	KUNIT_EXPECT_EQ(test, ane_h16_preload_digest(r, f->text, 0xbc000, f->data, 0x2b0000,
+						     digest), 0);
+	KUNIT_EXPECT_EQ(test, ane_h16_preload_digest(r, f->text, ANE_H16_PRELOAD_TEXT_SIZE,
+						     f->data, ANE_H16_PRELOAD_DATA_SIZE, digest),
+			-EINVAL);
+	KUNIT_EXPECT_EQ(test, ane_h16_preload_digest(&ane_h16_preload_25g83_j713, f->text,
+						     0xbc000, f->data, 0x2b0000, digest),
+			-EINVAL);
+	/* The last bytes of the larger DATA are part of the identity. */
+	{
+		u8 baseline[SHA256_DIGEST_SIZE];
+
+		KUNIT_ASSERT_EQ(test, ane_h16_preload_digest(r, f->text, 0xbc000, f->data,
+							     0x2b0000, baseline), 0);
+		f->data[0x2b0000 - 1] ^= 1;
+		KUNIT_ASSERT_EQ(test, ane_h16_preload_digest(r, f->text, 0xbc000, f->data,
+							     0x2b0000, digest), 0);
+		KUNIT_EXPECT_NE(test, memcmp(digest, baseline, sizeof(digest)), 0);
+		f->data[0x2b0000 - 1] ^= 1;
+	}
+}
+
 static struct kunit_case preload_cases[] = {
+	KUNIT_CASE(preload_sized_rule_test),
 	KUNIT_CASE(preload_26b123_ce_script_test),
 	KUNIT_CASE(preload_identity_test),
 	KUNIT_CASE(preload_mutable_test),

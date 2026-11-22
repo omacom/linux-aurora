@@ -26,7 +26,7 @@
 //! alike.
 
 use core::ops::Range;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use kernel::{
     drm::gem::BaseObject,
     new_mutex,
@@ -128,6 +128,10 @@ pub(crate) struct VmState {
     registry: Arc<Registry>,
     /// The PB heap chunks mapped in this VM.
     heap: Arc<HeapMappings>,
+    /// Moving average (1/4 weight per sample) of this VM's prefixes from publication to
+    /// retirement, ns; 0 before the first. The engine reads it to keep only short-prefix VMs
+    /// ahead of others ([`super::engine`]'s affinity).
+    pub(crate) prefix_ns: AtomicU64,
 }
 
 impl VmState {
@@ -340,6 +344,7 @@ pub(crate) fn new_vm(gpu: &Gpu, kernel_range: Range<u64>) -> Result<mmu::Vm> {
             uat: gpu.uat.clone(),
             registry: registry.clone(),
             heap,
+            prefix_ns: AtomicU64::new(0),
         },
         GFP_KERNEL,
     )?;

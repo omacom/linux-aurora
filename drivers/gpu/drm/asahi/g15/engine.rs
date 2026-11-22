@@ -4,7 +4,11 @@
 //!
 //! One device-global compute queue and one TA+FS queue pair serve every logical queue and VM.
 //! Jobs (one per SUBMIT) wait in `pending`; pick order: priority, then the least recently
-//! served queue, then FIFO. A *prefix* is a run of consecutive commands of one job (up to 16
+//! served queue, then FIFO, except that while a flight can still take a prefix behind it a ready
+//! job of the tail's VM goes first if that VM's prefixes are short, for at most
+//! [`AFFINITY_RUN`] prefixes and [`AFFINITY_NS`] in a row ([`Engine::pick_affine`]): a prefix
+//! of another VM cannot be posted behind the tail, so taking it there would drain the queues on
+//! every alternation between clients. A *prefix* is a run of consecutive commands of one job (up to 16
 //! computes and [`super::hw::tuning::PREFIX_RENDERS`] renders) published together: images,
 //! then thresholds/counters once per prefix, then one queue WRITE per queue, then channel
 //! records, then doorbells (compute, FS, TA). A compute-only job that ends its prefix pulls
@@ -68,6 +72,15 @@ pub(crate) fn rmb() {
 pub(crate) fn now_ns() -> u64 {
     <kernel::time::Monotonic as kernel::time::ClockSource>::ktime_get() as u64
 }
+
+/// Prefixes of the tail's VM published in a row behind a flight while the least-recently-served
+/// pick belonged to another VM, at most.
+const AFFINITY_RUN: u32 = 8;
+/// ... and for at most this long from the first of them, and only while the tail VM's prefixes
+/// average less than this from publication to retirement (`VmState::prefix_ns`). For longer
+/// prefixes the drain at a switch costs little next to the prefix itself, and posting another
+/// one ahead would only make the other client wait a whole prefix longer.
+const AFFINITY_NS: u64 = 2_000_000;
 
 /// The engine's bookkeeping of one job, embedded in [`Job`]. Only the engine changes it, always
 /// under the device lock (the atomics only make the shared `Arc<Job>` mutable).
@@ -246,6 +259,8 @@ pub(crate) struct Stats {
     pub(crate) gap_ns: u64,
     pub(crate) gaps: u64,
     pub(crate) yields: u64,
+    /// Prefixes of the tail's VM published ahead of another VM's least-recently-served job.
+    pub(crate) affine: u64,
     /// Prefixes published while another ran.
     pub(crate) overlaps: u64,
     pub(crate) jobs: u64,
@@ -358,6 +373,9 @@ pub(crate) struct Engine {
     pub(crate) frozen: bool,
     /// Service turn counter for the least-recently-served pick.
     pub(crate) turn: u64,
+    /// The current run of [`Engine::pick_affine`] picks and the time of its first.
+    affinity_run: u32,
+    affinity_from_ns: u64,
     /// The device's shared state, for the transport-error latch; set by the first poll or
     /// submission.
     pub(crate) shared: Option<Arc<Shared>>,
@@ -414,6 +432,8 @@ impl Engine {
             retained: KVec::new(),
             frozen: false,
             turn: 0,
+            affinity_run: 0,
+            affinity_from_ns: 0,
             shared: None,
             ordinal: 0,
             draw: 0,
@@ -466,6 +486,48 @@ impl Engine {
     fn pick(&self) -> Option<usize> {
         let mut best: Option<usize> = None;
         for (i, job) in self.pending.iter().enumerate() {
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    let (q, bq) = (&job.queue, &self.pending[b].queue);
+                    let (t, bt) = (
+                        q.turn.load(Ordering::Relaxed),
+                        bq.turn.load(Ordering::Relaxed),
+                    );
+                    q.priority < bq.priority || (q.priority == bq.priority && t < bt)
+                }
+            };
+            if better {
+                best = Some(i);
+            }
+        }
+        best
+    }
+
+    /// Index in `pending` of a job to publish behind the tail instead of `rr`, the
+    /// least-recently-served pick, when `rr` belongs to another VM and so cannot be posted
+    /// behind it: the best ready job of the tail's VM by the same order, at `rr`'s priority or
+    /// higher, while the flights have room, the tail VM's prefixes average under
+    /// [`AFFINITY_NS`] and the current run is within [`AFFINITY_RUN`] prefixes and
+    /// [`AFFINITY_NS`]. Only the order among independent queues changes; each
+    /// queue's own jobs stay in submission order.
+    fn pick_affine(&self, rr: usize, max_inflight: usize, now: u64) -> Option<usize> {
+        let tail = self.flights.last()?;
+        let rr_job = self.pending.get(rr)?;
+        if self.flights.len() >= max_inflight
+            || Arc::ptr_eq(&rr_job.vm, &tail.job.vm)
+            || self.affinity_run >= AFFINITY_RUN
+            || tail.job.vm.prefix_ns.load(Ordering::Relaxed) >= AFFINITY_NS
+            || (self.affinity_run != 0 && now.wrapping_sub(self.affinity_from_ns) >= AFFINITY_NS)
+        {
+            return None;
+        }
+        let priority = rr_job.queue.priority;
+        let mut best: Option<usize> = None;
+        for (i, job) in self.pending.iter().enumerate() {
+            if !Arc::ptr_eq(&job.vm, &tail.job.vm) || job.queue.priority > priority {
+                continue;
+            }
             let better = match best {
                 None => true,
                 Some(b) => {
@@ -564,10 +626,13 @@ impl Firmware {
             && self.recovery.armed.is_none()
             && !self.engine.pending.is_empty()
         {
-            let Some(index) = self.engine.pick() else {
+            let Some(rr) = self.engine.pick() else {
                 break;
             };
-            let job = self.engine.pending[index].clone();
+            let now = now_ns();
+            let affine = self.engine.pick_affine(rr, max_inflight, now);
+            let behind = !self.engine.flights.is_empty();
+            let job = self.engine.pending[affine.unwrap_or(rr)].clone();
             // Inside a renumbering margin nothing is published behind a flight: the flights
             // drain and the next publication renumbers the stamps while idle (once every ~8.7M
             // renders or ~4.0M computes with margins of 100000).
@@ -591,6 +656,15 @@ impl Firmware {
             job.queue.turn.store(self.engine.turn, Ordering::Relaxed);
             match self.publish_prefix(&job, done) {
                 Ok(()) => {
+                    if affine.is_some() {
+                        if self.engine.affinity_run == 0 {
+                            self.engine.affinity_from_ns = now;
+                        }
+                        self.engine.affinity_run += 1;
+                        self.engine.stats.affine += 1;
+                    } else if !behind {
+                        self.engine.affinity_run = 0; // the queues had drained: a new run
+                    }
                     if job.progress.sent() == job.progress.count() {
                         self.engine.unpend(&job); // fully published
                     }

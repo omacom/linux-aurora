@@ -201,12 +201,16 @@
 		compatible = "apple,t8142-cluster-cpufreq";
 		reg = <0x2 0x10e20000 0 0x1000>;
 		#performance-domain-cells = <0>;
+		/* E lane follows the ADT ordering; no changing sample yet. */
+		apple,fast-die-effort = <&pmp_report 0>;
 	};
 
 	cpufreq_p: performance-controller@211e20000 {
 		compatible = "apple,t8142-cluster-cpufreq";
 		reg = <0x2 0x11e20000 0 0x1000>;
 		#performance-domain-cells = <0>;
+		/* P lane has been observed under Linux CPU load. */
+		apple,fast-die-effort = <&pmp_report 1>;
 	};
 
 	/*

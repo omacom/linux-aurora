@@ -808,7 +808,50 @@ static void edr_timed_limits_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, dcp_edr_next_timed(15000, 16000, 16000, 60, 30, 8333), 16000U);
 }
 
+/*
+ * DAC firmware after a boot with display power cycles (J414s, 13.5) and
+ * after a system sleep.  The report goes to 0 with the power-off present
+ * and no report follows the one that lights the panel again; both
+ * sequences must end at the level the panel shows.
+ */
+static void backlight_presented_boot_resume_test(struct kunit *test)
+{
+	struct dcp_bl_presented boot = {}, resume = {};
+	int reported;
+
+	/* Fresh boot: only the loader's level is known, from its report. */
+	reported = 140;
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&boot, reported), 140);
+	/* systemd-backlight restores 500, and a present carries it. */
+	dcp_bl_presented_set(&boot, 500);
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&boot, reported), 500);
+	/* DPMS off: the clear swap takes the panel to 0, and the firmware says so. */
+	dcp_bl_presented_set(&boot, 0);
+	reported = 0;
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&boot, reported), 0);
+	/* DPMS on: the first present carries 500 again; no report follows. */
+	dcp_bl_presented_set(&boot, 500);
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&boot, reported), 500);
+
+	/* System sleep: the backlight core presents 0, then the clear swap. */
+	dcp_bl_presented_set(&resume, 500);
+	dcp_bl_presented_set(&resume, 0);
+	reported = 0;
+	dcp_bl_presented_set(&resume, 0);
+	/* Power-on carries the core's 0; the core's resume then presents 500. */
+	dcp_bl_presented_set(&resume, 0);
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&resume, reported), 0);
+	dcp_bl_presented_set(&resume, 500);
+	reported = 500;
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&resume, reported), 500);
+
+	/* Boot ends in the state resume does, even with a stale 0 report. */
+	KUNIT_EXPECT_EQ(test, dcp_bl_presented_actual(&boot, 0),
+			dcp_bl_presented_actual(&resume, 500));
+}
+
 static struct kunit_case backlight_cases[] = {
+	KUNIT_CASE(backlight_presented_boot_resume_test),
 	KUNIT_CASE(backlight_reports_keep_target_test),
 	KUNIT_CASE(backlight_millinits_takeover_test),
 	KUNIT_CASE(backlight_takeover_test),

@@ -46,7 +46,7 @@
 #include "pmp-report-validation.h"
 #include "pmp-dram.h"
 #include "pmp-ane.h"
-#include "pmp-j613-floor-gov.h"
+#include "pmp-floor-gov.h"
 
 #define PMP_REPORT_READY 0x1
 
@@ -61,9 +61,10 @@
  * @tgt_write: power state request, write side
  * @actual: power state acknowledgment
  * @status: PMP status; bit 0 is set while the PMP is running
- * @fast_die: 32-bit word holding the fast die-temperature effort of each
+ * @fast_die: word holding the fast die-temperature effort of each
  *	CPU cluster, one byte per lane; 0 if the SoC has none
  * @fast_die_lanes: number of lanes at @fast_die, at most 4
+ * @fast_die_wide: read @fast_die with a 64-bit access instead of 32-bit
  * @running_any: the PMP runs while any bit of the 64-bit status word is set,
  *	not only bit 0
  * @defer_requests: keep power state requests in memory until the PMP runs,
@@ -73,9 +74,11 @@
  * @name: with @starts_pmp, the SoC in messages
  * @fallback: with @starts_pmp, how to boot without starting the PMP
  * @pwrstate: with @starts_pmp, the compatible of the SoC's PMGR power states
- * @j613_floor_default: enable the demand-driven floor on the native J613 report
  * @devices_ordered: with @starts_pmp, soc-device record i holds device ID
  *	i + 1
+ * @floor_all_clients: a CPU memory floor is stored to every CPU client's
+ *	entry (the E and P clusters), and no request entry is ever read
+ * @floor_confirm: the first DVFS-STATE response follows a CPU memory floor
  */
 struct apple_pmp_report_offsets {
 	u32 tgt_read;
@@ -87,6 +90,7 @@ struct apple_pmp_report_offsets {
 	/* Update aperture of every entry (8 bytes each) and SOC-DEV-DVFS range. */
 	u32 update;
 	u32 dvfs_first, dvfs_count;
+	bool fast_die_wide;
 	bool running_any;
 	bool defer_requests;
 	bool starts_pmp;
@@ -94,11 +98,12 @@ struct apple_pmp_report_offsets {
 	const char *fallback;
 	const char *pwrstate;
 	bool devices_ordered;
-	bool j613_floor_default;
+	bool floor_all_clients;
+	bool floor_confirm;
 };
 
 struct apple_pmp_start;
-struct j613_floor;
+struct pmp_floor;
 
 struct apple_pmp_report {
 	struct device *dev;
@@ -131,8 +136,8 @@ struct apple_pmp_report {
 	struct delayed_work ready_work;
 	struct device_node *native_pmp;
 	u64 native_claimed;
-	/* J613 floor owner, absent on all other report instances. */
-	struct j613_floor *j613;
+	/* CPU memory-floor owner (apple,cpu-memory-floor), else NULL. */
+	struct pmp_floor *floor;
 	/* T6050: the boot-time PTD entries (apple,ptd-boot) are written */
 	bool t6050_boot_done;
 };
@@ -336,6 +341,13 @@ EXPORT_SYMBOL_GPL(apple_pmp_report_ane_perf);
 
 static struct dentry *apple_pmp_report_debugfs;
 
+static u32 apple_pmp_report_fast_die_word(const struct apple_pmp_report *rep)
+{
+	void __iomem *reg = rep->base + rep->offsets->fast_die;
+
+	return rep->offsets->fast_die_wide ? lower_32_bits(readq(reg)) : readl(reg);
+}
+
 /**
  * apple_pmp_report_fast_die_effort() - read the fast die-temperature effort
  *	of a CPU cluster
@@ -374,7 +386,7 @@ int apple_pmp_report_fast_die_effort(const struct device_node *np,
 		} else if (!apple_pmp_report_running(rep)) {
 			ret = -EAGAIN;
 		} else {
-			*effort = readl(rep->base + offs->fast_die) >>
+			*effort = apple_pmp_report_fast_die_word(rep) >>
 				  (lane * BITS_PER_BYTE);
 			ret = 0;
 		}
@@ -403,7 +415,7 @@ static int apple_pmp_report_status_show(struct seq_file *s, void *unused)
 	if (!running || !offs->fast_die)
 		return 0;
 
-	effort = readl(rep->base + offs->fast_die);
+	effort = apple_pmp_report_fast_die_word(rep);
 	for (lane = 0; lane < offs->fast_die_lanes; lane++)
 		seq_printf(s, "lane%u: %u\n", lane,
 			   (effort >> (lane * BITS_PER_BYTE)) & 0xff);
@@ -1642,63 +1654,57 @@ out:
 EXPORT_SYMBOL_GPL(apple_pmp_report_wait_ready);
 
 /*
- * J613 (T8122, 25G83 firmware) demand-driven CPU memory floor.
+ * Demand-driven CPU memory floor.
  *
- * Under Linux nothing asks the J613 PMP for more than the lowest DRAM and
- * fabric states, and a CPU or GPU copy measures about 20 GB/s. Like the
- * T6030 CPU clients' floor, a request on the second CPU-client entry of
- * SOC-DEV-DVFS (PACC0) raises it. Measured on J613: with a DCS 4 floor a
- * 4-thread CPU copy runs at 67 GB/s and a GPU copy at 62 GB/s, and with a
- * fabric 2 floor as well at 92 and 76 GB/s, against 21 and 19 without.
+ * With the PMP managing the DRAM (DCS) and fabric states, CPU demand alone
+ * never raises them: nothing in Linux asks the PMP for more on behalf of the
+ * CPUs. A request on the CPU clients' SOC-DEV-DVFS entry (PACC0, the second
+ * CPU-client entry) does. Measured with this floor:
+ *  - J613 (T8122): a 4-thread CPU copy 21 -> 67 GB/s, 92 GB/s with the
+ *    second lane as well; a GPU copy 19 -> 62 / 76 GB/s.
+ *  - J316s (T6000): see the DT that enables it.
  *
- * By default the native J613 report owns that request entry. A
- * governor samples CPU and GPU busy time; on demand it writes the valid bit
- * with the DCS and fabric floors, and after a hold time with no demand it
- * writes level 0 with the valid bit. Every exit path (disable, fault,
- * suspend, remove, reboot/shutdown) writes that level 0. Nothing else is
- * written. The request entry is read once, before the first write, to refuse
- * another producer: a read of a request entry after a store may retire the
- * pending update before the PMP handles it. Acceptance is judged only from
- * the DVFS-STATE responses.
+ * A report whose DT node has apple,cpu-memory-floor (<request-class level>
+ * pairs) owns that request entry; the PMP's tables locate it. A governor
+ * samples CPU and GPU busy time; on demand it writes the valid bit with the
+ * DT's levels, and after a hold time with no demand it writes level 0 with the
+ * valid bit. Every exit path (disable, fault, suspend, remove,
+ * reboot/shutdown) writes that level 0. While nothing is raised, sampling is
+ * deferrable, so an idle system is not woken for it.
+ *
+ * On T600x the same word goes to every CPU client's entry (the E cluster's
+ * and both P clusters'), and no request entry is ever read; the global DVFS
+ * state must already be up. With PACC0 alone a P-core pointer chase drops from
+ * ~430 to ~152 ns on M1 Pro, but the E cluster stays at ~340 ns; with all three
+ * clients it is ~176 ns. The device power request bits of these clients are
+ * not acknowledged by this PMP and are not used. On J613 only PACC0 is
+ * floored, and the request entry is read once, before the first write, to
+ * refuse another producer: a read of a request entry after a store may retire
+ * the pending update before the PMP handles it. Where the DVFS-STATE response
+ * is known to follow the floor (J613), acceptance is judged from it and a
+ * floor the PMP does not confirm stops the governor with level 0 published.
  */
-static bool j613_floor = true;
-module_param(j613_floor, bool, 0444);
-MODULE_PARM_DESC(j613_floor, "J613: own the CPU memory-floor request and run its governor (default: on for the native J613 report; 0 disables)");
-static unsigned int j613_floor_dcs = 4;
-module_param(j613_floor_dcs, uint, 0444);
-/* Fabric 2: 4-thread CPU copy 67 -> 92 GB/s, GPU copy 62 -> 76 GB/s over fabric 0. */
-static unsigned int j613_floor_soc = 2;
-module_param(j613_floor_soc, uint, 0444);
-MODULE_PARM_DESC(j613_floor_soc, "J613 floor: fabric level while raised, 0-2 (default: 2)");
-static unsigned int j613_floor_cpu_pct = 80;
-module_param(j613_floor_cpu_pct, uint, 0444);
-static unsigned int j613_floor_cpu_sum_pct = 90;
-module_param(j613_floor_cpu_sum_pct, uint, 0444);
-MODULE_PARM_DESC(j613_floor_cpu_sum_pct, "J613 floor: a cluster busy for this % of one CPU is demand (0: off, default: 90)");
-static unsigned int j613_floor_gpu_pct = 40;
-module_param(j613_floor_gpu_pct, uint, 0444);
-static unsigned int j613_floor_raise_samples = 2;
-module_param(j613_floor_raise_samples, uint, 0444);
-static unsigned int j613_floor_hold_ms = 500;
-module_param(j613_floor_hold_ms, uint, 0444);
-static unsigned int j613_floor_min_interval_ms = 100;
-module_param(j613_floor_min_interval_ms, uint, 0444);
-static unsigned int j613_floor_sample_ms = 30;
-module_param(j613_floor_sample_ms, uint, 0444);
-static unsigned int j613_floor_confirm_ms = 1000;
-module_param(j613_floor_confirm_ms, uint, 0444);
-static unsigned int j613_floor_start_delay_ms = 10000;
-module_param(j613_floor_start_delay_ms, uint, 0444);
-static bool j613_floor_idle_defer;
-module_param(j613_floor_idle_defer, bool, 0444);
 
-#define J613_FLOOR_START_POLLS	600	/* 1 s each, for the PMP to report ready */
+/* Governor policy, from the J613 measurements; the same on every SoC. */
+#define PMP_FLOOR_CPU_BUSY_PCT		80	/* any one CPU this busy is demand */
+#define PMP_FLOOR_CPU_SUM_PCT		90	/* ... or one cluster, in % of one CPU */
+#define PMP_FLOOR_GPU_BUSY_PCT		40	/* GPU work outstanding this share */
+#define PMP_FLOOR_RAISE_SAMPLES		2	/* consecutive demand samples */
+#define PMP_FLOOR_HOLD_MS		500	/* no demand this long drops it */
+#define PMP_FLOOR_MIN_INTERVAL_MS	100	/* between two transitions */
+#define PMP_FLOOR_SAMPLE_MS		30
+/* The PMP answers a floor change within a few ms; 1 s is a firmware failure. */
+#define PMP_FLOOR_CONFIRM_MS		1000
+#define PMP_FLOOR_START_POLLS		600	/* 1 s each, for the PMP to report ready */
 
-struct j613_floor {
+struct pmp_floor {
 	struct apple_pmp_report *rep;
 	struct device *dev;
 	struct device_node *pmp;
-	void __iomem *update;	/* PACC0 update alias; the only address ever written */
+	void __iomem *update;	/* PACC0 update alias, always written */
+	/* With @all, the other CPU clients' update aliases, written alike. */
+	void __iomem *other[PMP_FLOOR_CLIENTS_MAX - 1];
+	unsigned int others;
 	void __iomem *state;	/* DVFS-STATE word 0; words 1-3 follow at 16 bytes */
 	/* Serializes every request write and all state below. */
 	struct mutex lock;
@@ -1708,15 +1714,18 @@ struct j613_floor {
 	struct pmp_floor_gov gov;
 	struct pmp_floor_gov_cfg cfg;
 	struct pmp_floor_layout layout;
-	unsigned int dcs, soc, sample_ms, confirm_ms;
-	bool idle_defer;
+	u64 on;			/* the raised request, from the DT */
+	/* Every CPU client is floored and no request entry is read (T600x). */
+	bool all;
+	/* The DVFS-STATE response follows the floor (J613). */
+	bool confirm;
 	bool admitted, enabled, stopped, suspended, faulted;
 	const char *why;	/* refusal or fault reason */
 	unsigned int start_polls;
 	u64 initial, word, writes;
 	/* The transition awaiting its response, and its target. */
 	bool confirm_raise, confirm_drop, held_valid;
-	unsigned int tdcs, tsoc;
+	u64 target;
 	u64 confirm_since, held_resp, resp[4], last_confirm_us;
 	/* Sampling state. */
 	bool primed;
@@ -1725,7 +1734,7 @@ struct j613_floor {
 	u64 gpu_prev, last_ns;
 	unsigned int cpu_pct, cpu_sum, gpu_pct, reason, raise_reason;
 	/* Counters. */
-	u64 samples, raises, drops, relevels, raise_ok, raise_unconfirmed;
+	u64 samples, raises, drops, raise_ok, raise_unconfirmed;
 	u64 drop_ok, drop_unconfirmed, superseded, held_ns, raised_at;
 };
 
@@ -1734,21 +1743,22 @@ static struct {
 	spinlock_t lock;
 	bool busy;
 	u64 since, busy_ns, edges;
-	struct j613_floor *wake;
-} j613_floor_gpu = { .lock = __SPIN_LOCK_UNLOCKED(j613_floor_gpu.lock) };
+	struct pmp_floor *wake;
+} pmp_floor_gpu = { .lock = __SPIN_LOCK_UNLOCKED(pmp_floor_gpu.lock) };
 
-static void j613_floor_queue(struct j613_floor *f)
+static void pmp_floor_queue(struct pmp_floor *f)
 {
-	unsigned long delay = msecs_to_jiffies(f->sample_ms);
+	unsigned long delay = msecs_to_jiffies(PMP_FLOOR_SAMPLE_MS);
 
 	if (f->stopped || f->suspended || f->faulted || !f->enabled)
 		return;
 	/*
 	 * While the floor is held, sample on time so that it drops on time.
-	 * With idle_defer and nothing held, sampling is deferrable and waits
-	 * for a CPU that wakes anyway; a GPU busy edge moves it back.
+	 * With nothing held, sampling is deferrable and waits for a CPU that
+	 * wakes anyway; CPU demand needs a running CPU, and a GPU busy edge
+	 * moves it back.
 	 */
-	if (f->idle_defer && !f->gov.raised) {
+	if (!f->gov.raised) {
 		cancel_delayed_work(&f->work);
 		queue_delayed_work(system_freezable_power_efficient_wq, &f->idle_work, delay);
 	} else {
@@ -1758,53 +1768,54 @@ static void j613_floor_queue(struct j613_floor *f)
 }
 
 /**
- * apple_pmp_j613_floor_gpu_activity() - GPU work outstanding or retired
+ * apple_pmp_floor_gpu_activity() - GPU work outstanding or retired
  * @busy: true once work may reach the GPU, false once all of it retired
  *
  * Called by the GPU driver on each idle/busy edge, in any context but NMI.
- * Records busy time for the J613 floor governor; a no-op without an owner.
+ * Records busy time for the CPU memory-floor governor; a no-op without an
+ * owner.
  */
-void apple_pmp_j613_floor_gpu_activity(bool busy)
+void apple_pmp_floor_gpu_activity(bool busy)
 {
-	struct j613_floor *f;
+	struct pmp_floor *f;
 	unsigned long flags;
 	u64 now = ktime_get_ns();
 
-	spin_lock_irqsave(&j613_floor_gpu.lock, flags);
-	if (busy != j613_floor_gpu.busy) {
+	spin_lock_irqsave(&pmp_floor_gpu.lock, flags);
+	if (busy != pmp_floor_gpu.busy) {
 		if (busy)
-			j613_floor_gpu.since = now;
+			pmp_floor_gpu.since = now;
 		else
-			j613_floor_gpu.busy_ns += now - j613_floor_gpu.since;
-		j613_floor_gpu.busy = busy;
-		j613_floor_gpu.edges++;
-		f = j613_floor_gpu.wake;
+			pmp_floor_gpu.busy_ns += now - pmp_floor_gpu.since;
+		pmp_floor_gpu.busy = busy;
+		pmp_floor_gpu.edges++;
+		f = pmp_floor_gpu.wake;
 		/* Not cancel_delayed_work_sync: this may run in atomic context. */
-		if (busy && f && READ_ONCE(f->idle_defer) && cancel_delayed_work(&f->idle_work))
+		if (busy && f && cancel_delayed_work(&f->idle_work))
 			queue_delayed_work(system_freezable_power_efficient_wq, &f->work,
-					   msecs_to_jiffies(READ_ONCE(f->sample_ms)));
+					   msecs_to_jiffies(PMP_FLOOR_SAMPLE_MS));
 	}
-	spin_unlock_irqrestore(&j613_floor_gpu.lock, flags);
+	spin_unlock_irqrestore(&pmp_floor_gpu.lock, flags);
 }
-EXPORT_SYMBOL_GPL(apple_pmp_j613_floor_gpu_activity);
+EXPORT_SYMBOL_GPL(apple_pmp_floor_gpu_activity);
 
-static u64 j613_floor_gpu_busy_ns(u64 now, u64 *edges)
+static u64 pmp_floor_gpu_busy_ns(u64 now, u64 *edges)
 {
 	unsigned long flags;
 	u64 ns;
 
-	spin_lock_irqsave(&j613_floor_gpu.lock, flags);
-	ns = j613_floor_gpu.busy_ns;
-	if (j613_floor_gpu.busy && now > j613_floor_gpu.since)
-		ns += now - j613_floor_gpu.since;
+	spin_lock_irqsave(&pmp_floor_gpu.lock, flags);
+	ns = pmp_floor_gpu.busy_ns;
+	if (pmp_floor_gpu.busy && now > pmp_floor_gpu.since)
+		ns += now - pmp_floor_gpu.since;
 	if (edges)
-		*edges = j613_floor_gpu.edges;
-	spin_unlock_irqrestore(&j613_floor_gpu.lock, flags);
+		*edges = pmp_floor_gpu.edges;
+	spin_unlock_irqrestore(&pmp_floor_gpu.lock, flags);
 	return ns;
 }
 
 /* DVFS-STATE reads have no side effect; only request reads do. */
-static void j613_floor_read_state(struct j613_floor *f)
+static void pmp_floor_read_state(struct pmp_floor *f)
 {
 	unsigned int i;
 
@@ -1813,47 +1824,47 @@ static void j613_floor_read_state(struct j613_floor *f)
 }
 
 /* The only request store. Never followed by a read of the request word. */
-static void j613_floor_write(struct j613_floor *f, u64 word)
+static void pmp_floor_write(struct pmp_floor *f, u64 word)
 {
+	unsigned int i;
+
 	lockdep_assert_held(&f->lock);
 	writeq(word, f->update);
+	for (i = 0; i < f->others; i++)
+		writeq(word, f->other[i]);
 	f->word = word;
 	f->writes++;
 }
 
-static void j613_floor_expect(struct j613_floor *f, bool raise, u64 now)
+static void pmp_floor_expect(struct pmp_floor *f, bool raise, u64 now)
 {
+	if (!f->confirm)
+		return;
 	f->confirm_raise = raise;
 	f->confirm_drop = !raise;
 	f->confirm_since = now;
 }
 
-static void j613_floor_raise(struct j613_floor *f, u64 now, bool relevel)
+static void pmp_floor_raise(struct pmp_floor *f, u64 now)
 {
-	j613_floor_read_state(f);
-	f->tdcs = f->dcs;
-	f->tsoc = f->soc;
+	pmp_floor_read_state(f);
+	f->target = f->on;
 	f->held_valid = false;
 	if (f->confirm_drop)
 		f->superseded++;
-	j613_floor_write(f, pmp_floor_word(f->dcs, f->soc));
-	j613_floor_expect(f, true, now);
-	if (relevel) {
-		f->relevels++;
-	} else {
-		f->raises++;
-		f->raised_at = now;
-		f->raise_reason = f->reason;
-	}
+	pmp_floor_write(f, f->on);
+	pmp_floor_expect(f, true, now);
+	f->raises++;
+	f->raised_at = now;
+	f->raise_reason = f->reason;
 	if (__ratelimit(&f->rs))
-		dev_info(f->dev, "J613 floor %s DCS%u SOC%u (%s%s cpu=%u%% sum=%u%% gpu=%u%%) word %#llx DVFS-STATE before %#llx\n",
-			 relevel ? "relevel" : "raise", f->dcs, f->soc,
+		dev_info(f->dev, "memory floor raise (%s%s cpu=%u%% sum=%u%% gpu=%u%%) word %#llx DVFS-STATE before %#llx\n",
 			 f->reason & 1 ? "cpu" : "", f->reason & 2 ? "gpu" : "",
 			 f->cpu_pct, f->cpu_sum, f->gpu_pct, f->word, f->resp[0]);
 }
 
 /* Publish the explicit valid floor 0 if anything above it was written. */
-static void j613_floor_release(struct j613_floor *f, u64 now, const char *why)
+static void pmp_floor_release(struct pmp_floor *f, u64 now, const char *why)
 {
 	bool was = f->gov.raised;
 
@@ -1867,81 +1878,81 @@ static void j613_floor_release(struct j613_floor *f, u64 now, const char *why)
 		return;
 	if (f->confirm_raise)
 		f->superseded++;
-	j613_floor_write(f, PMP_FLOOR_VALID);
-	j613_floor_expect(f, false, now);
+	pmp_floor_write(f, PMP_FLOOR_VALID);
+	pmp_floor_expect(f, false, now);
 	if (was && __ratelimit(&f->rs))
-		dev_info(f->dev, "J613 floor release (%s) after %llu ms held, valid floor 0 published\n",
+		dev_info(f->dev, "memory floor release (%s) after %llu ms held, valid floor 0 published\n",
 			 why, div_u64(now - f->raised_at, NSEC_PER_MSEC));
 	else if (!was)
-		dev_info(f->dev, "J613 floor release (%s), valid floor 0 published\n", why);
+		dev_info(f->dev, "memory floor release (%s), valid floor 0 published\n", why);
 }
 
-static void j613_floor_fault(struct j613_floor *f, u64 now, const char *why)
+static void pmp_floor_fault(struct pmp_floor *f, u64 now, const char *why)
 {
 	f->faulted = true;
 	f->why = why;
-	j613_floor_release(f, now, why);
-	dev_warn(f->dev, "J613 floor fault: %s; governor stopped, valid floor 0 published (DVFS-STATE %#llx/%#llx/%#llx/%#llx)\n",
+	pmp_floor_release(f, now, why);
+	dev_warn(f->dev, "memory floor fault: %s; governor stopped, valid floor 0 published (DVFS-STATE %#llx/%#llx/%#llx/%#llx)\n",
 		 why, f->resp[0], f->resp[1], f->resp[2], f->resp[3]);
 }
 
 /* Judge the last transition from the responses only. */
-static void j613_floor_check(struct j613_floor *f, u64 now)
+static void pmp_floor_check(struct pmp_floor *f, u64 now)
 {
-	bool timeout = now - f->confirm_since >= (u64)f->confirm_ms * NSEC_PER_MSEC;
+	bool timeout = now - f->confirm_since >= (u64)PMP_FLOOR_CONFIRM_MS * NSEC_PER_MSEC;
 	u64 r;
 
 	if (!f->confirm_raise && !f->confirm_drop)
 		return;
-	j613_floor_read_state(f);
+	pmp_floor_read_state(f);
 	r = f->resp[0];
 	if (f->confirm_raise) {
-		if (pmp_floor_raise_confirmed(r, f->tdcs, f->tsoc)) {
+		if (pmp_floor_raise_confirmed(r, f->target)) {
 			f->confirm_raise = false;
 			f->held_valid = true;
 			f->held_resp = r;
 			f->raise_ok++;
 			f->last_confirm_us = div_u64(now - f->confirm_since, NSEC_PER_USEC);
 			if (__ratelimit(&f->rs))
-				dev_info(f->dev, "J613 floor DCS%u SOC%u confirmed in %llu us: DVFS-STATE %#llx/%#llx/%#llx/%#llx\n",
-					 f->tdcs, f->tsoc, f->last_confirm_us,
+				dev_info(f->dev, "memory floor %#llx confirmed in %llu us: DVFS-STATE %#llx/%#llx/%#llx/%#llx\n",
+					 f->target, f->last_confirm_us,
 					 f->resp[0], f->resp[1], f->resp[2], f->resp[3]);
 		} else if (timeout) {
 			f->confirm_raise = false;
 			f->raise_unconfirmed++;
-			j613_floor_fault(f, now,
+			pmp_floor_fault(f, now,
 					 "raise unconfirmed: DVFS-STATE did not reach the floor");
 		}
 		return;
 	}
 	if (f->held_valid ? pmp_floor_drop_confirmed(r, f->held_resp) :
-			    !pmp_floor_raise_confirmed(r, f->tdcs, f->tsoc)) {
+			    !pmp_floor_raise_confirmed(r, f->target)) {
 		f->confirm_drop = false;
 		f->drop_ok++;
 		f->last_confirm_us = div_u64(now - f->confirm_since, NSEC_PER_USEC);
 		if (__ratelimit(&f->rs))
-			dev_info(f->dev, "J613 floor release confirmed in %llu us: DVFS-STATE %#llx/%#llx/%#llx/%#llx\n",
+			dev_info(f->dev, "memory floor release confirmed in %llu us: DVFS-STATE %#llx/%#llx/%#llx/%#llx\n",
 				 f->last_confirm_us, f->resp[0], f->resp[1],
 				 f->resp[2], f->resp[3]);
 	} else if (pmp_floor_drop_timeout(now, f->confirm_since, 0, false,
-					  f->confirm_ms)) {
+					  PMP_FLOOR_CONFIRM_MS)) {
 		f->confirm_drop = false;
 		f->drop_unconfirmed++;
 		/* Floor 0 is already published; nothing further is written. */
 		f->faulted = true;
 		f->why = "release unconfirmed: DVFS-STATE did not change after floor 0";
-		dev_warn(f->dev, "J613 floor fault: %s (%#llx/%#llx/%#llx/%#llx); governor stopped\n",
+		dev_warn(f->dev, "memory floor fault: %s (%#llx/%#llx/%#llx/%#llx); governor stopped\n",
 			 f->why, f->resp[0], f->resp[1], f->resp[2], f->resp[3]);
 	}
 }
 
-static void j613_floor_prime(struct j613_floor *f)
+static void pmp_floor_prime(struct pmp_floor *f)
 {
 	f->primed = false;
 	f->gov.streak = 0;
 }
 
-static void j613_floor_sample_cpus(struct j613_floor *f, u64 period,
+static void pmp_floor_sample_cpus(struct pmp_floor *f, u64 period,
 				   unsigned int *cpct, unsigned int *csum)
 {
 	unsigned int cpu;
@@ -1985,15 +1996,15 @@ static void j613_floor_sample_cpus(struct j613_floor *f, u64 period,
 	cpus_read_unlock();
 }
 
-static void j613_floor_sample(struct j613_floor *f)
+static void pmp_floor_sample(struct pmp_floor *f)
 {
-	u64 now = ktime_get_ns(), gpu, period = (u64)f->sample_ms * NSEC_PER_MSEC;
+	u64 now = ktime_get_ns(), gpu, period = (u64)PMP_FLOOR_SAMPLE_MS * NSEC_PER_MSEC;
 	unsigned int cpct = 0, csum = 0;
 	enum pmp_floor_action act;
 
 	f->samples++;
-	j613_floor_sample_cpus(f, period, &cpct, &csum);
-	gpu = j613_floor_gpu_busy_ns(now, NULL);
+	pmp_floor_sample_cpus(f, period, &cpct, &csum);
+	gpu = pmp_floor_gpu_busy_ns(now, NULL);
 	f->cpu_pct = cpct;
 	f->cpu_sum = csum;
 	f->gpu_pct = f->primed ? pmp_floor_busy_pct(gpu - f->gpu_prev, now - f->last_ns) : 0;
@@ -2003,45 +2014,45 @@ static void j613_floor_sample(struct j613_floor *f)
 		    (f->primed && f->gpu_pct >= f->cfg.gpu_busy_pct) << 1;
 	f->primed = true;
 
-	j613_floor_check(f, now);
+	pmp_floor_check(f, now);
 	if (f->faulted)
 		return;
 	act = pmp_floor_gov_step(&f->gov, &f->cfg, now, f->reason);
 	if (act == PMP_FLOOR_RAISE) {
-		j613_floor_raise(f, now, false);
+		pmp_floor_raise(f, now);
 	} else if (act == PMP_FLOOR_DROP) {
 		/* The governor already left the raised state; account it here. */
 		f->gov.raised = true;
-		j613_floor_release(f, now, "idle");
+		pmp_floor_release(f, now, "idle");
 	}
 }
 
-static void j613_floor_work(struct work_struct *work)
+static void pmp_floor_run(struct pmp_floor *f)
 {
-	struct j613_floor *f = container_of(to_delayed_work(work), struct j613_floor, work);
-
 	mutex_lock(&f->lock);
 	if (!f->stopped && !f->suspended && !f->faulted && f->enabled) {
-		j613_floor_sample(f);
-		j613_floor_queue(f);
+		pmp_floor_sample(f);
+		pmp_floor_queue(f);
 	}
 	mutex_unlock(&f->lock);
 }
 
-static void j613_floor_idle_work(struct work_struct *work)
+static void pmp_floor_work(struct work_struct *work)
 {
-	struct j613_floor *f = container_of(to_delayed_work(work), struct j613_floor, idle_work);
-
-	mutex_lock(&f->lock);
-	if (!f->stopped && !f->suspended && !f->faulted && f->enabled) {
-		j613_floor_sample(f);
-		j613_floor_queue(f);
-	}
-	mutex_unlock(&f->lock);
+	pmp_floor_run(container_of(to_delayed_work(work), struct pmp_floor, work));
 }
 
-/* Validate this boot's tables and registers, then the single request read. */
-static int j613_floor_admit(struct j613_floor *f)
+static void pmp_floor_idle_work(struct work_struct *work)
+{
+	pmp_floor_run(container_of(to_delayed_work(work), struct pmp_floor, idle_work));
+}
+
+/*
+ * Validate this boot's tables and registers. Then, where the client's power
+ * request is admitted first, check that the PMP acknowledges it and that
+ * nothing else holds it; otherwise make the single request read.
+ */
+static int pmp_floor_admit(struct pmp_floor *f)
 {
 	struct apple_pmp_report *rep = f->rep;
 	struct resource *res;
@@ -2068,6 +2079,24 @@ static int j613_floor_admit(struct j613_floor *f)
 	}
 	f->update = rep->base + pmp_floor_req_update(&f->layout);
 	f->state = rep->base + pmp_floor_state_read(&f->layout, 0);
+	pmp_floor_read_state(f);
+	if (f->all) {
+		unsigned int i;
+
+		/* The global DVFS state is up before any device floor. */
+		if (!f->resp[0]) {
+			f->why = "DVFS-STATE not ready";
+			return -EIO;
+		}
+		f->others = 0;
+		for (i = 0; i < f->layout.clients; i++)
+			if (i != PMP_FLOOR_PACC0)
+				f->other[f->others++] = rep->base +
+					PMP_FLOOR_UPDATE(f->layout.cpu_first + i);
+		f->initial = 0;
+		f->word = 0;
+		return 0;
+	}
 	/* The one read of the request entry, before any write. */
 	f->initial = readq(rep->base + pmp_floor_req_read(&f->layout));
 	f->word = f->initial;
@@ -2075,13 +2104,12 @@ static int j613_floor_admit(struct j613_floor *f)
 		f->why = "PACC0 request held by another producer";
 		return -EBUSY;
 	}
-	j613_floor_read_state(f);
 	return 0;
 }
 
-static void j613_floor_start_work(struct work_struct *work)
+static void pmp_floor_start_work(struct work_struct *work)
 {
-	struct j613_floor *f = container_of(to_delayed_work(work), struct j613_floor, start_work);
+	struct pmp_floor *f = container_of(to_delayed_work(work), struct pmp_floor, start_work);
 	u64 status;
 	int ret;
 
@@ -2090,40 +2118,35 @@ static void j613_floor_start_work(struct work_struct *work)
 		goto out;
 	status = readq(f->rep->base + f->rep->offsets->status);
 	if (status != PMP_REPORT_READY) {
-		if (++f->start_polls >= J613_FLOOR_START_POLLS) {
+		if (++f->start_polls >= PMP_FLOOR_START_POLLS) {
 			f->why = "PMP never reported READY";
-			dev_warn(f->dev, "J613 floor refused: %s (status %#llx)\n", f->why, status);
+			dev_warn(f->dev, "memory floor refused: %s (status %#llx)\n",
+				 f->why, status);
 		} else {
 			queue_delayed_work(system_freezable_power_efficient_wq, &f->start_work, HZ);
 		}
 		goto out;
 	}
-	if (f->start_polls != ~0U) {
-		/* Ready: let the rest of the platform settle before owning the floor. */
-		f->start_polls = ~0U;
-		queue_delayed_work(system_freezable_power_efficient_wq, &f->start_work,
-				   msecs_to_jiffies(j613_floor_start_delay_ms));
-		goto out;
-	}
-	ret = j613_floor_admit(f);
+	ret = pmp_floor_admit(f);
 	if (ret) {
-		dev_warn(f->dev, "J613 floor refused: %s (%d); nothing written\n", f->why, ret);
+		dev_warn(f->dev, "memory floor refused: %s (%d); nothing written\n", f->why, ret);
 		goto out;
 	}
 	f->admitted = true;
 	f->why = NULL;
 	f->enabled = true;
-	dev_info(f->dev, "J613 floor owner admitted: PACC0 update +%#llx, initial %#llx, DVFS-STATE %#llx/%#llx/%#llx/%#llx; governor DCS%u SOC%u cpu>=%u%% gpu>=%u%% x%u hold %u ms\n",
-		 pmp_floor_req_update(&f->layout), f->initial,
-		 f->resp[0], f->resp[1], f->resp[2], f->resp[3], f->dcs, f->soc,
+	dev_info(f->dev, "memory floor owner admitted: PACC0 update +%#llx, %s %u, initial %#llx, DVFS-STATE %#llx/%#llx/%#llx/%#llx; governor %#llx cpu>=%u%% gpu>=%u%% x%u hold %u ms\n",
+		 pmp_floor_req_update(&f->layout),
+		 f->all ? "CPU clients" : "client", f->all ? f->layout.clients : 1,
+		 f->initial, f->resp[0], f->resp[1], f->resp[2], f->resp[3], f->on,
 		 f->cfg.cpu_busy_pct, f->cfg.gpu_busy_pct, f->cfg.raise_samples, f->cfg.hold_ms);
-	j613_floor_prime(f);
-	j613_floor_queue(f);
+	pmp_floor_prime(f);
+	pmp_floor_queue(f);
 out:
 	mutex_unlock(&f->lock);
 }
 
-static void j613_floor_cancel(struct j613_floor *f)
+static void pmp_floor_cancel(struct pmp_floor *f)
 {
 	cancel_delayed_work_sync(&f->start_work);
 	cancel_delayed_work_sync(&f->work);
@@ -2131,86 +2154,46 @@ static void j613_floor_cancel(struct j613_floor *f)
 }
 
 /* Stop for good (remove, reboot, shutdown): floor 0, no further sampling. */
-static void j613_floor_stop(struct j613_floor *f, const char *why)
+static void pmp_floor_stop(struct pmp_floor *f, const char *why)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&j613_floor_gpu.lock, flags);
-	if (j613_floor_gpu.wake == f)
-		j613_floor_gpu.wake = NULL;
-	spin_unlock_irqrestore(&j613_floor_gpu.lock, flags);
+	spin_lock_irqsave(&pmp_floor_gpu.lock, flags);
+	if (pmp_floor_gpu.wake == f)
+		pmp_floor_gpu.wake = NULL;
+	spin_unlock_irqrestore(&pmp_floor_gpu.lock, flags);
 	mutex_lock(&f->lock);
 	if (!f->stopped) {
 		f->stopped = true;
 		if (f->admitted)
-			j613_floor_release(f, ktime_get_ns(), why);
+			pmp_floor_release(f, ktime_get_ns(), why);
 	}
 	mutex_unlock(&f->lock);
-	j613_floor_cancel(f);
+	pmp_floor_cancel(f);
 }
 
-static void j613_floor_remove(void *data)
+static void pmp_floor_remove(void *data)
 {
-	j613_floor_stop(data, "remove");
+	pmp_floor_stop(data, "remove");
 }
 
-static int j613_floor_reboot(struct notifier_block *nb, unsigned long action, void *data)
+static int pmp_floor_reboot(struct notifier_block *nb, unsigned long action, void *data)
 {
-	j613_floor_stop(container_of(nb, struct j613_floor, reboot_nb), "reboot");
+	pmp_floor_stop(container_of(nb, struct pmp_floor, reboot_nb), "reboot");
 	return NOTIFY_DONE;
 }
 
-static struct j613_floor *j613_floor_of(struct device *dev)
+static struct pmp_floor *pmp_floor_of(struct device *dev)
 {
 	struct apple_pmp_report *rep = dev_get_drvdata(dev);
 
-	return rep->j613;
+	return rep->floor;
 }
 
-/* Values are clamped to the range; a busy threshold of 101 turns that input off. */
-#define J613_FLOOR_ATTR(_name, _field, _lo, _hi, _apply)				\
-static ssize_t _name##_show(struct device *dev, struct device_attribute *a, char *buf)	\
-{											\
-	struct j613_floor *f = j613_floor_of(dev);					\
-	return sysfs_emit(buf, "%u\n", READ_ONCE(f->_field));				\
-}											\
-static ssize_t _name##_store(struct device *dev, struct device_attribute *a,		\
-			     const char *buf, size_t count)				\
-{											\
-	struct j613_floor *f = j613_floor_of(dev);					\
-	unsigned int v;									\
-	int ret = kstrtouint(buf, 0, &v);						\
-	if (ret)									\
-		return ret;								\
-	mutex_lock(&f->lock);								\
-	WRITE_ONCE(f->_field, pmp_floor_clamp(v, _lo, _hi));				\
-	_apply;										\
-	mutex_unlock(&f->lock);								\
-	return count;									\
-}											\
-static DEVICE_ATTR_RW(_name)
-
-/* A level change while the floor is held is written at once, serialized. */
-#define J613_FLOOR_RELEVEL do {								\
-	if (f->admitted && f->gov.raised && !f->faulted && !f->stopped &&		\
-	    !f->suspended && (f->dcs != f->tdcs || f->soc != f->tsoc))			\
-		j613_floor_raise(f, ktime_get_ns(), true);				\
-} while (0)
-
-J613_FLOOR_ATTR(dcs, dcs, PMP_FLOOR_DCS_MIN, PMP_FLOOR_DCS_MAX, J613_FLOOR_RELEVEL);
-J613_FLOOR_ATTR(soc, soc, 0, PMP_FLOOR_SOC_MAX, J613_FLOOR_RELEVEL);
-J613_FLOOR_ATTR(cpu_busy_pct, cfg.cpu_busy_pct, 1, 101, (void)0);
-J613_FLOOR_ATTR(cpu_sum_pct, cfg.cpu_sum_pct, 0, 1600, (void)0);
-J613_FLOOR_ATTR(gpu_busy_pct, cfg.gpu_busy_pct, 1, 101, (void)0);
-J613_FLOOR_ATTR(raise_samples, cfg.raise_samples, 1, 20, (void)0);
-J613_FLOOR_ATTR(hold_ms, cfg.hold_ms, 100, 10000, (void)0);
-J613_FLOOR_ATTR(min_interval_ms, cfg.min_interval_ms, 0, 5000, (void)0);
-J613_FLOOR_ATTR(sample_ms, sample_ms, 10, 1000, (void)0);
-J613_FLOOR_ATTR(confirm_ms, confirm_ms, 100, 5000, (void)0);
-
+/* On/off for A/B measurements; the levels and policy come from the DT and the code. */
 static ssize_t enable_show(struct device *dev, struct device_attribute *a, char *buf)
 {
-	struct j613_floor *f = j613_floor_of(dev);
+	struct pmp_floor *f = pmp_floor_of(dev);
 
 	return sysfs_emit(buf, "%u\n", READ_ONCE(f->enabled));
 }
@@ -2218,7 +2201,7 @@ static ssize_t enable_show(struct device *dev, struct device_attribute *a, char 
 static ssize_t enable_store(struct device *dev, struct device_attribute *a,
 			    const char *buf, size_t count)
 {
-	struct j613_floor *f = j613_floor_of(dev);
+	struct pmp_floor *f = pmp_floor_of(dev);
 	bool on;
 	int ret = kstrtobool(buf, &on);
 
@@ -2230,10 +2213,10 @@ static ssize_t enable_store(struct device *dev, struct device_attribute *a,
 	} else if (on != f->enabled) {
 		f->enabled = on;
 		if (on) {
-			j613_floor_prime(f);
-			j613_floor_queue(f);
+			pmp_floor_prime(f);
+			pmp_floor_queue(f);
 		} else {
-			j613_floor_release(f, ktime_get_ns(), "disabled");
+			pmp_floor_release(f, ktime_get_ns(), "disabled");
 		}
 	}
 	mutex_unlock(&f->lock);
@@ -2243,27 +2226,28 @@ static DEVICE_ATTR_RW(enable);
 
 static ssize_t status_show(struct device *dev, struct device_attribute *a, char *buf)
 {
-	struct j613_floor *f = j613_floor_of(dev);
-	u64 now = ktime_get_ns(), edges, gpu = j613_floor_gpu_busy_ns(now, &edges);
+	struct pmp_floor *f = pmp_floor_of(dev);
+	u64 now = ktime_get_ns(), edges, gpu = pmp_floor_gpu_busy_ns(now, &edges);
 	u64 held;
 	int n;
 
 	mutex_lock(&f->lock);
 	if (f->admitted && !f->stopped)
-		j613_floor_read_state(f);
+		pmp_floor_read_state(f);
 	held = f->held_ns + (f->gov.raised ? now - f->raised_at : 0);
 	n = sysfs_emit(buf,
 		"admitted=%u enabled=%u faulted=%u stopped=%u suspended=%u why=%s\n"
-		"raised=%u dcs=%u soc=%u word=%#llx initial=%#llx writes=%llu\n"
+		"raised=%u on=%#llx word=%#llx initial=%#llx writes=%llu all=%u clients=%u confirm=%u\n"
 		"dvfs_state=%#llx/%#llx/%#llx/%#llx\n"
-		"raises=%llu drops=%llu relevels=%llu rate_limited=%llu superseded=%llu\n"
+		"raises=%llu drops=%llu rate_limited=%llu superseded=%llu\n"
 		"raise_confirmed=%llu raise_unconfirmed=%llu drop_confirmed=%llu drop_unconfirmed=%llu last_confirm_us=%llu\n"
 		"held_ms_total=%llu held_ms_current=%llu last_raise_reason=%u\n"
 		"samples=%llu cpu_pct=%u cpu_sum=%u gpu_pct=%u reason=%u gpu_busy_ms=%llu gpu_edges=%llu\n",
 		f->admitted, f->enabled, f->faulted, f->stopped, f->suspended, f->why ?: "-",
-		f->gov.raised, f->dcs, f->soc, f->word, f->initial, f->writes,
+		f->gov.raised, f->on, f->word, f->initial, f->writes,
+		f->all, f->all ? f->layout.clients : 1, f->confirm,
 		f->resp[0], f->resp[1], f->resp[2], f->resp[3],
-		f->raises, f->drops, f->relevels, f->gov.rate_limited, f->superseded,
+		f->raises, f->drops, f->gov.rate_limited, f->superseded,
 		f->raise_ok, f->raise_unconfirmed, f->drop_ok, f->drop_unconfirmed,
 		f->last_confirm_us,
 		div_u64(held, NSEC_PER_MSEC),
@@ -2275,65 +2259,86 @@ static ssize_t status_show(struct device *dev, struct device_attribute *a, char 
 }
 static DEVICE_ATTR_RO(status);
 
-static struct attribute *j613_floor_attrs[] = {
-	&dev_attr_enable.attr, &dev_attr_dcs.attr, &dev_attr_soc.attr,
-	&dev_attr_cpu_busy_pct.attr, &dev_attr_cpu_sum_pct.attr, &dev_attr_gpu_busy_pct.attr,
-	&dev_attr_raise_samples.attr, &dev_attr_hold_ms.attr,
-	&dev_attr_min_interval_ms.attr, &dev_attr_sample_ms.attr,
-	&dev_attr_confirm_ms.attr, &dev_attr_status.attr, NULL,
+static struct attribute *pmp_floor_attrs[] = {
+	&dev_attr_enable.attr, &dev_attr_status.attr, NULL,
 };
 
-static const struct attribute_group j613_floor_group = {
-	.name = "j613_floor",
-	.attrs = j613_floor_attrs,
+static const struct attribute_group pmp_floor_group = {
+	.name = "cpu_memory_floor",
+	.attrs = pmp_floor_attrs,
 };
 
-/*
- * Probe-time setup. The report driver data stays the report; the attribute
- * group reads the floor through the report's j613 pointer.
- */
-static void j613_floor_put_pmp(void *pmp)
+static void pmp_floor_put_pmp(void *pmp)
 {
 	of_node_put(pmp);
 }
 
-static int j613_floor_probe(struct apple_pmp_report *rep)
+/*
+ * The PMP whose tables describe this report: the report's apple,pmp-tables
+ * or apple,pmp, or else the one available PMP whose apple,pmp-report names
+ * the report.
+ */
+static struct device_node *pmp_floor_find_pmp(struct device_node *report)
+{
+	struct device_node *pmp, *link, *found;
+
+	found = of_parse_phandle(report, "apple,pmp-tables", 0);
+	if (!found)
+		found = of_parse_phandle(report, "apple,pmp", 0);
+	if (found)
+		return found;
+	for_each_node_with_property(pmp, "apple,pmp-report") {
+		link = of_parse_phandle(pmp, "apple,pmp-report", 0);
+		of_node_put(link);
+		if (link != report || !of_device_is_available(pmp))
+			continue;
+		if (found) {
+			of_node_put(found);
+			of_node_put(pmp);
+			return ERR_PTR(-EINVAL);
+		}
+		found = of_node_get(pmp);
+	}
+	return found;
+}
+
+/*
+ * Probe-time setup, for a report whose DT asks for the floor
+ * (apple,cpu-memory-floor). The report driver data stays the report; the
+ * attribute group reads the floor through the report's floor pointer.
+ */
+static int pmp_floor_probe(struct apple_pmp_report *rep)
 {
 	struct device *dev = rep->dev;
-	struct j613_floor *f;
-	struct device_node *pmp, *link;
-	const char *uuid;
+	struct pmp_floor *f;
+	struct device_node *pmp;
+	u32 cells[PMP_FLOOR_CELLS_MAX];
 	unsigned long flags;
-	int ret;
+	int n, ret;
+	u64 on;
 
-	if (!pmp_floor_enabled(of_machine_is_compatible("apple,j613"),
-			       rep->offsets->j613_floor_default, j613_floor))
+	if (!of_property_present(dev->of_node, "apple,cpu-memory-floor"))
 		return 0;
+	/* A bad floor description costs the floor only, never the report. */
+	n = of_property_count_u32_elems(dev->of_node, "apple,cpu-memory-floor");
+	if (n <= 0 || n > ARRAY_SIZE(cells) ||
+	    of_property_read_u32_array(dev->of_node, "apple,cpu-memory-floor", cells, n) ||
+	    !pmp_floor_word_of(cells, n, &on)) {
+		dev_err(dev, "invalid apple,cpu-memory-floor; no memory floor\n");
+		return 0;
+	}
+	pmp = pmp_floor_find_pmp(dev->of_node);
+	if (IS_ERR_OR_NULL(pmp)) {
+		dev_err(dev, "memory floor: no unique PMP for the report; no memory floor\n");
+		return 0;
+	}
+	ret = devm_add_action_or_reset(dev, pmp_floor_put_pmp, pmp);
+	if (ret)
+		return ret;
 	f = devm_kzalloc(dev, sizeof(*f), GFP_KERNEL);
 	if (!f)
 		return -ENOMEM;
-	/* Native PMP startup remains owned by its existing supplier driver. */
-	for_each_compatible_node(pmp, NULL, "apple,t8122-pmp-v2") {
-		link = of_parse_phandle(pmp, "apple,pmp-report", 0);
-		if (link != dev->of_node || !of_device_is_available(pmp)) {
-			of_node_put(link);
-			continue;
-		}
-		of_node_put(link);
-		if (f->pmp) {
-			of_node_put(pmp);
-			return -EINVAL;
-		}
-		f->pmp = of_node_get(pmp);
-		ret = devm_add_action_or_reset(dev, j613_floor_put_pmp, f->pmp);
-		if (ret) {
-			of_node_put(pmp);
-			return ret;
-		}
-	}
-	if (!f->pmp || of_property_read_string(f->pmp, "apple,tunable-uuid", &uuid) ||
-	    strcmp(uuid, PMP_FLOOR_J613_UUID))
-		return dev_err_probe(dev, -EINVAL, "J613 floor PMP identity refused\n");
+	f->pmp = pmp;
 	f->cpu_idle = devm_kcalloc(dev, nr_cpu_ids, sizeof(u64), GFP_KERNEL);
 	f->cpu_wall = devm_kcalloc(dev, nr_cpu_ids, sizeof(u64), GFP_KERNEL);
 	f->cluster_sum = devm_kcalloc(dev, nr_cpu_ids, sizeof(unsigned int), GFP_KERNEL);
@@ -2344,40 +2349,38 @@ static int j613_floor_probe(struct apple_pmp_report *rep)
 	mutex_init(&f->lock);
 	ratelimit_state_init(&f->rs, 10 * HZ, 20);
 	ratelimit_set_flags(&f->rs, RATELIMIT_MSG_ON_RELEASE);
-	INIT_DELAYED_WORK(&f->start_work, j613_floor_start_work);
-	INIT_DELAYED_WORK(&f->work, j613_floor_work);
-	INIT_DEFERRABLE_WORK(&f->idle_work, j613_floor_idle_work);
-	f->dcs = pmp_floor_clamp(j613_floor_dcs, PMP_FLOOR_DCS_MIN, PMP_FLOOR_DCS_MAX);
-	f->soc = pmp_floor_clamp(j613_floor_soc, 0, PMP_FLOOR_SOC_MAX);
-	f->cfg.cpu_busy_pct = pmp_floor_clamp(j613_floor_cpu_pct, 1, 101);
-	f->cfg.cpu_sum_pct = pmp_floor_clamp(j613_floor_cpu_sum_pct, 0, 1600);
-	f->cfg.gpu_busy_pct = pmp_floor_clamp(j613_floor_gpu_pct, 1, 101);
-	f->cfg.raise_samples = pmp_floor_clamp(j613_floor_raise_samples, 1, 20);
-	f->cfg.hold_ms = pmp_floor_clamp(j613_floor_hold_ms, 100, 10000);
-	f->cfg.min_interval_ms = pmp_floor_clamp(j613_floor_min_interval_ms, 0, 5000);
-	f->sample_ms = pmp_floor_clamp(j613_floor_sample_ms, 10, 1000);
-	f->confirm_ms = pmp_floor_clamp(j613_floor_confirm_ms, 100, 5000);
-	f->idle_defer = j613_floor_idle_defer;
-	rep->j613 = f;
+	INIT_DELAYED_WORK(&f->start_work, pmp_floor_start_work);
+	INIT_DELAYED_WORK(&f->work, pmp_floor_work);
+	INIT_DEFERRABLE_WORK(&f->idle_work, pmp_floor_idle_work);
+	f->on = on;
+	f->all = rep->offsets->floor_all_clients;
+	f->confirm = rep->offsets->floor_confirm;
+	f->cfg.cpu_busy_pct = PMP_FLOOR_CPU_BUSY_PCT;
+	f->cfg.cpu_sum_pct = PMP_FLOOR_CPU_SUM_PCT;
+	f->cfg.gpu_busy_pct = PMP_FLOOR_GPU_BUSY_PCT;
+	f->cfg.raise_samples = PMP_FLOOR_RAISE_SAMPLES;
+	f->cfg.hold_ms = PMP_FLOOR_HOLD_MS;
+	f->cfg.min_interval_ms = PMP_FLOOR_MIN_INTERVAL_MS;
+	rep->floor = f;
 
 	/* Removal order (reverse): stop the governor before the group goes. */
-	ret = devm_device_add_group(dev, &j613_floor_group);
+	ret = devm_device_add_group(dev, &pmp_floor_group);
 	if (ret)
 		return ret;
-	ret = devm_add_action_or_reset(dev, j613_floor_remove, f);
+	ret = devm_add_action_or_reset(dev, pmp_floor_remove, f);
 	if (ret)
 		return ret;
-	f->reboot_nb.notifier_call = j613_floor_reboot;
+	f->reboot_nb.notifier_call = pmp_floor_reboot;
 	/* Before device shutdown: the PMP is still running then. */
 	f->reboot_nb.priority = INT_MAX;
 	ret = devm_register_reboot_notifier(dev, &f->reboot_nb);
 	if (ret)
 		return ret;
-	spin_lock_irqsave(&j613_floor_gpu.lock, flags);
-	j613_floor_gpu.wake = f;
-	spin_unlock_irqrestore(&j613_floor_gpu.lock, flags);
-	queue_delayed_work(system_freezable_power_efficient_wq, &f->start_work, HZ);
-	dev_info(dev, "J613 floor: waiting for the PMP before admission\n");
+	spin_lock_irqsave(&pmp_floor_gpu.lock, flags);
+	pmp_floor_gpu.wake = f;
+	spin_unlock_irqrestore(&pmp_floor_gpu.lock, flags);
+	queue_delayed_work(system_freezable_power_efficient_wq, &f->start_work, 0);
+	dev_info(dev, "memory floor %#llx: waiting for the PMP before admission\n", f->on);
 	return 0;
 }
 
@@ -2385,40 +2388,40 @@ static void apple_pmp_report_shutdown(struct platform_device *pdev)
 {
 	struct apple_pmp_report *rep = platform_get_drvdata(pdev);
 
-	if (rep && rep->j613)
-		j613_floor_stop(rep->j613, "shutdown");
+	if (rep && rep->floor)
+		pmp_floor_stop(rep->floor, "shutdown");
 }
 
 /* System sleep: publish level 0 first, and sample again after resume. */
 static int apple_pmp_report_suspend(struct device *dev)
 {
 	struct apple_pmp_report *rep = dev_get_drvdata(dev);
-	struct j613_floor *f = rep ? rep->j613 : NULL;
+	struct pmp_floor *f = rep ? rep->floor : NULL;
 
 	if (!f)
 		return 0;
 	mutex_lock(&f->lock);
 	f->suspended = true;
 	if (f->admitted && !f->stopped)
-		j613_floor_release(f, ktime_get_ns(), "suspend");
+		pmp_floor_release(f, ktime_get_ns(), "suspend");
 	mutex_unlock(&f->lock);
-	j613_floor_cancel(f);
+	pmp_floor_cancel(f);
 	return 0;
 }
 
 static int apple_pmp_report_resume(struct device *dev)
 {
 	struct apple_pmp_report *rep = dev_get_drvdata(dev);
-	struct j613_floor *f = rep ? rep->j613 : NULL;
+	struct pmp_floor *f = rep ? rep->floor : NULL;
 
 	if (!f)
 		return 0;
 	mutex_lock(&f->lock);
 	f->suspended = false;
 	if (!f->stopped && !f->admitted && !f->why)
-		queue_delayed_work(system_freezable_power_efficient_wq, &f->start_work, HZ);
-	j613_floor_prime(f);
-	j613_floor_queue(f);
+		queue_delayed_work(system_freezable_power_efficient_wq, &f->start_work, 0);
+	pmp_floor_prime(f);
+	pmp_floor_queue(f);
 	mutex_unlock(&f->lock);
 	return 0;
 }
@@ -2488,7 +2491,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "native26 PTD table refused\n");
 
-	ret = j613_floor_probe(rep);
+	ret = pmp_floor_probe(rep);
 	if (ret)
 		return ret;
 
@@ -2532,6 +2535,7 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t600x = {
 	.dvfs_count = 0x28,
 	.actual = 0x1000,
 	.status = 0x10,
+	.floor_all_clients = true,
 };
 
 static const struct apple_pmp_report_offsets apple_pmp_offsets_t602x = {
@@ -2579,11 +2583,11 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t8122 = {
 
 /* The same PTD apertures; its startup belongs to the native PMP supplier. */
 static const struct apple_pmp_report_offsets apple_pmp_offsets_j613_25g83 = {
-	.j613_floor_default = true,
 	.tgt_read = 0x1000,
 	.tgt_write = 0x10800,
 	.actual = 0x1080,
 	.status = 0x10,
+	.floor_confirm = true,
 };
 
 /*
@@ -2643,6 +2647,27 @@ static const struct apple_pmp_report_offsets apple_pmp_offsets_t8132 = {
 	/* No qualified fast-die effort on this generation. */
 };
 
+/*
+ * T8142 (M5): PTD entries 1 (PMP-STATUS), 15 (FAST-DIE-CE: E, P),
+ * 39 (SOC-DEV-PS-REQ), 47 (SOC-DEV-PS-ACK) and 55..70 (SOC-DEV-DVFS).
+ * Reads are 16 bytes per entry from the base, writes 8 bytes per entry
+ * from base + 0x10000.
+ */
+static const struct apple_pmp_report_offsets apple_pmp_offsets_t8142 = {
+	.tgt_read = 0x270,
+	.tgt_write = 0x10138,
+	.update = 0x10000,
+	.dvfs_first = 0x37,
+	.dvfs_count = 16,
+	.actual = 0x2f0,
+	.status = 0x10,
+	.fast_die = 0xf0,
+	.fast_die_lanes = 2,
+	.fast_die_wide = true,
+	.running_any = true,
+	.defer_requests = true,
+};
+
 static const struct of_device_id apple_pmp_report_of_match[] = {
 	{ .compatible = "apple,j613-25g83-pmp-report", .data = &apple_pmp_offsets_j613_25g83 },
 	{ .compatible = "apple,t6000-pmp-v2-report", .data = &apple_pmp_offsets_t600x },
@@ -2656,6 +2681,7 @@ static const struct of_device_id apple_pmp_report_of_match[] = {
 	{ .compatible = "apple,t8122-pmp-v2-report", .data = &apple_pmp_offsets_t8122 },
 	{ .compatible = "apple,t8132-pmp-v2-report", .data = &apple_pmp_offsets_t8132 },
 	{ .compatible = "apple,t8140-pmp-v2-report", .data = &apple_pmp_offsets_t8140 },
+	{ .compatible = "apple,t8142-pmp-v2-report", .data = &apple_pmp_offsets_t8142 },
 	{}
 };
 

@@ -39,7 +39,7 @@ Lifecycle-only validation
 -------------------------
 
 Build with CONFIG_DEBUG_FS. On a supported 6070 device, write ``1`` (AVC) or ``2``
-(HEVC) to ``/sys/kernel/debug/apple-ave/lifecycle_test``. This synchronous operation
+(HEVC) to ``/sys/kernel/debug/apple-ave-<dev>/lifecycle_test``. This synchronous operation
 runs boot, Config, Open, Close and Halt, then requests runtime suspend. It does
 not allocate encoding surfaces or issue Start, Process or uninit for an encoder
 that was never initialized. A second write exercises a cold restart and DATA

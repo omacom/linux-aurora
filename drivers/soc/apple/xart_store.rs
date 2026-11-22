@@ -442,8 +442,9 @@ impl Store {
         Ok(true)
     }
 
-    /// Whether this store accepts writes: `xart_writes=1` and APFS proved the
-    /// extent writable.
+    /// Whether this store accepts writes: it was opened for writing (every
+    /// open but the key-store-only initrd phase's) and APFS proved the extent
+    /// writable.
     pub(crate) fn writes_enabled(&self) -> bool {
         self.writes_enabled
     }

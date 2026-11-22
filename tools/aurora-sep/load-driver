@@ -51,7 +51,14 @@ case "$(cat /sys/module/apple_sep/parameters/keystore_only 2>/dev/null || true)"
             exit 1
         fi
         ;;
-    *) modprobe apple_sep xart_writes=1 provision_keybag=1 ;;
+    *)
+        # No options: SEP writes are always on, so there is nothing to set
+        # (xart_writes and provision_keybag were removed,
+        # aurora-silicon/linux#2591). Passing them here also gave each one
+        # twice next to a stale apple_sep.xart_writes= on the kernel command
+        # line, and kernels before #2591 then refused to load the driver.
+        modprobe apple_sep
+        ;;
 esac
 
 work=$(mktemp -d /run/aurora-sep-load.XXXXXX)

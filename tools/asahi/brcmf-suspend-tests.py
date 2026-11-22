@@ -34,7 +34,8 @@ PREFIX = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-typedef int32_t s32; typedef uint32_t u32; typedef uint8_t u8;
+typedef int32_t s32; typedef uint32_t u32; typedef uint8_t u8; typedef uint32_t __le32;
+#define le32_to_cpu(x) (x)
 #define BIT(n) (1U << (n))
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 #define READ_ONCE(x) (x)
@@ -42,6 +43,8 @@ typedef int32_t s32; typedef uint32_t u32; typedef uint8_t u8;
 #define smp_load_acquire(p) (*(p))
 #define brcmf_dbg(...) ((void)0)
 #define bphy_err(...) ((void)drvr)
+#define bphy_info_once(...) ((void)drvr)
+#define brcmf_info(...) ((void)0)
 #define brcmf_err(...) ((void)0)
 #define __brcmf_err(...) ((void)0)
 #define spin_lock_irqsave(l,f) ((void)(l),(f)=0)
@@ -80,7 +83,7 @@ struct {struct brcmf_cfg80211_vif *first;} vif_list;
 struct {bool active, nd_enabled, lpas; int pre_pmmode;} wowl; };
 struct wiphy { struct brcmf_cfg80211_info *cfg; };
 struct regulatory_request { char alpha2[2]; int initiator; };
-struct brcmf_fil_country_le { char alpha2[2]; };
+struct brcmf_fil_country_le { char alpha2[2]; __le32 rev; char ccode[4]; };
 struct work_struct { bool queued; };
 struct brcmf_msgbuf_work_item { struct brcmf_msgbuf_work_item *next; };
 struct brcmf_msgbuf { struct brcmf_pub *drvr; bool tx_suspended;

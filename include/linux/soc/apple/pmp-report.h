@@ -14,8 +14,8 @@ struct device_node;
 struct device;
 
 #if IS_ENABLED(CONFIG_APPLE_PMP_REPORT)
-/* J613 floor demand input; no-op without an admitted owner. */
-void apple_pmp_j613_floor_gpu_activity(bool busy);
+/* CPU memory-floor GPU demand input; no-op without an admitted owner. */
+void apple_pmp_floor_gpu_activity(bool busy);
 int apple_pmp_report_ane_available(const struct device_node *np);
 int apple_pmp_report_ane_perf(const struct device_node *np,
 			      struct device *owner, unsigned int level, bool *held);
@@ -141,7 +141,7 @@ static inline int apple_pmp_report_set_request(const struct device_node *report_
 	return -ENODEV;
 }
 
-static inline void apple_pmp_j613_floor_gpu_activity(bool busy)
+static inline void apple_pmp_floor_gpu_activity(bool busy)
 {
 }
 #endif

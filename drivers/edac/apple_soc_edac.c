@@ -218,13 +218,19 @@ static const char *apple_soc_edac_source(const struct apple_soc_edac_hw *hw,
 	return NULL;
 }
 
+/*
+ * Read and acknowledge a T6041 NI status word. Returns whether it was set;
+ * @error says whether a bit in the platform error policy was set and
+ * @cleared whether the word reads back clear after the acknowledge.
+ */
 static bool apple_soc_edac_t6041_status(struct apple_soc_edac_irq *irq_data,
-					bool *error)
+					bool *error, bool *cleared)
 {
 	struct apple_soc_edac *edac = irq_data->edac;
-	u32 status;
+	u32 status, left;
 
 	*error = false;
+	*cleared = true;
 
 	if (irq_data->index >= 45 && irq_data->index < 70) {
 		void __iomem *reg = edac->status_regs[irq_data->index - 45] +
@@ -237,6 +243,14 @@ static bool apple_soc_edac_t6041_status(struct apple_soc_edac_irq *irq_data,
 		/* Bit 3 is not part of the platform error policy. */
 		*error = status & 0xf7;
 		writel(status, reg);
+		left = readl(reg);
+		if (left) {
+			*cleared = false;
+			dev_info_ratelimited(edac->dev,
+					     "%s source %u: status %#x, %#x after the acknowledge\n",
+					     irq_data->source, irq_data->index,
+					     status, left);
+		}
 		return true;
 	}
 
@@ -289,27 +303,29 @@ static irqreturn_t apple_soc_edac_irq_thread(int irq, void *data)
 {
 	struct apple_soc_edac_irq *irq_data = data;
 	struct apple_soc_edac *edac = irq_data->edac;
-	bool error;
+	bool error, cleared;
 	char msg[64];
-
-	if (edac->hw->num_status_regs &&
-	    apple_soc_edac_t6041_status(irq_data, &error)) {
-		if (!error)
-			return IRQ_HANDLED;
-
-		snprintf(msg, sizeof(msg), "%s source %u", irq_data->source,
-			 irq_data->index);
-		edac_device_handle_ue(edac->dci, 0, 0, msg);
-		dev_err_ratelimited(edac->dev, "hardware error: %s (IRQ %d)\n",
-				    msg, irq);
-		return IRQ_HANDLED;
-	}
 
 	snprintf(msg, sizeof(msg), "%s source %u", irq_data->source,
 		 irq_data->index);
-	if (irq_data->ni) {
-		bool cleared;
 
+	if (edac->hw->num_status_regs &&
+	    apple_soc_edac_t6041_status(irq_data, &error, &cleared)) {
+		if (error) {
+			edac_device_handle_ue(edac->dci, 0, 0, msg);
+			dev_err_ratelimited(edac->dev,
+					    "hardware error: %s (IRQ %d)\n",
+					    msg, irq);
+		}
+		if (cleared)
+			return IRQ_HANDLED;
+		/*
+		 * The acknowledge did not take, so the level line would
+		 * fire again at once: mask it and back off instead.
+		 */
+	}
+
+	if (irq_data->ni) {
 		if (apple_soc_edac_ni_status(irq_data, &cleared)) {
 			edac_device_handle_ue(edac->dci, 0, 0, msg);
 			dev_err_ratelimited(edac->dev, "hardware error: %s (IRQ %d)\n",

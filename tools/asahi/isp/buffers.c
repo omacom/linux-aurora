@@ -208,6 +208,7 @@ struct hardware {
 };
 
 struct apple_isp {
+	void *dcp;
 	struct isp_format fmt;
 	struct isp_channel *chan_bh;
 	const struct hardware *hw;
@@ -300,6 +301,17 @@ static int isp_cmd_ch_buffer_return(struct apple_isp *isp, int channel)
 
 static void apple_isp_wdt_stop(struct apple_isp *isp)
 {
+}
+
+/* The camera indicator is not under test here: no DCP, so no call. */
+static bool apple_isp_camera_indicator(const struct apple_isp *isp)
+{
+	return isp->dcp;
+}
+
+static int apple_isp_dcp_indicator_set(void *dcp, bool on)
+{
+	return 0;
 }
 
 static void apple_isp_stop_capture(struct apple_isp *isp);

@@ -19,7 +19,7 @@
 
 bool apple_pmp_telemetry_retained_board(void)
 {
-	return apple_t8132_firmware_path() && of_machine_is_compatible("apple,t8132");
+	return apple_t8132_firmware_path();
 }
 
 static LIST_HEAD(apple_pmp_telemetry_list);

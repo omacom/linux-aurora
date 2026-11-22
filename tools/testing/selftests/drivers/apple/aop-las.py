@@ -25,7 +25,7 @@ def main():
     las = (root / "drivers/iio/common/aop_sensors/aop_las.rs").read_text()
     parts = [r'''
 #![allow(non_camel_case_types)]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Release}};
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 const MICRO: u64 = 1_000_000;
 const MAX_MICRO: u64 = i32::MAX as u64 * MICRO + MICRO - 1;
 #[derive(Debug)]
@@ -42,7 +42,14 @@ mod bindings {
     pub const IIO_VAL_INT_PLUS_MICRO: u32 = 2;
     pub const IIO_VAL_INT_PLUS_NANO: u32 = 3;
     pub struct iio_dev { pub priv_: *const std::ffi::c_void }
-    pub struct iio_chan_spec { pub type_: u32 }
+    pub struct iio_chan_spec { pub type_: u32, pub address: u64 }
+}
+/// Host stand-in for `kernel::sync::atomic::Atomic`: only load/store are used.
+struct Atomic<T: Copy>(std::sync::Mutex<T>);
+impl<T: Copy> Atomic<T> {
+    fn new(v: T) -> Self { Atomic(std::sync::Mutex::new(v)) }
+    fn load(&self, _: std::sync::atomic::Ordering) -> T { *self.0.lock().unwrap() }
+    fn store(&self, v: T, _: std::sync::atomic::Ordering) { *self.0.lock().unwrap() = v; }
 }
 struct Arc<T>(std::marker::PhantomData<T>);
 impl<T> Arc<T> {
@@ -53,25 +60,29 @@ impl<T> Arc<T> {
 trait FakehidListener {
     fn process_fakehid_report(&self, data: &[u8]) -> Result<()>;
 }
-struct AopSensorData<T: MessageProcessor> {
-    ty: u32, value: AtomicU64, valid: AtomicBool, msg_proc: T,
+struct AopSensorData<T: MessageProcessor, const N: usize = 1> {
+    ty: [u32; N], value: [Atomic<u64>; N], valid: [Atomic<bool>; N], msg_proc: T,
 }
 struct MsgProc;
 ''', block(common, "pub trait MessageProcessor"),
         block(las, "impl MessageProcessor for MsgProc"),
-        block(common, "impl<T: MessageProcessor> FakehidListener"),
+        block(common, "impl<T: MessageProcessor, const N: usize> FakehidListener"),
         block(common, 'unsafe extern "C" fn aop_read_raw'), r'''
 fn sensor<T: MessageProcessor>(msg_proc: T) -> AopSensorData<T> {
     AopSensorData {
-        ty: 17, value: AtomicU64::new(0), valid: AtomicBool::new(false), msg_proc,
+        ty: [17], value: [Atomic::new(0)], valid: [Atomic::new(false)], msg_proc,
     }
 }
-fn read<T: MessageProcessor + 'static>(data: &AopSensorData<T>, mask: u32) -> (i32, i32, i32) {
+fn read_chan<T: MessageProcessor + 'static>(data: &AopSensorData<T>, ty: u32, address: u64,
+                                           mask: u32) -> (i32, i32, i32) {
     let mut dev = bindings::iio_dev { priv_: (data as *const AopSensorData<T>).cast() };
-    let chan = bindings::iio_chan_spec { type_: data.ty };
+    let chan = bindings::iio_chan_spec { type_: ty, address };
     let (mut val, mut val2) = (-1, -1);
-    let ret = unsafe { aop_read_raw::<T>(&mut dev, &chan, &mut val, &mut val2, mask as isize) };
+    let ret = unsafe { aop_read_raw::<T, 1>(&mut dev, &chan, &mut val, &mut val2, mask as isize) };
     (ret, val, val2)
+}
+fn read<T: MessageProcessor + 'static>(data: &AopSensorData<T>, mask: u32) -> (i32, i32, i32) {
+    read_chan(data, data.ty[0], 0, mask)
 }
 #[test]
 fn full_angle_and_padding() {
@@ -110,6 +121,9 @@ fn raw_scale_and_last_valid_sample() {
         data.process_fakehid_report(report).unwrap();
         assert_eq!(read(&data, BINDINGS_IIO_CHAN_INFO_RAW), (1, 99, 0));
     }
+    // A channel the registration did not create is rejected, reading or not.
+    assert_eq!(read_chan(&data, 17, 1, BINDINGS_IIO_CHAN_INFO_RAW).0, -22);
+    assert_eq!(read_chan(&data, 18, 0, BINDINGS_IIO_CHAN_INFO_RAW).0, -22);
     let (_, int, nano) = read(&data, BINDINGS_IIO_CHAN_INFO_SCALE);
     let radians = 99.0 * (int as f64 + nano as f64 / 1e9);
     assert!((radians - 99.0_f64.to_radians()).abs() < 1e-7);

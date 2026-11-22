@@ -35,6 +35,7 @@
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_damage_helper.h>
 #include <drm/drm_drv.h>
+#include <drm/drm_edid.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
@@ -92,6 +93,11 @@ struct t8132_ext_out {
 	 * (t8132_ext_lock to set; read anywhere)
 	 */
 	bool dying;
+	/*
+	 * A hotplug came while the connector was held for a display released
+	 * for a deep sleep: sent when the hold ends (t8132_ext_lock)
+	 */
+	bool hotplug_held;
 	bool first_frame;
 	/* A frame was not shown, so the next one goes whole */
 	bool frame_lost;
@@ -625,12 +631,30 @@ static enum drm_connector_status t8132_ext_detect(struct drm_connector *connecto
 							  connector_status_disconnected;
 }
 
+/*
+ * The modes are the firmware's catalog; the sink's EDID only fills in the
+ * connector's properties (its name, physical size and the like), which a
+ * compositor needs to tell monitors apart and to scale them.
+ */
 static int t8132_ext_get_modes(struct drm_connector *connector)
 {
 	struct t8132_ext_out *out = container_of(connector, struct t8132_ext_out, connector);
 	struct apple_dcp *owner = t8132_ext_owner(out);
+	const struct drm_edid *edid;
+	int count;
 
-	return owner ? iomfb_m4_ext_get_modes(owner, connector) : 0;
+	if (!owner)
+		return 0;
+	count = iomfb_m4_ext_get_modes(owner, connector);
+	edid = iomfb_m4_ext_edid(owner);
+	if (IS_ERR(edid)) {
+		drm_dbg_kms(connector->dev, "[CONNECTOR:%d:%s] no EDID: %pe\n",
+			    connector->base.id, connector->name, edid);
+		edid = NULL;
+	}
+	drm_edid_connector_update(connector, edid);
+	drm_edid_free(edid);
+	return count;
 }
 
 static void t8132_ext_hotplug_work(struct work_struct *work)
@@ -763,10 +787,24 @@ void t8132_ext_drm_hotplug(struct device *dcpext)
 	unsigned long flags;
 
 	spin_lock_irqsave(&t8132_ext_lock, flags);
-	for (unsigned int i = 0; i < T8132_EXT_MAX; i++)
-		if (t8132_ext_live[i] && &t8132_ext_live[i]->pdev->dev == dcpext &&
-		    !t8132_ext_live[i]->dying)
-			schedule_work(&t8132_ext_live[i]->hotplug_work);
+	for (unsigned int i = 0; i < T8132_EXT_MAX; i++) {
+		struct t8132_ext_out *out = t8132_ext_live[i];
+		struct apple_dcp *owner;
+
+		if (!out || &out->pdev->dev != dcpext || out->dying)
+			continue;
+		/*
+		 * Released for a deep sleep and connected again after it: the
+		 * connector stays as it was meanwhile, and its hotplug waits for
+		 * the end of the hold (t8132_ext_hold_end()).
+		 */
+		owner = t8132_ext_owner(out);
+		if (owner && iomfb_m4_ext_relinking(owner)) {
+			out->hotplug_held = true;
+			continue;
+		}
+		schedule_work(&out->hotplug_work);
+	}
 	spin_unlock_irqrestore(&t8132_ext_lock, flags);
 }
 
@@ -797,7 +835,8 @@ static int t8132_ext_wait_commit(struct drm_crtc *crtc, unsigned long timeout)
  * the output enters the sleep (its frames refused, its enables and disables
  * no-ops), then its display goes down with every worker running
  * (iomfb_m4_ext_sleep_down()). A commit after this one finds the output
- * asleep; none can be under way inside it.
+ * asleep; none can be under way inside it. A hold of its connector for a
+ * display released for the sleep (dcp.c) is this layer's to end from now on.
  */
 static int t8132_ext_sleep_prepare(struct t8132_ext_out *out)
 {
@@ -822,7 +861,49 @@ static int t8132_ext_sleep_prepare(struct t8132_ext_out *out)
 	out->sleep_entered = entered;
 	if (entered)
 		iomfb_m4_ext_sleep_down(owner);
+	iomfb_m4_ext_relink_own(owner);
 	return 0;
+}
+
+/* How long the replays wait, together, for displays released for the sleep (dcp.c) */
+#define T8132_EXT_RELINK_MS 3000
+
+/*
+ * The hold of a display released for the sleep is over, and its replay, if
+ * any, done: the hotplug held meanwhile goes out, or @hotplug's. The
+ * release's own HPD low and link rate 0 are among those held, so one goes
+ * out after every such sleep: the compositor probes the connector again and
+ * finds what the sleep changed, if anything (a display gone, also from a
+ * CRTC that is off, or a new link or sink).
+ */
+static void t8132_ext_hold_end(struct t8132_ext_out *out, bool hotplug)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&t8132_ext_lock, flags);
+	if ((hotplug || out->hotplug_held) && !out->dying)
+		schedule_work(&out->hotplug_work);
+	out->hotplug_held = false;
+	spin_unlock_irqrestore(&t8132_ext_lock, flags);
+}
+
+/* A display released for the sleep connected again, until @deadline at most. */
+static void t8132_ext_relink_wait(struct t8132_ext_out *out, unsigned long deadline)
+{
+	struct apple_dcp *owner = t8132_ext_owner(out);
+
+	if (owner)
+		iomfb_m4_ext_relink_wait(owner, deadline);
+}
+
+/* Not replayed: the hold of a display released for the sleep ends. */
+static void t8132_ext_relink_end(struct t8132_ext_out *out)
+{
+	struct apple_dcp *owner = t8132_ext_owner(out);
+
+	if (owner)
+		iomfb_m4_ext_relink_end(owner);
+	t8132_ext_hold_end(out, false);
 }
 
 /*
@@ -837,7 +918,9 @@ static int t8132_ext_sleep_prepare(struct t8132_ext_out *out)
  * (then read under its lock), or that is not confirmed afterwards (the
  * display DART and a frame shown, iomfb_m4_ext_restore_result()) sets the
  * connector's link status BAD and sends a hotplug event: the compositor has
- * to set the mode again.
+ * to set the mode again. A display released for the sleep was waited for
+ * before (t8132_ext_pm_notify()); its connector's hold ends here, and the
+ * hotplug held meanwhile goes out at the end.
  */
 static void t8132_ext_sleep_restore(struct t8132_ext_out *out)
 {
@@ -846,12 +929,17 @@ static void t8132_ext_sleep_restore(struct t8132_ext_out *out)
 	struct drm_modeset_acquire_ctx ctx;
 	struct drm_atomic_commit *state;
 	struct drm_crtc_state *cs;
-	bool active = false, known = false;
+	bool active = false, known = false, bad;
 	int ret, restore = 0;
 
 	out->sleep_entered = false;
 	if (!owner)
 		return;
+	ret = iomfb_m4_ext_relink_end(owner);
+	if (ret)
+		dev_info(&out->pdev->dev, "resume: %s: the display not connected again (%s): %d\n",
+			 out->crtc.name, ret == -ENOLINK ? "unplugged" :
+			 ret == -ETIMEDOUT ? "timed out" : "session failed", ret);
 	drm_modeset_acquire_init(&ctx, 0);
 	state = drm_atomic_commit_alloc(drm);
 	if (!state) {
@@ -902,13 +990,25 @@ fini:
 		restore = iomfb_m4_ext_restore_result(owner, 1000);
 	else
 		iomfb_m4_ext_restore_end(owner);
-	if (active && (ret || restore || iomfb_m4_ext_stale(owner))) {
+	bad = active && (ret || restore || iomfb_m4_ext_stale(owner));
+	if (bad) {
 		drm_connector_set_link_status_property(&out->connector, DRM_MODE_LINK_STATUS_BAD);
 		dev_warn(&out->pdev->dev, "resume: %s not restored (replay %d, restore %d): link status BAD, hotplug sent\n",
 			 out->crtc.name, ret, restore);
-		if (!READ_ONCE(out->dying))
-			schedule_work(&out->hotplug_work);
 	}
+	t8132_ext_hold_end(out, bad);
+}
+
+/*
+ * The sleep is over for @out: back if it entered it; if not, its connector's
+ * hold, if any, ends, and it reports whatever it has now.
+ */
+static void t8132_ext_sleep_end(struct t8132_ext_out *out)
+{
+	if (out->sleep_entered)
+		t8132_ext_sleep_restore(out);
+	else
+		t8132_ext_relink_end(out);
 }
 
 /*
@@ -918,6 +1018,7 @@ fini:
  */
 static int t8132_ext_pm_notify(struct notifier_block *nb, unsigned long event, void *unused)
 {
+	unsigned long deadline;
 	unsigned int i;
 	int ret = 0;
 
@@ -926,16 +1027,21 @@ static int t8132_ext_pm_notify(struct notifier_block *nb, unsigned long event, v
 		for (i = 0; i < t8132_ext_nouts && !ret; i++)
 			ret = t8132_ext_sleep_prepare(t8132_ext_outs[i]);
 		for (i = 0; ret && i < t8132_ext_nouts; i++)
-			if (t8132_ext_outs[i]->sleep_entered)
-				t8132_ext_sleep_restore(t8132_ext_outs[i]);
+			t8132_ext_sleep_end(t8132_ext_outs[i]);
 		mutex_unlock(&t8132_ext_reg_lock);
 		return notifier_from_errno(ret);
 	}
-	/* An output that entered the sleep comes back. */
-	if (event == PM_POST_SUSPEND)
+	/*
+	 * Displays released for the sleep are connected again side by side:
+	 * waited for together, against one deadline, before any replay.
+	 */
+	if (event == PM_POST_SUSPEND) {
+		deadline = jiffies + msecs_to_jiffies(T8132_EXT_RELINK_MS);
 		for (i = 0; i < t8132_ext_nouts; i++)
-			if (t8132_ext_outs[i]->sleep_entered)
-				t8132_ext_sleep_restore(t8132_ext_outs[i]);
+			t8132_ext_relink_wait(t8132_ext_outs[i], deadline);
+		for (i = 0; i < t8132_ext_nouts; i++)
+			t8132_ext_sleep_end(t8132_ext_outs[i]);
+	}
 	mutex_unlock(&t8132_ext_reg_lock);
 	return NOTIFY_DONE;
 }
@@ -949,8 +1055,8 @@ static struct notifier_block t8132_ext_pm_nb = {
  * before drm_dev_unregister() and any DRM object is torn down: the PM
  * notifier unregistered (a call of it under way finishes first), then every
  * output dying, its work cancelled, and one left in a sleep (no
- * PM_POST_SUSPEND will come) out of it. Only for the DRM device whose
- * outputs these are; called again, nothing.
+ * PM_POST_SUSPEND will come) out of it, its connector's hold ended. Only for
+ * the DRM device whose outputs these are; called again, nothing.
  */
 void t8132_ext_drm_fini(struct drm_device *drm)
 {
@@ -991,6 +1097,8 @@ void t8132_ext_drm_fini(struct drm_device *drm)
 			iomfb_m4_ext_sleep_wake(owner);
 			iomfb_m4_ext_restore_end(owner);
 		}
+		if (owner)
+			iomfb_m4_ext_relink_end(owner);
 		out->sleep_entered = false;
 	}
 }

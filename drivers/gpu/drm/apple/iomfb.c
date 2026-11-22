@@ -37,6 +37,7 @@
 #include <drm/drm_print.h>
 #include <drm/drm_vblank.h>
 
+#include "cec.h"
 #include "dcp.h"
 #include "dcp-hdr-metadata.h"
 #include "dcp-internal.h"
@@ -2036,6 +2037,8 @@ void dcp_hotplug(struct work_struct *work)
 	}
 
 	dcp_test_point(dcp, DCP_TEST_HOTPLUG_EVENT);
+	if (connected && connector == dcp->fixed_connector)
+		dcp_cec_poll_edid(dcp);
 	/* The announcement already decided what an H17P external reports. */
 	if (gated)
 		drm_kms_helper_connector_hotplug_event(&connector->base);
@@ -3817,6 +3820,61 @@ iomfb_scanout_prepare_h17p(struct apple_dcp *dcp, struct drm_crtc *crtc,
 	return scanout;
 }
 
+static void iomfb_null_surface_h17p(struct dcp_swap_submit_req_h17p *request,
+				   unsigned int slot)
+{
+	request->surf_null[slot] = true;
+	request->surf_iova[slot] = 0;
+	memset(&request->surf[slot], 0, sizeof(request->surf[slot]));
+	memset(&request->swap.src_rect[slot], 0, sizeof(request->swap.src_rect[slot]));
+	memset(&request->swap.dst_rect[slot], 0, sizeof(request->swap.dst_rect[slot]));
+	request->swap.surf_ids[slot] = 0;
+	request->swap.surf_flags[slot] = 0;
+	request->swap.surf_unk[slot] = 0;
+}
+
+/* DPMS-off commits can detach the plane without flushing its retained surface. */
+void iomfb_prepare_indicator_h17p(struct apple_dcp *dcp)
+{
+	struct dcp_camera_indicator *ci = &dcp->camera_ind;
+	struct dcp_swap_submit_req_h17p *request = &dcp->swap.h17p;
+	struct iomfb_scanout_h17p *scanout = dcp->iomfb.scanout;
+	unsigned int slot;
+
+	if (!ci->has_surf)
+		return;
+	lockdep_assert_held(&dcp->iomfb.lock);
+	slot = ci->surf;
+	if (request->surf_null[slot] && (!scanout || !scanout->fb[slot]))
+		return;
+	scoped_guard(spinlock_irqsave, &ci->lock) {
+		if (ci->state.wanted)
+			return;
+	}
+
+	iomfb_null_surface_h17p(request, slot);
+	request->swap.swap_enabled |= BIT(slot);
+	request->swap.swap_completed |= BIT(slot);
+}
+
+/* Only a completed null-layer update retires the retained indicator. */
+static void iomfb_retire_indicator_h17p(struct apple_dcp *dcp,
+				      struct iomfb_scanout_h17p *scanout)
+{
+	const struct dcp_swap_submit_req_h17p *sent = &dcp->swap.h17p;
+	unsigned int slot = dcp->camera_ind.surf;
+
+	if (!dcp->camera_ind.has_surf || !scanout || !scanout->fb[slot] ||
+	    !(sent->swap.swap_enabled & BIT(slot)) || !sent->surf_null[slot])
+		return;
+
+	drm_framebuffer_put(scanout->fb[slot]);
+	scanout->fb[slot] = NULL;
+	iomfb_null_surface_h17p(&scanout->request, slot);
+	scanout->request.swap.swap_enabled &= ~BIT(slot);
+	scanout->request.swap.swap_completed &= ~BIT(slot);
+}
+
 void iomfb_scanout_complete_h17p(struct apple_dcp *dcp)
 {
 	struct iomfb_scanout_h17p *scanout = dcp->iomfb.next_scanout;
@@ -3830,6 +3888,7 @@ void iomfb_scanout_complete_h17p(struct apple_dcp *dcp)
 
 	/* Keep common present arguments, including the null output pointers. */
 	scanout->request = *request;
+	iomfb_retire_indicator_h17p(dcp, scanout);
 	/* Preserve unchanged planes when only a subset was presented. */
 	for (i = 0; i < SWAP_SURFACES; i++) {
 		if (!(request->swap.swap_enabled & BIT(i)) && previous) {
@@ -3858,6 +3917,8 @@ void iomfb_scanout_complete_h17p(struct apple_dcp *dcp)
 		scanout->request.swap.bg_color = previous->request.swap.bg_color;
 	dcp->iomfb.scanout = scanout;
 	dcp->iomfb.next_scanout = NULL;
+	if (dcp->camera_ind.has_surf)
+		dcp_indicator_swap_done(dcp, scanout->fb[dcp->camera_ind.surf]);
 	iomfb_scanout_release_h17p(previous);
 }
 
@@ -3958,8 +4019,10 @@ bool iomfb_present_complete_h17p(struct apple_dcp *dcp)
 			dcp_backlight_complete(dcp, transaction->backlight.sequence, true);
 			transaction->backlight_reserved = false;
 		}
-		if (transaction->brightness_only)
+		if (transaction->brightness_only) {
+			iomfb_retire_indicator_h17p(dcp, dcp->iomfb.scanout);
 			return false;
+		}
 	}
 	if (dcp->fw_compat != DCP_FIRMWARE_V_27_0)
 		atomic_cmpxchg(&dcp->iomfb.opaque_x_state, IOMFB_OPAQUE_X_WAITING,
@@ -4488,9 +4551,20 @@ int iomfb_start_rtkit(struct apple_dcp *dcp)
 	     dcp->fw_compat == DCP_FIRMWARE_V_27_0) &&
 	    dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17P_EXTERNAL &&
 	    !dcp_is_ext26(dcp)) {
-		ret = apple_rtkit_start_ep(dcp->rtk, REMOTE_ALLOC_ENDPOINT);
-		if (ret)
-			return ret;
+		/*
+		 * Firmware 27 lists the endpoints its application uses. Some
+		 * builds (T8112's 27.2 DCP) have no remote allocator there, and
+		 * starting an endpoint the firmware does not advertise fails.
+		 */
+		if (dcp->fw_compat == DCP_FIRMWARE_V_27_0 &&
+		    !apple_rtkit_has_endpoint(dcp->rtk, REMOTE_ALLOC_ENDPOINT)) {
+			dev_info(dcp->dev, "remote allocator not advertised; IOMFB endpoint %sadvertised\n",
+				 apple_rtkit_has_endpoint(dcp->rtk, IOMFB_ENDPOINT) ? "" : "not ");
+		} else {
+			ret = apple_rtkit_start_ep(dcp->rtk, REMOTE_ALLOC_ENDPOINT);
+			if (ret)
+				return ret;
+		}
 	}
 	/* Desktop 26.x started the transport with its auxiliary endpoints. */
 	if (dcp->fw_compat != DCP_FIRMWARE_V_26_6_DESKTOP) {

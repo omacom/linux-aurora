@@ -440,6 +440,43 @@ static void markers(size_t ps)
 	printf("ok - uffd ABI %zuK poison: SIGBUS, MADV_FREE recovery, neighbours\n",
 	       ps / 1024);
 }
+static void marker_window(size_t ps, size_t native)
+{
+	unsigned char *map = mmap(NULL, 2 * native, PROT_READ | PROT_WRITE,
+				  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	unsigned char *a =
+		(void *)(((uintptr_t)map + native - 1) & ~(native - 1));
+	int fd = syscall(SYS_userfaultfd,
+			 O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+	struct uffdio_api api = { .api = UFFD_API,
+				  .features = UFFD_FEATURE_WP_ASYNC |
+					      UFFD_FEATURE_WP_UNPOPULATED };
+	struct uffdio_register reg = { .range = { (uintptr_t)a, native },
+				       .mode = UFFDIO_REGISTER_MODE_WP };
+	uint64_t start;
+
+	CHECK(map != MAP_FAILED && fd >= 0);
+	CHECK(!ioctl(fd, UFFDIO_API, &api) && !ioctl(fd, UFFDIO_REGISTER, &reg));
+	protect(fd, a, native, UFFDIO_WRITEPROTECT_MODE_WP);
+	/* The first touch of the window is a write, so markers are its only neighbours. */
+	a[ps + 17] = 0x5a;
+	start = physical(a, ps);
+	CHECK(start && !(start & (native - 1)));
+	for (size_t i = 0; i < native; i += ps) {
+		CHECK(physical(a + i, ps) == start + i);
+		CHECK(((pagemap(a + i, ps) >> 57) & 1) == (i != ps));
+	}
+	/* An async WP fault on a populated neighbour only clears its own bit. */
+	a[0] = 0xa5;
+	for (size_t i = 0; i < native; i += ps) {
+		CHECK(physical(a + i, ps) == start + i);
+		CHECK(((pagemap(a + i, ps) >> 57) & 1) == (i > ps));
+	}
+	CHECK(a[0] == 0xa5 && a[ps + 17] == 0x5a && !close(fd) &&
+	      !munmap(map, 2 * native));
+	printf("ok - uffd ABI %zuK unpopulated WP first write: one native page, neighbours WP\n",
+	       ps / 1024);
+}
 struct pager_request {
 	uintptr_t address;
 	size_t size;
@@ -783,6 +820,8 @@ static int worker(unsigned long expected, unsigned long native)
 	missing(ps, native);
 	file_minor(ps, native);
 	markers(ps);
+	if (ps < native)
+		marker_window(ps, native);
 	cross_pager(ps, native, 0);
 	cross_pager(ps, native, 1);
 	private_missing(ps);

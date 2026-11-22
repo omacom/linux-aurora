@@ -188,12 +188,6 @@ impl Config {
     }
 
     pub(crate) fn root(&self) -> u64 { self.objects[storage::ROOT].va() }
-    pub(crate) fn log_globals_debug(&mut self,dev:&driver::AsahiDrmDevice)->Result {
-        let value=self.objects[GLOBALS].read_u32(crate::m3::m3_globals_debug::OFFSET)?;
-        dev_info!(dev.as_ref(),"M3_GLOBALS_DEBUG off={} value={} request_level={}\n",
-            u8::from(crate::m3::m3_params::globals_debug_off()),value,crate::m3::m3_params::consistent_perf());
-        Ok(())
-    }
     pub(crate) fn performance_request(&mut self,chip:u32,busy:bool)->Result {
         // Native controller inputs supersede the legacy fixed-request interface.
         if self.profile == super::m3_profile::Profile::Extended { return Ok(()); }

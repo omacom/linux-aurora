@@ -166,6 +166,10 @@ pub(crate) enum RootProfile {
     /// kext and firmware (see the "J873 / G18G" section below). Selecting it
     /// changes nothing for the other two profiles.
     J873G18G26A428,
+    /// J873 / G18G / 26B123 (macOS 27.2), RTKit 3514.41.1. The 26A428 graph
+    /// with the 26B123 version word, a 0x7860-byte perf/policy block and a
+    /// 0x6d8-byte status config (see [`G18G_26B123_LAYOUTS`]).
+    J873G18G26B123,
 }
 
 impl RootProfile {
@@ -174,6 +178,21 @@ impl RootProfile {
             Self::J700G17P => INITDATA_VERSION_WORD,
             Self::J813G17G25G76 => 0x0c8a_a322_039e_04c0,
             Self::J873G18G26A428 => G18G_26A428_INITDATA_VERSION_WORD,
+            Self::J873G18G26B123 => G18G_26B123_INITDATA_VERSION_WORD,
+        }
+    }
+
+    /// Either G18G (J873) build.
+    pub(crate) const fn is_g18g(self) -> bool {
+        matches!(self, Self::J873G18G26A428 | Self::J873G18G26B123)
+    }
+
+    /// The G18G InitData layouts of this build; None for J700/J813.
+    pub(crate) const fn g18g_layouts(self) -> Option<&'static G18GLayouts> {
+        match self {
+            Self::J873G18G26A428 => Some(&G18G_26A428_LAYOUTS),
+            Self::J873G18G26B123 => Some(&G18G_26B123_LAYOUTS),
+            Self::J700G17P | Self::J813G17G25G76 => None,
         }
     }
 
@@ -182,7 +201,7 @@ impl RootProfile {
     /// images copy 0xc8 bytes from each root (FW_PROVEN b000 0x21664-0x216a8).
     pub(crate) const fn root_size(self, role: InstanceRole) -> usize {
         match self {
-            Self::J873G18G26A428 => G18G_26A428_ROOT_SIZE,
+            Self::J873G18G26A428 | Self::J873G18G26B123 => G18G_26A428_ROOT_SIZE,
             Self::J700G17P | Self::J813G17G25G76 => root_size(role),
         }
     }
@@ -193,10 +212,10 @@ impl RootProfile {
     /// 0xfffffc0000006c60, handler b000 0x3ed0). The secondary keeps 0x2a.
     pub(crate) const fn control_opening_opcode(self, role: InstanceRole) -> u32 {
         match (self, role) {
-            (Self::J873G18G26A428, InstanceRole::Primary) => {
+            (Self::J873G18G26A428 | Self::J873G18G26B123, InstanceRole::Primary) => {
                 G18G_26A428_CONTROL_OPENING_OPCODE_PRIMARY
             }
-            (Self::J873G18G26A428, InstanceRole::Secondary) => {
+            (Self::J873G18G26A428 | Self::J873G18G26B123, InstanceRole::Secondary) => {
                 G18G_26A428_CONTROL_OPENING_OPCODE_SECONDARY
             }
             (_, InstanceRole::Primary) => CONTROL_OPENING_OPCODE_PRIMARY,
@@ -209,7 +228,7 @@ impl RootProfile {
     /// jump table, so the profile has none and callers must not emit one.
     pub(crate) const fn control_register_opcode(self) -> Option<u32> {
         match self {
-            Self::J873G18G26A428 => None,
+            Self::J873G18G26A428 | Self::J873G18G26B123 => None,
             Self::J700G17P | Self::J813G17G25G76 => Some(CONTROL_OPENING_PRIMARY_REGISTER_OPCODE),
         }
     }
@@ -218,6 +237,7 @@ impl RootProfile {
     pub(crate) const fn bundle_view_offsets(self) -> [usize; 5] {
         match self {
             Self::J873G18G26A428 => G18G_26A428_BUNDLE_VIEW_OFFSETS,
+            Self::J873G18G26B123 => G18G_26B123_BUNDLE_VIEW_OFFSETS,
             Self::J700G17P | Self::J813G17G25G76 => BUNDLE_VIEW_OFFSETS,
         }
     }
@@ -225,7 +245,8 @@ impl RootProfile {
     /// Extents each view must fit inside the bundle allocation.
     pub(crate) const fn bundle_view_extents(self) -> [usize; 5] {
         match self {
-            Self::J873G18G26A428 => G18G_26A428_BUNDLE_VIEW_EXTENTS,
+            // 26B123 grows only the policy; the five views keep their sizes.
+            Self::J873G18G26A428 | Self::J873G18G26B123 => G18G_26A428_BUNDLE_VIEW_EXTENTS,
             Self::J700G17P | Self::J813G17G25G76 => BUNDLE_VIEW_EXTENTS,
         }
     }
@@ -235,6 +256,7 @@ impl RootProfile {
     pub(crate) const fn repeated_region_bundle_offset(self) -> usize {
         match self {
             Self::J873G18G26A428 => G18G_26A428_SHARED_LAYOUT.block_88,
+            Self::J873G18G26B123 => G18G_26B123_SHARED_LAYOUT.block_88,
             Self::J700G17P | Self::J813G17G25G76 => MAIN_REPEATED_REGION_BUNDLE_OFFSET,
         }
     }
@@ -243,6 +265,7 @@ impl RootProfile {
     pub(crate) const fn work_ring_bundle_offsets(self) -> [usize; WORK_CHANNEL_COUNT] {
         match self {
             Self::J873G18G26A428 => G18G_26A428_WORK_RING_BUNDLE_OFFSETS,
+            Self::J873G18G26B123 => G18G_26B123_WORK_RING_BUNDLE_OFFSETS,
             Self::J700G17P | Self::J813G17G25G76 => WORK_RING_BUNDLE_OFFSETS,
         }
     }
@@ -959,7 +982,7 @@ pub(crate) fn encode_control_opening_for_profile(
     role: InstanceRole,
     out: &mut [u8],
 ) -> Result<(), InitdataError> {
-    if profile != RootProfile::J873G18G26A428 {
+    if !profile.is_g18g() {
         return encode_control_opening(role, out);
     }
     if out.len() != CONTROL_RECORD_SIZE {
@@ -2767,9 +2790,11 @@ pub(crate) fn encode_main_config_for_profile(
                 RootProfile::J813G17G25G76 => 0xc,
                 // INFERRED: 26A428 stores accel+0x10a74 here (25G76:
                 // accel+0xed30, measured 0xc on J813). Value not read on J873.
-                RootProfile::J873G18G26A428 => G18G_26A428_MAIN_SECONDARY_KIND,
+                RootProfile::J873G18G26A428 | RootProfile::J873G18G26B123 => {
+                    G18G_26A428_MAIN_SECONDARY_KIND
+                }
             });
-            if profile == RootProfile::J873G18G26A428 {
+            if profile.is_g18g() {
                 // KEXT_PROVEN (26A428 initFirmwareSharedData, g18g_key.c:4464):
                 // role 1 main+0x481 = FW VA of the perf/policy allocation.
                 // 25G76 stored it at +0x471 and also wrote an accelerator
@@ -3022,7 +3047,7 @@ pub(crate) fn encode_region_c_for_profile(
     if out.len() != REGION_C_SIZE {
         return Err(InitdataError::BufferSize);
     }
-    if profile == RootProfile::J873G18G26A428 {
+    if profile.is_g18g() {
         // Derived from the J813 bytes below through the proven +4 shift.
         return encode_g18g_26a428_region_c(out);
     }
@@ -3167,7 +3192,7 @@ pub(crate) fn encode_secondary_root_extra_1_for_profile(
     // G18G: KEXT_PROVEN identical store geometry for this 0x60 object
     // (26A428 vs 25G76 R_60 stores, all at the same offsets); the J813 values
     // are carried unchanged (INFERRED, listed in G18G_26A428_UNPROVEN).
-    if matches!(profile, RootProfile::J813G17G25G76 | RootProfile::J873G18G26A428) {
+    if matches!(profile, RootProfile::J813G17G25G76) || profile.is_g18g() {
         put_u32(out, 0x10, 2);
     }
     Ok(())
@@ -3343,7 +3368,7 @@ pub(crate) fn check_firmware_root_gates_for_profile(
         return Err(InitdataError::BufferSize);
     }
     // G18G: both roles are copied as 0xc8 bytes (FW_PROVEN b000 0x21664).
-    if profile == RootProfile::J873G18G26A428 && root.len() != G18G_26A428_ROOT_SIZE {
+    if profile.is_g18g() && root.len() != G18G_26A428_ROOT_SIZE {
         return Err(InitdataError::BufferSize);
     }
     if get_u64(root, ROOT_VERSION) != profile.version_word() {
@@ -4245,6 +4270,170 @@ pub(crate) const G18G_26A428_STATUS_CONFIG_LINK_PTR: usize = 0x6c8;
 /// firmware at run time; they must start zero.
 pub(crate) const G18G_26A428_STATUS_CONFIG_SUBMIT_POLLS: [usize; 3] = [0x68c, 0x694, 0x69c];
 
+// --- J873 / G18G / 26B123 (macOS 27.2, RTKit 3514.41.1) ---------------------------
+//
+// 26B123 runs the 26A428 graph with three differences:
+//
+// - the root version word gains bit 45, which both roles compare with root +0;
+// - the perf/policy block grows from 0x7800 to 0x7860 and the status config
+//   from 0x6d0 to 0x6d8; every other allocation keeps its size;
+// - inside those two objects, fields move as described by
+//   [`G18G_26B123_POLICY_BANDS`] and [`G18G_26B123_STATUS_CONFIG_BANDS`].
+//
+// hw_data, the roots, the main configs, status B and region C keep their field
+// offsets.
+
+/// FW_PROVEN 26B123: u16 {0x04c0, 0x83a0, 0x6339, 0x0c8b}.
+pub(crate) const G18G_26B123_INITDATA_VERSION_WORD: u64 = 0x0c8b_6339_83a0_04c0;
+/// KEXT_PROVEN 26B123 allocation sizes: entries 4 (perf/policy) and 13
+/// (status config) differ from 26A428.
+pub(crate) const KEXT_ALLOCATION_SIZES_26B123: [usize; 24] = [
+    0x2848, 0x0c18, 0x1048, 0x0e10, 0x7860, 0x0068, 0x0800, 0x0088, 0x1800, 0x04c0, 0x4000, 0x0030,
+    0xe730, 0x06d8, 0x0020, 0x01b0, 0x4800, 0x28800, 0x79800, 0x9000, 0x0060, 0x0008, 0x0e80, 0x00e4,
+];
+/// The policy grows by 0x60, so everything after it in shared allocation #1
+/// moves by 0x80 (64-byte packing); the page total stays 0x28000.
+pub(crate) const G18G_26B123_SHARED_LAYOUT: SharedClusterLayout =
+    shared_cluster_layout(&KEXT_ALLOCATION_SIZES_26B123);
+/// 0x6d8 still packs to the 0x700 that 0x6d0 took: the private cluster is
+/// the 26A428 one.
+pub(crate) const G18G_26B123_PRIVATE_LAYOUT: PrivateClusterLayout =
+    private_cluster_layout(&KEXT_ALLOCATION_SIZES_26B123);
+const _: () = assert!(G18G_26B123_SHARED_LAYOUT.total == G18G_26A428_SHARED_LAYOUT.total);
+const _: () =
+    assert!(G18G_26B123_SHARED_LAYOUT.block_68 == G18G_26A428_SHARED_LAYOUT.block_68 + 0x80);
+const _: () = assert!(G18G_26B123_PRIVATE_LAYOUT.total == G18G_26A428_PRIVATE_LAYOUT.total);
+const _: () = assert!(G18G_26B123_PRIVATE_LAYOUT.status_b == G18G_26A428_PRIVATE_LAYOUT.status_b);
+const _: () = assert!(G18G_26B123_PRIVATE_LAYOUT.roles[0].status_a
+    == G18G_26A428_PRIVATE_LAYOUT.roles[0].status_a);
+const _: () = assert!(G18G_26B123_PRIVATE_LAYOUT.secondary_control_state
+    == G18G_26A428_PRIVATE_LAYOUT.secondary_control_state);
+const _: () = assert!(G18G_26B123_PRIVATE_LAYOUT.policy_state
+    == G18G_26A428_PRIVATE_LAYOUT.policy_state);
+pub(crate) const G18G_26B123_BUNDLE_VIEW_OFFSETS: [usize; 5] = [
+    G18G_26B123_SHARED_LAYOUT.block_c18,
+    G18G_26B123_SHARED_LAYOUT.block_1048,
+    G18G_26B123_SHARED_LAYOUT.block_e10,
+    G18G_26B123_SHARED_LAYOUT.block_68,
+    G18G_26B123_SHARED_LAYOUT.block_800,
+];
+pub(crate) const G18G_26B123_WORK_RING_BUNDLE_OFFSETS: [usize; WORK_CHANNEL_COUNT] =
+    work_ring_offsets(&G18G_26B123_SHARED_LAYOUT);
+
+/// Perf/policy 26A428 -> 26B123 (KEXT_PROVEN).
+///
+/// - `[0x2f08, 0x2f2c)`: the GPU power controller's parameter words gain
+///   one. +0x2f08 stays; +0x2f0c..+0x2f17 move by 0x10; the new u32 at
+///   +0x2f28 stays zero. No machine source carries it, and with it zero
+///   the 26B123 firmware boots, renders and keeps its throughput and
+///   latency (J873g), as the 26A428 layout runs without the word.
+/// - `[0x2f18, 0x2fb4)` holds nothing the host writes in either build.
+/// - From +0x2fb4 to the last field the host writes in 26A428 (+0x6d98, u64)
+///   everything moves by 0x18, among them the policy state pointer (+0x3d48),
+///   the AON PTD pointer (+0x64f0) and the boot timestamp (+0x6c2c).
+/// - Past +0x6da0 the host writes nothing; the firmware-written CSW history
+///   and trace snapshots there moved by 0x60 (+0x716d -> +0x71cd, +0x73dd ->
+///   +0x743d), so the remaining 0x48 bytes are inserted in that
+///   host-unwritten range. The 26A428 encoding must be zero there.
+pub(crate) const G18G_26B123_POLICY_BANDS: &[LayoutBand] = &[
+    band(0x0000, 0x2f0c, 0, Evidence::KextProven),
+    band(0x2f0c, 0x2f18, 0x10, Evidence::KextProven),
+    band(0x2fb4, 0x6da0, 0x18, Evidence::KextProven),
+];
+/// Status config 26A428 -> 26B123 (KEXT_PROVEN). +0x59c is a
+/// new word the host leaves zero (covered only by the q-zeroing at +0x590);
+/// the 26A428 words from +0x59c move by 4; +0x5b8 is the power controller's
+/// new parameter again, also left zero; the 26A428 words from +0x5b4 to the
+/// end move by 8, among them the link word/pointer (+0x6cc/+0x6d0) and +0x644.
+pub(crate) const G18G_26B123_STATUS_CONFIG_BANDS: &[LayoutBand] = &[
+    band(0x000, 0x59c, 0, Evidence::KextProven),
+    band(0x59c, 0x5b4, 4, Evidence::KextProven),
+    band(0x5b4, 0x6d0, 8, Evidence::KextProven),
+];
+
+/// The G18G InitData layout values that differ between firmware builds.
+#[derive(Debug)]
+pub(crate) struct G18GLayouts {
+    pub(crate) profile: RootProfile,
+    pub(crate) version_word: u64,
+    pub(crate) shared: SharedClusterLayout,
+    pub(crate) private: PrivateClusterLayout,
+    pub(crate) work_rings: [usize; WORK_CHANNEL_COUNT],
+    pub(crate) policy_size: usize,
+    pub(crate) status_config_size: usize,
+    /// Bands from the 26A428 encoding; None for 26A428 itself.
+    pub(crate) policy_bands: Option<&'static [LayoutBand]>,
+    pub(crate) status_config_bands: Option<&'static [LayoutBand]>,
+    pub(crate) status_config_link_word: usize,
+    pub(crate) status_config_link_ptr: usize,
+}
+
+pub(crate) const G18G_26A428_LAYOUTS: G18GLayouts = G18GLayouts {
+    profile: RootProfile::J873G18G26A428,
+    version_word: G18G_26A428_INITDATA_VERSION_WORD,
+    shared: G18G_26A428_SHARED_LAYOUT,
+    private: G18G_26A428_PRIVATE_LAYOUT,
+    work_rings: G18G_26A428_WORK_RING_BUNDLE_OFFSETS,
+    policy_size: KEXT_ALLOCATION_SIZES_26A428[KX_POLICY],
+    status_config_size: KEXT_ALLOCATION_SIZES_26A428[KX_STATUS_CONFIG],
+    policy_bands: None,
+    status_config_bands: None,
+    status_config_link_word: G18G_26A428_STATUS_CONFIG_LINK_WORD,
+    status_config_link_ptr: G18G_26A428_STATUS_CONFIG_LINK_PTR,
+};
+
+pub(crate) const G18G_26B123_LAYOUTS: G18GLayouts = G18GLayouts {
+    profile: RootProfile::J873G18G26B123,
+    version_word: G18G_26B123_INITDATA_VERSION_WORD,
+    shared: G18G_26B123_SHARED_LAYOUT,
+    private: G18G_26B123_PRIVATE_LAYOUT,
+    work_rings: G18G_26B123_WORK_RING_BUNDLE_OFFSETS,
+    policy_size: KEXT_ALLOCATION_SIZES_26B123[KX_POLICY],
+    status_config_size: KEXT_ALLOCATION_SIZES_26B123[KX_STATUS_CONFIG],
+    policy_bands: Some(G18G_26B123_POLICY_BANDS),
+    status_config_bands: Some(G18G_26B123_STATUS_CONFIG_BANDS),
+    status_config_link_word: G18G_26A428_STATUS_CONFIG_LINK_WORD + 8,
+    status_config_link_ptr: G18G_26A428_STATUS_CONFIG_LINK_PTR + 8,
+};
+
+/// Move a block encoded in the 26A428 layout (its first `old_size` bytes) to
+/// the layout `bands` describe, in place. Bytes no band carries must be zero;
+/// the bytes a band leaves behind are zeroed.
+pub(crate) fn relayout_by_bands(
+    bands: &[LayoutBand],
+    old_size: usize,
+    out: &mut [u8],
+) -> Result<(), InitdataError> {
+    if out.len() < old_size {
+        return Err(InitdataError::BufferSize);
+    }
+    for offset in 0..old_size {
+        if out[offset] != 0 && relocate_by_bands(bands, offset).is_none() {
+            return Err(InitdataError::BufferSize);
+        }
+    }
+    // Highest band first: every band moves up, so a lower band's target
+    // never overlaps a higher band's source that has not moved yet.
+    let mut index = bands.len();
+    while index > 0 {
+        index -= 1;
+        let band = bands[index];
+        if band.delta == 0 {
+            continue;
+        }
+        if band.delta < 0 {
+            return Err(InitdataError::BufferSize);
+        }
+        let target = band.start + band.delta as usize;
+        if target + (band.end - band.start) > out.len() {
+            return Err(InitdataError::BufferSize);
+        }
+        out.copy_within(band.start..band.end, target);
+        out[band.start..target.min(band.end)].fill(0);
+    }
+    Ok(())
+}
+
 // --- Relocation bands -------------------------------------------------------------
 
 /// Bytes `[start, end)` of a 25G76 object move to `[start + delta, end + delta)`
@@ -4835,11 +5024,12 @@ pub(crate) const G18G_26A428_REGION_C_CAPTURED_WORDS: [(usize, u32); 7] = [
 /// the owned pointers, the boot timestamp and the J873 ADT tunables. Preserves
 /// hw_data and everything from the BRN table on. No firmware is started.
 pub(crate) fn encode_g18g_26a428_bundle_policy(
+    layouts: &G18GLayouts,
     bindings: M5PolicyBindings,
     out: &mut [u8],
 ) -> Result<(), InitdataError> {
-    let layout = G18G_26A428_SHARED_LAYOUT;
-    if out.len() < G18G_26A428_SHARED_PREFIX_SIZE {
+    let layout = layouts.shared;
+    if out.len() < layout.brn_table {
         return Err(InitdataError::BufferSize);
     }
     required_address(bindings.state)?;
@@ -4853,7 +5043,7 @@ pub(crate) fn encode_g18g_26a428_bundle_policy(
     if bindings.state < aon_end && bindings.aon_ptd < state_end {
         return Err(InitdataError::PairAliasedObject);
     }
-    out[layout.block_c18..G18G_26A428_SHARED_PREFIX_SIZE].fill(0);
+    out[layout.block_c18..layout.brn_table].fill(0);
     let m5 = M5_25G76_SHARED_LAYOUT;
     let m5_policy_end = m5.policy + KEXT_ALLOCATION_SIZES_25G76[KX_POLICY];
     for &(offset, value) in M5_25G76_POLICY_WORDS {
@@ -4865,7 +5055,7 @@ pub(crate) fn encode_g18g_26a428_bundle_policy(
             return Err(InitdataError::BufferSize);
         }
     }
-    let policy = &mut out[layout.policy..layout.policy + G18G_26A428_POLICY_SIZE];
+    let policy = &mut out[layout.policy..layout.policy + layouts.policy_size];
     for &(offset, value) in M5_25G76_POLICY_WORDS {
         if !(m5.policy..m5_policy_end).contains(&offset) {
             continue;
@@ -4890,6 +5080,9 @@ pub(crate) fn encode_g18g_26a428_bundle_policy(
     }
     for (offset, value) in G18G_26A428_POLICY_CAPTURED_WORDS {
         put_u32(policy, offset, value);
+    }
+    if let Some(bands) = layouts.policy_bands {
+        relayout_by_bands(bands, G18G_26A428_POLICY_SIZE, policy)?;
     }
     Ok(())
 }
@@ -4932,6 +5125,7 @@ pub(crate) fn encode_g18g_26a428_region_c(out: &mut [u8]) -> Result<(), Initdata
 /// to status A; [`G18G_26A428_STATUS_B_SPAN`] bytes) before either role is
 /// started. `status_b` is the FW VA of the span, for the new cross-links.
 pub(crate) fn encode_g18g_26a428_primary_status_b(
+    layouts: &G18GLayouts,
     fwctl_state: u64,
     fwctl_ring: u64,
     status_b: u64,
@@ -4956,13 +5150,16 @@ pub(crate) fn encode_g18g_26a428_primary_status_b(
     put_u32(out, G18G_26A428_STATUS_B_CONFIG_HEADER, 1);
     put_u32(out, G18G_26A428_STATUS_B_LINK_WORD, 0);
     put_u64(out, G18G_26A428_STATUS_B_LINK_PTR,
-            status_b + (config + G18G_26A428_STATUS_CONFIG_LINK_WORD) as u64);
+            status_b + (config + layouts.status_config_link_word) as u64);
+    let status_config = &mut out[config..config + layouts.status_config_size];
     write_relocated_words(M5_25G76_STATUS_CONFIG_WORDS, 0, G18G_26A428_STATUS_CONFIG_BANDS,
-                          &mut out[config..config + G18G_26A428_STATUS_CONFIG_SIZE])?;
-    encode_g18g_26a428_status_config_defaults(
-        &mut out[config..config + G18G_26A428_STATUS_CONFIG_SIZE]);
-    put_u32(out, config + G18G_26A428_STATUS_CONFIG_LINK_WORD, 1);
-    put_u64(out, config + G18G_26A428_STATUS_CONFIG_LINK_PTR,
+                          &mut status_config[..G18G_26A428_STATUS_CONFIG_SIZE])?;
+    encode_g18g_26a428_status_config_defaults(&mut status_config[..G18G_26A428_STATUS_CONFIG_SIZE]);
+    if let Some(bands) = layouts.status_config_bands {
+        relayout_by_bands(bands, G18G_26A428_STATUS_CONFIG_SIZE, status_config)?;
+    }
+    put_u32(out, config + layouts.status_config_link_word, 1);
+    put_u64(out, config + layouts.status_config_link_ptr,
             status_b + G18G_26A428_STATUS_B_LINK_WORD as u64);
     Ok(())
 }
@@ -4973,11 +5170,12 @@ pub(crate) fn encode_g18g_26a428_primary_status_b(
 /// (plan 1.3: role 0 +0x320, role 1 +0x177720 = the J813 +0x1773e0 moved with
 /// the tail). Work and report counters stay zero.
 pub(crate) fn encode_g18g_26a428_private_cluster(
+    layouts: &G18GLayouts,
     private_base: u64,
     fwctl_state: u64,
     out: &mut [u8],
 ) -> Result<(), InitdataError> {
-    let layout = G18G_26A428_PRIVATE_LAYOUT;
+    let layout = layouts.private;
     if out.len() != layout.total {
         return Err(InitdataError::BufferSize);
     }
@@ -4997,13 +5195,14 @@ pub(crate) fn encode_g18g_26a428_private_cluster(
     out.fill(0);
     let status_b = layout.status_b;
     let status_a = layout.roles[0].status_a;
-    encode_g18g_26a428_primary_status_b(fwctl_state, fwctl_ring, private_base + status_b as u64,
+    encode_g18g_26a428_primary_status_b(layouts, fwctl_state, fwctl_ring,
+                                        private_base + status_b as u64,
                                         &mut out[status_b..status_a])?;
     for role in layout.roles {
         encode_status_block(&mut out[role.status_a..role.status_a + STATUS_BLOCK_SIZE])?;
     }
     let extra = layout.secondary_extra_1;
-    encode_secondary_root_extra_1_for_profile(RootProfile::J873G18G26A428,
+    encode_secondary_root_extra_1_for_profile(layouts.profile,
         &mut out[extra..extra + STATUS_BLOCK_SIZE])?;
     put_u32(out, layout.control_state + CHANNEL_STATE_PRODUCER * CHANNEL_STATE_SPACING,
             CONTROL_OPENING_PRIMARY_PRODUCER);

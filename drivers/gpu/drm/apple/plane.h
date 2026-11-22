@@ -15,6 +15,10 @@
 struct apple_plane {
 	struct drm_plane base;
 	u32 iomfb_surf;
+	/* Reserved for the kernel camera indicator; userspace may not use it. */
+	bool indicator;
+	/* The kernel commit in flight, compared by pointer only. */
+	const struct drm_atomic_commit *indicator_commit;
 };
 
 #define to_apple_plane(x) container_of(x, struct apple_plane, base)

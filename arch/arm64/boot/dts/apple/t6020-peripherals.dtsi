@@ -8,6 +8,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 950 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext0_cpu0>;
 		status = "disabled";
 	};
 
@@ -369,6 +370,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 986 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext1_cpu0>;
 		status = "disabled";
 	};
 

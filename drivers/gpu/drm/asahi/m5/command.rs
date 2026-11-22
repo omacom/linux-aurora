@@ -625,7 +625,7 @@ impl QueueUscWindow {
             .checked_add((tagged_offset & !7) as u64)
             .ok_or(UapiTranslateError::ProgramOffset)?;
         require_range(address_space, allocation, 4, GpuAccess::Read)?;
-        // Honeykrisp carries resource metadata in the low three UAPI bits,
+        // Borealis carries resource metadata in the low three UAPI bits,
         // but G17P's native 3D command strips those bits before programming
         // every BG/EOT/partial USC address. Preserving bit 2 launched four
         // bytes into the instruction stream and contradicted all complete

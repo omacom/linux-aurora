@@ -1625,13 +1625,13 @@ class GpuExperimentFlagTest(Base):
                     SRC.index('if preflight_needed "${1:-}"')]
         for args, want in [("--m3-gpu-experiment", "ok 0 1 -"),
                            ("--m3-handoff --m3-gpu-experiment", "ok 1 1 -"),
-                           ("--m3-gpu-experiment --read-only", "ok 0 1 --read-only"),
+                           ("--m3-gpu-experiment --read-only", "error: --read-only was removed: SEP writes are always on"),
                            ("--m3-gpu-experiment --uninstall", "error: M3 GPU options go with an install"),
                            ("--m3-report --m3-gpu-experiment", "error: M3 GPU options go with an install"),
                            ("--uninstall", "ok 0 0 --uninstall"),
                            ("--no-m3-mesa", "ok 0 0 - 0"),
                            ("--m3-gpu-experiment --no-m3-mesa", "ok 0 1 - 0"),
-                           ("--no-m3-mesa --read-only", "ok 0 0 --read-only 0"),
+                           ("--no-m3-mesa --read-only", "error: --read-only was removed: SEP writes are always on"),
                            ("--no-m3-mesa --uninstall", "error: --no-m3-mesa goes with an install"),
                            ("--m3-report --no-m3-mesa", "error: --no-m3-mesa goes with an install"),
                            ("", "ok 0 0 - 1")]:

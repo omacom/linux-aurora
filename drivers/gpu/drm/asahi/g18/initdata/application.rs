@@ -12,8 +12,16 @@ impl G18FirmwareMemory {
         let frame=job.frame();let context=u32::from(job.job.context_id());
         let pb=job.job.parameter_buffer().verify_resident(&mut self.pbdesc,context,frame.generation)?;
         let uma=self.uma_pool.verify_application_descriptor(&mut self.uma,j873_sma_device_words(2,6)?,frame.generation==1)?;
-        let pages=self.uma_pool.audit_render_mappings(&self.uat,job.job.vm())?;
-        job.audit(dev,&self.uat,&pb,&uma,pages)?;
+        // The page walks prove this job's mappings in the VMs they read. A VM's
+        // mapping epoch advances on every unmap and remap (an addition leaves
+        // every proven range mapped), so with the same client VM and the same
+        // epochs the last walk still holds and is not repeated. Everything else
+        // is checked on every frame.
+        let key=job.walk_key(&self.uat);
+        let walk=key.is_none() || key!=job.walked;
+        let pages=if walk {self.uma_pool.audit_render_mappings(&self.uat,job.job.vm())?} else {0};
+        job.audit(dev,&self.uat,&pb,&uma,pages,walk)?;
+        if walk {job.walked=key;}
         if frame.generation==1 {
             let state=self.uma_pool.render_state()?;let mut row=[0u8;128];
             for (out,word) in row.chunks_exact_mut(8).zip(uma) {out.copy_from_slice(&word.to_le_bytes());}
@@ -37,7 +45,7 @@ impl G18FirmwareMemory {
     /// Graphics and compute share this outer ring but have independent inner
     /// sequences. Only publish from a fully retired observed outer position.
     pub(crate) fn publish_application_records(&mut self, records: &[[u8;24]]) -> Result<u32> {
-        if records.is_empty() || records.len()>2 || self.control_counters()?!=[[2;3],[1;3]] {
+        if records.is_empty() || records.len()>2 || self.control_counters()?!=self.control_retired() {
             return Err(EINVAL);
         }
         let counters=self.compute_outer_counters()?;let before=counters[0];
@@ -59,7 +67,7 @@ impl G18FirmwareMemory {
         let after=(before+records.len() as u32)%256;
         self.shared.with_bytes_mut(|out| {
             for (index,record) in records.iter().enumerate() {
-                let start=init::G18G_26A428_WORK_RING_BUNDLE_OFFSETS[8]+((before as usize+index)%256)*24;
+                let start=self.layouts.work_rings[8]+((before as usize+index)%256)*24;
                 out.get_mut(start..start+24).ok_or(EINVAL)?.copy_from_slice(record);
             } Ok(())
         })?;

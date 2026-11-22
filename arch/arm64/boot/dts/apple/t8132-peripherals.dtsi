@@ -44,6 +44,8 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 967 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x00004000 0x0 0xffffc000>;
+		power-domains = <&ps_venc_sys>;
 		status = "disabled";
 	};
 
@@ -53,6 +55,8 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 967 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		apple,dma-range = <0x100 0x00004000 0x0 0xffffc000>;
+		power-domains = <&ps_venc_sys>;
 		status = "disabled";
 	};
 
@@ -60,6 +64,7 @@
 		compatible = "apple,t8132-dart-smmu", "apple,dart-smmu";
 		reg = <0x4 0x21094000 0x0 0x4000>;
 		status = "disabled";
+		power-domains = <&ps_venc_sys>;
 	};
 
 	dart_ave3: filter@4210b0000 {
@@ -74,6 +79,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1146 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_scodec>;
 		status = "disabled";
 	};
 
@@ -83,6 +89,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1074 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_sio_cpu>;
 		status = "disabled";
 	};
 
@@ -417,17 +424,18 @@
 	ave: video-encoder@421100000 {
 		compatible = "apple,t8132-ave", "apple,ave";
 		reg = <0x4 0x21100000 0x0 0x45c000>,
-		      <0x4 0x21800000 0x0 0x800000>,
 		      <0x4 0x21050000 0x0 0x4000>,
-		      <0x3 0x80708000 0x0 0x4000>,
-		      <0x4 0x20000000 0x0 0x1000000>;
+		      <0x4 0x21800000 0x0 0x800000>;
+		reg-names = "codec", "mailbox", "coproc";
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 970 IRQ_TYPE_LEVEL_HIGH>,
 		             <AIC_IRQ 964 IRQ_TYPE_LEVEL_HIGH>,
 		             <AIC_IRQ 963 IRQ_TYPE_LEVEL_HIGH>,
 		             <AIC_IRQ 966 IRQ_TYPE_LEVEL_HIGH>,
 		             <AIC_IRQ 965 IRQ_TYPE_LEVEL_HIGH>;
-		power-domains = <&ps_venc_sys>, <&ps_venc_pipe4>, <&ps_venc_pipe5>, <&ps_venc_me0>, <&ps_venc_me1>, <&ps_venc_dma>;
+		power-domains = <&ps_venc_dma>, <&ps_venc_pipe4>,
+				<&ps_venc_pipe5>, <&ps_venc_me0>, <&ps_venc_me1>;
+		power-domain-names = "dma", "pipe4", "pipe5", "me0", "me1";
 		iommus = <&dart_ave0 0>, <&dart_ave1 0>;
 		clocks = <&peripheral_clocks 430>;
 		status = "disabled";
@@ -438,6 +446,7 @@
 		reg = <0x2 0x81000000 0x0 0x4000>,
 		      <0x2 0x80000000 0x0 0x1000000>,
 		      <0x2 0x810c0000 0x0 0x4000>;
+		reg-names = "core", "wrapper", "aux";
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1147 IRQ_TYPE_LEVEL_HIGH>,
 		             <AIC_IRQ 1184 IRQ_TYPE_LEVEL_HIGH>;

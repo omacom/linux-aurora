@@ -315,7 +315,7 @@ def watchdog_publication_guard_tests(source):
     at = text.index('    fn timed_out(')
     body = text[at:text.index('\n    }\n', at)]
     guard = body.index('if !packet.is_published() {\n            return sched::Status::NoHang;')
-    assert guard < body.index('self.release_backlog(&packet);') < body.index('self.shared.watchdog_timeout()'), 'timed_out'
+    assert guard < body.index('self.release_backlog(&packet);') < body.index('self.shared.watchdog_timeout('), 'timed_out'
     for path, name in [('g17/runtime/render/settle.rs', 'pub(in crate::g17) fn timeout_render('),
                        ('g17/runtime/compute_control.rs', 'pub(super) fn timeout_compute(')]:
         text = (source / path).read_text()

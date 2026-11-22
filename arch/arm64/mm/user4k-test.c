@@ -13770,7 +13770,7 @@ static void user4k_exec_granule_policy_test(struct kunit *test)
 	}
 }
 
-/* Exec page-size requests are refused unless booted with user4k=on. */
+/* Exec page-size requests are refused when booted with user4k=off. */
 static void user4k_page_size_request_test(struct kunit *test)
 {
 	static const struct {
@@ -13828,7 +13828,7 @@ static void user4k_boot_switch_prctl_test(struct kunit *test)
 	long expect = !user4k_enabled() ? -EINVAL : has_4k ? 0 : -EOPNOTSUPP;
 	unsigned int i;
 
-	/* Without user4k=on the CPUs report no 4K user granule either. */
+	/* With user4k=off the CPUs report no 4K user granule either. */
 	if (!user4k_enabled())
 		KUNIT_EXPECT_FALSE(test, has_4k);
 	for (i = 0; i < ARRAY_SIZE(options); i++) {
@@ -13862,7 +13862,7 @@ static void user4k_boot_switch_exec_test(struct kunit *test)
 	KUNIT_ASSERT_NOT_NULL(test, mm);
 	KUNIT_EXPECT_EQ(test, mm_page_shift(mm), user4k_enabled() ? 12U : PAGE_SHIFT);
 	mmput(mm);
-	/* With user4k=on, user4k_exec_secure_granule_test covers staging. */
+	/* With user4k enabled, user4k_exec_secure_granule_test covers staging. */
 	if (user4k_enabled())
 		return;
 	for (compat = 0; compat < 2; compat++) {
@@ -13887,7 +13887,7 @@ static void user4k_boot_switch_exec_test(struct kunit *test)
 	}
 }
 
-/* Native pages never have a 4K owner; without user4k=on there is no record. */
+/* Native pages never have a 4K owner; with user4k=off there is no record. */
 static void user4k_boot_switch_page_ext_test(struct kunit *test)
 {
 	struct mm_subpage_mapcounts counts;
@@ -14766,7 +14766,7 @@ static struct kunit_suite user4k_test_suite = {
 	.test_cases = user4k_test_cases,
 };
 
-/* Safe with or without user4k=on; the other suites need user4k=on. */
+/* Safe with or without user4k=off; the other suites need it on. */
 static struct kunit_case user4k_policy_cases[] = {
 	KUNIT_CASE(user4k_page_size_request_test),
 	KUNIT_CASE(user4k_boot_switch_prctl_test),

@@ -61,7 +61,7 @@
 use crate::{
     driver::AsahiDrmDevice,
     g18::probe::{G18Runtime, T8152Probe},
-    g18::initdata::G18FirmwareMemory,
+    g18::initdata::{G18FirmwareMemory, G18TvbGrowRequest},
     g18::runtime::compute::G18PreparedComputeCommand,
     g18::buffer::pool::G18UmaPoolBinding,
     g18::queue::probe::{G18QueueProbe, QUEUE_ID},
@@ -198,6 +198,9 @@ const INITDATA_ACK: u64 = 0x0009_0000_0000_0000;
 /// EP 0x21 device-control doorbell for the idle-policy wake (M5 value,
 /// unchanged in the 26A428 EP 0x21 handler 0x254cc-0x25610).
 const IDLE_POLICY_WAKE: u64 = 0x0084_0000_0000_0011;
+/// The same doorbell after any other primary control record (g17
+/// MSG_CONTROL_NOTIFY).
+const CONTROL_NOTIFY: u64 = IDLE_POLICY_WAKE;
 
 const ACK_POLLS: u32 = 200; // x 10 ms
 const CONTROL_POLLS: u32 = 1000; // x 1 ms
@@ -1058,6 +1061,12 @@ struct G18Session {
     _registers: regs::Resources,
     dev: ARef<AsahiDrmDevice>,
     stage: u32,
+    /// InitData profile of the firmware build the loader admitted.
+    profile: crate::g18::fw::initdata::RootProfile,
+    /// A TVB grow request of the running job was answered "not grown".
+    /// The tiler then stays stalled, so wait_job() ends the render with a
+    /// recovery at once instead of waiting for its watchdog.
+    growth_refused: bool,
 }
 
 fn cntvct() -> u64 {
@@ -1080,12 +1089,46 @@ impl G18Session {
     }
 
     /// Drain the report rings once the graph exists. Returns whether a
-    /// recovery (type 4) event was seen.
+    /// recovery (type 4) event was seen. Answers TVB grow requests.
     fn drain(&mut self) -> Result<bool> {
-        match self.memory.as_mut() {
-            Some(memory) => memory.drain_reports(&self.dev),
-            None => Ok(false),
+        let Some(memory) = self.memory.as_mut() else { return Ok(false) };
+        let recovery = memory.drain_reports(&self.dev)?;
+        while let Some(request) = self.memory.as_mut().ok_or(EIO)?.take_tvb_grow() {
+            self.answer_tvb_grow(request)?;
         }
+        Ok(recovery)
+    }
+
+    /// Grow the PB that a firmware TVB grow request names and reply, so the
+    /// waiting tiler continues; "not grown" when that fails or the PB is at
+    /// its limit. A request from before the current recovery epoch is
+    /// stale and gets no reply, as on M5.
+    fn answer_tvb_grow(&mut self, request: G18TvbGrowRequest) -> Result {
+        let epoch = self.memory.as_mut().ok_or(EIO)?.recovery_word()?.epoch;
+        if request.halt_count != epoch {
+            dev_warn!(self.device(), "G18_TVB_GROW stale {:?} epoch={}\n", request, epoch);
+            return Ok(());
+        }
+        let grown = match self.application_job.as_mut() {
+            Some(job) => job.grow_parameter_buffer(&self.dev, request.buffer_slot, request.vm_slot),
+            None => Err(ENOENT),
+        };
+        let grew = match grown {
+            Ok(0) => {
+                dev_warn!(self.device(), "G18_TVB_GROW {:?} not grown: PB at its limit\n", request);
+                false
+            }
+            Ok(_) => true,
+            Err(error) => {
+                dev_warn!(self.device(), "G18_TVB_GROW {:?} not grown: {:?}\n", request, error);
+                false
+            }
+        };
+        self.growth_refused |= !grew;
+        self.memory.as_mut().ok_or(EIO)?.reply_tvb_grow(request, grew)?;
+        Pin::new(&mut self.roles[G18Role::Gfx.index()].rtkit)
+            .send_message(EP_GFX_INTERRUPTS, CONTROL_NOTIFY)?;
+        Ok(())
     }
 
     /// Fault check used by every wait loop.
@@ -1258,7 +1301,8 @@ impl G18Session {
     /// for G18G yet).
     fn build_initdata(&mut self) -> Result {
         let roots = self.uat.prepare_t8140_firmware_high_roots()?;
-        let memory = G18FirmwareMemory::new_with_uat(&self.dev, self.uat.clone(), cntvct(), matches!(self.stage, STAGE_RENDER | STAGE_DRM))?;
+        let memory = G18FirmwareMemory::new_with_uat(&self.dev, self.uat.clone(), cntvct(),
+            matches!(self.stage, STAGE_RENDER | STAGE_DRM), self.profile)?;
         self.memory = Some(memory);
         if matches!(self.stage, STAGE_RENDER | STAGE_DRM) {
             self.render_job = Some(crate::g18::boot::render_stage::prepare(&self.dev, &self.uat)?);
@@ -1905,9 +1949,10 @@ fn prepare_firmware_session(pdev: &platform::Device<Core<'_>>, probe: T8152Probe
     let dev: &kernel::device::Device<Core<'_>> = pdev.as_ref();
     let stage = probe.stage;
     dev_warn!(dev, "G18 stage {}: starts the GPU ASC CPUs (REQUIRES USER APPROVAL)\n", stage);
-    if !probe.firmware_profile_admitted {
-        return Err(ENODEV);
-    }
+    let profile = match probe.firmware_build {
+        Some(profile) if probe.firmware_profile_admitted => profile,
+        _ => return Err(ENODEV),
+    };
     if G18_FIRMWARE_ATTEMPTED.load(Ordering::Acquire) {
         dev_err!(dev, "G18 refused: the firmware was already started this boot; reboot first\n");
         return Err(EBUSY);
@@ -2021,6 +2066,8 @@ fn prepare_firmware_session(pdev: &platform::Device<Core<'_>>, probe: T8152Probe
         _registers: probe.registers,
         dev: drm,
         stage,
+        profile,
+        growth_refused: false,
     }, GFP_KERNEL)?;
 
     // Point of no return: from here every path retains the session, and the

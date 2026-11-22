@@ -366,6 +366,36 @@ static int hwx_tensor_for(struct hwx_parser *p, u32 index, u32 *used)
 	return match;
 }
 
+/*
+ * Surface element formats: the descriptor's format code (+0x24) and the
+ * element size in bytes (+0x68) always come as one of these pairs in
+ * Apple's H16 and H17 objects. Observed 8-bit objects align rows to 64
+ * bytes like fp16 ones, so a row can be shorter than 2 * width and
+ * hwx_tensor() checks only the width * element floor (not row alignment).
+ * Any other pair (fp32, packed or unknown formats) stays refused.
+ */
+static const struct {
+	u32 format, element;
+} hwx_formats[] = {
+	{ 5, 2 },	/* fp16 */
+	{ 2, 1 },	/* int8 */
+	{ 3, 1 },	/* uint8 */
+};
+
+static u32 hwx_element_size(const u8 *c)
+{
+	u32 format = get_unaligned_le32(c + 0x24);
+	unsigned int i;
+
+	if (get_unaligned_le32(c + 0x6c))
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(hwx_formats); i++)
+		if (hwx_formats[i].format == format &&
+		    hwx_formats[i].element == get_unaligned_le32(c + 0x68))
+			return hwx_formats[i].element;
+	return 0;
+}
+
 static int hwx_tensor(struct hwx_parser *p, u32 index, u32 tensor)
 {
 	struct ane_h16_hwx_surface *b = &p->info.surfaces[index];
@@ -375,17 +405,19 @@ static int hwx_tensor(struct hwx_parser *p, u32 index, u32 tensor)
 	u64 n, channels, height, width, row, plane, batch, minimum;
 	size_t symbol_length, short_length;
 	unsigned int i;
+	u32 element;
 
 	if (length < 0xd48 || length > SZ_16K || get_unaligned_le32(c + 0xc) != 0x34a ||
 	    get_unaligned_le32(c + 0x10) != 3 ||
 	    get_unaligned_le32(c + 0x14) != b->direction ||
 	    get_unaligned_le32(c + 0x18) != 0xd38 || !hwx_zero(c, 0x1c, 0x20) ||
 	    get_unaligned_le32(c + 0x20) != 0xd3d ||
-	    get_unaligned_le32(c + 0x24) != 5 ||
 	    get_unaligned_le32(c + 0x38) != 1 || !hwx_zero(c, 0x3c, 0x50) ||
-	    get_unaligned_le64(c + 0x68) != 2 ||
 	    get_unaligned_le32(c + 0x78) != 1 || !hwx_zero(c, 0x88, 0xd38) ||
 	    memcmp(c + 0xd38, "main", 5))
+		return -ENOEXEC;
+	element = hwx_element_size(c);
+	if (!element)
 		return -ENOEXEC;
 	n = get_unaligned_le32(c + 0x28);
 	channels = get_unaligned_le32(c + 0x2c);
@@ -395,7 +427,7 @@ static int hwx_tensor(struct hwx_parser *p, u32 index, u32 tensor)
 	plane = get_unaligned_le64(c + 0x58);
 	row = get_unaligned_le64(c + 0x60);
 	if (!n || !channels || !height || !width ||
-	    check_mul_overflow(width, 2ULL, &minimum) || row < minimum ||
+	    check_mul_overflow(width, (u64)element, &minimum) || row < minimum ||
 	    check_mul_overflow(height, row, &minimum) || plane < minimum ||
 	    check_mul_overflow(channels, plane, &minimum) || batch < minimum ||
 	    get_unaligned_le64(c + 0x70) != batch ||

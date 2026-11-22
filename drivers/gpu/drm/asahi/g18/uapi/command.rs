@@ -68,7 +68,7 @@ pub(crate) const RENDER_G18_RESOURCES: u32 = 1 << 25;
 pub(crate) const UAPI_ATTACHMENT_SIZE: usize = 24;
 pub(crate) const UAPI_MAX_ATTACHMENTS: usize = 16;
 pub(crate) const UAPI_MAX_HARDWARE_COMMANDS: u32 = 64;
-// Match the image/framebuffer limit advertised by Honeykrisp. Storage is
+// Match the image/framebuffer limit advertised by Borealis. Storage is
 // sized from each submission; this is a format limit, not a demo window cap.
 pub(crate) const M5_MAX_RENDER_DIMENSION: u32 = 16384;
 pub(crate) const UAPI_BARRIER_NONE: u16 = 0xffff;
@@ -706,7 +706,7 @@ impl QueueUscWindow {
             .checked_add((tagged_offset & !7) as u64)
             .ok_or(UapiTranslateError::ProgramOffset)?;
         require_range(address_space, allocation, 4, GpuAccess::Read)?;
-        // Honeykrisp carries resource metadata in the low three UAPI bits,
+        // Borealis carries resource metadata in the low three UAPI bits,
         // but G17P's native 3D command strips those bits before programming
         // every BG/EOT/partial USC address. Preserving bit 2 launched four
         // bytes into the instruction stream and contradicted all complete

@@ -15,6 +15,7 @@ typedef uint32_t u32;
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define cmpxchg(p, old, v) __sync_val_compare_and_swap(p, old, v)
 #define dma_wmb() ((void)0)
+#define KUNIT_STATIC_STUB_REDIRECT(...) ((void)0)
 #define dev_err(...) ((void)0)
 #define dev_warn(...) ((void)0)
 #define dev_err_ratelimited(...) ((void)0)
@@ -73,7 +74,7 @@ struct apple_isp {
 	bool ipc_failed;
 	const struct hardware *hw;
 	struct { bool started; } fw;
-	void *dev, *wq, *cmd_virt;
+	void *dev, *wq, *cmd_virt, *dcp;
 	u64 cmd_iova;
 	unsigned int current_ch;
 };
@@ -163,6 +164,17 @@ static int isp_cmd_ch_buffer_return(struct apple_isp *isp, int ch)
 static void apple_isp_wdt_stop(struct apple_isp *isp)
 {
 	watchdog_stops++;
+}
+
+/* The camera indicator is not under test here: no DCP, so no call. */
+static bool apple_isp_camera_indicator(const struct apple_isp *isp)
+{
+	return isp->dcp;
+}
+
+static int apple_isp_dcp_indicator_set(void *dcp, bool on)
+{
+	return 0;
 }
 
 static void isp_firmware_shutdown_stage1(struct apple_isp *isp)

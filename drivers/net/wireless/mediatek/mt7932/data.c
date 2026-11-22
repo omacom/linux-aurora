@@ -285,6 +285,7 @@ void mt_data_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 	m->rx_ethernet++;
 	spin_lock(&m->data_lock);
 	m->station_rx_packets++;
+	m->station_rx_time = jiffies;
 	m->rx_band_records[frame->band == NL80211_BAND_2GHZ ? 0 :
 			   frame->band == NL80211_BAND_5GHZ ? 1 : 2]++;
 	m->station_rx_bytes += frame->length;

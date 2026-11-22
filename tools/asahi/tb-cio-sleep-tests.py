@@ -61,6 +61,14 @@ def main():
         'drain-macos-paths': ('if (path->tb->nhi->quirks & QUIRK_CIO_MACOS_FRAMES)\n\t\treturn 0;',
                               'if (false)\n\t\treturn 0;'),
         'rewrite-unslept-hops': ('!path->sleep_lost && observed.enable', 'false && observed.enable'),
+        'keep-xdomain-plugged': ('\t\txd->is_unplugged = true;\n', ''),
+        'skip-xdomain-unregister': ('the host must not hold across its power cycle.\n\t */\n\ttb_domain_unregister_unplugged_xdomains(tb);\n',
+                                    'the host must not hold across its power cycle.\n\t */\n'),
+        'skip-device-router-xdomains': ('\t\t\ttb_cio_release_xdomains(tb, port->remote->sw);\n', ''),
+        'refused-skips-rescan': ('\t\ttb_scan_switch(tb->root_switch);\n}', '\t\t(void)0;\n}'),
+        'rescan-while-stopping': ('if (tcm->hotplug_active && !tcm->stopping)\n\t\ttb_scan_switch', 'if (true)\n\t\ttb_scan_switch'),
+        'refused-keeps-cleanup': ('\t\t\ttcm->resume_cleanup_pending = false;\n\t\t}\n\t}\n\ttb_domain_unregister', '\t\t}\n\t}\n\ttb_domain_unregister'),
+        'keep-xdomain-port': ('\t\tif (port->xdomain == xd)\n\t\t\tport->xdomain = NULL;\n', ''),
     }
     variants = {'real': unit}
     for name, (old, new) in mutations.items():

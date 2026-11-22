@@ -266,7 +266,7 @@ static int ave_sess_params(struct ave_ctx *ctx, struct ave_params *p)
 	if (p->rc_mode == AVE_RC_CQ)
 		p->coded_cap = ALIGN(p->coded_cap * 2, SZ_16K);
 	p->coded_cap = max_t(u32, p->coded_cap, AVE_CODED_MIN);
-	if (ctx->ave->layout->counted &&
+	if (ctx->ave->layout->counted && !ctx->ave->layout->any_gop &&
 	    (p->fps_num != 30ULL * p->fps_den ||
 	     (!p->bframes && (p->codec == AVE_CODEC_HEVC || (!baseline && !p->intra_only))))) {
 		dev_info(ctx->ave->dev,

@@ -63,7 +63,8 @@ properties:
     maxItems: 1
 
   iommus:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   apple,rtkit-handoff:
     enum:
@@ -75,6 +76,15 @@ properties:
       DockChannel HID header unread, and retains the helper's identity DART
       bypass. The host continues servicing system endpoints without restarting
       the coprocessor or taking it to QUIESCED.
+
+  apple,rtkit-keep-running:
+    type: boolean
+    description: |
+      The helper's firmware cannot be restarted once it has been taken to
+      QUIESCED, so a boot stage that starts it hands its first RTKit epoch to
+      the OS running, with apple,rtkit-handoff, instead of stopping it. Set by
+      the board device tree for the firmware it describes. The OS does not
+      read it.
 
   apple,rtkit-buffers:
     oneOf:

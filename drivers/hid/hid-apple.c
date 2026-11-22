@@ -184,7 +184,7 @@ static const struct apple_key_translation magic_keyboard_2021_and_2024_fn_keys[]
 	{ KEY_F3,	KEY_SCALE,          APPLE_FLAG_FKEY },
 	{ KEY_F4,	KEY_SEARCH,         APPLE_FLAG_FKEY },
 	{ KEY_F5,	KEY_MICMUTE,        APPLE_FLAG_FKEY },
-	{ KEY_F6,	KEY_SLEEP,          APPLE_FLAG_FKEY },
+	{ KEY_F6,	KEY_DO_NOT_DISTURB, APPLE_FLAG_FKEY },
 	{ KEY_F7,	KEY_PREVIOUSSONG,   APPLE_FLAG_FKEY },
 	{ KEY_F8,	KEY_PLAYPAUSE,      APPLE_FLAG_FKEY },
 	{ KEY_F9,	KEY_NEXTSONG,       APPLE_FLAG_FKEY },

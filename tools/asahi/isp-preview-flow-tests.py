@@ -18,7 +18,7 @@ struct coord {int x,y;};
 struct preset {int index;struct coord crop_offset,crop_size,output_dim;};
 struct isp_format {struct preset *preset;int strides[2];};
 struct hw {int fw_abi;bool lpdp;};
-struct apple_isp {struct hw *hw;bool preview_26;int temporal_filter;};
+struct apple_isp {struct hw *hw;int temporal_filter;};
 static struct preset preset;
 static struct isp_format fmt={.preset=&preset};
 static struct isp_format *isp_get_format(struct apple_isp *i,u32 ch){return &fmt;}
@@ -39,18 +39,15 @@ code += 'static int isp_ch_configure_temporal_filter(struct apple_isp *i,u32 ch)
 code+=body+r'''
 int main(void){
  struct hw hw={0};struct apple_isp isp={.hw=&hw};
- for(int profile=0;profile<3;profile++){
+ for(int profile=0;profile<2;profile++){
   temporal_start=history=enable=disable=pools=0;mbnr_mode=-1;
-  isp.preview_26=profile==1;hw.fw_abi=profile==2;
+  hw.fw_abi=profile;
   CHECK(!isp_ch_configure_capture(&isp,0));
-  CHECK(mbnr_mode==(profile==1?0:1));
-  CHECK(disable==(profile==1));
-  CHECK(temporal_start==(profile!=1));
-  CHECK(history==(profile!=1));CHECK(enable==(profile!=1));CHECK(pools==1);
+  CHECK(mbnr_mode==1);
+  CHECK(disable==0);
+  CHECK(temporal_start==1);CHECK(history==1);CHECK(enable==1);CHECK(pools==1);
  }
- isp.preview_26=true;hw.fw_abi=0;pools=0;fail_disable=1;
- CHECK(isp_ch_configure_capture(&isp,0)==-EIO);CHECK(pools==0);
- puts("PASS: explicit MBNR disable, no temporal/history startup, legacy/H17 unchanged, disable failure propagation");return 0;
+ puts("PASS: legacy and H17 capture setup enable MBNR and start the temporal filter once");return 0;
 }
 '''
 with tempfile.TemporaryDirectory() as d:

@@ -189,6 +189,12 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		mt_link_event(m, &event);
 		goto unlock;
 	}
+	/* The station-record command, which AWDL sends, answers with the same ID. */
+	if (event.eid == MT7932_EID_BEACON_TIMEOUT &&
+	    !mt7932_event_matches(&event, m->waiting, m->waiting_eid)) {
+		mt_beacon_timeout_event(m, &event);
+		goto unlock;
+	}
 	if (event.eid == MT7932_EID_WOW_REASON) {
 		mt_wow_reason_event(m, &event);
 		goto unlock;
@@ -1280,6 +1286,7 @@ static int mt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	init_completion(&m->cal_response);
 	init_completion(&m->reset_retry);
 	init_completion(&m->hif_done);
+	INIT_WORK(&m->recover_work, mt_recover_work);
 	mutex_init(&m->command_mutex);
 	spin_lock_init(&m->response_lock);
 	ret = mt_ownership(m);
@@ -1298,8 +1305,10 @@ static int mt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	ret = mt_initialize(m);
 	if (!ret)
 		ret = mt_register_regulatory_gate(m);
-	if (!ret)
+	if (!ret) {
 		WRITE_ONCE(m->ready, true);
+		mt_restart_done(m);
+	}
 retain:
 	if (ret) {
 		int error = ret;
@@ -1507,7 +1516,8 @@ static int mt_resume(struct device *dev)
 		dev_dbg(dev, "back after the sleep, firmware kept\n");
 		return 0;
 	}
-	dev_err(dev, "Wi-Fi didn't keep its firmware across the sleep: %d; restarting it\n", ret);
+	dev_err(dev, "Wi-Fi didn't keep its firmware across the sleep: %d; restarting it (restart %d)\n",
+		ret, mt_note_restart());
 	spin_lock_irqsave(&m->response_lock, flags);
 	mt_rf_fail_locked(m, ret);
 	spin_unlock_irqrestore(&m->response_lock, flags);

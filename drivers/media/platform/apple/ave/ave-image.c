@@ -6,7 +6,7 @@
  * its own defaults; nothing is stored. Besides the fields the driver
  * computes (sizes, geometry, profile, level, rate control, GOP, buffer
  * addresses, per-frame values), every captured command on firmware
- * AppleAVE2FW 9003.78.0 holds the same small set of constant words. They
+ * encoder firmware 9003.78.0 holds the same small set of constant words. They
  * are listed here as facts, grouped by where they sit; for most of them
  * the meaning is not known, only that macOS always sets that value. The
  * commands are built in a zeroed buffer: these words first, then the

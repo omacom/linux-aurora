@@ -41,6 +41,9 @@ properties:
               - apple,t6050-pmu-rtc
               - apple,t8132-pmu-rtc
           - const: apple,t6041-pmu-rtc
+      - items:
+          - const: apple,t8122-pmu-rtc
+          - const: apple,t8112-pmu-rtc
 
   interrupts:
     maxItems: 1

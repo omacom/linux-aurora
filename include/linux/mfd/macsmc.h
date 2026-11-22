@@ -133,6 +133,16 @@ struct apple_smc {
 	bool saved_enabled, saved_blocked, saved_scope, saved_committed;
 	bool saved_pending, saved_recovery, saved_wake;
 	int saved_fault, saved_notice_error, saved_restore_error;
+	/*
+	 * T6050: the wake record and waka, taken cleanly right after AP ON at the platform
+	 * wake (the sleep driver's .woken), for the noirq resume; when waka was answered.
+	 */
+	bool woken_done, woken_mbsw;
+	u64 waka_at;
+	/* T6050: MSLD as read right after waka, for the noirq resume's lid handling */
+	bool wake_lid_read;
+	u8 wake_lid;
+	int wake_lid_ret;
 	u64 saved_unexpected;
 	/* To be told at the noirq suspend, after the debug link's cut. */
 	bool sleep_warn_late;
@@ -140,6 +150,12 @@ struct apple_smc {
 	bool polled;
 	/* MBSW at the last wake: what the SMC had woken the AP for. */
 	u64 wake_record;
+	/*
+	 * J714s: dark wakes since the last full wake (for a port or the radio alone), those for the
+	 * radio alone among them, and when the last sleep began.
+	 */
+	unsigned int dark_wakes, radio_dark_wakes;
+	ktime_t sleep_entry_boot, sleep_entry_mono;
 	/* MBSW's bits as this SoC numbers them, from the probe. */
 	const struct apple_smc_wake_reason *wake_reasons;
 

@@ -55,11 +55,11 @@ static int sysfs_emit(char *out, const char *fmt, ...) {
         endpoint_limit = re.search(r'^#define SEP_DIAG_MAX_EP\s+\d+', text, re.M).group(0)
         main = '''int main(void) {
  char out[4096]; sep_diag.xart = true; sep_diag.xart_guard = 1;
- sep_diag_set_policy(false, false, false, true, false, false);
+ sep_diag_set_policy(false, false, true, false, false);
  for (unsigned int i = 0; i < 4; i++) {
   sep_diag_set_identity_source(i); policy_show(NULL, NULL, out); fputs(out, stdout);
  }
- sep_diag_set_policy(true, true, true, false, true, true);
+ sep_diag_set_policy(true, true, false, true, true);
  sep_diag.xart = false; sep_diag.xart_guard = 0;
  policy_show(NULL, NULL, out); fputs(out, stdout); return 0;
 }
@@ -70,7 +70,9 @@ static int sysfs_emit(char *out, const char *fmt, ...) {
             subprocess.run([compiler, '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                             '-Wno-unused-parameter', str(source), '-o', str(program)], check=True)
             lines = subprocess.check_output([str(program)], text=True).splitlines()
-        expected = dict(xart_writes='1', provision_keybag='0', xart_guard='1',
+        # provision_keybag has no parameter any more: the driver always
+        # provisions, and the key stays for ABI 3 readers.
+        expected = dict(xart_writes='1', provision_keybag='1', xart_guard='1',
                         trusted_keys='0', filevault_api='0', xarm_trace='1',
                         refkey_v2='0', identity_override='0')
         for line, identity in zip(lines[:4], ('pending', 'dt', 'override', 'missing')):

@@ -80,7 +80,7 @@ struct ane_fw_backend {
 	 */
 	struct ane_fw_surface preload[2], heap_tail;
 	u64 preload_phys[2];
-	u8 data_digest[SHA256_DIGEST_SIZE];
+	u8 text_digest[SHA256_DIGEST_SIZE], data_digest[SHA256_DIGEST_SIZE];
 	/* Powered down for system sleep; a (cold or warm) boot is due. */
 	bool slept;
 	/*
@@ -732,7 +732,7 @@ static int ane_fw_reload_segment(struct ane_fw_backend *b, unsigned int i)
 	memunmap(source);
 	dma_wmb();
 	sha256(s->cpu, s->size, digest);
-	return memcmp(digest, i ? b->data_digest : b->soc->text_pin, sizeof(digest)) ?
+	return memcmp(digest, i ? b->data_digest : b->text_digest, sizeof(digest)) ?
 	       -EKEYREJECTED : 0;
 }
 
@@ -1206,6 +1206,18 @@ static void ane_fw_sleep_resume(struct ane_fw_backend *b)
 		 div_u64(ktime_get_ns() - start, NSEC_PER_MSEC), b->resume_replayed);
 }
 
+/*
+ * The sleep this notifier refuses does not happen, and the PM core's rollback gives PM_POST_SUSPEND
+ * only to the notifiers before the refusing one: undo PM_SUSPEND_PREPARE's block here, or every
+ * request would wait (-EAGAIN) until a later sleep completes.
+ */
+static void ane_fw_sleep_unblock(struct ane_fw_backend *b)
+{
+	WRITE_ONCE(b->in_sleep, false);
+	WRITE_ONCE(b->session.wake_blocked, false);
+	wake_up_all(&b->session.wake);
+}
+
 static int ane_fw_pm_event(struct notifier_block *nb, unsigned long event, void *unused)
 {
 	struct ane_fw_backend *b = container_of(nb, struct ane_fw_backend, pm_notifier);
@@ -1233,11 +1245,14 @@ static int ane_fw_pm_event(struct notifier_block *nb, unsigned long event, void 
 	if (event == PM_SUSPEND_PREPARE && retained) {
 		if (!ane_fw_sleep_prepare(b))
 			return NOTIFY_DONE;
+		ane_fw_sleep_unblock(b);
 		dev_warn_once(&b->pdev->dev, ANE_FW_SLEEP_REFUSED);
 		return NOTIFY_BAD;
 	}
 	/* Hibernation and restore stay refused. */
 	if (ane_fw_sleep_refused_cycle(event, retained, true)) {
+		if (event == PM_SUSPEND_PREPARE)
+			ane_fw_sleep_unblock(b);
 		dev_warn_once(&b->pdev->dev, ANE_FW_SLEEP_REFUSED);
 		return NOTIFY_BAD;
 	}
@@ -1564,6 +1579,54 @@ static int ane_fw_dapf(struct ane_fw_backend *b)
 }
 
 /*
+ * Whether TEXT is the build's firmware: as loaded (text_pin, measured) or as
+ * code, with the loader-filled environment sections zeroed (text_code_pin,
+ * from the image). Both digests are returned for the log; code is zero
+ * without a code pin or with an environment table that does not fit TEXT.
+ */
+static bool ane_fw_text_pinned(const struct ane_fw_platform *soc, const u8 *text,
+			       size_t size, u8 raw[SHA256_DIGEST_SIZE],
+			       u8 code[SHA256_DIGEST_SIZE])
+{
+	static const u8 zero[256];
+	struct sha256_ctx hash;
+	size_t pos = 0;
+	unsigned int i;
+	bool ok;
+
+	sha256(text, size, raw);
+	ok = soc->text_pin && !memcmp(raw, soc->text_pin, SHA256_DIGEST_SIZE);
+	memset(code, 0, SHA256_DIGEST_SIZE);
+	if (!soc->text_code_pin || !soc->text_env[0].size)
+		return ok;
+	for (i = 0; i < ARRAY_SIZE(soc->text_env) && soc->text_env[i].size; i++) {
+		const struct ane_fw_text_env *env = &soc->text_env[i];
+
+		if (env->offset < pos || env->offset > size || env->size > size - env->offset)
+			return ok;
+		pos = env->offset + env->size;
+	}
+	sha256_init(&hash);
+	pos = 0;
+	for (i = 0; i < ARRAY_SIZE(soc->text_env) && soc->text_env[i].size; i++) {
+		const struct ane_fw_text_env *env = &soc->text_env[i];
+		size_t left = env->size;
+
+		sha256_update(&hash, text + pos, env->offset - pos);
+		while (left) {
+			size_t n = min(left, sizeof(zero));
+
+			sha256_update(&hash, zero, n);
+			left -= n;
+		}
+		pos = env->offset + env->size;
+	}
+	sha256_update(&hash, text + pos, size - pos);
+	sha256_final(&hash, code);
+	return ok || !memcmp(code, soc->text_code_pin, SHA256_DIGEST_SIZE);
+}
+
+/*
  * The loader's preload hand-off. apple,preload-data-sha256 is optional: with
  * it the private DATA copy must match the loader's digest of what it handed
  * off; without it, the live DATA at copy time (ane_fw_preload()).
@@ -1602,7 +1665,8 @@ static int ane_fw_preload(struct ane_fw_backend *b)
 {
 	u64 physical[2], size[2], dva[2], tail, tail_size;
 	struct ane_fw_surface snapshots[2], heap_tail;
-	u8 digest[SHA256_DIGEST_SIZE], data_pin[SHA256_DIGEST_SIZE];
+	u8 digest[SHA256_DIGEST_SIZE], code[SHA256_DIGEST_SIZE];
+	u8 data_pin[SHA256_DIGEST_SIZE];
 	bool have_data_pin;
 	unsigned int i;
 	int ret;
@@ -1629,10 +1693,17 @@ static int ane_fw_preload(struct ane_fw_backend *b)
 		memunmap(source);
 		if (ret)
 			return ret;
+		if (!i) {
+			/* The copy is what a reload after sleep must give back. */
+			if (!ane_fw_text_pinned(b->soc, snapshots[0].cpu, size[0],
+						b->text_digest, code))
+				return -EKEYREJECTED;
+			continue;
+		}
 		sha256_init(&hash);
 		sha256_update(&hash, snapshots[i].cpu, size[i]);
 		sha256_final(&hash, digest);
-		if (memcmp(digest, i ? data_pin : b->soc->text_pin, sizeof(digest)))
+		if (memcmp(digest, data_pin, sizeof(digest)))
 			return -EKEYREJECTED;
 	}
 	/* Preserve every personalized DATA byte, including the iBoot TLV table. */
@@ -2203,7 +2274,8 @@ static bool ane_fw_handoff_present(struct platform_device *pdev,
 	struct device_node *np = pdev->dev.of_node;
 	struct device_node *chosen __free(device_node) = of_find_node_by_path("/chosen");
 	struct ane_fw_handoff h = {};
-	u8 digest[SHA256_DIGEST_SIZE] = {};
+	u8 digest[SHA256_DIGEST_SIZE] = {}, code[SHA256_DIGEST_SIZE] = {};
+	bool mapped = false;
 	unsigned int i;
 
 	if (chosen)
@@ -2228,12 +2300,34 @@ static bool ane_fw_handoff_present(struct platform_device *pdev,
 		void *text = memremap(h.phys[0], h.size[0], MEMREMAP_WB);
 
 		if (text) {
-			sha256(text, h.size[0], digest);
+			bool pinned = ane_fw_text_pinned(soc, text, h.size[0], digest, code);
+			size_t pre = soc->text_env[0].offset;
+
+			/*
+			 * On a code pin miss, the code before the first loader-filled
+			 * section tells a loader write elsewhere from a different build.
+			 */
+			if (!pinned && soc->text_code_pin && soc->text_env[0].size &&
+			    pre <= h.size[0]) {
+				u8 head[SHA256_DIGEST_SIZE];
+
+				sha256(text, pre, head);
+				dev_info(&pdev->dev,
+					 "H17 ANE: TEXT before 0x%zx sha256 %*phN\n",
+					 pre, (int)sizeof(head), head);
+			}
 			memunmap(text);
+			mapped = true;
 			h.text_ok = ane_fw_preload_ranges_valid(soc, h.phys, h.size, h.dva) &&
-				    !memcmp(digest, soc->text_pin, sizeof(digest));
+				    pinned;
 		}
 	}
+	/* Each boot shows whether the code pin holds, whatever matched. */
+	if (mapped && soc->text_code_pin)
+		dev_info(&pdev->dev, "H17 ANE: firmware %s, TEXT code sha256 %*phN (%s)\n",
+			 soc->build_name ?: "?", (int)sizeof(code), code,
+			 memcmp(code, soc->text_code_pin, sizeof(code)) ?
+			 "not the code pin" : "code pin");
 	*hp = h;
 	if (ane_fw_cold_handoff_loader_ok(&h, soc))
 		return true;
@@ -2350,6 +2444,8 @@ int ane_fw_staged_init(struct platform_device *pdev, const struct ane_fw_platfor
 
 	if (ane_backend || !ane_fw_platform_staged(soc) || soc->dapf_count > ANE_FW_DAPF_MAX)
 		return -EOPNOTSUPP;
+	/* The firmware build the loader preloaded, if the SoC has several. */
+	soc = ane_fw_platform_build(np, soc);
 	/* No hand-off (an older loader, a warm boot): leave the engine alone. */
 	if (!ane_fw_handoff_present(pdev, soc, &handoff))
 		return -ENODEV;

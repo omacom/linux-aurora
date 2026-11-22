@@ -201,6 +201,8 @@
 
 &mtp {
 	status = "okay";
+	/* The helper and its HID transport share one IOMMU group, so both list streams 0 and 1. */
+	iommus = <&mtp_dart 0>, <&mtp_dart 1>;
 };
 
 /*
@@ -215,7 +217,11 @@
 		reg = <0x8000 0x1000>, <0xc000 0x1000>,
 		      <0x0 0x1000>, <0x4000 0x1000>;
 		reg-names = "config", "data", "rmt-config", "rmt-data";
-		iommus = <&mtp_dart 0>;
+		/*
+		 * The coprocessor writes the MTP receive ring over DART stream 1. Both
+		 * streams must be in one IOMMU group, so the helper lists the same two.
+		 */
+		iommus = <&mtp_dart 0>, <&mtp_dart 1>;
 		interrupt-parent = <&mtp_dockchannel>;
 		interrupts = <2 IRQ_TYPE_LEVEL_HIGH>,
 			     <3 IRQ_TYPE_LEVEL_HIGH>;

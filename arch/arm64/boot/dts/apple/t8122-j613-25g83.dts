@@ -4,6 +4,11 @@
 #include "t8122-j613-dcp-25g83.dtsi"
 #include "t8122-j613-qspi.dtsi"
 
+/* CPU memory floor, class 0x25 at 4 and 0x21 at 2: CPU copy 21 -> 92 GB/s. */
+&pmp_report {
+	apple,cpu-memory-floor = <0x21 2 0x25 4>;
+};
+
 /*
  * Bind the MTP by its SoC compatible only: U-Boot's generic helper starts
  * and quiesces it, after which the 25G83 MTP firmware data-aborts.

@@ -765,6 +765,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 950 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext0_cpu0>;
 		status = "disabled";
 	};
 
@@ -1054,6 +1055,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 986 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext1_cpu0>;
 		status = "disabled";
 	};
 
@@ -1219,6 +1221,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 1022 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext2_cpu0>;
 		status = "disabled";
 	};
 
@@ -1377,6 +1380,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 0 1058 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext3_cpu0>;
 		status = "disabled";
 	};
 
@@ -1639,6 +1643,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1 950 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext0_cpu0_die1>;
 		status = "disabled";
 	};
 
@@ -1878,6 +1883,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1 986 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext1_cpu0_die1>;
 		status = "disabled";
 	};
 
@@ -2032,6 +2038,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1 1022 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext2_cpu0_die1>;
 		status = "disabled";
 	};
 
@@ -2190,6 +2197,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1 1058 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_dispext3_cpu0_die1>;
 		status = "disabled";
 	};
 

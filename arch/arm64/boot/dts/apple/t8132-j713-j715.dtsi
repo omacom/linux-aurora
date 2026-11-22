@@ -329,3 +329,60 @@
 &avd {
 	status = "okay";
 };
+
+/*
+ * t8132-j713-pmgr.dtsi enables the DISP and DISPEXT states on J713 and J715,
+ * so the display DARTs that t8132-dcp.dtsi and t8132-peripherals.dtsi share
+ * with boards that leave them disabled name them here: a DART probes on its
+ * own, and without its block's state it could be read with the block off.
+ */
+&dcp_dart {
+	power-domains = <&ps_disp_cpu>;
+};
+
+&disp0_dart {
+	power-domains = <&ps_disp_cpu>;
+};
+
+&dart_disp0_companion1 {
+	power-domains = <&ps_disp_cpu>;
+};
+
+&dart_dispext0_companion1 {
+	power-domains = <&ps_dispext0_cpu>;
+};
+
+&dart_dispext1_companion1 {
+	power-domains = <&ps_dispext1_cpu>;
+};
+
+/*
+ * t8132-j713-pmgr.dtsi disables SCODEC and SIO_CPU, and their engines with
+ * them. Their DARTs, which name those states in t8132-peripherals.dtsi, would
+ * wait for them forever if anything enabled them, so drop the reference here.
+ * VENC is enabled there: the video encoder and its DARTs below.
+ */
+&dart_ave2 {
+	/delete-property/ power-domains;
+};
+
+&dart_apr0 {
+	/delete-property/ power-domains;
+};
+
+&dart_sio0 {
+	/delete-property/ power-domains;
+};
+
+/* The video encoder; t8132-j713-pmgr.dtsi enables its VENC states. */
+&dart_ave0 {
+	status = "okay";
+};
+
+&dart_ave1 {
+	status = "okay";
+};
+
+&ave {
+	status = "okay";
+};

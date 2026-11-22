@@ -26,7 +26,6 @@ static int ready, check, power_result[2], report_result[3], powers, reports;
 static char calls[16];
 static unsigned int used;
 static void called(char c) { assert(used < sizeof(calls) - 1); calls[used++] = c; }
-static bool of_machine_is_compatible(const char *s) { (void)s; return t6030; }
 static bool of_device_is_compatible(void *p, const char *s)
 {
 	(void)p; (void)s; return t6030;

@@ -22,6 +22,7 @@
 #include <kunit/static_stub.h>
 
 #include "afk.h"
+#include "cec.h"
 #include "dcp.h"
 #include "dcp-fabric.h"
 #include "dcp-fabric-effects.h"
@@ -5207,22 +5208,33 @@ static int dcp_fixed_output_select(struct apple_dcp *dcp)
 				    &dcp_fixed_ops, dcp);
 }
 
+void dcp_dp2hdmi_record_edge(struct apple_dcp *dcp)
+{
+	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
+		return;
+
+	WRITE_ONCE(dcp->hdmi_edge_jiffies, jiffies);
+	WRITE_ONCE(dcp->hdmi_edge_seen, true);
+	dcp_hdmi_edge(dcp);
+}
+
 /*
  * Any HDMI HPD edge: a display is there or just was.  Start the hold at the
  * edge itself, before a borrower can take the fabric lock ahead of the
- * thread.
+ * thread.  Short IRQ_HPD pulses while the link is up stay in hardirq context
+ * so the IRQF_ONESHOT threaded handler does not mask the rising edge.
  */
 irqreturn_t dcp_dp2hdmi_hpd_edge(int irq, void *data)
 {
 	struct apple_dcp *dcp = data;
 
+	if (dcp_hdmi_hpd_edge(dcp))
+		return IRQ_HANDLED;
+
 	if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 		return IRQ_WAKE_THREAD;
 
-	WRITE_ONCE(dcp->hdmi_edge_jiffies, jiffies);
-	WRITE_ONCE(dcp->hdmi_edge_seen, true);
-	dcp_hdmi_hpd_edge(data);
-	dcp_hdmi_edge(data);
+	dcp_dp2hdmi_record_edge(dcp);
 
 	return IRQ_WAKE_THREAD;
 }
@@ -5744,6 +5756,7 @@ void dcp_link(struct platform_device *pdev, struct apple_crtc *crtc,
 	}
 	if (iomfb_is_m4(dcp))
 		WRITE_ONCE(connector->connected, !iomfb_m4_error(dcp) && dcp->active);
+	dcp_cec_register(dcp);
 }
 
 static void dcp_typec_port_unlink(struct apple_dcp_typec_port *port,
@@ -5768,6 +5781,17 @@ void dcp_unlink(struct drm_device *drm)
 {
 	struct apple_dcp_typec_port *port;
 	struct drm_crtc *crtc;
+
+	drm_for_each_crtc(crtc, drm) {
+		struct apple_crtc *apple_crtc = to_apple_crtc(crtc);
+		struct apple_dcp *dcp;
+
+		if (t8132_ext_crtc(crtc) || !apple_crtc->dcp)
+			continue;
+		dcp = platform_get_drvdata(apple_crtc->dcp);
+		if (dcp->crtc == apple_crtc)
+			dcp_cec_unregister(dcp);
+	}
 
 	guard(mutex)(&dcp_typec_fabric_lock);
 

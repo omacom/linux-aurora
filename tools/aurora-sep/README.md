@@ -53,22 +53,25 @@ for example with `systemctl edit aurora-sep.service`:
 Environment=AURORA_SEP_READY_TIMEOUT=180
 ```
 
-The driver defaults to `xart_writes=1`. It exports no module alias, so udev
+SEP writes are always on: xART writes and identity-keybag provisioning have
+no switch. The driver's `xart_writes` and `provision_keybag` parameters were
+removed (aurora-silicon/linux#2591), and a stale value on the kernel command
+line or in modprobe.d is ignored. Kernels from before that change still honour a
+`0`, so remove any `xart_writes=0` or `provision_keybag=0` left from an earlier
+read-only install. The driver exports no module alias, so udev
 never loads it on its own: the service above loads it, once the iBoot system
 container is reachable. Writes are accepted only when the APFS `.gl`
 extent passes the driver's narrow ownership checks: one physical extent, no snapshots or revert
 state, and a single extent reference owned by the `.gl` inode. The kernel
 resolves that extent from checksum-validated APFS metadata; unsupported layouts
-fail closed. Set `options apple_sep xart_writes=0 provision_keybag=0` in a
-modprobe configuration to retain read-only operation. `provision_keybag=1`
-is also the default: first boot creates the Linux identity needed for trusted
+fail closed. The first boot creates the Linux identity needed for trusted
 keys, and later boots recover that identity and its machine reference key.
 An existing unreadable or invalid identity is not silently replaced.
-Enabling writes has been tested on m2 with identity-keybag provisioning,
+Writes were first tested on m2 with identity-keybag provisioning,
 trusted-key seal/unseal, and reboot reload. The raw iBoot container hash did not
 change in those tests, so an actual xART write was **not** validated. Do not
 infer that all SEP or Touch ID operations work with a read-only GigaLocker.
-Read `XART-SAFETY.md` before enabling writes on another dual-boot machine.
+Read `XART-SAFETY.md` before installing on a machine that also runs macOS.
 
 For read-only structural diagnostics on Linux, run
 `sudo python3 apfs-xart-inspect.py /dev/disk/by-partlabel/iBootSystemContainer`.

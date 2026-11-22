@@ -14,7 +14,7 @@ DRIVER = 'drivers/soc/apple/rtkit.c'
 
 
 def function(source, name):
-    match = re.search(r'^(?:static )?(?:void|int) ' + name + r'\(', source, re.M)
+    match = re.search(r'^(?:static )?(?:void|int|bool) ' + name + r'\(', source, re.M)
     assert match, name
     opening = source.index('{', match.end())
     depth, end = 1, opening + 1
@@ -173,12 +173,16 @@ def main():
         constants += '\n#define APPLE_RTKIT_OSLOG_LOG 2\n'
     # The session reset reinit() and a cold restart share, where the driver has one.
     names = ['apple_rtkit_oslog_rx', 'apple_rtkit_mark_running']
+    # The echo's predicate, where the receiver is built on one.
+    if 'static bool apple_rtkit_oslog_echoed(' in source:
+        names[:0] = ['apple_rtkit_oslog_unanswered', 'apple_rtkit_oslog_echoed']
     if 'static void apple_rtkit_reset_session(' in source:
         names.append('apple_rtkit_reset_session')
     names.append('apple_rtkit_reinit')
     bodies = '\n'.join(function(source, name) for name in names)
     if args.mutate == 'admission':
         bodies = bodies.replace('(!rtk->oslog_buffer.size && !rtk->oslog_inherited)', 'false')
+        bodies = bodies.replace('(rtk->oslog_buffer.size || rtk->oslog_inherited)', 'true')
     elif args.mutate == 'channel':
         bodies = bodies.replace('(msg & APPLE_RTKIT_OSLOG_LOG_RESERVED)', 'false')
     elif args.mutate == 'counter':

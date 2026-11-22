@@ -15,6 +15,8 @@
 #define ISP_COPROC_EDPRCR      0x1010310
 #define ISP_COPROC_CONTROL     0x1400044
 #define ISP_COPROC_STATUS      0x1400048
+/* The control word the firmware boot writes (after 0) to start the coprocessor */
+#define ISP_COPROC_CONTROL_START 0x10
 
 #define ISP_COPROC_IRQ_MASK_0  0x1400a00
 #define ISP_COPROC_IRQ_MASK_1  0x1400a04

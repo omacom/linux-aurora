@@ -1601,6 +1601,7 @@ impl compute::Host for ComputeHost<'_> {
         self.shared.note_gpu_activity();
         self.effort.submit();
         self.effort.note_waiters(super::now_ns(), super::fence::waiters());
+        self.effort.note_bound(self.shared.feed.busy_run());
         super::Firmware::apply_shared_effort(self.init, self.effort, self.port, super::power::FULL_EFFORT)
     }
     fn submit_m5(&mut self, submission: &super::fw::m5::queue::HardwareSubmission) -> Result {
@@ -2641,10 +2642,16 @@ impl super::Firmware {
 }
 
 impl super::Shared {
-    /// Charge only real watchdog expirations, after the per-job allowance. A
-    /// changing client or recovery generation cannot mint a fresh storm budget.
-    pub(super) fn watchdog_timeout(self: &Arc<Self>) -> bool {
+    /// Charge only real watchdog expirations, after the per-job allowance. A command's first
+    /// expiry is its own client's: settling it fails that client's work, or spares it behind
+    /// another VM's, and the client can do that once per command it submits. Counted for the
+    /// device, one process's hung commands, one per queue, stopped the GPU for every client
+    /// until reboot. Only an expiry that settling the command did not end (`again`) counts
+    /// toward the storm limit; a changing client or recovery generation cannot mint a fresh
+    /// storm budget for those.
+    pub(super) fn watchdog_timeout(self: &Arc<Self>, again: bool) -> bool {
         if self.crashed.load(Ordering::Acquire) { return true; }
+        if !again { return false; }
         let stop = {
             let mut state = self.state.lock();
             state.as_deref_mut().is_none_or(|firmware| firmware.recovery.timeout_limit(now_ns()))

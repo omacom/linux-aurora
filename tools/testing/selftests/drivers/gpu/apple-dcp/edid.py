@@ -105,6 +105,8 @@ struct apple_dcp {
              u64 opened_epoch,close_gen,terminated_epoch,close_epoch;bool opening;struct work_struct close_wq; } dcpavserv;
     /* A J714s firmware 27 processor's: this one is not. */
     bool v27_j714s, v27_sleep_transport; struct apple_dcp_afkep *sleep_v27_ep[0x20], *panelav[0x20];
+    /* Not a dcpext: none of these scenarios is an external processor. */
+    bool dcpext;
 };
 '''+internal_inline(root,'dcp_fw_is_14_7')+internal_inline(root,'dcp_is_v14_7_external')+internal_inline(root,'dcp_is_v27_external')+r'''struct epic_cmd { u32 retcode;u64 rxbuf,txbuf;u32 rxlen,txlen; };
 static unsigned int dma_frees,opens;
@@ -291,6 +293,20 @@ static void repeated_announcements(void)
         const char *forged[]={"DCPDP13ServiceExtra","dcpdp13service","AppleDCPDP2HDMIExtra","unrelated-provider"};
         announce(13,name,forged[variant],13);assert(opens==before && !d.dcpavserv.service);
     }
+    /* AFKV2 on the classic DPAV endpoint: EPICUnit 0 with a dynamic interface-id. */
+    ep.endpoint=0x28;
+    for(unsigned int variant=0;variant<2;variant++) {
+        const char *provider=variant?native_class:class;
+        assert(!prepare(1,1,name,provider));assert(!prepare(5,5,name,provider));
+        assert(!prepare(0,0,name,provider));assert(!prepare(65536,0,name,provider));
+        assert(!prepare(5,0,"dcpdp-service-epic",provider));assert(!prepare(5,0,name,"unrelated-provider"));
+        for(u32 channel=1;channel<=13;channel+=4) {
+            struct apple_epic_service *s=prepare(channel,0,name,provider);
+            assert(s && "EPICUnit-0 AV provider must be admitted");afk_service_discard(s);
+        }
+    }
+    ep.endpoint=0x2c;assert(!prepare(5,0,name,native_class));ep.endpoint=0x2a;
+    assert(!prepare(5,0,name,native_class)); /* H17P keeps unit == interface-id. */
     assert(!prepare(13,13,name,NULL));
     open_error=-EIO;announce(13,name,native_class,13);assert(opens==++before && !d.dcpavserv.service);open_error=0;
     for(unsigned int window=0;window<5;window++) {

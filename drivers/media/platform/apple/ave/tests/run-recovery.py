@@ -5,8 +5,11 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
+# python3 -I leaves the script directory off sys.path; run.py sits next to this file.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run import declaration, function, source
 
 
@@ -39,7 +42,7 @@ def main():
     code += source((src / 'ave-vb2.c').read_text())
     code += (here / 'command-boundary.h').read_text()
     groups = {
-        'ave-fw.c': ('ave_fw_vcbar', 'ave_fw_lost', 'ave_fw_mark_broken', 'ave_fw_halt', 'ave_fw_shutdown',
+        'ave-fw.c': ('ave_fw_vcbar', 'ave_fw_lost', 'ave_fw_mark_broken', 'ave_fw_halt', 'ave_fw_stop_hung', 'ave_fw_shutdown',
                      'ave_fw_runtime_suspend', 'ave_fw_prepare_restart', 'ave_fw_restore_data'),
         'ave-sess.c': ('ave_mctf_pool_crc', 'ave_mctf_pool_check', 'ave_mctf_pool_return', 'ave_sess_domain_unsafe', 'ave_sess_free_bufs', 'ave_sess_destroy', 'ave_sess_reap'),
         'ave-v4l2.c': ('ave_return_bufs', 'ave_buf_queue', 'ave_session_index',

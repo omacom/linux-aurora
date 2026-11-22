@@ -12,8 +12,9 @@ config VIDEO_APPLE_AVE
 	  Apple T8140 (A18 Pro) SoCs, as in the MacBook Neo.
 	  T6000 (M1 Pro) and T8112 (M2) support lifecycle-only validation
 	  of firmware 6070.11.1 through debugfs; encoding stays disabled.
-	  T6041 (M4 Pro) has probe-only support. T6050 (M5 Pro/Max) encodes
-	  H.264.
+	  T8122 (M3) with the macOS 27.2 firmware encodes H.264 and HEVC.
+	  T6041 (M4 Pro) and the M3 Pro/Max (T603x) have probe-only
+	  support. T6050 (M5 Pro/Max) encodes H.264.
 
 	  The encoder firmware is loaded by the bootloader; the driver builds
 	  every command itself. See Documentation/admin-guide/media/apple-ave.rst.

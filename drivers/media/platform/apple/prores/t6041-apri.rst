@@ -55,6 +55,16 @@ The container deliberately has no MMIO addresses, selectors, power policy,
 or arbitrary write commands.  File integrity is the responsibility of the
 package that installs the per-Mac file.
 
+T8132
+=====
+
+``apple/prores-t8132-init.bin`` is the T6041 container with ``soc = 0x8132``
+and a wrapper block of 48 entries instead of 62: 2,560 bytes in all. macOS
+brings up the T8132 engine with read-modify-write tables of 82 (SCODEC
+system), 80 (core) and 48 (AXI wrapper) rows, below ``+0x4040`` in the
+wrapper window. The driver has no built-in T8132 rows, so that engine probes
+only with the file.
+
 T6050
 =====
 
@@ -64,3 +74,12 @@ offsets below ``0x4000``): 2,880 bytes in all.  Without the file, T6050 uses
 its built-in rows: the 82, 12, 80 and 62 values macOS writes to the system,
 control, core and wrapper windows before its first job.  The control rows are
 applied after the system rows and before the core rows.
+
+T8142
+=====
+
+``apple/prores-t8142-init.bin`` has T6050's four blocks with ``soc = 0x8142``
+and a 38-entry wrapper block: 2,592 bytes in all.  Like T6050, T8142 has
+built-in rows, the 82 system, 12 control, 80 core and 38 wrapper values macOS
+27.2.1 writes before its first job on a J815, so the file is optional and,
+when present, replaces them.

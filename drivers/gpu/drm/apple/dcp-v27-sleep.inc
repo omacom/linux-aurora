@@ -122,6 +122,8 @@ struct dcp_v27_sleep {
 	bool display_early;	/* the display DART's lease taken and stopped at the prepare */
 	/* External: the wake's two calls are owed; the pipe state the driver tracked before. */
 	bool ext_wake, ext_pipe;
+	/* External: a dark wake skipped the wake's replug; the next resume, or the sleep's end, owes it. */
+	bool ext_dark_owed;
 	/* External: the queue of the calls that follow an interface's opening. */
 	struct workqueue_struct *ext_wq;
 	bool ext_wq_owned;
@@ -500,6 +502,12 @@ static bool dcp_v27_ext_busy(struct apple_dcp *dcp, char *what, size_t len)
 		strscpy(what, "hotplug work", len);
 		return true;
 	}
+#if IS_ENABLED(CONFIG_DRM_APPLE_CEC)
+	if (dcp_cec_busy(dcp)) {
+		strscpy(what, "CEC work", len);
+		return true;
+	}
+#endif
 	if (!apple_rtkit_v27_rx_drained(dcp->rtk)) {
 		strscpy(what, "messages from the processor", len);
 		return true;
@@ -729,9 +737,14 @@ static void dcp_v27_ext_replug(struct apple_dcp *dcp, bool wake)
 
 	if (!dcp_v27_external(dcp))
 		return;
-	/* A dark wake sleeps again at once: nothing is plugged for it. */
-	if (wake && pm_dark_wake())
+	/* A dark wake sleeps again at once: nothing is plugged for it, until a resume or the end. */
+	if (wake && pm_dark_wake()) {
+		if (s)
+			s->ext_dark_owed = true;
 		return;
+	}
+	if (s && wake)
+		s->ext_dark_owed = false;
 	dcp_fabric_sleep_done(dcp);
 	if (!s || !(wake ? s->ext_wake : s->ext_torn))
 		return;
@@ -801,33 +814,70 @@ static int dcp_v27_sleep_inventory(struct apple_dcp *dcp)
 	return 0;
 }
 
+/*
+ * The firmware keeps sending while the other display processors suspend: the panel's logs
+ * the brightness it takes each time an external display is released, and that line, or any
+ * other message, can land between the checks below. macOS answers what comes and goes on
+ * with its sleep calls: with three displays attached, the panel's first stop request follows
+ * its answer to the last syslog line by 31 us. So when a message came during the checks, it
+ * is taken and all of them run again, the inventory of unhandled messages included; the
+ * sleep is no longer refused on that snapshot. A processor that never goes quiet within
+ * the limit, or a check that times out after such a message, refuses the sleep as before.
+ */
+#define V27_SETTLE_MS	1000
+
 static int dcp_v27_sleep_settle(struct apple_dcp *dcp)
 {
+	ktime_t start = ktime_get(), deadline = ktime_add_ms(start, V27_SETTLE_MS);
+	unsigned int late = 0;
 	int i, ret, check;
 	bool drained;
 
-	ret = dcp_v27_sleep_inventory(dcp);
-	if (ret)
-		return ret;
-	ret = read_poll_timeout(apple_rtkit_v27_rx_drained, drained, drained,
-		1000, 250000, false, dcp->rtk);
-	if (ret)
-		return ret;
-	ret = iomfb_queue_settle(dcp, msecs_to_jiffies(1000));
-	if (ret)
-		return ret;
-	for (i = 0; i < ARRAY_SIZE(v27_sleep_endpoints); i++) {
-		struct apple_dcp_afkep *ep = dcp->sleep_v27_ep[v27_sleep_endpoints[i] - 0x20];
+	for (;;) {
+		ret = dcp_v27_sleep_inventory(dcp);
+		if (ret)
+			return ret;
+		ret = read_poll_timeout(apple_rtkit_v27_rx_drained, drained, drained,
+			1000, 250000, false, dcp->rtk);
+		if (ret)
+			goto timed_out;
+		ret = iomfb_queue_settle(dcp, msecs_to_jiffies(1000));
+		if (ret)
+			goto timed_out;
+		for (i = 0; i < ARRAY_SIZE(v27_sleep_endpoints); i++) {
+			struct apple_dcp_afkep *ep = dcp->sleep_v27_ep[v27_sleep_endpoints[i] - 0x20];
 
-		ret = read_poll_timeout(afk_v27_sleep_check, check, check != -EBUSY,
-			1000, 250000, false, ep);
-		if (ret || check)
-			return ret ?: check;
+			ret = read_poll_timeout(afk_v27_sleep_check, check, check != -EBUSY,
+				1000, 250000, false, ep);
+			if (ret)
+				goto timed_out;
+			if (check)
+				return check;
+		}
+		/* Before IDLE this is a snapshot; after mailbox_off RX is detached and
+		 * synchronized. The same check then closes the accepted-callback lifetime.
+		 */
+		if (apple_rtkit_v27_rx_drained(dcp->rtk)) {
+			/* What the last messages' handlers left unhandled, read after they returned. */
+			ret = dcp_v27_sleep_inventory(dcp);
+			if (ret)
+				return ret;
+			break;
+		}
+		late++;
+		if (ktime_after(ktime_get(), deadline)) {
+			dev_warn(dcp->dev, "V27 sleep: the processor still sends %lld ms into the settle (%u rounds): sleep refused\n",
+				 ktime_ms_delta(ktime_get(), start), late);
+			return -EBUSY;
+		}
 	}
-	/* Before IDLE this is a snapshot; after mailbox_off RX is detached and
-	 * synchronized. The same check then closes the accepted-callback lifetime.
-	 */
-	return apple_rtkit_v27_rx_drained(dcp->rtk) ? 0 : -EBUSY;
+	if (late)
+		dev_info(dcp->dev, "V27 sleep: a message came during the settle in %u round(s): taken, quiet after %lld us\n",
+			 late, ktime_us_delta(ktime_get(), start));
+	return 0;
+timed_out:
+	/* After a message came, a timeout refuses as the snapshot did: -EBUSY, undone cleanly. */
+	return late && ret == -ETIMEDOUT ? -EBUSY : ret;
 }
 
 /*
@@ -934,9 +984,7 @@ static const struct apple_epic_service_ops dcp_v27_ext_av_services[] = {
 	{ .name = "dcpav-audio-interface-epic", .compact_full = "dcpav-audio-interface-epic:0",
 	  .singleton = true, .init = dcp_v27_ext_service_init,
 	  .teardown = dcp_v27_ext_av_teardown },
-	{ .name = "dcpav-cec-interface-epic", .compact_full = "dcpav-cec-interface-epic:0",
-	  .singleton = true, .init = dcp_v27_ext_service_init,
-	  .teardown = dcp_v27_ext_av_teardown },
+	DCP_CEC_COMPACT_SERVICE_OPS,
 	{},
 };
 
@@ -1604,9 +1652,16 @@ static int dcp_v27_sleep_suspend(struct apple_dcp *dcp)
 	if (dcp->sleep_v27)
 		dcp->sleep_v27->steps_len = 0;
 	ret = dcp_v27_sleep_prepare(dcp);
-	/* Every external processor's step on one line, "call result@ms". */
+	/*
+	 * Every external processor's step on one line, "call result@ms", and the internal
+	 * one's when it refuses the sleep: a step's refusal there is otherwise silent.
+	 */
 	if (dcp_v27_external(dcp))
 		dev_info(dcp->dev, "ext %u: sleep step:%s; result %d\n", dcp_v27_ext_nr(dcp),
+			 dcp->sleep_v27 && dcp->sleep_v27->steps_len ?
+			 dcp->sleep_v27->steps : " refused before its calls", ret);
+	else if (ret)
+		dev_info(dcp->dev, "internal: sleep step:%s; result %d\n",
 			 dcp->sleep_v27 && dcp->sleep_v27->steps_len ?
 			 dcp->sleep_v27->steps : " refused before its calls", ret);
 	/* A device whose suspend fails gets no resume: its ports are let go here. */
@@ -1671,7 +1726,23 @@ static int dcp_v27_sleep_resume(struct apple_dcp *dcp)
 	dcp_v27_ext_replug(dcp, !ret);
 	return ret;
 }
+
+/*
+ * The sleep is over, and the last wake was a dark one whose re-entry was refused before this
+ * processor suspended again: no resume made the replug the dark wake skipped. Make it now.
+ */
+static void dcp_v27_dark_replug_owed(struct apple_dcp *dcp)
+{
+	struct dcp_v27_sleep *s = dcp->sleep_v27;
+
+	if (!s || !s->ext_dark_owed || pm_dark_wake())
+		return;
+	dev_info(dcp->dev, "ext %u: a dark wake ended without sleeping again: the wake's replug now\n",
+		 dcp_v27_ext_nr(dcp));
+	dcp_v27_ext_replug(dcp, true);
+}
 #else
+static void dcp_v27_dark_replug_owed(struct apple_dcp *dcp) { }
 static bool dcp_v27_sleep_selected(struct apple_dcp *dcp) { return false; }
 static void dcp_v27_sleep_invalidate(struct apple_dcp *dcp) { }
 static int dcp_v27_sleep_suspend(struct apple_dcp *dcp) { return -EOPNOTSUPP; }

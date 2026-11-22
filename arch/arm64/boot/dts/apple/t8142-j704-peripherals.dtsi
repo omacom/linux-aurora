@@ -257,6 +257,11 @@
 	status = "okay";
 };
 
+&pmp_report {
+	power-domains = <&ps_pms_sram>;
+	status = "okay";
+};
+
 &mtp_dart {
 	/* Keep host allocations clear of firmware's low IOVA mappings. */
 	apple,dma-range = <0 0x02000000 0 0x10000000>;

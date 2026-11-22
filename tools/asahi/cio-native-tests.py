@@ -57,13 +57,16 @@ def main():
         'skip-unwind-power-cycle': ('if (!anhi->cio_cycled) {\n\t\trecover', 'if (false) {\n\t\trecover'),
         'panic-on-lost-port': ('return pcie->resume_failed ? 0 : ret;', 'return ret;'),
         'wait-for-lost-link': ('if (pcie->cio_lost)\n\t\treturn -ENOTCONN;', ''),
-        'ignore-lost-pci': ('tunnels\\n");\n\t\tapple_pcie_tunnel_cio_lost(anhi->cio_pcie);',
+        'ignore-lost-pci': ('tunnels\\n");\n\t\tif (anhi->cio_pcie)\n\t\t\tapple_pcie_tunnel_cio_lost(anhi->cio_pcie);',
                             'tunnels\\n");\n\t\t(void)0;'),
         'skip-failed-port-stop': ('/* Until it is back, a later teardown must still stop the port. */\n\tport->needs_stop = true;', ''),
         'ignore-physical-state': ('ret = apple_pmgr_ps_verify_state(pd, true);',
                                   'ret = 0;'),
         't6050-port-refuses-late': ('ret = apple_dart_cio_check(pcie->cio_dart, true);',
                                     'ret = 0;'),
+        't6050-refuses-after-release': ('if (!pcie && anhi->cio_t6050) {\n\t\tret = -ENODEV;\n\t\tgoto release_cable;',
+                                        'if (false) {\n\t\tret = -ENODEV;\n\t\tgoto release_cable;'),
+        'refused-without-rescan': ('\ttb_cio_sleep_refused(anhi->tb);\n', '\ttb_cio_sleep_complete(anhi->tb);\n'),
     }
     variants = {'real': fixture}
     for name, (old, new) in mutations.items():

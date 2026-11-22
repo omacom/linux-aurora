@@ -18,6 +18,12 @@
 };
 
 &dcp {
+	/*
+	 * DRM owns swap slots 0 and 1 here. On this panel the indicator
+	 * shows in slot 3; in slot 2 it does not show under the desktop.
+	 */
+	apple,camera-indicator-surface = <3>;
+
 	panel: panel {
 		compatible = "apple,panel-j615", "apple,panel";
 		/* 2880x1864 at 224 ppi; 64 notch rows above the desktop. */
@@ -28,8 +34,13 @@
 	};
 };
 
+&isp {
+	apple,camera-indicator = <&dcp>;
+};
+
 &wifi0 {
 	brcm,board-type = "apple,tuzla";
+	wakeup-source;
 };
 
 &bluetooth0 {
@@ -108,6 +119,14 @@
 		ti,imon-slot-no = <20>;
 		ti,vmon-slot-no = <22>;
 	};
+};
+
+/*
+ * The six amps' voltage and current sense words reach the speaker ports one
+ * bit clock later than the I2S format places them.
+ */
+&mca {
+	apple,rx-delay-bclks = <1 1 0 0 0 0>;
 };
 
 / {

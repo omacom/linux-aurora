@@ -106,6 +106,23 @@ struct ane_fw_platform {
 	const u8 *text_pin;
 	/* H16: an aux-3 window, which the build's XL tunables go to. */
 	bool has_xl;
+	/*
+	 * Or the build's code: the TEXT digest with the loader-filled
+	 * environment sections zeroed (__TEXT,text_env and, from 27.2,
+	 * __TEXT,ce_env; ascending, not overlapping, unused ones size 0). The
+	 * loader fills them in (the image has a fixed pattern or zeroes there),
+	 * so unlike text_pin this is computed from the image.
+	 */
+	const u8 *text_code_pin;
+	struct ane_fw_text_env {
+		u32 offset, size;
+	} text_env[2];
+	/*
+	 * Another firmware build the loader may preload on this SoC, with its
+	 * own preload layout and pins; the handed-over layout selects it.
+	 */
+	const struct ane_fw_platform *next_build;
+	const char *build_name;
 };
 
 /* Pure range check: the boot loader supplies the physical addresses. */
@@ -164,6 +181,8 @@ void ane_fw_platform_remove(struct platform_device *pdev);
 int ane_fw_platform_suspend(struct device *dev);
 int ane_fw_platform_resume(struct device *dev);
 int ane_fw_preload_range(struct device_node *np, unsigned int index, u64 *phys, u64 *size);
+const struct ane_fw_platform *ane_fw_platform_build(struct device_node *np,
+						    const struct ane_fw_platform *soc);
 int ane_h16_backend_probe(struct platform_device *pdev, const struct ane_fw_platform *soc);
 void ane_h16_backend_remove(struct platform_device *pdev);
 int ane_h16_backend_suspend(struct device *dev);

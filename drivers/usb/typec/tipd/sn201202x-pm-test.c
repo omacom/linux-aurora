@@ -219,6 +219,7 @@ static struct sn201202x_test *__sn201202x_test_port(struct kunit *test, bool idl
 	tps = &t->sn.cd.tps;
 	tps->dev = t->dev;
 	tps->data = tipd_hw_variants[TIPD_VARIANT_SN201202X];
+	t->sn.idle_sleep = idle_sleep;
 	if (idle_sleep)
 		tps->sleep_event = sn201202x_test_sleep_event;
 	spmi_device_set_drvdata(t->sn.sdev, tps);

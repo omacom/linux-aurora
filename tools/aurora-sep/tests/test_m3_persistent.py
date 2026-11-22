@@ -160,7 +160,8 @@ class Persistent(test_m3_handoff.M3PathTest):
     def test_real_option_parser_auto_and_conflicting_profiles(self):
         source=test_m3_handoff.INSTALLER.read_text()
         tail=source[source.index('\nargs=()\n'):]
-        for args,good in [(['--m3-gpu'],True),(['--m3-gpu','--read-only'],True),
+        for args,good in [(['--m3-gpu'],True),(['--m3-gpu','--desktop-fixes'],True),
+                          (['--m3-gpu','--read-only'],False),
                           (['--m3-gpu','--m3-gpu-persistent'],False),
                           (['--m3-profile=j613-25g83','--m3-gpu'],False)]:
             with self.subTest(args=args):

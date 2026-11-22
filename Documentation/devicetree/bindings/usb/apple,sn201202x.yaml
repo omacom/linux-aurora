@@ -47,11 +47,49 @@ properties:
       Tell the controller the system's power state (SSPS) around a
       firmware-driven suspend, S3 before it and S0 after.
 
+  apple,cable-change-ssps:
+    type: boolean
+    description:
+      At a cable change while running, send the controller the system power
+      state sequence macOS sends it (traced on the J714s). At a detach, write
+      register 0x50, then SSPS 0x02. At an attach, SSPS 0x00, then USBw 0x00
+      after the attach's debounce.
+
+  apple,sleep-ssps-rules:
+    type: boolean
+    description:
+      Talk to the controller under the sleep's rules. For its system power
+      state command, wake it on its bus first and read the command's end at
+      intervals rather than back to back. For every command, count one found
+      done on a read made past its limit as done. A controller that does not
+      take S3 refuses the sleep. The controllers that need these rules are
+      polled on their bus and miss or delay a command's end when read back to
+      back.
+
+  apple,reset-on-failed-probe:
+    type: boolean
+    description:
+      The previous boot can leave the controller in the middle of a command,
+      so its first probe can fail on the reads that follow. Probe it again a
+      few times after waits, with a cold reset before a late try, before
+      deferring the probe.
+
   apple,debug-lock-key:
     $ref: /schemas/types.yaml#/definitions/string
+    pattern: "^.{4}$"
     description:
-      The four-character key that unlocks the controller's debug mode, for
-      rearming the debug link after a sleep ended it.
+      The four-character key (the board number, reversed, such as "417J" on
+      the J714s) that the controller's LOCK command takes to unlock the
+      commands that need it. These are its debug mode, for rearming the
+      debug link after a sleep ended it, and a disconnect and reattach of
+      its partner (DISC).
+
+  apple,event-irq-in-sleep:
+    type: boolean
+    description:
+      The controller's event interrupt stays live while the controller
+      sleeps, so it can sleep while its port is idle and still report a
+      port event. A register access wakes it first.
 
   apple,usb-remote-wake:
     type: boolean

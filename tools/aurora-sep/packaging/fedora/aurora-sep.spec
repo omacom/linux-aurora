@@ -8,7 +8,7 @@
 
 Name:           aurora-sep
 Version:        1
-Release:        12%{?dist}
+Release:        13%{?dist}
 Summary:        Loader and desktop integration for the Apple SEP fingerprint driver
 
 License:        GPL-2.0-only
@@ -197,6 +197,13 @@ fi
 %ghost %verify(not md5 size mode mtime) %{_sharedstatedir}/selinux/%{selinuxtype}/active/modules/200/%{modulename}
 
 %changelog
+* Fri Nov 20 2026 Diljit Singh <hey@djdev.me> - 1-13
+- SEP writes are always on: aurora-sep-load runs modprobe apple_sep with no
+  options, since the driver no longer has xart_writes or provision_keybag
+  (aurora-silicon/linux#2591); the docs no longer offer a read-only setting
+- aurora-sep and aurora-sep-ready name only the fail-closed causes of
+  disabled xART writes
+
 * Sat Nov 07 2026 Ryan Murray <ryan@aurorasilicon.org> - 1-12
 - Take the distribution packages' changes: wait on the driver's key-store
   attribute before the trusted-key probe, leave /dev/sep-bio to

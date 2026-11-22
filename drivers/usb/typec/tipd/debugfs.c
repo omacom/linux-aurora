@@ -14,6 +14,13 @@
  * /sys/kernel/debug/usb/tipd/<device>/regs
  *	read-only register access: pread() with the register as offset
  *	(0x00..0x7f) and the length (1..64 bytes) as count.
+ * /sys/kernel/debug/usb/tipd/<device>/replug
+ *	Only on a port tipd can replug its partner on (an SN201202x whose DT
+ *	gives apple,debug-lock-key, with a USB role switch).
+ *	write: the seconds (1..10) the partner is disconnected for. One replug,
+ *	       queued as the driver queues its own after a sleep (see
+ *	       tipd_port_replug()); -EBUSY while one is queued and not yet
+ *	       running. A write while one runs queues another after it.
  *
  * An open "command" file that put the controller into "DBMa" leaves that
  * mode (DBMa 0, then LOCK 0000) when it is released, unless the controller
@@ -24,6 +31,7 @@
 #include <linux/debugfs.h>
 #include <linux/export.h>
 #include <linux/fs.h>
+#include <linux/kstrtox.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -256,6 +264,31 @@ static ssize_t tipd_debugfs_regs_read(struct file *file, char __user *ubuf,
 	return count;
 }
 
+#define TIPD_DEBUGFS_REPLUG_MAX_S	10
+
+static ssize_t tipd_debugfs_replug_write(struct file *file, const char __user *ubuf,
+					 size_t count, loff_t *ppos)
+{
+	struct tps6598x *tps = file->private_data;
+	u8 seconds;
+	int ret;
+
+	ret = kstrtou8_from_user(ubuf, count, 0, &seconds);
+	if (ret)
+		return ret;
+	if (!seconds || seconds > TIPD_DEBUGFS_REPLUG_MAX_S)
+		return -EINVAL;
+	ret = tipd_replug_request(tps, seconds);
+	return ret ? ret : count;
+}
+
+static const struct file_operations tipd_debugfs_replug_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = tipd_debugfs_replug_write,
+	.llseek = noop_llseek,
+};
+
 static const struct file_operations tipd_debugfs_regs_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
@@ -283,6 +316,9 @@ void tipd_debugfs_register(struct tps6598x *tps)
 				    &tipd_debugfs_command_fops);
 	debugfs_create_file("regs", 0400, dbg->dentry, tps,
 			    &tipd_debugfs_regs_fops);
+	if (tipd_replug_supported(tps) && tps->role_sw)
+		debugfs_create_file("replug", 0200, dbg->dentry, tps,
+				    &tipd_debugfs_replug_fops);
 }
 
 void tipd_debugfs_unregister(struct tps6598x *tps)

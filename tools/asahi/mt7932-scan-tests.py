@@ -78,28 +78,34 @@ struct mt7932 {
  u8 connect_ssid[32]; unsigned connect_ssid_length;
  void *connect_bss,*pdev;
 };
-static unsigned commands,waits;
+static unsigned commands,waits,cancels,recoveries;
+static bool silent;
 static u8 bodies[4][0x4d4];
 static struct mt7932 *active;
 static bool mt_rf_allowed(struct mt7932 *m){return m->rf_ready;}
 static int mt_request(struct mt7932 *m,u8 cid,bool runtime,bool set,bool reply,const void *body,size_t n){
+ if(cid==0x1b){assert(command_locked&&runtime&&set&&!reply&&n==4);cancels++;return 0;}
  assert(command_locked&&cid==3&&runtime&&set&&!reply&&n==0x4d4&&commands<4);
  memcpy(bodies[commands++],body,n);return 0;
 }
 static unsigned long wait_for_completion_timeout(int *c,unsigned long timeout){
  assert(!command_locked&&c==&active->discovery_done&&commands);
+ /* The firmware never ends the scan: neither the wait nor the cancel's. */
+ if(silent&&timeout==1000){assert(cancels);return 0;}
  const u8 *b=bodies[commands-1];assert(!b[2]);
  assert(timeout==5000+233U*b[0x9f]);
  assert(timeout>220U*b[0x9f]+100);
- waits++;active->discovery_finished=true;return 1;
+ waits++;if(silent)return 0;active->discovery_finished=true;return 1;
 }
 static void *mt_connect_find_bss(struct mt7932 *m){return commands==2?m:NULL;}
+/* Only a latch that a reset settles asks for one. */
+static void mt_request_recovery(struct mt7932 *m,const char *why){assert(m->link_failed&&why&&*why);recoveries++;}
 HEADERS
 SUBMIT
 DISCOVER
 static void reset(struct mt7932 *m){
  memset(m,0,sizeof(*m));memset(bodies,0,sizeof(bodies));
- m->rf_ready=true;commands=waits=0;active=m;command_locked=true;
+ m->rf_ready=true;commands=waits=cancels=recoveries=0;silent=false;active=m;command_locked=true;
 }
 int main(void){
  struct mt7932 m;struct cfg80211_scan_request request={};
@@ -142,7 +148,12 @@ int main(void){
  reset(&m);m.connect_akm=WLAN_AKM_SUITE_SAE;
  m.band6=(struct ieee80211_supported_band){.band=NL80211_BAND_6GHZ,.n_channels=59,.channels=channels};
  assert(mt_connect_discover(&m)==0);
- assert(commands==2&&waits==2&&!m.link_failed&&!m.discovering&&command_locked);
+ assert(commands==2&&waits==2&&!m.link_failed&&!m.discovering&&command_locked&&!recoveries);
+ /* A discovery the firmware never ends latches the link and asks for one reset. */
+ reset(&m);m.connect_akm=WLAN_AKM_SUITE_SAE;silent=true;
+ m.band6=(struct ieee80211_supported_band){.band=NL80211_BAND_6GHZ,.n_channels=59,.channels=channels};
+ assert(mt_connect_discover(&m)==-ETIMEDOUT);
+ assert(commands==1&&cancels==1&&m.link_failed&&recoveries==1&&!m.discovering&&command_locked);
  puts("MT7932 RNR batching, directed scans and full-band discovery: pass");return 0;
 }
 '''
@@ -168,6 +179,10 @@ def main():
     bad = dict(parts)
     bad['DISCOVER'] = bad['DISCOVER'].replace('mt7932_scan_discovery_timeout(body)', '5000')
     variants['mutant-short-wait'] = bad
+    bad = dict(parts)
+    bad['DISCOVER'] = re.sub(r'\n\t*mt_request_recovery\([^;]*\);', '', bad['DISCOVER'])
+    assert bad['DISCOVER'] != parts['DISCOVER']
+    variants['mutant-no-recovery'] = bad
     results = {}
     for name, content in variants.items():
         source = PREFIX

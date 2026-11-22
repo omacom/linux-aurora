@@ -34,6 +34,7 @@ properties:
               - apple,j473-macaudio
               - apple,j493-macaudio
               - apple,j575c-macaudio
+              - apple,j775c-macaudio
               - apple,j775d-macaudio
               - apple,j575c-macaudio-jack
               - apple,j604-macaudio

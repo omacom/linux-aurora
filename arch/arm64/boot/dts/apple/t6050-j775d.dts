@@ -10,6 +10,7 @@
 /dts-v1/;
 
 #include "t6050-ultra.dtsi"
+#include "t6050-studio-audio.dtsi"
 
 / {
 	compatible = "apple,j775d", "apple,t6050", "apple,arm-platform";
@@ -47,43 +48,11 @@
 		#size-cells = <2>;
 		ranges;
 	};
+};
 
-	/*
-	 * The jack (CS42L84) and the speaker (SN012776) through the AOP's audio services. The card waits
-	 * for its CPU component, the AOP audio node, which exists only after Aura's AOP handoff.
-	 */
-	sound {
-		compatible = "apple,j775d-macaudio", "apple,macaudio";
-		model = "Mac Studio J775D";
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		dai-link@0 {
-			reg = <0>;
-			link-name = "Headphone Jack";
-
-			cpu {
-				sound-dai = <&aop_audio 0>;
-			};
-
-			codec {
-				sound-dai = <&jack_codec>;
-			};
-		};
-
-		dai-link@1 {
-			reg = <1>;
-			link-name = "Speaker";
-
-			cpu {
-				sound-dai = <&aop_audio 3>;
-			};
-
-			codec {
-				sound-dai = <&speaker_amp>;
-			};
-		};
-	};
+&sound {
+	compatible = "apple,j775d-macaudio", "apple,macaudio";
+	model = "Mac Studio J775D";
 };
 
 /*
@@ -237,34 +206,6 @@
 	 * names a new pin of pinctrl_ap opens it here too.
 	 */
 	gpio-reserved-ranges = <0 80>, <81 25>, <108 26>, <135 4>, <140 81>;
-};
-
-&i2c1 {
-	/*
-	 * ADT speaker-config: playback slot 0, amp gain 20, V sense in slot 0 and I sense
-	 * in slot 2. The firmware's speaker frame is 250 BCLKs of 12 MHz (ADT
-	 * iop-audio-controller/audio-speaker), which the amp's ratio detection rejects.
-	 */
-	speaker_amp: codec@38 {
-		compatible = "ti,sn012776", "ti,tas2764";
-		reg = <0x38>;
-		shutdown-gpios = <&pinctrl_ap 107 GPIO_ACTIVE_HIGH>;
-		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
-		#sound-dai-cells = <0>;
-		ti,imon-slot-no = <2>;
-		ti,vmon-slot-no = <0>;
-	};
-};
-
-&i2c2 {
-	jack_codec: codec@4b {
-		compatible = "cirrus,cs42l84";
-		reg = <0x4b>;
-		reset-gpios = <&pinctrl_ap 139 GPIO_ACTIVE_HIGH>;
-		interrupts-extended = <&pinctrl_ap 134 IRQ_TYPE_LEVEL_LOW>;
-		#sound-dai-cells = <0>;
-		sound-name-prefix = "Jack";
-	};
 };
 
 /*

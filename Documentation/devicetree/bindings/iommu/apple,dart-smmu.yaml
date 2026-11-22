@@ -43,6 +43,13 @@ properties:
   reg:
     maxItems: 1
 
+  power-domains:
+    description:
+      The power domain of the engine the interface sits beside. The interface
+      has no power gate of its own; its registers are reachable only while that
+      domain is on.
+    maxItems: 1
+
 required:
   - compatible
   - reg

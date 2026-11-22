@@ -66,7 +66,11 @@ properties:
       - const: rx
 
   iommus:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
+    description:
+      DART streams of the transport. A second stream carries the coprocessor's
+      writes into the receive ring on firmware that has one.
 
   apple,fifo-size:
     $ref: /schemas/types.yaml#/definitions/uint32

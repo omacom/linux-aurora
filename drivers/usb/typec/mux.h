@@ -23,6 +23,7 @@ struct typec_mux_dev {
 	bool removed;
 	bool safe_after_role;
 	bool transient_timeouts;
+	bool dp_joins_usb;
 };
 
 #define to_typec_switch_dev(_dev_) container_of(_dev_, struct typec_switch_dev, dev)

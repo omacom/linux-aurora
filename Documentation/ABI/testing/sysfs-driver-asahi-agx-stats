@@ -42,6 +42,10 @@ Description:
 		           fence signals), not from a firmware counter.
 
 		pstate     u32; current performance state index (PowerState.pstate).
+		           On the measured T6020 (M2 Pro, firmware 13.5), the
+		           index took six values between 1 and 8. At index 1,
+		           power_mw ranged from 1 to 6 mW at idle to 889 mW under
+		           load. Read power_mw for the latest power measurement.
 
 		requested_frequency_hz
 		           G13/G14: nominal OPP frequency in Hz for the pstate
@@ -61,6 +65,24 @@ Description:
 		           validated against a controlled MLX load and may
 		           differ per SoC revision. Treat as raw until a per-chip
 		           doc note lands.
+
+		           MEASURED on T6020 (M2 Pro, G14, firmware 13.5; one
+		           machine, a 30 minute trace polled every 500 ms, 1453
+		           file states, twelve 30 s GPU load bursts): all four are
+		           integer percentages (util4 spans 1..100). util1, util2
+		           and util4 were exactly equal in 96 % of the states.
+		           util3 was 0 in 80 %; when it was not, it never
+		           exceeded util4 (for example 78 77 50 78). Read util4
+		           as the aggregate percentage there. What util3 measures
+		           is not established. Not measured on other SoCs or
+		           firmware versions.
+
+		           Freshness: there is no per-field timestamp. On that
+		           T6020 the values changed at about 1 Hz, idle included
+		           (median interval 1.0 s, 1154 of 1418 intervals at most
+		           1 s, maximum 11.1 s), so a reader cannot tell an idle
+		           GPU from a value a few seconds old. The G16S/G17P keys
+		           below carry utilisation_status for this.
 
 		temperature_raw, temperature_scale    u32; latest Temperature
 		           sample and scale (or 0 if Temperature has not yet

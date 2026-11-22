@@ -493,7 +493,7 @@ struct fwnode_handle { int refs; };
 struct typec_mux_state { void *alt,*data; unsigned long mode; };
 struct device;
 struct tps6598x { int lock; void *port; struct device *dev; };
-struct notifier_block { int (*notifier_call)(struct notifier_block *,unsigned long,void *); };
+struct notifier_block { int (*notifier_call)(struct notifier_block *,unsigned long,void *); int priority; };
 '''
     pm = tipd_pm_header(root)
     mocks = r'''
@@ -761,6 +761,27 @@ int main(void) {
  assert(!watches&&!c.tbt_watch_registered&&!c.tbt_fwnode);
  cd321x_unregister_port(&c.tps);balanced();
 ''', 1)
+
+    # A port that closes its USB4 session before a reboot registers a reboot notifier at probe.
+    if 'register_reboot_notifier(' in core:
+        member = ' bool state_valid,tbt_notifier_registered;\n'
+        assert mocks.count(member) == 1
+        mocks = mocks.replace(member, member + ' struct notifier_block reboot_nb;\n bool reboot_nb_registered;\n', 1)
+        mocks += r'''
+#ifndef INT_MAX
+#define INT_MAX 0x7fffffff
+#endif
+static int reboots;
+static int cd321x_reboot_notify(struct notifier_block *n,unsigned long a,void *d) { (void)n;(void)a;(void)d;return 0; }
+static int register_reboot_notifier(struct notifier_block *n) { (void)n;reboots++;return 0; }
+static void unregister_reboot_notifier(struct notifier_block *n) { (void)n;assert(reboots>0);reboots--; }
+'''
+        idle = ' assert(!ports&&!altmodes&&!muxes&&!switches&&!notifiers);\n}'
+        assert controls.count(idle) == 1
+        controls = controls.replace(idle, idle[:-2] + '\n assert(!reboots);\n}', 1)
+        probed = '  reset(&c);assert(cd321x_register_port(&c.tps,&connector)==0&&c.state_valid);\n'
+        assert controls.count(probed) == 1
+        controls = controls.replace(probed, probed + '  assert(reboots==1&&c.reboot_nb_registered&&c.reboot_nb.notifier_call==cd321x_reboot_notify);\n', 1)
 
     return prefix + pm + mocks + production + '\n#define TEST_DEFER 1\n#define TEST_FWNODE 1\n' + controls
 

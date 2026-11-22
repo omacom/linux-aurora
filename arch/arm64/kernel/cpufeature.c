@@ -1736,7 +1736,7 @@ early_param("arm64.user16k_deny_late_cpu", user16k_deny_late_cpu_setup);
 static bool has_user4k_granule(const struct arm64_cpu_capabilities *entry,
 			     int scope)
 {
-	/* Without user4k=on no alternative granule is offered or reported. */
+	/* With user4k=off no alternative granule is offered or reported. */
 	if (!user4k_enabled())
 		return false;
 #ifdef CONFIG_ARM64_USER4K_KUNIT_TEST

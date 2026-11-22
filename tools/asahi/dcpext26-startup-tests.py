@@ -93,7 +93,7 @@ struct apple_epic_service;struct apple_dcp_afkep;
 struct apple_epic_service_ops {const char *name;bool reusable,optional,open_later;int (*prepare)(struct apple_epic_service *,const char *,const char *,s64);int (*revalidate)(struct apple_epic_service *,const char *,const char *,s64);void (*init)(struct apple_epic_service *,const char *,const char *,s64);void (*teardown)(struct apple_epic_service *);void (*init_props)(struct apple_epic_service *,s64,const void *,size_t);};
 struct apple_epic_service {struct apple_dcp_afkep *ep;const struct apple_epic_service_ops *ops;bool enabled,torndown,pending_open,defer_start;unsigned users;int lock;u32 channel;void *cookie;const char *pending_name,*pending_class;s64 pending_unit;int cmd_map[1];};
 struct dptx_port {struct apple_epic_service *service;s64 unit;bool enabled,connected;int enable_completion;};
-struct apple_dcp {const void *push_out_prefill;bool native,ext26_services_open,v27_j714s,v27_sleep_transport;int fw_compat,index,dptx_controller_ready;struct {unsigned num_dptx_ports;int iomfb_method_profile,firmware_compat;} hw;struct dptx_port dptxport[2];void *dev;struct apple_dcp_afkep *systemep,*ibootep,*dptx_controller_ep,*dcpavservep,*dptxep,*ext26_aux[3];};
+struct apple_dcp {const void *push_out_prefill;bool native,ext26_services_open,v27_j714s,v27_sleep_transport,dcpext;int fw_compat,index,dptx_controller_ready;struct {unsigned num_dptx_ports;int iomfb_method_profile,firmware_compat;} hw;struct dptx_port dptxport[2];void *dev;struct apple_dcp_afkep *systemep,*ibootep,*dptx_controller_ep,*dcpavservep,*dptxep,*ext26_aux[3];};
 struct apple_dcp_afkep {struct apple_dcp *dcp;u32 endpoint,num_channels;bool wire_v2,stopping,match_epic_name,compact;int lock;void *wq,*service_work;const struct apple_epic_service_ops *ops;struct apple_epic_service services[AFK_MAX_CHANNEL];};
 static bool dcp_is_ext26(struct apple_dcp *d){return d->native;}
 static bool dcp_fail_stop(struct apple_dcp *d){return d->native;}
@@ -147,7 +147,7 @@ static void announce(struct apple_dcp_afkep *e,unsigned ch,struct blob b){
  assert(!afkv2_decode_frame(record,size,false,&f));afk_recv_handle_init(e,f.interface,(void *)f.payload,f.payload_size);
 }
 int main(void){
- struct apple_dcp d={.native=true,.fw_compat=DCP_FIRMWARE_H17P,.index=1,.hw.num_dptx_ports=2};struct apple_dcp_afkep eps[8]={0};
+ struct apple_dcp d={.native=true,.dcpext=true,.fw_compat=DCP_FIRMWARE_H17P,.index=1,.hw.num_dptx_ports=2};struct apple_dcp_afkep eps[8]={0};
  struct apple_dcp_afkep **slots[]={&d.systemep,&d.ibootep,&d.dptx_controller_ep,&d.ext26_aux[0],&d.dcpavservep,&d.ext26_aux[1],&d.dptxep,&d.ext26_aux[2]};
  const unsigned ids[]={0x20,0x23,0x24,0x27,0x28,0x29,0x2a,0x2c};
  for(unsigned i=0;i<8;i++){*slots[i]=&eps[i];eps[i]=(struct apple_dcp_afkep){.dcp=&d,.endpoint=ids[i],.wire_v2=true};eps[i].wq=&eps[i];}

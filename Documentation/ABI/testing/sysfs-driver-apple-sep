@@ -36,8 +36,9 @@ Description:
 		/dev/sep-bio interface. It does not add a new sensor protocol.
 		OS firmware and system firmware are separate: qualify both.
 
-		For an existing bag, select xart_writes=1, provision_keybag=0,
-		xart_guard=1 and xarm_trace=1. trusted_keys=0 and
+		For an existing bag, select xart_guard=1 and xarm_trace=1;
+		xART writes and keybag provisioning are always on, and an
+		existing bag is kept without a write. trusted_keys=0 and
 		filevault_api=0 omit the optional kernel APIs; both default
 		to 1 to preserve existing deployments. There is no boot_uuid
 		parameter: the OS identity comes from /chosen/apfs-preboot-uuid.
@@ -98,14 +99,21 @@ KernelVersion:	7.1
 Contact:	Chris Kearney <chris@kearneymail.com>
 Description:
 		(RO) Whether the SEP's writes to the shared xART store reach
-		the disk. Fixed at probe, when the driver opens the store.
+		the disk. Set at probe, when the driver opens the store;
+		complete_attach updates it when it reopens the store, and a
+		failed writable reopen there sets it to disabled.
 
 		========	=============================================
-		enabled		Writes reach the store (xart_writes=1, and
-				the store validated for writing).
-		disabled	Writes are refused. Touch ID enrol and verify
-				are refused too, since the SEP must save
-				state after each.
+		enabled		Writes reach the store (it validated for
+				writing).
+		disabled	Writes are refused: the key-store-only
+				initrd phase before complete_attach
+				(keystore_only=1, or 2 with the xART
+				guard), or a failed writable reopen.
+				Touch ID enrol and verify are refused
+				too, since the SEP must save state after
+				each. There is no parameter that turns
+				writes off.
 		========	=============================================
 
 What:		/sys/bus/platform/devices/<unit>.sep/diag/attach
@@ -173,12 +181,8 @@ Description:
 		failed	Provisioning, reading or loading it failed.
 		=======	==============================================
 
-		With provision_keybag=1, the default, the boot-time bring-up
-		decides it once the key store is open, and it stays
-		"unknown" if the key store never opens. With
-		provision_keybag=0, Touch ID activation decides it when it
-		reads the keybag, and it stays "unknown" if activation fails
-		before that point.
+		The boot-time bring-up decides it once the key store is
+		open, and it stays "unknown" if the key store never opens.
 
 What:		/sys/bus/platform/devices/<unit>.sep/diag/sensor
 Date:		October 2026
@@ -227,15 +231,10 @@ Description:
 				the next boot.
 		=========	============================================
 
-		"failed" can be intentional. With provision_keybag=0, as on
-		a read-only install (xart_writes=0, provision_keybag=0), the
-		bring-up still publishes /dev/sep-bio when no identity
-		keybag exists yet, and its first open then fails activation
-		because there is none: keybag reads "missing" and touchid
-		reads "failed". Read touchid "failed" together with keybag
-		"missing" (and, on a read-only install, xart "disabled") as
-		not provisioned rather than broken. Every other way to reach
-		"failed" is a real failure.
+		There is no read-only install: the xart_writes and
+		provision_keybag parameters were removed, so the bring-up
+		always provisions a missing identity keybag before it
+		publishes /dev/sep-bio, and "failed" is a real failure.
 
 		Because the first open of /dev/sep-bio activates Touch ID, a
 		tool waiting for "ready" has to open it, or let its client
@@ -388,8 +387,8 @@ Contact:        Aurora Silicon maintainers
 Description:
                 Write-only, root-only (0200). Writing 1 completes an attach
                 started with apple_sep.keystore_only=1: opens host state and
-                the identity index on the real root, reopens xART with the
-                configured write and guard policy, and publishes the biometric
+                the identity index on the real root, reopens xART writable
+                with the guard policy, and publishes the biometric
                 devices. Sensor activation still occurs on first device open,
                 just as with a normal attach. No SEP registration is repeated.
                 Successful completion is idempotent. Failed store opens may
@@ -397,9 +396,10 @@ Description:
                 was loaded without keystore_only. The read-only module
                 parameter retains its load-time value after completion.
 
-                In keystore-only mode, xART is read-only regardless of
-                xart_writes, provisioning is disabled, and no host-state or
-                guard files are opened for writing. The initrd must carry the
+                With keystore_only=1, xART is read-only until
+                complete_attach (keystore_only=2 below), provisioning waits
+                for it, and no host-state or guard files are opened for
+                writing. The initrd must carry the
                 existing identity keybag and machine ref-key at their usual
                 /var/lib paths; both are cached on first trusted-key use.
                 An unseal needing an xART write fails with EBADMSG so userspace
@@ -410,7 +410,7 @@ Description:
                 only the state, import, unlock, lock and FDE unseal requests;
                 every other request returns EAGAIN until complete_attach.
                 Loading and unlocking a bag needs enclave writes to xART, so
-                in this mode xART follows xart_writes, but only when the xART
+                in this mode xART is writable, but only when the xART
                 guard is off (its record list lives in host files on the real
                 root). With a guard, xART stays read-only, the bag requests
                 fail with EROFS and the volume falls back to its passphrase.
@@ -422,7 +422,9 @@ Contact:	Satya Benson <satya@benson.earth>
 Description:
 		(RO, ABI 3) A space-separated key=value snapshot of the
 		driver policy selected at probe: xart_writes (effective store
-		writability), provision_keybag, xart_guard (effective level),
+		writability), provision_keybag (always 1: the parameter was
+		removed and the driver always provisions a missing keybag),
+		xart_guard (effective level),
 		trusted_keys, filevault_api, xarm_trace, refkey_v2 and
 		identity_override (0 or 1). API flags describe the selected
 		policy, not successful registration if that API later fails.

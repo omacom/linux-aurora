@@ -6,6 +6,6 @@
 
 This remains experimental native OpenGL support, without a full conformance claim.
 
-**Vulkan for the M3 Pro** (`pro-vulkan/`): the separate Honeykrisp package keeps the release 16 binaries and compression settings.
+**Vulkan for the M3 Pro** (`pro-vulkan/`): the separate Borealis package keeps the release 16 binaries and compression settings.
 
 **Other Macs:** M1/M2, the Air HAL200 profiles and the Neo keep their existing selection.

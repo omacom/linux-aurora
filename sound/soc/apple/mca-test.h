@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The capture sync of the cacheable buffers: which ranges are invalidated
- * for an advance of the DMA, laps included.
+ * for an advance of the DMA, laps included. And how late a capture samples,
+ * from the apple,rx-delay-bclks of its source ports.
  */
 #include <kunit/test.h>
 
@@ -20,6 +21,29 @@ static s64 mca_test_frames_ns(u64 frames)
 static bool mca_test_may_lap(s64 elapsed_ns)
 {
 	return mca_capture_may_lap(MCA_TEST_RATE, MCA_TEST_BUFFER, MCA_TEST_PERIOD, elapsed_ns);
+}
+
+/* A capture samples as late as the slowest of its source ports */
+static void mca_rx_delay_of_ports(struct kunit *test)
+{
+	struct mca_data *mca = kunit_kzalloc(test, struct_size(mca, clusters, 6), GFP_KERNEL);
+
+	KUNIT_ASSERT_NOT_NULL(test, mca);
+	mca->nclusters = 6;
+
+	/* No apple,rx-delay-bclks: no port is late */
+	KUNIT_EXPECT_EQ(test, mca_ports_rx_delay(mca, 0x3), 0);
+
+	/* J615: the two speaker ports are one BCLK late, the jack port is not */
+	mca->clusters[0].rx_delay = 1;
+	mca->clusters[1].rx_delay = 1;
+	KUNIT_EXPECT_EQ(test, mca_ports_rx_delay(mca, BIT(0) | BIT(1)), 1);
+	KUNIT_EXPECT_EQ(test, mca_ports_rx_delay(mca, BIT(1)), 1);
+	KUNIT_EXPECT_EQ(test, mca_ports_rx_delay(mca, BIT(2)), 0);
+	KUNIT_EXPECT_EQ(test, mca_ports_rx_delay(mca, BIT(0) | BIT(2)), 1);
+
+	/* Bits past the clusters are ignored */
+	KUNIT_EXPECT_EQ(test, mca_ports_rx_delay(mca, BIT(6) | BIT(2)), 0);
 }
 
 static void mca_capture_lap_by_time(struct kunit *test)
@@ -85,6 +109,7 @@ static void mca_capture_lap_syncs_everything(struct kunit *test)
 }
 
 static struct kunit_case mca_capture_sync_cases[] = {
+	KUNIT_CASE(mca_rx_delay_of_ports),
 	KUNIT_CASE(mca_capture_lap_by_time),
 	KUNIT_CASE(mca_capture_ranges_follow_the_dma),
 	KUNIT_CASE(mca_capture_lap_syncs_everything),

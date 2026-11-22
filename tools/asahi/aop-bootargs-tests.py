@@ -42,6 +42,7 @@ fn fixture(offset:usize,table:&[u8])->Device{
 }
 fn patch(dev:&Device,word:bool)->Result{Aop.patch_bootargs(&Mmio{dev,_p:PhantomData::<Region<AOP_MMIO_SIZE>>},&[(1,Some(0x12345678)),(2,Some(0x87654321))],word)}
 fn patch_with(dev:&Device,patches:&[(u32,Option<u64>)])->Result{Aop.patch_bootargs(&Mmio{dev,_p:PhantomData::<Region<AOP_MMIO_SIZE>>},patches,true)}
+fn has_ed0p(dev:&Device)->Result<bool>{Aop::bootargs_has_ed0p(&Mmio{dev,_p:PhantomData::<Region<AOP_MMIO_SIZE>>},true)}
 fn from_fourcc(b:&[u8;4])->u32{u32::from_le_bytes(*b)}
 CONFIGS
 fn main(){
@@ -65,13 +66,26 @@ fn main(){
  assert_eq!(patch_with(&d,&[(1,Some(0x12345678)),(2,None)]),Ok(()));assert_eq!(*d.bytes.borrow(),expected,"None overwrote the firmware value");
  // Per-SoC nCal: T8112 and T6000 keep the image value, T6040/T8132 write 1, the others write 0.
  let ncal=from_fourcc(b"nCal");
- for (name,cfg,want) in [("T8103",&HW_CFG_T8103,None),("T8112",&HW_CFG_T8112,Some(1u32)),("T6000",&HW_CFG_T6000,Some(1)),("T6020",&HW_CFG_T6020,None),("T6040",&HW_CFG_T6040,None),("T8132",&HW_CFG_T8132,None),("T8140",&HW_CFG_T8140,None)] {
-  let expect=match name {"T8112"|"T6000"=>None,"T6040"|"T8132"=>Some(1u64),_=>Some(0u64)};
+ for (name,cfg,want) in [("T8103",&HW_CFG_T8103,None),("T8112",&HW_CFG_T8112,Some(1u32)),("T6000",&HW_CFG_T6000,Some(1)),("T6020",&HW_CFG_T6020,None),("T6040",&HW_CFG_T6040,None),("T8132",&HW_CFG_T8132,None),("T8122",&HW_CFG_T8122,None),("T8140",&HW_CFG_T8140,None)] {
+  let expect=match name {"T8112"|"T6000"=>None,"T6040"|"T8132"|"T8122"=>Some(1u64),_=>Some(0u64)};
   assert_eq!(cfg.ncal,expect,"{} nCal choice",name);
   let mut t=[0u8;12];t[0..4].copy_from_slice(&ncal.to_le_bytes());t[4..8].copy_from_slice(&4u32.to_le_bytes());t[8..12].copy_from_slice(&1u32.to_le_bytes());
   let d=fixture(32,&t);assert_eq!(patch_with(&d,&[(ncal,cfg.ncal)]),Ok(()));
   let got=u32::from_le_bytes(d.bytes.borrow()[40..44].try_into().unwrap());
   let wanted=want.unwrap_or_else(||cfg.ncal.unwrap() as u32);assert_eq!(got,wanted,"{} nCal written",name);
+ }
+ // Without a bootloader memory-region a T8122 AOP starts as its apple,t6020-aop fallback; no other block names one.
+ let t8122:&'static AopHwConfig=&HW_CFG_T8122;
+ assert!(t8122.fw_regions,"T8122 checks its firmware regions");
+ assert!(std::ptr::eq(t8122.for_regions(true),t8122),"T8122 with regions keeps its own configuration");
+ let alt=t8122.for_regions(false);
+ assert!(!std::ptr::eq(alt,t8122),"T8122 without regions takes its fallback");
+ assert!(!alt.fw_regions&&alt.without_fw_regions.is_none(),"the fallback needs no regions");
+ assert!(alt.ncal==HW_CFG_T6020.ncal&&alt.ec0p==HW_CFG_T6020.ec0p&&alt.quiesce_on_unbind==HW_CFG_T6020.quiesce_on_unbind&&alt.bootargs_word_access==HW_CFG_T6020.bootargs_word_access&&alt.halt_on_failed_start==HW_CFG_T6020.halt_on_failed_start,"T8122 fallback is T6020's");
+ let others:[(&str,&'static AopHwConfig);10]=[("T8103",&HW_CFG_T8103),("T8112",&HW_CFG_T8112),("T6000",&HW_CFG_T6000),("T6020",&HW_CFG_T6020),("T6040",&HW_CFG_T6040),("T8132",&HW_CFG_T8132),("T8140",&HW_CFG_T8140),("T8152",&HW_CFG_T8152),("T8142",&HW_CFG_T8142),("T6050",&HW_CFG_T6050)];
+ for (name,cfg) in others {
+  assert!(cfg.without_fw_regions.is_none(),"{} names no fallback",name);
+  for regions in [true,false] {assert!(std::ptr::eq(cfg.for_regions(regions),cfg),"{} keeps its configuration (regions {})",name,regions);}
  }
  // ED0p: writes 8-byte IOVA when an external data region is present, preserves unused ED0p when None,
  // and rejects missing, duplicate, or non-8-byte ED0p entries without writing MMIO.
@@ -83,21 +97,26 @@ fn main(){
  t27[16..20].copy_from_slice(&ed0p.to_le_bytes());t27[20..24].copy_from_slice(&8u32.to_le_bytes());
  t27[24..32].copy_from_slice(&0xdead_beef_cafe_babeu64.to_le_bytes());
  let d=fixture(32,&t27);
+ assert_eq!(has_ed0p(&d),Ok(true),"ED0p presence not detected");
+ assert!(d.writes.borrow().is_empty());
  assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,Some(ed0p_iova))]),Ok(()));
  assert_eq!(u64::from_le_bytes(d.bytes.borrow()[32+24..32+32].try_into().unwrap()),ed0p_iova,"ED0p not written");
  let d=fixture(32,&t27);
  assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,None)]),Ok(()));
  assert_eq!(u64::from_le_bytes(d.bytes.borrow()[32+24..32+32].try_into().unwrap()),0xdead_beef_cafe_babeu64,"unused ED0p overwritten");
  let d=fixture(32,&t27[..16]);
+ assert_eq!(has_ed0p(&d),Ok(false),"absent ED0p reported present");
  assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,Some(ed0p_iova))]),Err(EINVAL),"missing ED0p accepted");
  assert!(d.writes.borrow().is_empty());
  let mut dup=[0u8;32];
  dup[0..16].copy_from_slice(&t27[16..32]);dup[16..32].copy_from_slice(&t27[16..32]);
  let d=fixture(32,&dup);
+ assert_eq!(has_ed0p(&d),Err(EINVAL),"duplicate ED0p accepted in probe check");
  assert_eq!(patch_with(&d,&[(ed0p,Some(ed0p_iova))]),Err(EINVAL),"duplicate ED0p accepted");
  assert!(d.writes.borrow().is_empty());
  let mut short=t27;short[20..24].copy_from_slice(&4u32.to_le_bytes());
  let d=fixture(32,&short[..28]);
+ assert_eq!(has_ed0p(&d),Err(EINVAL),"4-byte ED0p accepted in probe check");
  assert_eq!(patch_with(&d,&[(ec0p,Some(0x1000_0000_000)),(ed0p,Some(ed0p_iova))]),Err(EINVAL),"4-byte ED0p accepted");
  assert!(d.writes.borrow().is_empty());
  println!("PASS aligned/unaligned byte and word access, unchanged writes, malformed tables, bounds, failed readback, None keeps the firmware value, per-SoC nCal, ED0p external data");
@@ -105,8 +124,8 @@ fn main(){
 '''
 
 
-def method(source):
-    start = source.index('    fn patch_bootargs(')
+def extract_fn(source, header):
+    start = source.index(header)
     at = source.index('{', start)
     depth = 1
     end = at + 1
@@ -114,6 +133,10 @@ def method(source):
         depth += (source[end] == '{') - (source[end] == '}')
         end += 1
     return source[start:end]
+
+
+def method(source):
+    return extract_fn(source, '    fn bootargs_has_ed0p(') + '\n\n' + extract_fn(source, '    fn patch_bootargs(')
 
 
 def configs(source):
@@ -130,7 +153,7 @@ def configs(source):
             if not line.strip() or line.startswith(('//', '#[')):
                 pending.append(line)
                 continue
-            keep = line.startswith(('struct AopHwConfig', 'const HW_CFG_'))
+            keep = line.startswith(('struct AopHwConfig', 'impl AopHwConfig', 'const HW_CFG_'))
             item, pending, depth = pending + [line], [], 0
         else:
             item.append(line)
@@ -180,6 +203,11 @@ def main():
         result = compile_run(rustc, p, binary, bad)
         assert result.returncode != 0 and 'missing ED0p accepted' in result.stderr, result.stderr
         print('PASS negative control: missing ED0p ignored')
+        bad = code.replace('Ok(seen)', 'Ok(true)')
+        assert bad != code
+        result = compile_run(rustc, p, binary, bad)
+        assert result.returncode != 0 and 'absent ED0p reported present' in result.stderr, result.stderr
+        print('PASS negative control: bootargs_has_ed0p unconditionally true')
         for soc, val in (('T8112', 'Some(0)'), ('T6040', 'Some(0)'), ('T6000', 'Some(1)')):
             start = code.index('const HW_CFG_%s: AopHwConfig' % soc)
             at = code.index('    ncal: ', start)

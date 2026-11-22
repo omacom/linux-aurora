@@ -10,7 +10,7 @@ use crate::g17::{
     preparation::Lease,
     job::Packet,
     object::{Allocator, KernelObject, Pool},
-    queue::render::{Pair, RenderAddresses},
+    queue::render::{HostGrowth, Pair, RenderAddresses},
 };
 use kernel::{prelude::*, sync::Arc};
 
@@ -898,19 +898,23 @@ impl super::super::Backend {
             packet.context.mark_published();
             let target = pair.host_growth_target(packet)?;
             let buffer_id = pair.buffer_id();
-            let growth_target = if let Some(target) = target {
-                let table = firmware.init.pb_descriptor_table()?;
-                let offset = usize::from(buffer_id) * 16;
-                core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-                let mut descriptor = [0; 4];
-                for (index, word) in descriptor.iter_mut().enumerate() {
-                    *word = table
-                        .word(offset + index * 4)?
-                        .load(core::sync::atomic::Ordering::Relaxed);
+            let growth_target = match target {
+                Some(HostGrowth::Idle(target)) => {
+                    let table = firmware.init.pb_descriptor_table()?;
+                    let offset = usize::from(buffer_id) * 16;
+                    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+                    let mut descriptor = [0; 4];
+                    for (index, word) in descriptor.iter_mut().enumerate() {
+                        *word = table
+                            .word(offset + index * 4)?
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                    }
+                    Some((target, Some(descriptor)))
                 }
-                Some((target, descriptor))
-            } else {
-                None
+                // A busy pair's firmware owns its page list and PB descriptor:
+                // the growth only appends blocks to the inventory.
+                Some(HostGrowth::Busy(target)) => Some((target, None)),
+                None => None,
             };
             let pair = firmware.queues.render.take_pair(slot, self.owner, packet)?;
             (firmware.uat.clone(), pair, addresses, growth_target)
@@ -920,15 +924,22 @@ impl super::super::Backend {
             uat: &uat,
         };
         let mut growth = None;
+        let busy = matches!(growth_target, Some((_, None)));
         let result = (|| {
             if let Some((target, descriptor)) = growth_target {
                 let vm = pair.context().vm().clone();
-                growth = pair.manager().prepare_growth(
-                    &dev,
-                    &vm,
-                    target,
-                    Some(descriptor),
-                )?;
+                match pair.manager().prepare_growth(&dev, &vm, target, descriptor) {
+                    Ok(prepared) => growth = prepared,
+                    // A busy pair keeps its heap; firmware grow requests still serve it.
+                    Err(_) if busy => {
+                        let manager = pair.manager();
+                        manager.defer_busy_growth(crate::g17::now_ns());
+                        let blocks = manager.blocks();
+                        crate::g17::trace::heap(crate::g17::trace::HEAP_HOST_BUSY, false,
+                            blocks, blocks);
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             pair.prepare(&alloc, packet, addresses)
         })();
@@ -967,7 +978,7 @@ impl super::super::Backend {
             }
             // Private restaging can fail after preparing a larger inventory.
             // Finish its descriptor before discarding the command preparation.
-            firmware.commit_render_growth(slot, &mut growth)?;
+            firmware.commit_render_growth(slot, &mut growth, busy)?;
             result?;
             if packet.cancel_requested() || firmware.queues.render.entry(slot)?.closed {
                 return Err(ECANCELED);

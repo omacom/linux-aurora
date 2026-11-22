@@ -15,6 +15,7 @@
 #include <linux/soc/apple/dp-tunnel.h>
 
 #include "afk.h"
+#include "cec.h"
 #include "dcp.h"
 #include "dcp-hdmi.h"
 #include "dptxep.h"
@@ -232,6 +233,7 @@ int dptxport_release_display(struct apple_epic_service *service)
 {
 	dcp_180hz_invalidate(service->ep->dcp);
 	dcpavserv_v14_close(service->ep->dcp);
+	dcp_cec_close_port(service->ep->dcp, service);
 	return afk_service_call(service, 0, 7, NULL, 0, 16, NULL, 0, 16);
 }
 
@@ -242,9 +244,11 @@ int dptxport_set_hpd_timeout(struct apple_epic_service *service, bool hpd,
 	size_t received;
 	int ret;
 
-	/* The 14.7 external role completes an HPD low only once its AV client closed. */
-	if (!hpd)
+	/* Close active AV and CEC clients before telling firmware HPD went low. */
+	if (!hpd) {
 		dcpavserv_v14_close(service->ep->dcp);
+		dcp_cec_close_port(service->ep->dcp, service);
+	}
 	memset(&cmd, 0, sizeof(cmd));
 
 	if (hpd)
@@ -681,6 +685,14 @@ unsupported:
 			dptx->phy_ops.dp.link_rate = phy_link_rate;
 			dptx->phy_ops.dp.set_rate = 1;
 			ret = phy_configure(dptx->atcphy, &dptx->phy_ops);
+			/*
+			 * A dcpext takes its link down (rate 0) when its HPD goes
+			 * low, and its ATC PHY may have left DP mode already: the
+			 * link is down then. Refused, the firmware waits on this
+			 * call and answers nothing else, the HPD low among them.
+			 */
+			if (ret == -EOPNOTSUPP && !phy_link_rate)
+				ret = 0;
 			if (ret)
 				return ret;
 		}
@@ -1654,7 +1666,14 @@ int dptxep_init(struct apple_dcp *dcp)
 			 * kIOReturnNoDevice (0xe00002c0). Leave the endpoint
 			 * up so a later announce can still bind.
 			 */
-			if (dcp_fw_is_14_7(dcp) || dcp_is_ext26(dcp)) {
+			/*
+			 * A firmware-27 external processor whose ports are not
+			 * on this endpoint announces nothing here either (a 27.2
+			 * dcpext on DPTX_ENDPOINT_V2 where its firmware does not
+			 * advertise DPTX_ENDPOINT, see dcp_v27_dptx_layout()).
+			 */
+			if (dcp_fw_is_14_7(dcp) || dcp_is_ext26(dcp) ||
+			    (dcp->fw_compat == DCP_FIRMWARE_V_27_0 && dcp->dcpext)) {
 				dev_info(dcp->dev,
 					 "DPTX port %u not announced yet\n", port);
 				return 0;

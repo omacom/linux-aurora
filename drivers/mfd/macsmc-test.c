@@ -232,7 +232,7 @@ static void macsmc_sleep_order_test(struct kunit *test)
 	apple_smc_sleep_warn(&ctx->smc);
 	KUNIT_EXPECT_EQ(test, apple_smc_sleep_commit(&ctx->smc), 0);
 	KUNIT_EXPECT_TRUE(test, ctx->smc.ap_notified);
-	apple_smc_sleep_wake(&ctx->smc);
+	apple_smc_sleep_wake(&ctx->smc, false);
 	KUNIT_EXPECT_FALSE(test, ctx->smc.ap_notified);
 	KUNIT_EXPECT_FALSE(test, ctx->smc.sleep_warned);
 
@@ -299,7 +299,7 @@ static void macsmc_notice_test(struct kunit *test)
 
 	/* The test trigger writes no MBSE value: those announce a real sleep. */
 	KUNIT_EXPECT_EQ(test, apple_smc_notice_idle(&ctx->smc), 0);
-	apple_smc_notice_on(&ctx->smc, &mbsw);
+	apple_smc_notice_on(&ctx->smc, &mbsw, false);
 	KUNIT_ASSERT_EQ(test, ctx->seen_count, 4U);
 	KUNIT_EXPECT_EQ(test, ctx->seen[0], (u32)MACSMC_TEST_AP_IDLE);
 	KUNIT_EXPECT_EQ(test, ctx->seen[1], (u32)MACSMC_TEST_AP_ON);
@@ -332,7 +332,7 @@ static void macsmc_lid_wake_test(struct kunit *test)
 
 	/* The lid alone: MSLD is read last, after macOS's own order. */
 	ctx->record = BIT_ULL(10);
-	apple_smc_sleep_wake(&ctx->smc);
+	apple_smc_sleep_wake(&ctx->smc, false);
 	KUNIT_ASSERT_EQ(test, ctx->seen_count, 5U);
 	KUNIT_EXPECT_EQ(test, ctx->seen[0], (u32)MACSMC_TEST_AP_ON);
 	KUNIT_EXPECT_EQ(test, ctx->seen[1], SMC_KEY(MBSE));
@@ -343,7 +343,7 @@ static void macsmc_lid_wake_test(struct kunit *test)
 	/* The lid with anything else is a normal wake: the lid is still read, for the display. */
 	ctx->seen_count = 0;
 	ctx->record = BIT_ULL(10) | BIT_ULL(0);
-	apple_smc_sleep_wake(&ctx->smc);
+	apple_smc_sleep_wake(&ctx->smc, false);
 	KUNIT_ASSERT_EQ(test, ctx->seen_count, 5U);
 	KUNIT_EXPECT_EQ(test, ctx->seen[4], SMC_KEY(MSLD));
 	if (IS_ENABLED(CONFIG_APPLE_SOC_SLEEP))

@@ -9,10 +9,11 @@ config VIDEO_APPLE_PRORES
 	select VIDEOBUF2_DMA_CONTIG
 	help
 	  V4L2 memory-to-memory driver for the ProRes encoder engine (APR)
-	  in Apple M1 Pro (T6000), M4 Pro (T6041), M5 Pro/Max (T6050) and
-	  A18 Pro (T8140) SoCs. On T6041 and T6050 a per-machine
-	  apple/prores-t6041-init.bin or apple/prores-t6050-init.bin takes
-	  the place of the built-in initialization rows. It encodes 8
+	  in Apple M1 Pro (T6000), M4 (T8132), M4 Pro (T6041), M5 (T8142),
+	  M5 Pro/Max (T6050) and A18 Pro (T8140) SoCs. On T6041, T8142 and
+	  T6050 a per-machine apple/prores-<soc>-init.bin takes the place of
+	  the built-in initialization rows; T8132 has no built-in rows and
+	  binds only with apple/prores-t8132-init.bin. It encodes 8
 	  and 16 bit 4:2:2 and 4:4:4 frames to ProRes 422 Proxy, LT, 422, HQ,
 	  4444 and 4444 XQ.
 

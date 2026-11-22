@@ -942,8 +942,9 @@ impl platform::Driver for PmpDriver {
     type Data<'bound> = PmpDriver;
 
     fn suppress_bind_attrs() -> bool {
-        // Retained J713 power votes have no teardown path, and an unbound T8140 PMP still runs.
-        // SAFETY: read-only machine identity checks; other machines remain unchanged.
+        // Retained J713 power votes have no teardown path, and an unbound PMP that registered
+        // with the sleep driver still runs.
+        // SAFETY: read-only machine identity and device tree checks.
         unsafe { bindings::apple_pmp_keep_bound() }
     }
 

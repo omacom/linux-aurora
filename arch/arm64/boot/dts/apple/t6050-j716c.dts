@@ -270,3 +270,27 @@
 
 #include "t6050-j716c-sleep.dtsi"
 #include "t6050-j716c-sleep-full.dtsi"
+
+/*
+ * The Neural Engine, started only after the boot loader's preload hand-off.
+ * ANE_SYS sits behind FAB8_SOC (kept on for the SEP above) and FAB9_SOC (on for
+ * the camera).
+ */
+#include "t6050-j714s-ane.dtsi"
+
+/* The port controllers follow the sleep's command rules (tipd: woken first, read at intervals) */
+&hpm0 {
+	apple,sleep-ssps-rules;
+};
+
+&hpm1 {
+	apple,sleep-ssps-rules;
+};
+
+&hpm2 {
+	apple,sleep-ssps-rules;
+};
+
+&hpm5 {
+	apple,sleep-ssps-rules;
+};

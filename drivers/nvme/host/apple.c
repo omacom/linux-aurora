@@ -2588,6 +2588,11 @@ static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
 		ret = -ENXIO;
 		goto out_detach_genpd;
 	}
+	/*
+	 * PRP list entries must be NVME_CTRL_PAGE_SIZE aligned, so a bounced
+	 * segment has to keep its offset within the controller page.
+	 */
+	dma_set_min_align_mask(dev, NVME_CTRL_PAGE_SIZE - 1);
 
 	anv->irq = platform_get_irq(pdev, 0);
 	if (anv->irq < 0) {

@@ -158,9 +158,13 @@ shutil.copyfile(src,dst)
   source=ROOT/'install-aurora-sep.sh';text=source.read_text()
   tail=text[text.index('args=()\n',text.index('# Tests source this file')):]
   shim=self.base/'parser.sh';shim.write_text(f'AURORA_SEP_SOURCE_ONLY=1 source "{source}"\n'
-     'preflight() { :; }; install_all() { echo "$DESKTOP_FIXES:$READ_ONLY"; }; uninstall_all() { echo UNINSTALL; };\n'+tail)
+     'preflight() { :; }; install_all() { echo "$DESKTOP_FIXES"; }; uninstall_all() { echo UNINSTALL; };\n'+tail)
+  r=subprocess.run(['bash',str(shim),'--desktop-fixes'],env=self.env,text=True,capture_output=True)
+  self.assertEqual((r.returncode,r.stdout),(0,'1\n'),r.stderr)
+  # --read-only was removed (SEP writes are always on): it is refused, and nothing is installed.
   r=subprocess.run(['bash',str(shim),'--desktop-fixes','--read-only'],env=self.env,text=True,capture_output=True)
-  self.assertEqual((r.returncode,r.stdout),(0,'1:1\n'),r.stderr)
+  self.assertNotEqual(r.returncode,0);self.assertEqual(r.stdout,'')
+  self.assertIn('--read-only was removed: SEP writes are always on',r.stderr)
   r=subprocess.run(['bash',str(shim),'--desktop-fixes','--uninstall'],env=self.env,text=True,capture_output=True)
   self.assertNotEqual(r.returncode,0);self.assertNotIn('UNINSTALL',r.stdout)
  def test_assembler_verifies_optional_three_roles_and_keeps_default_empty(self):

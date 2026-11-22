@@ -110,6 +110,19 @@ properties:
   '#sound-dai-cells':
     const: 1
 
+  apple,rx-delay-bclks:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 4
+    maxItems: 6
+    items:
+      maximum: 1
+    description:
+      One entry per cluster port, in port order. The number of bit clock
+      cycles by which the data received on that port arrives later than
+      the format places it, because of the board's signal timing. A
+      cluster capturing from the port samples its data that much later.
+      Absent, or 0 for a port, means no delay.
+
 required:
   - compatible
   - reg

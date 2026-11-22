@@ -103,7 +103,6 @@ static struct btrfs_bio *btrfs_split_bio(struct btrfs_fs_info *fs_info,
 	bbio->can_use_append = orig_bbio->can_use_append;
 	bbio->is_scrub = orig_bbio->is_scrub;
 	bbio->is_remap = orig_bbio->is_remap;
-	bbio->async_csum = orig_bbio->async_csum;
 
 	atomic_inc(&orig_bbio->pending_ios);
 	return bbio;
@@ -113,9 +112,6 @@ void btrfs_bio_end_io(struct btrfs_bio *bbio, blk_status_t status)
 {
 	/* Make sure we're already in task context. */
 	ASSERT(in_task());
-
-	if (bbio->async_csum)
-		wait_for_completion(&bbio->csum_done);
 
 	bbio->bio.bi_status = status;
 	if (bbio->bio.bi_pool == &btrfs_clone_bioset) {
@@ -595,15 +591,24 @@ static void btrfs_submit_bio(struct bio *bio, struct btrfs_io_context *bioc,
 	}
 }
 
+/*
+ * Data writes at least this large generate their checksums in a worker while
+ * the bio is already in flight.  Below it the checksum costs less than the
+ * work item hand-off, so it is computed inline before submission.
+ */
+#define BTRFS_ASYNC_CSUM_MIN_SIZE	SZ_512K
+
 static int btrfs_bio_csum(struct btrfs_bio *bbio)
 {
 	if (bbio->bio.bi_opf & REQ_META)
 		return btree_csum_one_bio(bbio);
-#ifdef CONFIG_BTRFS_EXPERIMENTAL
-	return btrfs_csum_one_bio(bbio, true);
-#else
-	return btrfs_csum_one_bio(bbio, false);
-#endif
+	/*
+	 * Data that needs a checksum is stable while the bio is in flight
+	 * (stable writes for buffered I/O, bounce buffers for direct I/O), so
+	 * the checksum can be generated in parallel with the device write.
+	 */
+	return btrfs_csum_one_bio(bbio,
+			bbio->bio.bi_iter.bi_size >= BTRFS_ASYNC_CSUM_MIN_SIZE);
 }
 
 /*
@@ -660,6 +665,8 @@ static void run_one_async_done(struct btrfs_work *work, bool do_free)
 
 	/* If an error occurred we just want to clean up the bio and move on. */
 	if (bio->bi_status) {
+		btrfs_put_bioc(async->bioc);
+		btrfs_bio_counter_dec(async->bbio->inode->root->fs_info);
 		btrfs_bio_end_io(async->bbio, bio->bi_status);
 		return;
 	}
@@ -686,6 +693,15 @@ static bool should_async_write(struct btrfs_bio *bbio)
 	 */
 	return false;
 #endif
+
+	/*
+	 * Large data writes generate their checksums in parallel with the
+	 * device write anyway (see btrfs_bio_csum()), there is nothing to gain
+	 * from also deferring the submission.
+	 */
+	if (!(bbio->bio.bi_opf & REQ_META) &&
+	    bbio->bio.bi_iter.bi_size >= BTRFS_ASYNC_CSUM_MIN_SIZE)
+		return false;
 
 	/* Submit synchronously if the checksum implementation is fast. */
 	if (auto_csum_mode && test_bit(BTRFS_FS_CSUM_IMPL_FAST, &fs_info->flags))
@@ -798,6 +814,7 @@ static bool btrfs_submit_chunk(struct btrfs_bio *bbio, int mirror_num)
 		split = btrfs_split_bio(fs_info, bbio, map_length);
 		if (IS_ERR(split)) {
 			status = errno_to_blk_status(PTR_ERR(split));
+			btrfs_put_bioc(bioc);
 			btrfs_bio_counter_dec(fs_info);
 			goto end_bbio;
 		}
@@ -858,6 +875,7 @@ done:
 	return map_length == length;
 
 fail:
+	btrfs_put_bioc(bioc);
 	btrfs_bio_counter_dec(fs_info);
 	/*
 	 * We have split the original bbio, now we have to end both the current

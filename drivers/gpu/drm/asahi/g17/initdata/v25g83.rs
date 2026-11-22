@@ -145,6 +145,7 @@ impl InitData {
             (None, Some(chip)) => (cfg.perf()?, chip.max_power_mw, &chip.leakage),
             _ => return Err(EINVAL),
         };
+        self.active_effort = super::active_effort(&opps, perf)?;
         let hw_args = abi::HwDataArgs {
             chip_id: cfg.chip_id,
             windows: cfg.windows,

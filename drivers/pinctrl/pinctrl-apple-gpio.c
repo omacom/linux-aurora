@@ -62,6 +62,7 @@ struct apple_gpio_pinctrl {
 #define REG_GPIO(x)          (4 * (x))
 #define REG_GPIOx_DATA       BIT(0)
 #define REG_GPIOx_MODE       GENMASK(3, 1)
+#define REG_GPIOx_MODE_HI    BIT(4)
 #define REG_GPIOx_OUT        1
 #define REG_GPIOx_IN_IRQ_HI  2
 #define REG_GPIOx_IN_IRQ_LO  3
@@ -217,6 +218,15 @@ static const struct pinmux_ops apple_gpio_pinmux_ops = {
 	.strict = true,
 };
 
+/* The mode field is bits 1-4 on every block this driver loads: iBoot leaves bit 4
+ * set on pins across T6000, T6040, T6050 and T8140 (read-backs on PR #2004), and
+ * while it is set the DATA bit does not latch in output mode. Clear it on every
+ * mode write and include it in the direction read. */
+static u32 apple_gpio_mode_mask(void)
+{
+	return REG_GPIOx_MODE | REG_GPIOx_MODE_HI;
+}
+
 /* GPIO chip functions */
 
 static int apple_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
@@ -224,7 +234,7 @@ static int apple_gpio_get_direction(struct gpio_chip *chip, unsigned int offset)
 	struct apple_gpio_pinctrl *pctl = gpiochip_get_data(chip);
 	unsigned int reg = apple_gpio_get_reg(pctl, offset);
 
-	if (FIELD_GET(REG_GPIOx_MODE, reg) == REG_GPIOx_OUT)
+	if ((reg & apple_gpio_mode_mask()) == FIELD_PREP(REG_GPIOx_MODE, REG_GPIOx_OUT))
 		return GPIO_LINE_DIRECTION_OUT;
 	return GPIO_LINE_DIRECTION_IN;
 }
@@ -238,7 +248,7 @@ static int apple_gpio_get(struct gpio_chip *chip, unsigned int offset)
 	 * If this is an input GPIO, read the actual value (not the
 	 * cached regmap value)
 	 */
-	if (FIELD_GET(REG_GPIOx_MODE, reg) != REG_GPIOx_OUT)
+	if ((reg & apple_gpio_mode_mask()) != FIELD_PREP(REG_GPIOx_MODE, REG_GPIOx_OUT))
 		reg = readl_relaxed(pctl->base + REG_GPIO(offset));
 
 	return !!(reg & REG_GPIOx_DATA);
@@ -258,7 +268,7 @@ static int apple_gpio_direction_input(struct gpio_chip *chip, unsigned int offse
 	struct apple_gpio_pinctrl *pctl = gpiochip_get_data(chip);
 
 	apple_gpio_set_reg(pctl, offset,
-			   REG_GPIOx_PERIPH | REG_GPIOx_MODE | REG_GPIOx_DATA |
+			   REG_GPIOx_PERIPH | apple_gpio_mode_mask() | REG_GPIOx_DATA |
 				   REG_GPIOx_INPUT_ENABLE,
 			   FIELD_PREP(REG_GPIOx_MODE, REG_GPIOx_IN_IRQ_OFF) |
 				   REG_GPIOx_INPUT_ENABLE);
@@ -271,7 +281,7 @@ static int apple_gpio_direction_output(struct gpio_chip *chip,
 	struct apple_gpio_pinctrl *pctl = gpiochip_get_data(chip);
 
 	apple_gpio_set_reg(pctl, offset,
-			   REG_GPIOx_PERIPH | REG_GPIOx_MODE | REG_GPIOx_DATA,
+			   REG_GPIOx_PERIPH | apple_gpio_mode_mask() | REG_GPIOx_DATA,
 			   FIELD_PREP(REG_GPIOx_MODE, REG_GPIOx_OUT) |
 				   (value ? REG_GPIOx_DATA : 0));
 	return 0;
@@ -310,7 +320,7 @@ static void apple_gpio_irq_mask(struct irq_data *data)
 	struct gpio_chip *gc = irq_data_get_irq_chip_data(data);
 	struct apple_gpio_pinctrl *pctl = gpiochip_get_data(gc);
 
-	apple_gpio_set_reg(pctl, data->hwirq, REG_GPIOx_MODE,
+	apple_gpio_set_reg(pctl, data->hwirq, apple_gpio_mode_mask(),
 			   FIELD_PREP(REG_GPIOx_MODE, REG_GPIOx_IN_IRQ_OFF));
 	gpiochip_disable_irq(gc, data->hwirq);
 }
@@ -329,7 +339,7 @@ static void apple_gpio_irq_unmask(struct irq_data *data)
 	unsigned int irqtype = apple_gpio_irq_type(irqd_get_trigger_type(data));
 
 	gpiochip_enable_irq(gc, data->hwirq);
-	apple_gpio_set_reg(pctl, data->hwirq, REG_GPIOx_MODE,
+	apple_gpio_set_reg(pctl, data->hwirq, apple_gpio_mode_mask(),
 			   FIELD_PREP(REG_GPIOx_MODE, irqtype));
 }
 
@@ -355,7 +365,7 @@ static int apple_gpio_irq_set_type(struct irq_data *data, unsigned int type)
 	if (irqtype == REG_GPIOx_IN_IRQ_OFF)
 		return -EINVAL;
 
-	apple_gpio_set_reg(pctl, data->hwirq, REG_GPIOx_MODE,
+	apple_gpio_set_reg(pctl, data->hwirq, apple_gpio_mode_mask(),
 			   FIELD_PREP(REG_GPIOx_MODE, irqtype));
 
 	if (type & IRQ_TYPE_LEVEL_MASK)

@@ -1,14 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-only OR MIT */
 /*
- * J613 CPU memory-floor governor: pure decision logic.
+ * PMP CPU memory-floor governor: pure decision logic.
  *
  * No MMIO, locking or time source here, so the same code runs in the kernel,
- * in KUnit and in the host harness (tools/asahi/pmp-j613-floor-tests.py).
+ * in KUnit and in the host harness (tools/asahi/pmp-floor-tests.py).
  * The caller samples CPU and GPU busy time, calls pmp_floor_gov_step() once
  * per sample and performs the returned transition.
  */
-#ifndef _APPLE_PMP_J613_FLOOR_GOV_H
-#define _APPLE_PMP_J613_FLOOR_GOV_H
+#ifndef _APPLE_PMP_FLOOR_GOV_H
+#define _APPLE_PMP_FLOOR_GOV_H
 
 #ifdef __KERNEL__
 #include <linux/bits.h>
@@ -16,25 +16,60 @@
 #include <linux/types.h>
 #endif
 
-/* The parameter may veto the board-specific native-report default. */
-static inline bool pmp_floor_enabled(bool j613, bool native_default, bool allowed)
+/*
+ * A CPU-client SOC-DEV-DVFS request: the valid bit (61) and four-bit levels
+ * in the request-class lanes, classes 0x21 to 0x25 at bits 35:32 to 51:48
+ * (the lanes of apple,dvfs-request-levels); the default level, bits 4:0,
+ * stays 0. The DT names the classes and levels (apple,cpu-memory-floor), so
+ * no SoC's lane assignment is coded here.
+ */
+#define PMP_FLOOR_VALID		BIT_ULL(61)
+#define PMP_FLOOR_CLASS_FIRST	0x21
+#define PMP_FLOOR_CLASS_LAST	0x25
+#define PMP_FLOOR_CLASS_SHIFT	32
+#define PMP_FLOOR_CLASS_BITS	4
+#define PMP_FLOOR_LEVEL_MAX	0xf
+/* <class level> pairs, each class at most once. */
+#define PMP_FLOOR_CELLS_MAX	(2 * (PMP_FLOOR_CLASS_LAST - PMP_FLOOR_CLASS_FIRST + 1))
+
+static inline unsigned int pmp_floor_class_shift(unsigned int cls)
 {
-	return j613 && native_default && allowed;
+	return PMP_FLOOR_CLASS_SHIFT + PMP_FLOOR_CLASS_BITS * (cls - PMP_FLOOR_CLASS_FIRST);
 }
 
 /*
- * A CPU-client SOC-DEV-DVFS request: the valid bit (61) with a DRAM (DCS)
- * floor in bits 51:48 and a fabric floor in bits 35:32, the T6030 layout of
- * the CPU clients' memory floor; the default level lane, bits 4:0, stays 0.
- * The same request raises the J613 DVFS-STATE response to the floor.
+ * The raised request from the DT's <class level> pairs. Refused: an odd or
+ * empty list, a class outside 0x21..0x25 or given twice, a level wider than
+ * its lane, and a list whose levels are all 0 (a request for nothing).
  */
-#define PMP_FLOOR_VALID		BIT_ULL(61)
-#define PMP_FLOOR_DCS_SHIFT	48
-#define PMP_FLOOR_SOC_SHIFT	32
-/* The levels measured to be accepted on J613: DCS 4 with fabric 0, 1 or 2. */
-#define PMP_FLOOR_DCS_MIN	1
-#define PMP_FLOOR_DCS_MAX	4
-#define PMP_FLOOR_SOC_MAX	2
+static inline bool pmp_floor_word_of(const unsigned int *cells, unsigned int n,
+				     unsigned long long *word)
+{
+	unsigned long long w = PMP_FLOOR_VALID;
+	unsigned int i, seen = 0;
+
+	if (!cells || !word || !n || n % 2 || n > PMP_FLOOR_CELLS_MAX)
+		return false;
+	for (i = 0; i < n; i += 2) {
+		unsigned int cls = cells[i], level = cells[i + 1];
+
+		if (cls < PMP_FLOOR_CLASS_FIRST || cls > PMP_FLOOR_CLASS_LAST ||
+		    level > PMP_FLOOR_LEVEL_MAX || seen & (1U << (cls - PMP_FLOOR_CLASS_FIRST)))
+			return false;
+		seen |= 1U << (cls - PMP_FLOOR_CLASS_FIRST);
+		w |= (unsigned long long)level << pmp_floor_class_shift(cls);
+	}
+	if (w == PMP_FLOOR_VALID)
+		return false;
+	*word = w;
+	return true;
+}
+
+/* The level a request word carries for @cls. */
+static inline unsigned int pmp_floor_level(unsigned long long word, unsigned int cls)
+{
+	return (word >> pmp_floor_class_shift(cls)) & PMP_FLOOR_LEVEL_MAX;
+}
 
 #define PMP_FLOOR_NS_PER_MS	1000000ULL
 
@@ -80,13 +115,6 @@ enum pmp_floor_action {
 	PMP_FLOOR_RAISE,
 	PMP_FLOOR_DROP,
 };
-
-/* Valid floor request for @dcs/@soc; level 0/0 is the explicit valid floor 0. */
-static inline unsigned long long pmp_floor_word(unsigned int dcs, unsigned int soc)
-{
-	return PMP_FLOOR_VALID | (unsigned long long)(dcs & 0xf) << PMP_FLOOR_DCS_SHIFT |
-	       (unsigned long long)(soc & 0xf) << PMP_FLOOR_SOC_SHIFT;
-}
 
 /* A foreign producer is anything but an empty word or a bare valid marker. */
 static inline bool pmp_floor_initial_ok(unsigned long long word)
@@ -189,22 +217,27 @@ static inline void pmp_floor_gov_reset(struct pmp_floor_gov *g, unsigned long lo
 }
 
 /*
- * DVFS-STATE response check, on the first entry of that range. On J613 its
- * low nibble follows the requested DCS floor and the next nibble the fabric
- * floor (0x3200 with no floor, 0x3204/0x3214/0x3224 with DCS 4 and fabric
- * 0/1/2). A raise is confirmed once both reach at least the floor (a lower
- * firmware limit is reported as unconfirmed, not overridden). A release is
- * confirmed once that byte differs from the one seen while the floor was held.
+ * DVFS-STATE response check, on the first entry of that range, for a report
+ * whose responses follow the floor (J613). There the low nibble follows the
+ * class 0x25 lane of the request and the next nibble the class 0x21 lane
+ * (0x3200 with no floor, 0x3204/0x3214/0x3224 with class 0x25 at 4 and
+ * class 0x21 at 0/1/2). A raise is confirmed once both reach at least the
+ * requested level (a lower firmware limit is reported as unconfirmed, not
+ * overridden). A release is confirmed once that byte differs from the one
+ * seen while the floor was held.
  */
 #define PMP_FLOOR_STATE_LEVEL_MASK 0xf
-#define PMP_FLOOR_STATE_SOC_SHIFT 4
+#define PMP_FLOOR_STATE_HI_SHIFT 4
 #define PMP_FLOOR_STATE_MASK 0xff
+#define PMP_FLOOR_STATE_LO_CLASS 0x25
+#define PMP_FLOOR_STATE_HI_CLASS 0x21
 
-static inline bool pmp_floor_raise_confirmed(unsigned long long resp, unsigned int dcs,
-					     unsigned int soc)
+static inline bool pmp_floor_raise_confirmed(unsigned long long resp, unsigned long long word)
 {
-	return (resp & PMP_FLOOR_STATE_LEVEL_MASK) >= dcs &&
-	       ((resp >> PMP_FLOOR_STATE_SOC_SHIFT) & PMP_FLOOR_STATE_LEVEL_MASK) >= soc;
+	return (resp & PMP_FLOOR_STATE_LEVEL_MASK) >=
+		       pmp_floor_level(word, PMP_FLOOR_STATE_LO_CLASS) &&
+	       ((resp >> PMP_FLOOR_STATE_HI_SHIFT) & PMP_FLOOR_STATE_LEVEL_MASK) >=
+		       pmp_floor_level(word, PMP_FLOOR_STATE_HI_CLASS);
 }
 
 static inline bool pmp_floor_drop_confirmed(unsigned long long resp, unsigned long long held)
@@ -219,10 +252,10 @@ static inline bool pmp_floor_drop_confirmed(unsigned long long resp, unsigned lo
  * entries, four response entries). apple,tunable-soc-device must name both
  * CPU clients, EACC0 and PACC0, exactly once. The CPU clients are the first
  * two SOC-DEV-DVFS entries; the floor is requested on the second (PACC0).
+ * Where a second P-cluster client (PACC1) is named once too, it is the third
+ * entry, and a report that floors every CPU client also uses it.
  * Returns NULL when admitted, else the refusal reason.
  */
-/* Firmware identity qualified by the J613 hypervisor and Linux trials. */
-#define PMP_FLOOR_J613_UUID "EFD60284-7C58-33A9-8522-CB3366AF6040"
 #define PMP_FLOOR_REC_SIZE	0x7c	/* soc-device record */
 #define PMP_FLOOR_REC_NAME	0x74	/* its 8-byte, NUL-padded name */
 #define PMP_FLOOR_RANGE_SIZE	32	/* ptd-range record: id, base, count, name at 16 */
@@ -234,9 +267,12 @@ static inline bool pmp_floor_drop_confirmed(unsigned long long resp, unsigned lo
 #define PMP_FLOOR_CLIENTS	2
 #define PMP_FLOOR_PACC0		1	/* CPU client index of the floor */
 
+#define PMP_FLOOR_CLIENTS_MAX	3	/* EACC0, PACC0 and, where named, PACC1 */
+
 struct pmp_floor_layout {
 	unsigned int cpu_first;		/* PTD index of SOC-DEV-DVFS entry 0 */
 	unsigned int state_first;	/* PTD index of DVFS-STATE entry 0 */
+	unsigned int clients;		/* CPU clients, the first SOC-DEV-DVFS entries */
 };
 
 /* PTD entry @i: read alias (16 bytes apart) and update alias (8 bytes apart). */
@@ -267,7 +303,8 @@ static inline unsigned long long pmp_floor_state_read(const struct pmp_floor_lay
 /* The highest offset the owner touches, plus one: the resource must cover it. */
 static inline unsigned long long pmp_floor_layout_end(const struct pmp_floor_layout *l)
 {
-	unsigned long long a = pmp_floor_req_update(l) + PMP_FLOOR_WORD_SIZE;
+	unsigned int last = l->clients > PMP_FLOOR_PACC0 + 1 ? l->clients - 1 : PMP_FLOOR_PACC0;
+	unsigned long long a = PMP_FLOOR_UPDATE(l->cpu_first + last) + PMP_FLOOR_WORD_SIZE;
 	unsigned long long b = pmp_floor_req_read(l) + PMP_FLOOR_WORD_SIZE;
 	unsigned long long c = pmp_floor_state_read(l, 2 * PMP_FLOOR_CLIENTS - 1) +
 			       PMP_FLOOR_WORD_SIZE;
@@ -281,9 +318,11 @@ static inline unsigned int pmp_floor_le32(const unsigned char *p)
 	       (unsigned int)p[2] << 16 | (unsigned int)p[3] << 24;
 }
 
-/* Exactly one soc-device record is named @name. */
-static inline bool pmp_floor_named_once(const unsigned char *t, size_t len, const char *name)
+/* The one soc-device record named @name, or NULL if none or several are. */
+static inline const unsigned char *pmp_floor_named_once(const unsigned char *t, size_t len,
+							const char *name)
 {
+	const unsigned char *rec = NULL;
 	char want[8] = { 0 };
 	unsigned int i, found = 0;
 	size_t pos;
@@ -291,9 +330,11 @@ static inline bool pmp_floor_named_once(const unsigned char *t, size_t len, cons
 	for (i = 0; i < sizeof(want) && name[i]; i++)
 		want[i] = name[i];
 	for (pos = 0; pos + PMP_FLOOR_REC_SIZE <= len; pos += PMP_FLOOR_REC_SIZE)
-		if (!memcmp(t + pos + PMP_FLOOR_REC_NAME, want, sizeof(want)))
+		if (!memcmp(t + pos + PMP_FLOOR_REC_NAME, want, sizeof(want))) {
 			found++;
-	return found == 1;
+			rec = t + pos;
+		}
+	return found == 1 ? rec : NULL;
 }
 
 /* The single range with @id, named @name, of at least @minimum entries. */
@@ -326,10 +367,11 @@ static inline const char *pmp_floor_tables_check(const unsigned char *dev, size_
 		return "soc-device table size";
 	if (!pmp_floor_named_once(dev, dlen, "EACC0") || !pmp_floor_named_once(dev, dlen, "PACC0"))
 		return "CPU clients EACC0/PACC0 not named once";
+	l->clients = pmp_floor_named_once(dev, dlen, "PACC1") ? 3 : PMP_FLOOR_CLIENTS;
 	if (!rng || !rlen || rlen % PMP_FLOOR_RANGE_SIZE)
 		return "ptd-range table size";
 	if (!pmp_floor_range_find(rng, rlen, PMP_FLOOR_CPU_RANGE, "SOC-DEV-DVFS",
-				  PMP_FLOOR_CLIENTS, &l->cpu_first))
+				  l->clients, &l->cpu_first))
 		return "SOC-DEV-DVFS range";
 	if (!pmp_floor_range_find(rng, rlen, PMP_FLOOR_STATE_RANGE, "DVFS-STATE",
 				  2 * PMP_FLOOR_CLIENTS, &l->state_first))
@@ -340,4 +382,4 @@ static inline const char *pmp_floor_tables_check(const unsigned char *dev, size_
 	return NULL;
 }
 
-#endif /* _APPLE_PMP_J613_FLOOR_GOV_H */
+#endif /* _APPLE_PMP_FLOOR_GOV_H */

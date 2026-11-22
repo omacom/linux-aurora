@@ -192,6 +192,16 @@ properties:
       Per-slot enable flags, in slot order. The legacy J700 bootloader
       supplies a single zero to select surface zero instead.
 
+  apple,camera-indicator-surface:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 3
+    description: |
+      Swap slot the kernel reserves for the software camera indicator, a
+      kernel-owned overlay on the internal panel that the camera driver shows
+      while it streams, on a best-effort basis: the camera does not depend on
+      it. The slot must not be enabled in apple,iomfb-surfaces. Userspace cannot
+      use the slot. This is a software indicator, not a privacy guarantee.
+
   apple,power-lut-data-x:
     $ref: /schemas/types.yaml#/definitions/uint8-array
     minItems: 4

@@ -805,7 +805,7 @@ class ProMesaTest(flow.M3FlowBase):
                 ("file", ["bash", str(copy)], None, f"file {sha}"),
                 ("relative file", ["bash", copy.name], None, f"file {sha}"),
                 ("pipe", ["bash"], src, "stdin unavailable"),
-                ("pipe with arguments", ["bash", "-s", "--", "--read-only"], src, "stdin unavailable"),
+                ("pipe with arguments", ["bash", "-s", "--", "--no-m3-mesa"], src, "stdin unavailable"),
                 ("process substitution", ["bash", "-c", f"bash <(cat '{copy}')"], None, "stdin unavailable")):
             with self.subTest(how=how):
                 out = subprocess.run(cmd, input=stdin, capture_output=True, text=True, env=env,

@@ -52,6 +52,7 @@ use crate::{
 };
 
 use core::sync::atomic::{
+    AtomicBool,
     AtomicU64,
     Ordering, //
 };
@@ -68,12 +69,120 @@ fn can_submit_inline(dependencies_ready: bool, previous_status: Option<i32>) -> 
     dependencies_ready && previous_status.is_none_or(|status| status != 0)
 }
 
+/// TVB state that a queue shares with its render jobs.
+struct TvbShared {
+    /// Sequence number of the last render job that carried a slot init and failed in `run()`
+    /// before any of its commands reached the firmware, or 0.
+    lost_init: AtomicU64,
+}
+
+/// What a render job knows about the TVB buffer it uses.
+struct TvbJob {
+    shared: Arc<TvbShared>,
+    /// This job's render sequence number on its queue (from 1).
+    seq: u64,
+    /// Sequence number of the render job whose slot init this job relies on (`seq` if it carries
+    /// the init itself), or 0 if no init was needed since the queue was created.
+    init_seq: u64,
+    /// Set by `run()` before the job's first command is published to the firmware.
+    published: AtomicBool,
+}
+
+impl TvbJob {
+    fn carries_init(&self) -> bool {
+        self.init_seq != 0 && self.init_seq == self.seq
+    }
+
+    /// Whether the slot init this job relies on never reached the firmware.
+    fn init_lost(&self) -> bool {
+        init_was_lost(self.shared.lost_init.load(Ordering::Acquire), self.init_seq)
+    }
+
+    /// Called when `run()` fails. An init carrier that published nothing lost its init.
+    fn note_run_failed(&self) {
+        if self.carries_init() && !self.published.load(Ordering::Acquire) {
+            self.shared.lost_init.store(self.seq, Ordering::Release);
+        }
+    }
+}
+
+/// Whether the init carried by render job `init_seq` is the one that `lost_init` reports lost.
+fn init_was_lost(lost_init: u64, init_seq: u64) -> bool {
+    init_seq != 0 && lost_init == init_seq
+}
+
+/// A render submission as the TVB grow sees it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TvbUse {
+    /// Its finished fence has not signalled.
+    Pending,
+    /// It completed without error: it and every render before it are done.
+    Done,
+    /// It failed in `run()` before any command reached the firmware.
+    FailedUnpublished,
+    /// It failed after some of its commands reached the firmware. Nothing signals when those
+    /// retire (the job's other commands were rolled back), so only a later clean completion
+    /// proves them done.
+    FailedPublished,
+}
+
+impl TvbUse {
+    fn from_status(status: i32, published: bool) -> Self {
+        match status {
+            0 => Self::Pending,
+            1.. => Self::Done,
+            _ if published => Self::FailedPublished,
+            _ => Self::FailedUnpublished,
+        }
+    }
+}
+
+/// Drops the entries of `users` (oldest first, as classified by `seen`) that cannot hold the TVB
+/// any more: a clean completion proves itself and every older entry done (renders complete in
+/// order on the fragment queue), an entry that failed before reaching the firmware never held it.
+/// Pending entries stay, and of the entries that failed after reaching the firmware the newest one
+/// stays (it stands in for the older ones, since whatever proves it done proves them done too).
+fn prune_tvb_uses<T>(users: &mut KVec<T>, seen: impl Fn(&T) -> TvbUse) {
+    if let Some(done) = users.iter().rposition(|u| seen(u) == TvbUse::Done) {
+        users.drain(..=done);
+    }
+    let newest_failed = users
+        .iter()
+        .rposition(|u| seen(u) == TvbUse::FailedPublished);
+    let mut index = 0;
+    users.retain(|u| {
+        let keep = match seen(u) {
+            TvbUse::Pending => true,
+            TvbUse::FailedPublished => Some(index) == newest_failed,
+            TvbUse::Done | TvbUse::FailedUnpublished => false,
+        };
+        index += 1;
+        keep
+    });
+}
+
+/// An entry of [`Queue::ver::tvb_users`].
+struct TvbUser {
+    /// Finished fence of the submission.
+    fence: Fence,
+    job: Arc<TvbJob>,
+    /// The state last read by [`Queue::ver::prune_tvb_users`].
+    seen: TvbUse,
+}
+
 /// Trait implemented by all versioned queues.
 pub(crate) trait Queue: Send + Sync {
     /// Sets the watchdog allowance of the queue's compute commands to `requested_ms`
     /// (`drm_asahi_queue_create::compute_timeout_ms`, nonzero) and returns the allowance in
     /// effect. Only queues of GPUs that advertise DRM_ASAHI_FEATURE_COMPUTE_TIMEOUT take one.
     fn set_compute_timeout(&mut self, _requested_ms: u32) -> Result<u32> {
+        Err(EINVAL)
+    }
+
+    /// Lets submissions with output syncs return once accepted
+    /// (DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT). Only queues of GPUs that advertise
+    /// DRM_ASAHI_FEATURE_ASYNC_SUBMIT take it.
+    fn set_async_submit(&mut self) -> Result {
         Err(EINVAL)
     }
 
@@ -163,6 +272,19 @@ pub(crate) struct Queue {
     stats: Arc<stats::StatsSnapshot>,
     /// Finished fence of the last submitted job, waited for when the queue goes away.
     last_out: Option<Fence>,
+    /// The submissions with a render that may still use the TVB buffer: those after the newest one
+    /// that completed without error. See [`Queue::ver::wait_tvb_idle`].
+    tvb_users: KVec<TvbUser>,
+    /// The TVB grew (or the render that re-initialised its slot never reached the firmware), so the
+    /// next render must re-initialise the buffer slot. Cleared once a render with that init is
+    /// pushed.
+    tvb_init_pending: bool,
+    /// Shared with this queue's render jobs: reports a slot init that never reached the firmware.
+    tvb_shared: Arc<TvbShared>,
+    /// Sequence number of the last render job pushed (0 before the first).
+    tvb_seq: u64,
+    /// Sequence number of the render job that carried the newest slot init, or 0.
+    tvb_init_seq: u64,
 }
 
 #[versions(AGX)]
@@ -236,6 +358,8 @@ pub(crate) struct QueueJob {
     /// Zero until the ioctl tries publication, one for success, or a negative
     /// errno for a failed attempt. The scheduler consumes the recorded result.
     inline_result: i32,
+    /// For a job with a render: the TVB slot init it relies on and whether it reached the firmware.
+    tvb: Option<Arc<TvbJob>>,
     id: u64,
 }
 
@@ -359,6 +483,17 @@ impl sched::JobImpl for QueueJob::ver {
             };
         }
 
+        // A render that relies on a slot init which never reached the firmware would tile with a
+        // stale slot. Fail it before publishing anything; the next submission re-initialises.
+        if job.tvb.as_ref().is_some_and(|tvb| tvb.init_lost()) {
+            cls_pr_debug!(
+                Errors,
+                "QueueJob {}: Cancelled, its TVB slot init never reached the firmware\n",
+                job.id
+            );
+            return Err(ECANCELED);
+        }
+
         mod_dev_dbg!(job.dev, "QueueJob {}: Running Job\n", job.id);
 
         // We can only increase the notifier threshold here, now that we are
@@ -407,10 +542,13 @@ impl sched::JobImpl for QueueJob::ver {
         // above. Deferring the increment to submit solves the race.
         let dev = job.dev.clone();
         let Some(guard) = dev.registration_guard() else {
+            if let Some(tvb) = job.tvb.as_ref() {
+                tvb.note_run_failed();
+            }
             return Err(ENODEV);
         };
 
-        guard.registration_data_with(|reg_data| {
+        let ret = guard.registration_data_with(|reg_data| {
             let gpu = match reg_data
                 .gpu
                 .clone()
@@ -467,7 +605,11 @@ impl sched::JobImpl for QueueJob::ver {
                 raw.increase(job.notification_count);
             });
 
-            // Now we fully commit to running the job
+            // Now we fully commit to running the job. From here on the firmware may see the
+            // job's commands (`run_job()` publishes them before it rings the doorbell).
+            if let Some(tvb) = job.tvb.as_ref() {
+                tvb.published.store(true, Ordering::Release);
+            }
             mod_dev_dbg!(job.dev, "QueueJob {}: Run fragment\n", job.id);
             frag_sub.map(|a| gpu.run_job(a)).transpose()?;
 
@@ -485,7 +627,13 @@ impl sched::JobImpl for QueueJob::ver {
             core::mem::drop(frag_job);
 
             Ok(Some(Fence::from_fence(&job.fence)))
-        })
+        });
+        if ret.is_err() {
+            if let Some(tvb) = job.tvb.as_ref() {
+                tvb.note_run_failed();
+            }
+        }
+        ret
     }
 
     fn timed_out(job: &mut QueueTimeout, _finished: bool) -> sched::Status {
@@ -598,6 +746,16 @@ impl Queue::ver {
             fence_ctx: FenceContexts::new(1, QUEUE_NAME, QUEUE_CLASS_KEY)?,
             stats,
             last_out: None,
+            tvb_users: KVec::new(),
+            tvb_init_pending: false,
+            tvb_shared: Arc::new(
+                TvbShared {
+                    lost_init: AtomicU64::new(0),
+                },
+                GFP_KERNEL,
+            )?,
+            tvb_seq: 0,
+            tvb_init_seq: 0,
             inner: QueueInner::ver {
                 dev: dev.clone(),
                 ualloc,
@@ -727,30 +885,115 @@ fn build_attachments(reader: &mut Reader<'_>, size: usize) -> Result<microseq::A
     Ok(attachments)
 }
 
+/// Status of `fence`: 0 while pending, 1 once signalled without error, a negative errno once
+/// signalled with an error.
+fn fence_status(fence: &Fence) -> i32 {
+    // SAFETY: `fence` owns a live dma_fence reference for the duration of the call.
+    unsafe { kernel::bindings::dma_fence_get_status(fence.raw()) }
+}
+
+/// Waits for `fence` to signal. Returns `Ok(false)` if `timeout` (in jiffies) ran out first, and
+/// `ERESTARTSYS` if `interruptible` and a signal arrived.
+fn wait_fence(fence: &Fence, interruptible: bool, timeout: kernel::ffi::c_long) -> Result<bool> {
+    // SAFETY: `fence` holds a reference for the duration of the call. The callers hold no lock
+    // that its completion needs.
+    let ret = unsafe { kernel::bindings::dma_fence_wait_timeout(fence.raw(), interruptible, timeout) };
+    if ret < 0 {
+        Err(Error::from_errno(ret as i32))
+    } else {
+        Ok(ret > 0)
+    }
+}
+
 #[versions(AGX)]
 impl Queue::ver {
+    /// Add a barrier to `queue_job` that waits for `event`.
+    fn add_explicit_barrier(
+        dev: &AsahiDevRef,
+        gpu: &gpu::GpuManager::ver,
+        queue_job: &mut workqueue::Job::ver,
+        event: &workqueue::QueueEventInfo::ver,
+        vm_slot: u32,
+        id: u64,
+    ) -> Result {
+        let mut alloc = gpu.alloc();
+        mod_dev_dbg!(dev, "[Submission {}] Create Explicit Barrier\n", id);
+        let barrier = alloc.private.new_init(
+            pin_init::zeroed::<fw::workqueue::Barrier>(),
+            |_inner, _p| {
+                let queue_job = &*queue_job;
+                try_init!(fw::workqueue::raw::Barrier {
+                    tag: fw::workqueue::CommandType::Barrier,
+                    wait_stamp: event.fw_stamp_pointer,
+                    wait_value: event.value,
+                    wait_slot: event.slot,
+                    stamp_self: queue_job.event_info().value.next(),
+                    uuid: 0xffffbbbb,
+                    external_barrier: 0,
+                    internal_barrier_type: 1,
+                    padding: Default::default(),
+                })
+            },
+        )?;
+        mod_dev_dbg!(dev, "[Submission {}] Add Explicit Barrier\n", id);
+        queue_job.add(barrier, vm_slot)
+    }
+
     /// Waits, for at most [`QUEUE_CLOSE_WAIT_MS`], for the last submitted job to finish. The
     /// jobs of one queue complete in order, so its finished fence covers all of them.
     fn wait_submitted(&self) {
         let Some(fence) = self.last_out.as_ref() else {
             return;
         };
-        // SAFETY: `fence` holds a reference for the duration of the call. No lock is held,
-        // so completion can signal it.
-        let left = unsafe {
-            kernel::bindings::dma_fence_wait_timeout(
-                fence.raw(),
-                false,
-                kernel::time::msecs_to_jiffies(QUEUE_CLOSE_WAIT_MS) as _,
-            )
-        };
-        if left == 0 {
+        let timeout = kernel::time::msecs_to_jiffies(QUEUE_CLOSE_WAIT_MS) as kernel::ffi::c_long;
+        if let Ok(false) = wait_fence(fence, false, timeout) {
             dev_warn!(
                 self.dev.as_ref(),
                 "[Queue {}] Closing with work still running after {} ms\n",
                 self.inner.id,
                 QUEUE_CLOSE_WAIT_MS
             );
+        }
+    }
+
+    /// Drops the entries of [`Self::tvb_users`] that can no longer be using the TVB buffer (see
+    /// [`prune_tvb_uses`]). Each entry's fence status is read once per call.
+    fn prune_tvb_users(&mut self) {
+        for user in self.tvb_users.iter_mut() {
+            user.seen = TvbUse::from_status(
+                fence_status(&user.fence),
+                user.job.published.load(Ordering::Acquire),
+            );
+        }
+        prune_tvb_uses(&mut self.tvb_users, |user| user.seen);
+    }
+
+    /// Waits until no earlier submission of this queue can still be using its TVB buffer.
+    ///
+    /// The wait is interruptible and has no time limit of its own: earlier work may legitimately
+    /// run long (or wait on its own in-fences), and the scheduler's timeout covers a hung job. A
+    /// signal returns `ERESTARTSYS`. Nothing of the current submission is published yet when this
+    /// runs, so the ioctl restarts cleanly.
+    ///
+    /// If the newest such submission failed after some of its work reached the firmware, nothing
+    /// will signal when that work retires, so the buffer cannot be proven idle and this returns
+    /// `ECANCELED` (the submission that needs the growth fails, the buffer is left alone).
+    fn wait_tvb_idle(&mut self) -> Result {
+        loop {
+            self.prune_tvb_users();
+            let Some(user) = self.tvb_users.last() else {
+                return Ok(());
+            };
+            if user.seen == TvbUse::FailedPublished {
+                cls_pr_debug!(
+                    Errors,
+                    "submit: TVB cannot grow: render {} failed after reaching the firmware\n",
+                    user.job.seq
+                );
+                return Err(ECANCELED);
+            }
+            let fence = user.fence.clone();
+            wait_fence(&fence, true, kernel::task::MAX_SCHEDULE_TIMEOUT)?;
         }
     }
 }
@@ -794,6 +1037,121 @@ impl Queue for Queue::ver {
             return Err(ENODEV);
         }
 
+        let mut cmdbuf = Reader::new(cmdbuf_raw);
+
+        // First, parse the headers to determine the number of compute/render
+        // commands. This will be used to determine when to flush stamps.
+        //
+        // We also use it to determine how many notifications the job will
+        // generate. We could calculate that in the second pass since we don't
+        // need until much later, but it's convenient to gather everything at
+        // the same time.
+        let mut nr_commands = 0;
+        let mut last_compute = 0;
+        let mut last_render = 0;
+        let mut nr_render = 0;
+        let mut nr_compute = 0;
+        let mut max_tvb_blocks = 0usize;
+
+        while !cmdbuf.is_empty() {
+            let header: uapi::drm_asahi_cmd_header = cmdbuf.read()?;
+            let payload_size = header.size as usize;
+            match u32::from(header.cmd_type) {
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
+                    let render: uapi::drm_asahi_cmd_render = cmdbuf.read_up_to(payload_size)?;
+                    if render
+                        .ts_frag_end_copies
+                        .iter()
+                        .any(|ts| ts.handle != 0 || ts.offset != 0)
+                    {
+                        return Err(EINVAL);
+                    }
+                    max_tvb_blocks = max_tvb_blocks
+                        .max(QueueInner::ver::render_min_tvb_blocks(&gpu, &render)?);
+                }
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
+                    let compute: uapi::drm_asahi_cmd_compute = cmdbuf.read_up_to(payload_size)?;
+                    if compute
+                        .ts_end_copies
+                        .iter()
+                        .any(|ts| ts.handle != 0 || ts.offset != 0)
+                    {
+                        return Err(EINVAL);
+                    }
+                }
+                _ => cmdbuf.skip(payload_size),
+            }
+            nr_commands += 1;
+
+            match u32::from(header.cmd_type) {
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
+                    last_render = nr_commands;
+                    nr_render += 1;
+                }
+                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
+                    last_compute = nr_commands;
+                    nr_compute += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // Validate the number of hardware commands, ignoring software commands
+        let nr_hw_commands = nr_render + nr_compute;
+        if nr_hw_commands == 0 || nr_hw_commands > MAX_COMMANDS_PER_SUBMISSION {
+            cls_pr_debug!(
+                Errors,
+                "submit: Command count {} out of valid range [1, {}]\n",
+                nr_hw_commands,
+                MAX_COMMANDS_PER_SUBMISSION - 1
+            );
+            return Err(EINVAL);
+        }
+
+        // The firmware buffer manager owns a TVB buffer while scenes on it are in flight. Growing
+        // it then (new blocks in its block list plus an InitBuffer of its bound slot) corrupts the
+        // tiling of those scenes: on G13 clustered rendering the tiler writes to VA 0. So size the
+        // buffer for every render of this submission before any of it is published, and only once
+        // no earlier render of this queue (the only other user of the buffer) can still use it.
+        // The size the overflow statistics ask for is folded in, so that growth from them also
+        // happens on a busy queue, with one wait per growth step (3x each).
+        if nr_render > 0 {
+            // The render that carried the newest slot init failed before reaching the firmware,
+            // and the renders after it that rely on that init fail in `run()` too. Nothing on the
+            // firmware uses the slot since then, so this render initialises it again.
+            if init_was_lost(
+                self.tvb_shared.lost_init.load(Ordering::Acquire),
+                self.tvb_init_seq,
+            ) {
+                self.tvb_init_pending = true;
+            }
+            let cur_blocks = self.inner.buffer.block_count() as usize;
+            let stats_blocks = self.inner.buffer.stats_target_blocks();
+            let want_blocks = max_tvb_blocks.max(stats_blocks.unwrap_or(0));
+            if want_blocks > cur_blocks {
+                self.wait_tvb_idle()?;
+                if self.inner.buffer.ensure_blocks_idle(want_blocks)? {
+                    self.tvb_init_pending = true;
+                    if stats_blocks.is_some() {
+                        self.inner.buffer.reset_stats();
+                    }
+                    cls_dev_dbg!(
+                        TVBStats,
+                        &self.dev,
+                        "[Submission {}] TVB grew from {} to {} blocks ({} bytes): dimensions need {}, overflows ask {}\n",
+                        id,
+                        cur_blocks,
+                        want_blocks,
+                        want_blocks * buffer::BLOCK_SIZE,
+                        max_tvb_blocks,
+                        stats_blocks.unwrap_or(0),
+                    );
+                }
+            }
+            // Room for this submission's entry, so that recording it cannot fail once published.
+            self.tvb_users.reserve(1, GFP_KERNEL)?;
+        }
+
         let op_guard = if in_sync_count > 0 {
             Some(gpu.start_op()?)
         } else {
@@ -835,61 +1193,21 @@ impl Queue for Queue::ver {
             )?
             .into();
 
-        let mut cmdbuf = Reader::new(cmdbuf_raw);
-
-        // First, parse the headers to determine the number of compute/render
-        // commands. This will be used to determine when to flush stamps.
-        //
-        // We also use it to determine how many notifications the job will
-        // generate. We could calculate that in the second pass since we don't
-        // need until much later, but it's convenient to gather everything at
-        // the same time.
-        let mut nr_commands = 0;
-        let mut last_compute = 0;
-        let mut last_render = 0;
-        let mut nr_render = 0;
-        let mut nr_compute = 0;
-
-        while !cmdbuf.is_empty() {
-            let header: uapi::drm_asahi_cmd_header = cmdbuf.read()?;
-            let payload_size = header.size as usize;
-            match u32::from(header.cmd_type) {
-                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
-                    let render: uapi::drm_asahi_cmd_render = cmdbuf.read_up_to(payload_size)?;
-                    if render
-                        .ts_frag_end_copies
-                        .iter()
-                        .any(|ts| ts.handle != 0 || ts.offset != 0)
-                    {
-                        return Err(EINVAL);
-                    }
-                }
-                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
-                    let compute: uapi::drm_asahi_cmd_compute = cmdbuf.read_up_to(payload_size)?;
-                    if compute
-                        .ts_end_copies
-                        .iter()
-                        .any(|ts| ts.handle != 0 || ts.offset != 0)
-                    {
-                        return Err(EINVAL);
-                    }
-                }
-                _ => cmdbuf.skip(payload_size),
-            }
-            nr_commands += 1;
-
-            match u32::from(header.cmd_type) {
-                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => {
-                    last_render = nr_commands;
-                    nr_render += 1;
-                }
-                uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => {
-                    last_compute = nr_commands;
-                    nr_compute += 1;
-                }
-                _ => {}
-            }
-        }
+        let mut init_slot = self.tvb_init_pending;
+        let tvb = if nr_render > 0 {
+            let seq = self.tvb_seq + 1;
+            Some(Arc::new(
+                TvbJob {
+                    shared: self.tvb_shared.clone(),
+                    seq,
+                    init_seq: if init_slot { seq } else { self.tvb_init_seq },
+                    published: AtomicBool::new(false),
+                },
+                GFP_KERNEL,
+            )?)
+        } else {
+            None
+        };
 
         let mut job = self.entity.new_job(
             1,
@@ -920,6 +1238,8 @@ impl Queue for Queue::ver {
 
                 inline_result: 0,
 
+                tvb: tvb.clone(),
+
                 id,
             },
         )?;
@@ -941,18 +1261,6 @@ impl Queue for Queue::ver {
             }
         }
 
-        // Validate the number of hardware commands, ignoring software commands
-        let nr_hw_commands = nr_render + nr_compute;
-        if nr_hw_commands == 0 || nr_hw_commands > MAX_COMMANDS_PER_SUBMISSION {
-            cls_pr_debug!(
-                Errors,
-                "submit: Command count {} out of valid range [1, {}]\n",
-                nr_hw_commands,
-                MAX_COMMANDS_PER_SUBMISSION - 1
-            );
-            return Err(EINVAL);
-        }
-
         cmdbuf.rewind();
 
         let mut command_index = 0;
@@ -968,6 +1276,15 @@ impl Queue for Queue::ver {
             // Pre-increment command index to match last_compute/last_render
             command_index += 1;
 
+            // A render's wait for earlier renders is added once its flags are
+            // known: without DRM_ASAHI_RENDER_FRAGMENT_BARRIERS it goes on the
+            // vertex queue; with it no barrier is added, since the wait names
+            // only earlier fragment work, which the fragment queue already runs
+            // first, so the vertex half can run beside it. Each fragment half
+            // still waits for its own vertex half.
+            let is_render =
+                u32::from(header.cmd_type) == uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER;
+            let mut render_wait = None;
             for (queue_idx, index) in [header.vdm_barrier, header.cdm_barrier].iter().enumerate() {
                 if *index == uapi::DRM_ASAHI_BARRIER_NONE as u16 {
                     continue;
@@ -976,32 +1293,16 @@ impl Queue for Queue::ver {
                     cls_pr_debug!(Errors, "Invalid barrier #{}: {}\n", queue_idx, index);
                     EINVAL
                 })? {
-                    let mut alloc = gpu.alloc();
+                    if is_render && queue_idx == SQ_RENDER {
+                        render_wait = Some(*event);
+                        continue;
+                    }
                     let queue_job = match u32::from(header.cmd_type) {
                         uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_RENDER => job.get_vtx()?,
                         uapi::drm_asahi_cmd_type_DRM_ASAHI_CMD_COMPUTE => job.get_comp()?,
                         _ => return Err(EINVAL),
                     };
-                    mod_dev_dbg!(self.dev, "[Submission {}] Create Explicit Barrier\n", id);
-                    let barrier = alloc.private.new_init(
-                        pin_init::zeroed::<fw::workqueue::Barrier>(),
-                        |_inner, _p| {
-                            let queue_job = &queue_job;
-                            try_init!(fw::workqueue::raw::Barrier {
-                                tag: fw::workqueue::CommandType::Barrier,
-                                wait_stamp: event.fw_stamp_pointer,
-                                wait_value: event.value,
-                                wait_slot: event.slot,
-                                stamp_self: queue_job.event_info().value.next(),
-                                uuid: 0xffffbbbb,
-                                external_barrier: 0,
-                                internal_barrier_type: 1,
-                                padding: Default::default(),
-                            })
-                        },
-                    )?;
-                    mod_dev_dbg!(self.dev, "[Submission {}] Add Explicit Barrier\n", id);
-                    queue_job.add(barrier, vm_slot)?;
+                    Self::add_explicit_barrier(&self.dev, &gpu, queue_job, event, vm_slot, id)?;
                 } else {
                     assert!(*index == 0);
                 }
@@ -1015,6 +1316,24 @@ impl Queue for Queue::ver {
                             cls_pr_debug!(Errors, "Unsupported render command fields\n")
                         })?;
 
+                    // With FRAGMENT_BARRIERS the wait names only earlier fragment work of
+                    // this queue (index 0 is its last fragment event, later indices are
+                    // renders of this submission), which the fragment workqueue already
+                    // runs first, so no barrier is needed at all.
+                    let fragment_only = render.flags
+                        & uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_FRAGMENT_BARRIERS
+                        != 0;
+                    if let Some(event) = render_wait.take().filter(|_| !fragment_only) {
+                        Self::add_explicit_barrier(
+                            &self.dev,
+                            &gpu,
+                            job.get_vtx()?,
+                            &event,
+                            vm_slot,
+                            id,
+                        )?;
+                    }
+
                     self.inner.submit_render(
                         &gpu,
                         &mut job,
@@ -1024,6 +1343,7 @@ impl Queue for Queue::ver {
                         objects,
                         id,
                         command_index == last_render,
+                        core::mem::take(&mut init_slot),
                     )?;
                     events[SQ_RENDER].push(
                         Some(
@@ -1118,6 +1438,25 @@ impl Queue for Queue::ver {
         );
         job.push();
 
+        if let Some(tvb) = tvb {
+            self.tvb_seq = tvb.seq;
+            if tvb.carries_init() {
+                // The first render of the job carries the slot init.
+                self.tvb_init_pending = false;
+                self.tvb_init_seq = tvb.seq;
+            }
+            self.prune_tvb_users();
+            let user = TvbUser {
+                fence: out_fence.clone(),
+                job: tvb,
+                seen: TvbUse::Pending,
+            };
+            if self.tvb_users.push_within_capacity(user).is_err() {
+                // The space was reserved above and pruning only removes entries.
+                unreachable!("push_within_capacity() failed after reserve()");
+            }
+        }
+
         mod_dev_dbg!(
             self.dev,
             "Queue {}: Adding {} out_syncs\n",
@@ -1139,7 +1478,63 @@ impl Queue for Queue::ver {
 
 #[kunit_tests(asahi_legacy_inline_queue)]
 mod tests {
-    use super::can_submit_inline;
+    use super::{can_submit_inline, init_was_lost, prune_tvb_uses, TvbUse};
+    use kernel::prelude::*;
+
+    use TvbUse::{Done, FailedPublished as FailPub, FailedUnpublished as FailUnpub, Pending};
+
+    fn pruned(uses: &[TvbUse]) -> KVec<TvbUse> {
+        let mut v = KVec::new();
+        for u in uses {
+            v.push(*u, GFP_KERNEL).expect("alloc");
+        }
+        prune_tvb_uses(&mut v, |u| *u);
+        v
+    }
+
+    #[test]
+    fn tvb_use_from_fence_status() {
+        assert_eq!(TvbUse::from_status(0, false), Pending);
+        assert_eq!(TvbUse::from_status(0, true), Pending);
+        assert_eq!(TvbUse::from_status(1, true), Done);
+        assert_eq!(TvbUse::from_status(-125, false), FailUnpub);
+        assert_eq!(TvbUse::from_status(-22, true), FailPub);
+    }
+
+    #[test]
+    fn tvb_clean_completion_proves_older_renders() {
+        assert_eq!(&pruned(&[FailPub, Pending, Done, Pending])[..], &[Pending]);
+        assert!(pruned(&[Pending, Done]).is_empty());
+    }
+
+    #[test]
+    fn tvb_unpublished_failure_drops_only_itself() {
+        assert_eq!(
+            &pruned(&[Pending, FailUnpub, Pending])[..],
+            &[Pending, Pending]
+        );
+        assert!(pruned(&[FailUnpub]).is_empty());
+    }
+
+    #[test]
+    fn tvb_published_failure_stays_until_proven() {
+        // Never dropped on its own, and the newest one stands in for the older ones.
+        assert_eq!(&pruned(&[FailPub])[..], &[FailPub]);
+        assert_eq!(
+            &pruned(&[FailPub, Pending, FailPub, FailUnpub])[..],
+            &[Pending, FailPub]
+        );
+        // A later clean completion proves it done.
+        assert!(pruned(&[FailPub, Done]).is_empty());
+    }
+
+    #[test]
+    fn tvb_lost_init_matches_only_its_carrier() {
+        assert!(!init_was_lost(0, 0));
+        assert!(!init_was_lost(5, 0));
+        assert!(init_was_lost(5, 5));
+        assert!(!init_was_lost(5, 7));
+    }
 
     #[test]
     fn depth_192_only_publishes_the_idle_head_inline() {

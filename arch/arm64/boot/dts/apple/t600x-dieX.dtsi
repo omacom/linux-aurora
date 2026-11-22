@@ -42,6 +42,7 @@
 			<0x2 0x87100000 0x0 0x10000>;
 		reg-names = "code", "sram", "mbox", "ctrl";
 		iommus = <&DIE_NODE(avd_dart) 0>;
+		dma-coherent;
 	};
 
 	DIE_NODE(avd_dart): iommu@287010000 {
@@ -503,6 +504,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1309 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc0_cio)>;
 		};
 
 		DIE_NODE(usb4_0_nhi): nhi@f00000 {
@@ -657,6 +659,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1357 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc1_cio)>;
 		};
 
 		DIE_NODE(usb4_1_nhi): nhi@f00000 {
@@ -811,6 +814,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1405 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc2_cio)>;
 		};
 
 		DIE_NODE(usb4_2_nhi): nhi@f00000 {
@@ -964,6 +968,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1453 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc3_cio)>;
 		};
 
 		DIE_NODE(usb4_3_nhi): nhi@f00000 {

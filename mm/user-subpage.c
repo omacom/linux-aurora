@@ -71,7 +71,7 @@ static_assert(SUBPAGES_PER_FOLIO <= sizeof(u16) * BITS_PER_BYTE);
 
 /*
  * The record is reserved only when this boot may create alternative-granule
- * mms (on arm64, user4k=on). Otherwise page_ext may still exist for other
+ * mms (on arm64, unless booted with user4k=off). Otherwise page_ext may still exist for other
  * users, but mm_subpage_ext_ops has no offset in it and must not be read.
  */
 static bool __init subpage_ext_needed(void)

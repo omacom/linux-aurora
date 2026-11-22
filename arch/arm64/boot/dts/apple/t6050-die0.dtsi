@@ -831,6 +831,7 @@
 		 */
 		aop_als: als {
 			compatible = "apple,t6050-aop-als", "apple,aop-als";
+			firmware-name = "apple/aop-als-cal.bin";
 		};
 
 		/* The firmware's "las" service: the lid angle, as on T6020 and T8112. */

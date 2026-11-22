@@ -1878,7 +1878,7 @@ static int apple_cio_activate_pcie_tunnel_locked(struct apple_cio *acio)
 		return apple_cio_pcie_tunnel_ready_locked(acio);
 	if (!acio->pcie_tunnel_preinitialized)
 		return dev_err_probe(acio->dev, -ENODEV,
-				     "PCIe-C is not initialized by m1n1 or the kernel\n");
+				     "PCIe-C is not initialized by aura or the kernel\n");
 
 	if (acio->pd_list->num_pds < 4 || !acio->pd_list->pd_links[3])
 		return dev_err_probe(acio->dev, -ENODEV,
@@ -2695,7 +2695,8 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	anhi->nhi.ops = &anhi->ops;
 	anhi->nhi.ring_layout = &apple_nhi_ring_layout;
 	anhi->nhi.iobase = anhi->nhi_base;
-	anhi->nhi.quirks = QUIRK_NO_DMA_PORT | QUIRK_NO_USB3_BW_ALLOC;
+	anhi->nhi.quirks = QUIRK_NO_DMA_PORT | QUIRK_NO_USB3_BW_ALLOC |
+			   QUIRK_TMU_HIFI_BI;
 	if (anhi->nhi.host_dp_policy)
 		anhi->nhi.quirks |= QUIRK_HOST_DP_NFC_CREDITS;
 	if (acio->hw->no_host_clx)
@@ -3062,7 +3063,12 @@ static void apple_nhi_complete(struct device *dev)
 
 	apple_nhi_cio_complete(anhi);
 	tb_domain_complete(anhi->tb);
-	apple_dpin_resume_retries(acio);
+	/*
+	 * A dark wake sleeps again at once and lights no display: DP IN admission, paused again by
+	 * the next .prepare, stays paused through the gap and reopens at the final wake.
+	 */
+	if (!pm_dark_wake())
+		apple_dpin_resume_retries(acio);
 
 	guard(mutex)(&acio->pcie_tunnel_lock);
 	acio->pcie_pm_prepared = false;
@@ -4541,7 +4547,7 @@ static int apple_cio_probe(struct platform_device *pdev)
 				acio->pcie_tunnel_np);
 		if (!acio->pcie_tunnel_preinitialized) {
 			dev_info(dev,
-				 "PCIe-C tunnel disabled: not initialized by m1n1 or the kernel\n");
+				 "PCIe-C tunnel disabled: not initialized by aura or the kernel\n");
 		} else {
 			ret = apple_cio_map_pcie_intr2axi(acio);
 			if (ret)

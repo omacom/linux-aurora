@@ -320,6 +320,7 @@ static int macsmc_fan_test_init(struct kunit *test)
 		fan_test_key(&t->fans[i].max, keys[i][2], flt);
 		fan_test_key(&t->fans[i].set, keys[i][3], flt);
 		fan_test_key(&t->fans[i].mode, keys[i][4], ui8);
+		t->fans[i].manual_control = true;
 		t->mode[i] = MACSMC_FAN_MODE_SYSTEM;
 	}
 	t->hwmon.smc = &t->smc;
@@ -328,15 +329,9 @@ static int macsmc_fan_test_init(struct kunit *test)
 	t->hwmon.fan.unlock_key = SMC_KEY(Ftst);
 	mutex_init(&t->hwmon.fan.lock);
 	test->priv = t;
-	fan_control = true;
 	kunit_activate_static_stub(test, apple_smc_read, fan_test_read);
 	kunit_activate_static_stub(test, apple_smc_write, fan_test_write);
 	return 0;
-}
-
-static void macsmc_fan_test_exit(struct kunit *test)
-{
-	fan_control = false;
 }
 
 static void fan_test_released(struct kunit *test, struct macsmc_fan_test *t)
@@ -416,6 +411,18 @@ static void macsmc_fan_test_no_unlock_key(struct kunit *test)
 	struct macsmc_fan_test *t = test->priv;
 
 	t->hwmon.fan.unlock_key = 0;
+	KUNIT_EXPECT_EQ(test, macsmc_hwmon_set_fan(&t->hwmon, 0, 2500), -EOPNOTSUPP);
+	KUNIT_EXPECT_EQ(test, t->writes, 0);
+	KUNIT_EXPECT_EQ(test, t->mode[0], MACSMC_FAN_MODE_SYSTEM);
+	KUNIT_EXPECT_EQ(test, t->hwmon.fan.manual, 0);
+}
+
+/* A fan without apple,fan-manual-control refuses a target, with no SMC write. */
+static void macsmc_fan_test_not_manual(struct kunit *test)
+{
+	struct macsmc_fan_test *t = test->priv;
+
+	t->fans[0].manual_control = false;
 	KUNIT_EXPECT_EQ(test, macsmc_hwmon_set_fan(&t->hwmon, 0, 2500), -EOPNOTSUPP);
 	KUNIT_EXPECT_EQ(test, t->writes, 0);
 	KUNIT_EXPECT_EQ(test, t->mode[0], MACSMC_FAN_MODE_SYSTEM);
@@ -559,6 +566,7 @@ static struct kunit_case macsmc_fan_test_cases[] = {
 	KUNIT_CASE(macsmc_fan_test_target_write_fails),
 	KUNIT_CASE(macsmc_fan_test_two_fans),
 	KUNIT_CASE(macsmc_fan_test_no_unlock_key),
+	KUNIT_CASE(macsmc_fan_test_not_manual),
 	KUNIT_CASE(macsmc_fan_test_legacy),
 	KUNIT_CASE(macsmc_fan_test_legacy_write_only),
 	KUNIT_CASE(macsmc_fan_test_untouched),
@@ -570,7 +578,6 @@ static struct kunit_case macsmc_fan_test_cases[] = {
 static struct kunit_suite macsmc_fan_test_suite = {
 	.name = "macsmc-hwmon-fan",
 	.init = macsmc_fan_test_init,
-	.exit = macsmc_fan_test_exit,
 	.test_cases = macsmc_fan_test_cases,
 };
 kunit_test_suites(&macsmc_hwmon_test_suite, &macsmc_fan_test_suite);

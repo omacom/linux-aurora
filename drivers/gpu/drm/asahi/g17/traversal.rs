@@ -9,9 +9,13 @@
 //!   is admitted and unfinished. The first that waited keeps other clients' further
 //!   ray-traversal commands out until it has finished, which bounds its wait.
 //!
-//! Renders that trace no rays never wait. Only arrivals are ordered: a command already on its
-//! way to the GPU is not recalled. The state is plain data over job handles, so it builds on
-//! the host; the scheduler side is `runtime/traversal.rs`.
+//! The same firmware loses or mixes up mesh output when two clients' renders with mesh shading
+//! run on the GPU together, so the scheduler admits those renders like commands that trace
+//! rays (`runtime/traversal.rs`, `aurora.g17_mesh_exclusion`).
+//!
+//! Other renders never wait. Only arrivals are ordered: a command already on its way to the GPU
+//! is not recalled. The state is plain data over job handles, so it builds on the host; the
+//! scheduler side is `runtime/traversal.rs`.
 
 /// Ray-traversal commands of one client admitted at a time; with more, it waits for one to end.
 const HELD: usize = 16;

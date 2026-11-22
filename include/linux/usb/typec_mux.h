@@ -112,6 +112,14 @@ struct typec_mux_desc {
 	 * it from typec_mux_timeout_transient().
 	 */
 	bool transient_timeouts;
+	/*
+	 * DisplayPort pin D comes beside a USB 3 link this provider already runs
+	 * without that link stopping: the lanes USB 3 runs on stay as they are,
+	 * so the USB role does not have to stop for the change. Only the
+	 * provider that owns the port's lanes may declare it, and its word holds
+	 * for the whole port (typec_mux_dp_joins_usb()).
+	 */
+	bool dp_joins_usb;
 };
 
 #if IS_ENABLED(CONFIG_TYPEC)
@@ -125,6 +133,7 @@ int typec_mux_begin(struct typec_mux *mux, struct typec_mux_state *state);
 int typec_mux_apply(struct typec_mux *mux);
 bool typec_mux_safe_after_role(struct typec_mux *mux);
 bool typec_mux_timeout_transient(struct typec_mux *mux);
+bool typec_mux_dp_joins_usb(struct typec_mux *mux);
 int typec_mux_end(struct typec_mux *mux);
 void typec_mux_abort(struct typec_mux *mux);
 int typec_mux_prepare(struct typec_mux *mux, struct typec_mux_state *state);
@@ -159,6 +168,11 @@ static inline bool typec_mux_safe_after_role(struct typec_mux *mux)
 }
 
 static inline bool typec_mux_timeout_transient(struct typec_mux *mux)
+{
+	return false;
+}
+
+static inline bool typec_mux_dp_joins_usb(struct typec_mux *mux)
 {
 	return false;
 }

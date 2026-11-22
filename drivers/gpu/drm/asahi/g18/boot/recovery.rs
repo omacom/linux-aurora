@@ -382,7 +382,9 @@ impl G18Session {
     /// once a recovery has ended the job it checks only what the firmware
     /// owns, since no stage will complete. `report` is set once per second
     /// of waiting (every 250 ms after a recovery) for progress logging. The
-    /// host watchdog requests a recovery for a job the firmware never flags.
+    /// host watchdog requests a recovery for a job the firmware never flags,
+    /// and so does a refused parameter buffer growth: the tiler that asked
+    /// stays stalled, and only a recovery ends that render.
     /// Timing is wall clock; most jobs retire within a few hundred
     /// microseconds, so polling starts fine and backs off.
     pub(super) fn wait_job<F>(&mut self, label: &str, mut retired: F) -> Result<JobEnd>
@@ -392,6 +394,7 @@ impl G18Session {
         let mut recovery: Option<G18Recovery> = None;
         let mut since = Instant::<Monotonic>::now();
         let mut reported = 0u32;
+        self.growth_refused = false;
         loop {
             if let Some(serviced) = self.poll_faults(label)? {
                 if recovery.is_none() {
@@ -422,6 +425,11 @@ impl G18Session {
                 }
             } else if ms >= JOB_WATCHDOG_MS {
                 dev_err!(self.device(), "G18_JOB_WATCHDOG {} ms={}: requesting recovery\n", label, ms);
+                recovery = Some(self.recover(label, true)?);
+                since = Instant::<Monotonic>::now();
+                reported = 0;
+            } else if core::mem::take(&mut self.growth_refused) {
+                dev_err!(self.device(), "G18_GROW_REFUSED {} ms={}: requesting recovery\n", label, ms);
                 recovery = Some(self.recover(label, true)?);
                 since = Instant::<Monotonic>::now();
                 reported = 0;

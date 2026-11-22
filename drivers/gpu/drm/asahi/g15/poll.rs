@@ -537,6 +537,9 @@ impl Firmware {
     fn stat_retire(&mut self, f: &Flight) {
         let now = now_ns();
         let d = now.wrapping_sub(f.published_ns);
+        let avg = &f.job.vm.prefix_ns;
+        let old = avg.load(Ordering::Relaxed);
+        avg.store(if old == 0 { d } else { old - old / 4 + d / 4 }, Ordering::Relaxed);
         let kind = if f.computes != 0 && f.renders != 0 {
             2
         } else if f.renders != 0 {
@@ -697,11 +700,12 @@ impl Firmware {
         }
         writeln!(
             f,
-            "gaps {} gap_us {} yields {} overlaps {}",
+            "gaps {} gap_us {} yields {} overlaps {} affine {}",
             s.gaps,
             us(s.gap_ns),
             s.yields,
-            s.overlaps
+            s.overlaps,
+            s.affine
         )?;
         writeln!(
             f,

@@ -34,6 +34,26 @@ patternProperties:
           Maximum brightness possible for the LED
         $ref: /schemas/types.yaml#/definitions/uint32
 
+      min-duty-cycle-bp:
+        description:
+          Start of the PWM duty cycle range, in basis points (1/100 of a
+          percent) of the period. Brightness b from 1 to max-brightness gives
+          min-duty-cycle-bp + (max-duty-cycle-bp - min-duty-cycle-bp) * b /
+          max-brightness; brightness 0 is off. Use it for an LED that stays
+          dark below a threshold duty cycle.
+        minimum: 0
+        maximum: 9999
+        default: 0
+
+      max-duty-cycle-bp:
+        description:
+          PWM duty cycle at max-brightness, in basis points of the period.
+          Use it for an LED that must not be driven above a fraction of full
+          duty.
+        minimum: 1
+        maximum: 10000
+        default: 10000
+
       default-brightness:
         description:
           Brightness to be set if LED's default state is on. Used only during

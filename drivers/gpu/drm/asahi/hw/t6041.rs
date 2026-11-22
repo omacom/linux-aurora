@@ -43,7 +43,7 @@ pub(super) const BASE: Config = Config {
         handoff_slot: 0xffff_ffff,
         handoff_unk2: 0,
         native_gpu_permissions: true,
-        narrow_pool_window: true,
+        narrow_pool_window: false,
     },
     region_c: Some(&REGION_C),
     chip: Some(&CHIP),
@@ -141,9 +141,10 @@ const BUILD_25F84: fw::variant::Build = fw::variant::Build {
 
 /// The macOS 26.6.2 boot firmware (iBoot mBoot-18000.161.10) loads the 25G83 build the M4 Pro
 /// runs. iBoot fills part of the loaded TEXT for each Mac, so each admitted image is a
-/// measurement. Three are listed: the 32-core J616C's, which runs with
+/// measurement. Four are listed: the 32-core J616C's, which runs with
 /// [`super::t6041_25g83::CONFIG`], and the 40-core J614C's and J575C's, which run with
-/// [`CONFIG_25G83`]. The J575C's is measured with its boot-filled ranges zeroed.
+/// [`CONFIG_25G83`]. The J575C's is measured with its boot-filled ranges zeroed, as is the
+/// J614C's under system firmware 27.2, whose iBoot fills the same ranges.
 pub(super) const BUILD_25G83: fw::variant::Build = fw::variant::Build {
     os_version: [26, 6, 2],
     name: "macOS 26.6.2 (25G83, iBoot mBoot-18000.161.10)",
@@ -185,6 +186,20 @@ pub(super) const BUILD_25G83: fw::variant::Build = fw::variant::Build {
                 0x9f, 0x23, 0xd1, 0x88, 0x92, 0xd4, 0x82, 0x81, 0x78, 0xa4, 0x98, 0xb6, 0x7a, 0x14,
                 0xe3, 0xe6, 0xa8, 0x36, 0x7c, 0xc4, 0x6a, 0x6b, 0x13, 0xae, 0x91, 0x02, 0xa4, 0x72,
                 0x74, 0x0a, 0x3c, 0xcd,
+            ],
+        },
+        crate::fwid::FirmwareBuild {
+            name: "Apple GFX 25G83 for T6041 (normalized loaded image, 40-core J614C, iBoot 27.2)",
+            text_size: 0x60000,
+            data_size: 0x138000,
+            entropy: &[[0x59839, 0x5991c]],
+            // Under system firmware 27.2 (mBoot-20457.41.3) iBoot fills the J614C's header load
+            // field and SLID record block as it does on the J575C, so they are zeroed the same way.
+            boot_filled: &[(0x224, 4), (0x59839, 0x231)],
+            text_sha256: [
+                0x1b, 0x54, 0x21, 0x51, 0x66, 0x75, 0x20, 0x5e, 0x0d, 0x90, 0x25, 0xd5, 0x5a, 0xf8,
+                0x91, 0x10, 0xe1, 0xaf, 0xdf, 0x89, 0xda, 0xdb, 0x09, 0xf4, 0x81, 0xc6, 0x3d, 0x36,
+                0x15, 0xa5, 0x2c, 0x7d,
             ],
         },
     ],

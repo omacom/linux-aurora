@@ -83,6 +83,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1314 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&ps_atc0_cio>;
 		};
 
 		usb4_0_nhi: nhi@f00000 {
@@ -199,6 +200,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1376 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&ps_atc1_cio>;
 		};
 
 		usb4_1_nhi: nhi@f00000 {
@@ -294,6 +296,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1268 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&ps_atc0_cio_pcie>;
 			/* The port's own writes, MSIs included, use these streams. */
 			apple,bypass-sids = <253 255>;
 			/* No bootloader fills this one; the tunnel's cold init needs it. */
@@ -384,6 +387,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 1330 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&ps_atc1_cio_pcie>;
 			/* The port's own writes, MSIs included, use these streams. */
 			apple,bypass-sids = <253 255>;
 			/* No bootloader fills this one; the tunnel's cold init needs it. */

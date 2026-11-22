@@ -1288,7 +1288,7 @@ impl TaDescriptor {
         self.sampler_count = pass.sampler_count;
         self.sampler_max = sampler_max;
         // Asks the firmware to grow the heap. macOS keeps that for memoryless passes, which can't
-        // partial-render, and Honeykrisp has none. 26A428 keeps it: untested there.
+        // partial-render, and Borealis has none. 26A428 keeps it: untested there.
         self.unk_892 = u32::from(args.programs != RegisterPrograms::V25G83);
         self.stamp_va = args.ta.stamp_va;
         self.aux_stamp_va = args.ta.aux_stamp_va;

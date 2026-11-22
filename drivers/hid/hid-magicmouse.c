@@ -175,6 +175,7 @@ MODULE_PARM_DESC(haptic_pulse_gap_ms, "milliseconds between pulses when more tha
 #define SPI_REPORT_ID      0x02
 #define SPI_RESET_REPORT_ID 0x60
 #define MTP_REPORT_ID      0x75
+#define MTP_V2_REPORT_ID   0x5a
 /* HID product of the MTP trackpad that sends Trackpad26 frames (K116s) */
 #define MTP_TP26_PRODUCT_ID 0x0362
 #define SENSOR_DIMENSIONS_REPORT_ID 0xd9
@@ -1359,6 +1360,119 @@ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
 	return 1;
 }
 
+/*
+ * The K114c MTP firmware (personality K2C1) sends report 0x5a. Its contact
+ * section sits at a fixed offset and holds 48-byte records of IEEE 754
+ * floats, in micrometres. All offsets are bytes from the report id.
+ *
+ *   48       section tag, 0x02
+ *   49       section header size (8)
+ *   50       contact record size (48)
+ *   51       section payload size, header + count * record size
+ *   53       number of contact records
+ *   59       bit 4: physical button
+ *   52       section header, 8 bytes, then count records of 48 bytes:
+ *   record n:
+ *     +1       tracking id, rolling
+ *     +2       phase: 1 start, 2-3 approach, 4 touching, 5-7 lifting, 0 gone
+ *     +5       float x, y; velocity x, y; major, minor axis; three unnamed
+ *              floats; force
+ */
+#define MTP_V2_SECTION		48
+#define MTP_V2_SECTION_TAG	0x02
+#define MTP_V2_COUNT		53
+#define MTP_V2_BUTTONS		59
+#define MTP_V2_BUTTON_MASK	0x10
+#define MTP_V2_PAYLOAD		52
+#define MTP_V2_RECORD_SIZE	48
+#define MTP_V2_PHASE_TOUCH	3
+#define MTP_V2_PHASE_LEAVE	5
+
+enum { MTP_V2_X = 5, MTP_V2_Y = 9, MTP_V2_MAJOR = 21, MTP_V2_MINOR = 25, MTP_V2_FORCE = 41 };
+
+/* Integer part of an IEEE 754 single, without touching the FPU. */
+static int magicmouse_f32_to_int(const u8 *p)
+{
+	u32 bits = get_unaligned_le32(p);
+	int exp = (int)((bits >> 23) & 0xff) - 127;
+	u32 mant = (bits & 0x7fffff) | 0x800000;
+	u32 v;
+
+	if (exp < 0 || exp > 30)
+		return 0;
+	v = exp >= 23 ? mant << (exp - 23) : mant >> (23 - exp);
+	return (bits >> 31) ? -(int)v : (int)v;
+}
+
+static int magicmouse_raw_event_mtp_v2(struct hid_device *hdev, u8 *data, int size)
+{
+	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
+	struct input_dev *input = msc->input;
+	int count, i, n = 0;
+	int major[MAX_CONTACTS], minor[MAX_CONTACTS], force[MAX_CONTACTS];
+	u32 pressure = 0;
+
+	/* The button byte is the last fixed field before the records. */
+	if (size <= MTP_V2_BUTTONS || data[MTP_V2_SECTION] != MTP_V2_SECTION_TAG ||
+	    data[MTP_V2_SECTION + 2] < MTP_V2_FORCE + 4)
+		return 0;
+
+	count = data[MTP_V2_COUNT];
+	if (count > MAX_CONTACTS ||
+	    data[MTP_V2_SECTION + 3] !=
+	    data[MTP_V2_SECTION + 1] + count * data[MTP_V2_SECTION + 2] ||
+	    size < MTP_V2_SECTION + 4 + data[MTP_V2_SECTION + 3])
+		return 0;
+
+	for (i = 0; i < count; i++) {
+		const u8 *rec = data + MTP_V2_PAYLOAD + data[MTP_V2_SECTION + 1] +
+				    i * data[MTP_V2_SECTION + 2];
+
+		if (rec[2] < MTP_V2_PHASE_TOUCH || rec[2] >= MTP_V2_PHASE_LEAVE)
+			continue;
+
+		/* Micrometres to the hundredths of a millimetre of the J314 ranges. */
+		msc->pos[n].x = magicmouse_f32_to_int(rec + MTP_V2_X) / 10;
+		msc->pos[n].y = -magicmouse_f32_to_int(rec + MTP_V2_Y) / 10;
+		major[n] = magicmouse_f32_to_int(rec + MTP_V2_MAJOR) / 10;
+		minor[n] = magicmouse_f32_to_int(rec + MTP_V2_MINOR) / 10;
+		force[n] = magicmouse_f32_to_int(rec + MTP_V2_FORCE);
+		n++;
+	}
+
+	input_mt_assign_slots(input, msc->tracking_ids, msc->pos, n, 0);
+
+	for (i = 0; i < n; i++) {
+		input_mt_slot(input, msc->tracking_ids[i]);
+		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
+		input_report_abs(input, ABS_MT_TOUCH_MAJOR, major[i]);
+		input_report_abs(input, ABS_MT_TOUCH_MINOR, minor[i]);
+		input_report_abs(input, ABS_MT_PRESSURE, force[i]);
+		input_report_abs(input, ABS_MT_POSITION_X, msc->pos[i].x);
+		input_report_abs(input, ABS_MT_POSITION_Y, msc->pos[i].y);
+		pressure += force[i];
+	}
+
+	input_mt_sync_frame(input);
+	input_report_key(input, BTN_MOUSE,
+			 magicmouse_haptic_click(msc, pressure,
+						 data[MTP_V2_BUTTONS] & MTP_V2_BUTTON_MASK));
+	input_sync(input);
+	return 1;
+}
+
+static int magicmouse_raw_event_dockchannel(struct hid_device *hdev,
+		struct hid_report *report, u8 *data, int size)
+{
+	struct magicmouse_sc *msc = hid_get_drvdata(hdev);
+
+	/* A Trackpad26 frame also starts with 0x5a; magicmouse_raw_event_mtp() takes it. */
+	if (!msc->mtp_tp26 && size && data[0] == MTP_V2_REPORT_ID)
+		return magicmouse_raw_event_mtp_v2(hdev, data, size);
+
+	return magicmouse_raw_event_mtp(hdev, report, data, size);
+}
+
 static int magicmouse_raw_event_spi(struct hid_device *hdev,
 		struct hid_report *report, u8 *data, int size)
 {
@@ -1754,6 +1868,17 @@ static int magicmouse_input_mapping(struct hid_device *hdev,
 
 	if (!msc->input)
 		msc->input = hi->input;
+
+	/*
+	 * The dockchannel MTP descriptors (K114c and later) open with a GD
+	 * Mouse collection. raw_event() drives the pad, and libinput refuses
+	 * a mouse and multi-touch hybrid, so drop the Mouse usages. The
+	 * keyboard interface is a GD Keyboard, and kiwi never gets here
+	 * (type guard in magicmouse_probe()).
+	 */
+	if (hdev->bus == BUS_HOST && !strncmp(hdev->name, "Apple MTP", 9) &&
+	    field->application == HID_GD_MOUSE)
+		return -1;
 
 	/* Magic Trackpad does not give relative data after switching to MT */
 	if ((hi->input->id.product == USB_DEVICE_ID_APPLE_MAGICTRACKPAD ||
@@ -2769,7 +2894,7 @@ static int magicmouse_probe(struct hid_device *hdev,
 		msc->mtp_tp26 = !msc->mtp_c1fe &&
 				hdev->product == MTP_TP26_PRODUCT_ID;
 
-		msc->input_ops.raw_event = magicmouse_raw_event_mtp;
+		msc->input_ops.raw_event = magicmouse_raw_event_dockchannel;
 		msc->input_ops.setup_input = magicmouse_setup_input_mtp;
 	} else if (id->bus == BUS_SPI) {
 		msc->input_ops.raw_event = magicmouse_raw_event_spi;
@@ -2865,9 +2990,15 @@ static int magicmouse_probe(struct hid_device *hdev,
 			 */
 			if (msc->mtp_tp26)
 				report = hdev->report_enum[HID_INPUT_REPORT].report_id_hash[0];
-			else
+			else {
 				report = hid_register_report(hdev, HID_INPUT_REPORT,
 							     MTP_REPORT_ID, 0);
+				if (report) {
+					report->size = 6;
+					report = hid_register_report(hdev, HID_INPUT_REPORT,
+								     MTP_V2_REPORT_ID, 0);
+				}
+			}
 			break;
 		case BUS_SPI:
 			report = hid_register_report(hdev, HID_INPUT_REPORT, SPI_REPORT_ID, 0);

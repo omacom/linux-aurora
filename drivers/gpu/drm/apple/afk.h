@@ -241,6 +241,23 @@ static inline void afk_service_retire(struct apple_epic_service *service)
 	spin_unlock_irqrestore(&service->lock, flags);
 }
 
+/*
+ * Retire @service only if it still serves @channel; a singleton slot reused
+ * in place for a later announcement keeps its new channel enabled.
+ */
+static inline void afk_service_retire_channel(struct apple_epic_service *service,
+					      u32 channel)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&service->lock, flags);
+	if (service->channel == channel) {
+		service->enabled = false;
+		service->torndown = true;
+	}
+	spin_unlock_irqrestore(&service->lock, flags);
+}
+
 static inline bool afk_service_matches(struct apple_epic_service *service,
 				       u32 channel)
 {
@@ -595,6 +612,7 @@ static inline void afk_ep_init_state(struct apple_dcp_afkep *ep)
 
 struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
 				 const struct apple_epic_service_ops *ops);
+bool afk_compact_av_capable(struct apple_dcp *dcp);
 int afk_v2_copy_owned(struct apple_epic_service *service, u64 dva,
 		      void *buffer, size_t size, bool to_peer);
 int afk_start(struct apple_dcp_afkep *ep);

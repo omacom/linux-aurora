@@ -314,7 +314,7 @@ impl job::Backend for Backend {
         self.finish_publication(&packet, result, &mut deferred)
     }
 
-    fn timed_out(&self, packet: Arc<Packet>) -> sched::Status {
+    fn timed_out(&self, packet: Arc<Packet>, again: bool) -> sched::Status {
         // A packet still in publication, for example waiting for capacity or
         // for its render pair's graph, has nothing visible to firmware and may
         // not even have an installed pair. Its publisher owns its bounded wait
@@ -325,7 +325,7 @@ impl job::Backend for Backend {
             return sched::Status::NoHang;
         }
         self.release_backlog(&packet);
-        if self.shared.watchdog_timeout() { return sched::Status::NoHang; }
+        if self.shared.watchdog_timeout(again) { return sched::Status::NoHang; }
         let result = match packet.engine() {
             Engine::Compute => self.timeout_compute(&packet),
             Engine::Render => self.timeout_render(&packet),

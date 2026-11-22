@@ -99,10 +99,13 @@ static int apple_smc_write_u64(struct apple_smc *smc, smc_key key, u64 value)
     # Compile the actual probe assignments, so the test also checks board selection.
     assignments = re.search(r"\tsmcgp->j713 = [^;]+;\n\tmutex_init\([^;]+;", source).group()
     parts += [r'''
-/* No board, then every M4 Mac with the Airs' radio port. */
+/*
+ * No board, then every M4 Mac with the Airs' radio port, then the J716s,
+ * whose N1 power line is the same gP13 template.
+ */
 static const char *const boards[] = {
     NULL, "apple,j713", "apple,j715", "apple,j604", "apple,j623", "apple,j624",
-    "apple,j773g",
+    "apple,j773g", "apple,j716s",
 };
 #define NUM_BOARDS (sizeof(boards) / sizeof(*boards))
 static unsigned int board;

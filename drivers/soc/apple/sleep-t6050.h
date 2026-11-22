@@ -71,6 +71,12 @@ struct t6050_ops {
 	unsigned int n;
 };
 
+/* An SPMI controller's peripheral sources: eight words of 32 */
+#define T6050_SPMI_SRC_WORDS	8
+/* apple,spmi-buses (spmi_bus[]), and with nub-spmi0 */
+#define T6050_SPMI_BUSES	7
+#define T6050_SPMI_CTRLS	(1 + T6050_SPMI_BUSES)
+
 struct apple_sleep_region_state {
 	void __iomem *base[T6050_REGIONS];
 	struct resource resource[T6050_REGIONS];
@@ -126,7 +132,7 @@ struct apple_sleep_region_state {
 	/* Each display child's word as it read before the stop lowered it */
 	u32 disp_child_saved[5][16];
 	u32 mcc_cycle[2][10];
-	void __iomem *spmi_bus[7];
+	void __iomem *spmi_bus[T6050_SPMI_BUSES];
 	/* nub-spmi0's controller: its driver's lock is held through a returning PMU exchange */
 	struct device *pmu_bus;
 	void __iomem *aon_clk[2];
@@ -175,9 +181,23 @@ struct apple_sleep_region_state {
 	u32 wake_status[11];
 	bool wake_status_valid;
 	bool wake_armed, wake_sources;
-	u32 spmi_mask[8];
+	u32 spmi_mask[T6050_SPMI_CTRLS];
 	bool spmi_masked;
 	bool spmi_post_timer;
+	/*
+	 * nub-spmi0's and each of apple,spmi-buses's peripheral sources as the last acknowledgement
+	 * found them (t6050_spmi_src_ack): latched, enabled, and those it acknowledged
+	 */
+	u32 spmi_src_latched[T6050_SPMI_CTRLS][T6050_SPMI_SRC_WORDS];
+	u32 spmi_src_enabled[T6050_SPMI_CTRLS][T6050_SPMI_SRC_WORDS];
+	u32 spmi_src_acked[T6050_SPMI_CTRLS][T6050_SPMI_SRC_WORDS];
+	bool spmi_src_valid;
+	/* This wake's status words are read and not yet in its events (t6050_wake_events_report) */
+	bool wake_status_fresh;
+	/* After a wake, the PMU's steps wait for the SMC's (t6050_sleep_pmu_wake) */
+	bool pmu_wake_pending;
+	u8 pmu_wake_rtc_ctl;
+	int pmu_wake_rtc_ret;
 	/* Each cluster's cores that reached their last WFI (t6050_cpu_down()) */
 	atomic_t cpus_down[3];
 	/*
@@ -623,8 +643,9 @@ static int t6050_sleep_check_alarm(struct apple_sleep *s)
 	ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_CTL, NULL, &control, 1);
 	if (!ret)
 		ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_MASK, NULL, &mask, 1);
+	/* No armed alarm is no refusal: the SMC's wake sources (lid, keys) do not need it */
 	if (!ret && (!(control & T6050_RTC_CTL_ARMED) || (mask & BIT(0))))
-		ret = -EBUSY;
+		return 0;
 	if (!ret)
 		ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_COMPARE, NULL,
 					   r->alarm_compare, 4);
@@ -1673,6 +1694,9 @@ static int t6050_sleep_begin(struct apple_sleep *s)
 	r->early_dropped = false;
 	r->venc0_lowered = false;
 	r->wake_status_valid = false;
+	r->wake_status_fresh = false;
+	r->spmi_src_valid = false;
+	r->pmu_wake_pending = false;
 	r->pmc_saved = false;
 	r->floor_changed = 0;
 	r->display_lowered = 0;
@@ -2215,14 +2239,7 @@ static void t6050_late_lower(struct apple_sleep *s, unsigned int i)
  * through the suspend. Here it goes down as on macOS: the children first, AUSS last, each only
  * if on, and polled off. After a sleep the snapshot's replay raises them again, parent first;
  * after a refusal t6050_auss_restore() does.
- *
- * t6050_auss_off=0 leaves them as they are, which was the behaviour before.
  */
-static bool t6050_auss_off = true;
-module_param(t6050_auss_off, bool, 0644);
-MODULE_PARM_DESC(t6050_auss_off,
-		 "T6050: lower AUSS and the routers' CIO_AUSS words at the sleep's entry, as macOS has them (0: leave them)");
-
 static const u32 t6050_auss_words[] = {
 	SLEEP_REGION_WORD(T6050_PS0, 0x348),	/* ATC0_CIO_AUSS */
 	SLEEP_REGION_WORD(T6050_PS0, 0x360),	/* ATC1_CIO_AUSS */
@@ -2244,7 +2261,7 @@ static void t6050_auss_lower(struct apple_sleep *s)
 		u32 word = t6050_auss_words[i];
 
 		r->auss_saved[i] = readl(sleep_region_reg(s, word));
-		if (!t6050_auss_off || !t6050_late_word_on(s, word))
+		if (!t6050_late_word_on(s, word))
 			continue;
 		sleep_ps_lower(s, word);
 		r->auss_lowered |= BIT(i);
@@ -2343,34 +2360,64 @@ static int t6050_sleep_entry_lower(struct apple_sleep *s)
 		 r->late_lowered, r->late_timeouts, r->state4_set);
 	/* AUSS as the sleep's last steps find it: the engine wants it off. */
 	i = ARRAY_SIZE(t6050_auss_words) - 1;
-	dev_info(s->dev, "entry: AUSS %#x -> %#x, lowered %#x (%u timed out)%s\n",
+	dev_info(s->dev, "entry: AUSS %#x -> %#x, lowered %#x (%u timed out)\n",
 		 r->auss_saved[i], readl(sleep_region_reg(s, t6050_auss_words[i])),
-		 r->auss_lowered, r->auss_timeouts,
-		 t6050_auss_off ? "" : ", t6050_auss_off=0");
+		 r->auss_lowered, r->auss_timeouts);
 	return 0;
 }
 
 /*
- * nub-spmi0 latches each interrupt the PMU sends (its alarm's among them) in a peripheral status
- * word, and a latched source that is enabled holds the controller's interrupt output up: an AP
- * wake source, which the sleep keeps armed. No driver takes the PMU's interrupts on this
- * controller, so nothing acknowledged them: after the first alarm, each later sleep woke right
- * after its commit. The DT names the PMU's sources. They are acknowledged at each wake, before
- * the run-time mask is back, as macOS does; and before the sleep's masks, for one latched while
- * the system ran (an alarm that fired after an earlier wake). An event after that wakes the
- * sleep, as it should. Returns the word as found, before the acknowledgement.
+ * Each SPMI controller latches the interrupts its peripherals send, one bit a source, in eight
+ * peripheral status words at +0x600 (write 1 to clear); its enables at +0x400 pick the sources
+ * that raise its interrupt output. A latched source that is enabled holds the output up, and
+ * nub-spmi0's outputs are AP wake sources, which the sleep keeps armed: before nub-spmi0's PMU
+ * sources (the DT's) were acknowledged, each sleep after the first alarm woke right after its
+ * commit.
+ *
+ * macOS's handler takes a controller's latched and enabled sources as they come, so none is
+ * pending at the sleep's entry. At the wake it runs first, 57 ms in, before the SMC hears that
+ * the AP is on: it reads the eight words, acknowledges each enabled source that is set, masks it
+ * until its driver has seen it, and names it in the wake's events. In the macOS-HV traces
+ * mxt4, dk1 and dk2, those are nub-spmi0's 0x02 (the PMU's), nub-spmi-a1's 0x0b, and in dk1
+ * also nub-spmi-a0's 0x3f (dk1's pmset log: "NUB.SPMI0Sw3IRQ nub-spmi-a0.0x3F nub-spmi0.0x02
+ * nub-spmi-a1.0x0B rtc"). A latched source that isn't enabled stays set: nub-spmi-a0's +0x600
+ * reads 0x12051c00 through every macOS sleep.
+ *
+ * Linux takes no SPMI interrupt, and acknowledged only nub-spmi0's PMU sources. Do to the
+ * controllers what macOS's handler does: at the entry, before the sleep's masks, and at the
+ * wake, before the run-time masks are back, acknowledge each latched source that is enabled
+ * (and on nub-spmi0 the DT's PMU sources) on nub-spmi0 and each of apple,spmi-buses. The
+ * enables are left as they are. What the wake found is kept for its events. An event after the
+ * entry's acknowledgement wakes the sleep, as it should.
  */
-static u32 t6050_spmi_pmu_ack(struct apple_sleep *s)
+#define T6050_SPMI_SRC_EN	0x400
+
+static void t6050_spmi_src_ack(struct apple_sleep *s)
 {
 	struct apple_sleep_region_state *r = s->region;
-	u32 status;
+	unsigned int b, i, pmu_word = (r->spmi_pmu_status - M5_SPMI_SRC_STATUS) / 4;
+	void __iomem *bus;
+	u32 ack;
 
-	if (!r->spmi_pmu_bits)
-		return 0;
-	status = readl(s->spmi + r->spmi_pmu_status);
-	if (status & r->spmi_pmu_bits)
-		writel(status & r->spmi_pmu_bits, s->spmi + r->spmi_pmu_status);
-	return status;
+	BUILD_BUG_ON(ARRAY_SIZE(r->spmi_src_acked) != 1 + ARRAY_SIZE(r->spmi_bus));
+	for (b = 0; b < ARRAY_SIZE(r->spmi_src_acked); b++) {
+		bus = b ? r->spmi_bus[b - 1] : s->spmi;
+		for (i = 0; i < T6050_SPMI_SRC_WORDS; i++) {
+			r->spmi_src_latched[b][i] = 0;
+			r->spmi_src_enabled[b][i] = 0;
+			if (bus) {
+				r->spmi_src_latched[b][i] = readl(bus + M5_SPMI_SRC_STATUS + 4 * i);
+				r->spmi_src_enabled[b][i] = readl(bus + T6050_SPMI_SRC_EN + 4 * i);
+			}
+			ack = r->spmi_src_latched[b][i] & r->spmi_src_enabled[b][i];
+			if (!b && r->spmi_pmu_bits && i == pmu_word)
+				ack |= r->spmi_src_latched[b][i] & r->spmi_pmu_bits;
+			r->spmi_src_acked[b][i] = ack;
+			if (ack)
+				writel(ack, bus + M5_SPMI_SRC_STATUS + 4 * i);
+		}
+	}
+	r->spmi_src_valid = true;
 }
 
 /*
@@ -2410,8 +2457,10 @@ static void t6050_sleep_after_ans(struct apple_sleep *s)
 	for (i = T6050_LATE_I2C3; i <= T6050_LATE_I2C6; i++)
 		t6050_late_lower(s, i);
 	r->spmi_mask[0] = readl(s->spmi + M5_SPMI_IRQ_EN);
-	/* nub-spmi0 first: its interrupt outputs are AP wake sources. */
-	t6050_spmi_pmu_ack(s);
+	/* Every controller's pending sources, as macOS's handler leaves them for the sleep */
+	t6050_spmi_src_ack(s);
+	r->spmi_src_valid = false;
+	/* nub-spmi0's mask first: its interrupt outputs are AP wake sources. */
 	writel(readl(s->spmi + M5_SPMI_IRQ_STATUS), s->spmi + M5_SPMI_IRQ_STATUS);
 	writel(s->soc->spmi_notify_sleep, s->spmi + M5_SPMI_IRQ_EN);
 	for (i = 0; i < r->nspmi_order; i++) {
@@ -2750,6 +2799,9 @@ static int t6050_sleep_final_check(struct apple_sleep *s)
 	ret = t6050_sleep_check_alarm(s);
 	if (ret)
 		return ret;
+	/* No alarm armed: nothing to hold against the sleep timer */
+	if (!r->alarm_valid)
+		return 0;
 	ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_COUNTER, NULL, ticks, 6);
 	if (ret)
 		return ret;
@@ -3570,6 +3622,7 @@ static void t6050_wake_source_read(struct apple_sleep *s)
 		r->wake_status[i] = readl(r->wake + T6050_WAKE_STATUS + 4 * i);
 	r->wake_status[T6050_WAKE_WORDS] = readl(r->wake_gfx + T6050_WAKE_STATUS_GFX);
 	r->wake_status_valid = true;
+	r->wake_status_fresh = true;
 }
 
 /* Raw latched status, not exclusive attribution or proof that a source was enabled. */
@@ -3601,6 +3654,123 @@ static void t6050_wake_source_report(struct apple_sleep *s)
 			dev_info(s->dev, "wake status set: GFX %u\n", b);
 }
 
+/* Only the SMC's lines are latched: its own wake, whatever else was armed. */
+static bool t6050_smc_woke_alone(struct apple_sleep *s)
+{
+	struct apple_sleep_region_state *r = s->region;
+	u32 smc[T6050_WAKE_WORDS] = {};
+	unsigned int i;
+	bool any = false;
+
+	if (!r || !r->wake || !r->wake_gfx || r->wake_status[T6050_WAKE_WORDS])
+		return false;
+	for (i = 0; i < ARRAY_SIZE(t6050_wake_names); i++) {
+		u32 id = t6050_wake_names[i].id;
+
+		if (strstarts(t6050_wake_names[i].name, "SMC.") &&
+		    id / 32 < T6050_WAKE_WORDS)
+			smc[id / 32] |= BIT(id % 32);
+	}
+	for (i = 0; i < T6050_WAKE_WORDS; i++) {
+		if (r->wake_status[i] & ~smc[i])
+			return false;
+		any |= !!r->wake_status[i];
+	}
+
+	return any;
+}
+
+/* @n words appended to @buf at @len as " %08x"; the new length */
+static int t6050_wake_words(char *buf, int len, int size, const u32 *w, unsigned int n)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++)
+		len += scnprintf(buf + len, size - len, " %08x", w[i]);
+	return len;
+}
+
+/*
+ * After each wake, one line in the form of macOS's console's ("system wake events: NUB.SPMI0Sw3IRQ
+ * nub-spmi0.0x02 nub-spmi-a1.0x0B rtc", wm2): the AP wake sources whose status is set, by their ADT
+ * names; the SPMI sources the wake acknowledged (latched and enabled), as <controller>.0x<source>
+ * with nub-spmi0 by its ADT name and the others by their nodes; and rtc if the PMU's alarm had
+ * fired. The SMC's reasons are its wake record's. Like macOS's, these are latched events, not
+ * proof that one of them alone raised the wake. The words as read go to the debug log.
+ */
+static void t6050_wake_events_report(struct apple_sleep *s)
+{
+	struct apple_sleep_region_state *r = s->region;
+	char ev[320], raw[320];
+	const int lim = sizeof(ev) - 4;	/* room for " ..." */
+	struct device_node *np;
+	unsigned int w, b, i, id;
+	int n = 0, m;
+
+	if (r->wake_status_fresh) {
+		for (w = 0; w < T6050_WAKE_WORDS; w++)
+			for (b = 0; b < 32; b++) {
+				if (!(r->wake_status[w] & BIT(b)))
+					continue;
+				id = 32 * w + b;
+				for (i = 0; i < ARRAY_SIZE(t6050_wake_names); i++)
+					if (t6050_wake_names[i].id == id)
+						break;
+				if (i < ARRAY_SIZE(t6050_wake_names))
+					n += scnprintf(ev + n, lim - n, " %s",
+						       t6050_wake_names[i].name);
+				else
+					n += scnprintf(ev + n, lim - n, " AP%u", id);
+			}
+		for (b = 0; b < 32; b++)
+			if (r->wake_status[T6050_WAKE_WORDS] & BIT(b))
+				n += scnprintf(ev + n, lim - n, " GFX%u", b);
+	}
+	for (b = 0; r->spmi_src_valid && b < ARRAY_SIZE(r->spmi_src_acked); b++) {
+		np = b ? of_parse_phandle(s->dev->of_node, "apple,spmi-buses", b - 1) : NULL;
+		for (i = 0; i < 32 * T6050_SPMI_SRC_WORDS; i++) {
+			if (!(r->spmi_src_acked[b][i / 32] & BIT(i % 32)))
+				continue;
+			if (np)
+				n += scnprintf(ev + n, lim - n, " %pOFP.0x%02X", np, i);
+			else
+				n += scnprintf(ev + n, lim - n, " %s.0x%02X",
+					       b ? "?" : "nub-spmi0", i);
+		}
+		of_node_put(np);
+	}
+	if (!r->pmu_wake_rtc_ret && (r->pmu_wake_rtc_ctl & T6050_RTC_CTL_FIRED))
+		n += scnprintf(ev + n, lim - n, " rtc");
+	if (n >= lim - 1)
+		n += scnprintf(ev + n, sizeof(ev) - n, " ...");
+	dev_info(s->dev, "wake events:%s\n", n ? ev : " none");
+
+	if (r->wake_status_fresh) {
+		m = scnprintf(raw, sizeof(raw), "AP status");
+		m = t6050_wake_words(raw, m, sizeof(raw), r->wake_status, T6050_WAKE_WORDS + 1);
+		dev_dbg(s->dev, "wake events: %s\n", raw);
+	}
+	for (b = 0; r->spmi_src_valid && b < ARRAY_SIZE(r->spmi_src_acked); b++) {
+		for (i = 0; i < T6050_SPMI_SRC_WORDS; i++)
+			if (r->spmi_src_latched[b][i] | r->spmi_src_enabled[b][i])
+				break;
+		if (i == T6050_SPMI_SRC_WORDS)
+			continue;
+		np = b ? of_parse_phandle(s->dev->of_node, "apple,spmi-buses", b - 1) : NULL;
+		if (np)
+			m = scnprintf(raw, sizeof(raw), "%pOFP latched", np);
+		else
+			m = scnprintf(raw, sizeof(raw), "%s latched", b ? "?" : "nub-spmi0");
+		of_node_put(np);
+		m = t6050_wake_words(raw, m, sizeof(raw), r->spmi_src_latched[b],
+				     T6050_SPMI_SRC_WORDS);
+		m += scnprintf(raw + m, sizeof(raw) - m, ", enabled");
+		m = t6050_wake_words(raw, m, sizeof(raw), r->spmi_src_enabled[b],
+				     T6050_SPMI_SRC_WORDS);
+		dev_dbg(s->dev, "wake events: %s\n", raw);
+	}
+}
+
 static void t6050_sleep_wake_regs(struct apple_sleep *s)
 {
 	struct apple_sleep_region_state *r = s->region;
@@ -3610,8 +3780,8 @@ static void t6050_sleep_wake_regs(struct apple_sleep *s)
 	t6050_wake_source_read(s);
 
 	if (r->spmi_masked) {
-		/* What the PMU sent while the SoC slept (its wake), before the run-time mask */
-		t6050_spmi_pmu_ack(s);
+		/* What the controllers latched while the SoC slept, before the run-time masks */
+		t6050_spmi_src_ack(s);
 		writel(r->spmi_mask[0], s->spmi + M5_SPMI_IRQ_EN);
 		for (i = 0; i < ARRAY_SIZE(r->spmi_bus); i++)
 			if (r->spmi_bus[i])
@@ -3684,17 +3854,66 @@ static void t6050_sleep_finish(struct apple_sleep *s)
 		if (r->n1_up_ret)
 			dev_err(s->dev, "radio's PCIe PHY and root complex not back: %d\n", r->n1_up_ret);
 	}
-	/* Also reached after a reversible refusal. No PMU sleep/wake command: the DT's stage. */
-	value = r->pmu_wake_stage;
-	ret = r->boot_stage_written && r->pmu_wake_stage_valid ?
-		t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_WRITEL, T6050_PMU_BOOT_STAGE, &value, NULL, 1) :
-		0;
-	r->boot_stage_written = false;
+	/*
+	 * After a wake the PMU's steps wait for the SMC's first wake commands
+	 * (t6050_sleep_pmu_wake). After a reversible refusal the DT's stage goes back now. No PMU
+	 * sleep/wake command.
+	 */
+	ret = 0;
+	if (r->committed) {
+		r->pmu_wake_pending = true;
+	} else {
+		value = r->pmu_wake_stage;
+		if (r->boot_stage_written && r->pmu_wake_stage_valid)
+			ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_WRITEL, T6050_PMU_BOOT_STAGE,
+						   &value, NULL, 1);
+		r->boot_stage_written = false;
+	}
 	t6050_sleep_ptd_ownership(s, false);
 	r->usb_aon_kept = 0;
 	dev_dbg(s->dev, "entry %s: replay %u, timeouts %u, late %u, PMU %u/%d, DART stops %#x\n",
 		r->committed ? "returned" : "refused", s->ps_rewoken, s->ps_rewake_timeouts,
 		r->late_errors, r->pmu_errors, ret, r->dart_done);
+}
+
+/*
+ * After a wake, once the SMC has had AP ON, its wake record read and waka (apple_sleep_report),
+ * the PMU's steps in macOS's order: its RTC control read, the DT's boot stage, the DT's PMU
+ * reads as at the entry. In the macOS-HV traces mxt4 and dk1 they start 95 ms into the wake,
+ * 27 ms after waka (no wait here: the SMC's steps are done when the PMU's begin). Linux wrote the
+ * boot stage first, and the SMC's MBSE then read 0x106fe where macOS's reads 0x10650. Then the
+ * wake's events.
+ */
+static void t6050_sleep_pmu_wake(struct apple_sleep *s)
+{
+	struct apple_sleep_region_state *r = s->region;
+	u8 value, rd[sizeof_field(struct apple_sleep_region_state, pmu_rd)];
+	unsigned int i, n;
+	int ret = 0;
+
+	if (!r->pmu_wake_pending)
+		return;
+	r->pmu_wake_pending = false;
+	r->pmu_wake_rtc_ctl = 0;
+	r->pmu_wake_rtc_ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_CTL, NULL,
+						   &r->pmu_wake_rtc_ctl, 1);
+	if (r->boot_stage_written && r->pmu_wake_stage_valid) {
+		value = r->pmu_wake_stage;
+		ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_WRITEL, T6050_PMU_BOOT_STAGE, &value,
+					   NULL, 1);
+		for (i = 0, n = 0; i < r->npmu_reads; n += r->pmu_reads[i][1], i++) {
+			if (n + r->pmu_reads[i][1] > sizeof(rd))
+				break;
+			t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, r->pmu_reads[i][0], NULL,
+					     rd + n, r->pmu_reads[i][1]);
+		}
+	}
+	r->boot_stage_written = false;
+	if (ret)
+		dev_warn(s->dev, "PMU boot stage not put back after the wake: %d\n", ret);
+	t6050_wake_events_report(s);
+	r->spmi_src_valid = false;
+	r->wake_status_fresh = false;
 }
 
 static const struct apple_sleep_ops t6050_sleep_ops = {
@@ -3723,6 +3942,7 @@ static const struct apple_sleep_ops t6050_sleep_ops = {
 	.cpu_down = t6050_cpu_down,
 	.wake = t6050_sleep_wake_regs,
 	.finish = t6050_sleep_finish,
+	.pmu_wake = t6050_sleep_pmu_wake,
 	.cpu_prepare = t6050_sleep_cpu_prepare,
 	.cpu_restore = t6050_sleep_cpu_restore,
 };
@@ -3847,6 +4067,7 @@ static const struct apple_sleep_ops t6050_j716c_sleep_ops = {
 	.cpu_down = t6050_cpu_down,
 	.wake = t6050_sleep_wake_regs,
 	.finish = t6050_sleep_finish,
+	.pmu_wake = t6050_sleep_pmu_wake,
 	.cpu_prepare = t6050_sleep_cpu_prepare,
 	.cpu_restore = t6050_sleep_cpu_restore,
 };

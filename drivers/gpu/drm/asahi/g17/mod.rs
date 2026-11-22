@@ -954,6 +954,7 @@ impl Firmware {
         self.primary.state.shared.note_gpu_activity();
         self.effort.submit();
         self.effort.note_waiters(now_ns(), fence::waiters());
+        self.effort.note_bound(self.primary.state.shared.feed.busy_run());
         self.apply_effort(power::FULL_EFFORT)
     }
 
@@ -1009,8 +1010,8 @@ impl Firmware {
         effort: u32,
     ) -> Result {
         // The performance-controller demand follows the requested effort; the firmware is
-        // given, and the state records, the M5 value (InitData::submission_effort).
-        let published = init.submission_effort(effort, state.waited());
+        // given, and the state records, the published value (InitData::submission_effort).
+        let published = init.submission_effort(effort, state.waited(), state.bound());
         port.set_effort_full(effort == power::FULL_EFFORT);
         if state.applied() == published {
             // M5 maps region C read-only to the firmware: once confirmed, the word holds
@@ -1051,9 +1052,14 @@ impl Firmware {
         if submitted {
             self.effort.submit();
         }
-        // A waiter that began or ended since the last note moves the effort while work streams.
-        if self.effort.streaming() && self.effort.note_waiters(now_ns, fence::waiters()) {
-            self.apply_effort(power::FULL_EFFORT)?;
+        // A waiter or a busy run that began or ended since the last note moves the effort while
+        // work streams.
+        if self.effort.streaming() {
+            let waiters = self.effort.note_waiters(now_ns, fence::waiters());
+            let bound = self.effort.note_bound(self.primary.state.shared.feed.busy_run());
+            if waiters || bound {
+                self.apply_effort(power::FULL_EFFORT)?;
+            }
         }
         let effort = match self.effort.idle(now_ns, in_flight || submitted) {
             power::IdleAction::None => None,
@@ -1064,6 +1070,7 @@ impl Firmware {
                     self.effort.submit();
                     return Ok(Some(power::IDLE_HOLD_NS));
                 }
+                self.primary.state.shared.feed.end_busy_run();
                 self.apply_effort(0)?;
                 None
             }
@@ -2503,6 +2510,7 @@ impl gpu::Gpu for Gpu {
             u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS)
                 | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS)
                 | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS)
+                | u64::from(uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_COMPUTE_NO_QUERY_ACCESS)
                 | sync_output::FEATURE_CUMULATIVE_SIGNALS
                 | crate::file::DRM_ASAHI_FEATURE_COMPUTE_TIMEOUT;
         let variant = self.shared.variant;
@@ -2569,13 +2577,16 @@ impl gpu::Gpu for Gpu {
         true
     }
 
-    /// The G17 runtime never programs fault_control into the firmware, so unmapped reads are not
-    /// guaranteed to return zero. Advertising soft faults made Mesa point out-of-bounds vec3/vec4
-    /// vertex fetches at address 0 and skip bounds checks on bounded loads; on T6040 those reads
-    /// returned non-zero data (2026-10-19: every robustness2 rgba32 vertex_attribute_fetch case
-    /// failed; all pass with soft faults off).
+    /// The G17 firmware takes no fault_control. Its own fault mode gives soft faults: a shader
+    /// load of an unmapped client address returns zero and a store or atomic to one is dropped,
+    /// with no fault reported (measured on the M4 Pro, firmware 25G83). The driver gives every
+    /// queue of the family the same fault setting, 1 in `QueueConfig::unk_66`, the word the M5
+    /// firmware names soft_fault_enabled, so this is not a per-SoC property. Advertise it unless
+    /// fault_control asks for anything else. The first 0x74000 bytes of a client VM are mapped,
+    /// not unmapped memory: they hold the execution context's views (`CONTEXT_VIEWS`, the null
+    /// view at address 0).
     fn supports_soft_faults(&self) -> bool {
-        false
+        crate::module_parameters::fault_control.value() == 0xb
     }
 
     fn queue_limits(&self) -> Option<uapi::drm_asahi_queue_limits> {

@@ -2223,6 +2223,13 @@ static __maybe_unused int sio_suspend_late(struct device *dev)
 
 	if (sio->commit_registered && apple_sleep_commit_stops_coprocs()) {
 		apple_sleep_coproc_set_ready(dev, true);
+		/*
+		 * The commit stops it, through its ASC and mailbox, after the noirq
+		 * phase: keep its power domain up until then, as genpd would power it
+		 * down with the device runtime-suspended. Read with the domain down,
+		 * both answer with an external abort.
+		 */
+		device_set_wakeup_path(dev);
 		sio->commit_used = true;
 		sio->asleep = true;
 		return 0;

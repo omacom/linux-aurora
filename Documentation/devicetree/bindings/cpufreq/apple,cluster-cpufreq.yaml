@@ -64,7 +64,7 @@ properties:
     items:
       - items:
           - description: PMP report region
-          - description: Cluster lane (0 for E, 1 for P on T8140; 0 for
+          - description: Cluster lane (0 for E, 1 for P on T8140 and T8142; 0 for
               E, 1 for P0, 2 for P1 on T6041; 0 for M0, 1 for M1, 2 for P
               on T6050)
             enum: [0, 1, 2]

@@ -149,6 +149,15 @@ properties:
       leaves it alone after a wake.
     type: boolean
 
+  apple,sleep-wakeup-path:
+    description:
+      A consumer of this domain is stopped by the system sleep's final commit,
+      after the noirq phase, and stays on the wakeup path until then. The OS
+      keeps the domain on through system sleep while a device under it is on
+      the wakeup path, also when the domain was off when the power controller
+      probed. Other domains are unaffected.
+    type: boolean
+
   apple,firmware-owned:
     description:
       The boot loader hands over active hardware whose power domain remains

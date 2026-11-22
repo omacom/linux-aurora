@@ -150,8 +150,10 @@ static bool device_is_bound(struct device*d){return d->bound;}
 static struct device *get_device(struct device*d){d->refs++;return d;}
 static void put_device(struct device*d){d->refs--;}
 static struct device_link *device_link_add(struct device*c,struct device*s,unsigned flags){static struct device_link l;assert(flags==1);return link_fail?NULL:&l;}
-/* This harness exercises the J613/25G83 bridge, not the T6030 GFX report. */
-static bool of_machine_is_compatible(const char *name){return !strcmp(name,"apple,t8132");}
+/* This harness exercises the J613/25G83 bridge, not the T6030 GFX report, and has no sleep controller. */
+static struct device_node *of_find_node_by_name(struct device_node*from,const char*name){return NULL;}
+#define for_each_node_by_name(dn,name) for(dn=of_find_node_by_name(NULL,name);dn;dn=of_find_node_by_name(dn,name))
+static bool of_device_is_available(const struct device_node*n){return true;}
 static bool of_device_is_compatible(const struct device_node*n,const char*name){return false;}
 static inline int of_property_match_string(const struct device_node*n,const char*p,const char*s){assert(!"no system sleep here");return -EINVAL;}
 ''')

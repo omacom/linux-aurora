@@ -61,6 +61,7 @@ config MT7932_RF_KUNIT_TEST
 	  admission paths with synthetic devices, without radio hardware.
 	  Check association wakeups, retained peer ownership and refusal to
 	  reopen RF admission after a terminal calibration error.
+	  Check that a connection whose AP the firmware lost is ended.
 
 config MT7932_KUNIT_TEST
 	bool "KUnit tests for MT7932 firmware input validation" if !KUNIT_ALL_TESTS

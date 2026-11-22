@@ -201,7 +201,7 @@
 };
 
 &ps_venc_sys {
-	status = "disabled";
+	status = "okay";
 };
 
 &ps_spi1 {
@@ -497,23 +497,23 @@
 };
 
 &ps_venc_dma {
-	status = "disabled";
+	status = "okay";
 };
 
 &ps_venc_pipe4 {
-	status = "disabled";
+	status = "okay";
 };
 
 &ps_venc_pipe5 {
-	status = "disabled";
+	status = "okay";
 };
 
 &ps_venc_me0 {
-	status = "disabled";
+	status = "okay";
 };
 
 &ps_venc_me1 {
-	status = "disabled";
+	status = "okay";
 };
 
 &ps_ane_mpm {

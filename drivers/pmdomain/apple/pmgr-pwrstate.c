@@ -76,6 +76,7 @@ struct apple_pmgr_ps {
 	bool sleep_retained;
 	/* apple,sleep-driver-owned: the driver behind it brings it back after a sleep */
 	bool sleep_driver_owned;
+	bool sleep_wakeup_path;
 	/* Never enable automatic power management (apple,no-auto-pm). */
 	bool no_auto_pm;
 	bool inherited_on;
@@ -949,6 +950,7 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 	}
 	ps->sleep_retained = of_property_read_bool(node, "apple,sleep-retained");
 	ps->sleep_driver_owned = of_property_read_bool(node, "apple,sleep-driver-owned");
+	ps->sleep_wakeup_path = of_property_read_bool(node, "apple,sleep-wakeup-path");
 	/*
 	 * Only T8132 hands over inherited-on domains with this contract. Older
 	 * M3 device trees carry the property with another meaning; keep them
@@ -1023,6 +1025,13 @@ static int apple_pmgr_ps_probe(struct platform_device *pdev)
 		}
 	} else if (active && !ps->firmware_owned && !ps->inherited_on) {
 		ps->genpd.flags |= GENPD_FLAG_DEFER_OFF | GENPD_FLAG_ACTIVE_WAKEUP;
+	} else if (ps->sleep_wakeup_path && !ps->firmware_owned && !ps->inherited_on) {
+		/*
+		 * Off at probe, powered up later by its consumer, which the sleep's
+		 * commit stops after the noirq phase: hold it while that consumer is
+		 * on the wakeup path.
+		 */
+		ps->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
 	}
 
 	/* Turn on auto-PM if the domain is already on, unless it must stay off */

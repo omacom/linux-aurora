@@ -27,24 +27,24 @@
 	 * ADT's order; the labels already follow it.
 	 */
 	cpus {
-		T6050_M_CPU(cpu0, 40000, cpufreq_mc0);
-		T6050_M_CPU(cpu1, 40001, cpufreq_mc0);
-		T6050_M_CPU(cpu2, 40002, cpufreq_mc0);
-		T6050_M_CPU(cpu3, 40003, cpufreq_mc0);
-		T6050_M_CPU(cpu4, 40004, cpufreq_mc0);
-		T6050_M_CPU(cpu5, 40005, cpufreq_mc0);
-		T6050_M_CPU(cpu6, 40100, cpufreq_mc1);
-		T6050_M_CPU(cpu7, 40101, cpufreq_mc1);
-		T6050_M_CPU(cpu8, 40102, cpufreq_mc1);
-		T6050_M_CPU(cpu9, 40103, cpufreq_mc1);
-		T6050_M_CPU(cpu10, 40104, cpufreq_mc1);
-		T6050_M_CPU(cpu11, 40105, cpufreq_mc1);
-		T6050_P_CPU(cpu12, 10200, cpufreq_pc);
-		T6050_P_CPU(cpu13, 10201, cpufreq_pc);
-		T6050_P_CPU(cpu14, 10202, cpufreq_pc);
-		T6050_P_CPU(cpu15, 10203, cpufreq_pc);
-		T6050_P_CPU(cpu16, 10204, cpufreq_pc);
-		T6050_P_CPU(cpu17, 10205, cpufreq_pc);
+		T6050_M_CPU(cpu0, 40000, cpufreq_mc0, l2_cache_mc0);
+		T6050_M_CPU(cpu1, 40001, cpufreq_mc0, l2_cache_mc0);
+		T6050_M_CPU(cpu2, 40002, cpufreq_mc0, l2_cache_mc0);
+		T6050_M_CPU(cpu3, 40003, cpufreq_mc0, l2_cache_mc0);
+		T6050_M_CPU(cpu4, 40004, cpufreq_mc0, l2_cache_mc0);
+		T6050_M_CPU(cpu5, 40005, cpufreq_mc0, l2_cache_mc0);
+		T6050_M_CPU(cpu6, 40100, cpufreq_mc1, l2_cache_mc1);
+		T6050_M_CPU(cpu7, 40101, cpufreq_mc1, l2_cache_mc1);
+		T6050_M_CPU(cpu8, 40102, cpufreq_mc1, l2_cache_mc1);
+		T6050_M_CPU(cpu9, 40103, cpufreq_mc1, l2_cache_mc1);
+		T6050_M_CPU(cpu10, 40104, cpufreq_mc1, l2_cache_mc1);
+		T6050_M_CPU(cpu11, 40105, cpufreq_mc1, l2_cache_mc1);
+		T6050_P_CPU(cpu12, 10200, cpufreq_pc, l2_cache_pc);
+		T6050_P_CPU(cpu13, 10201, cpufreq_pc, l2_cache_pc);
+		T6050_P_CPU(cpu14, 10202, cpufreq_pc, l2_cache_pc);
+		T6050_P_CPU(cpu15, 10203, cpufreq_pc, l2_cache_pc);
+		T6050_P_CPU(cpu16, 10204, cpufreq_pc, l2_cache_pc);
+		T6050_P_CPU(cpu17, 10205, cpufreq_pc, l2_cache_pc);
 
 		/*
 		 * The clusters are MPIDR Aff1 (M0, M1, then P), each with its own L2. The boot
@@ -115,6 +115,11 @@
 			};
 		};
 	};
+
+	/* One L2 per cluster (t6050-base.dtsi, "Caches"). */
+	T6050_M_L2(l2_cache_mc0, l2-cache-mcluster0);
+	T6050_M_L2(l2_cache_mc1, l2-cache-mcluster1);
+	T6050_P_L2(l2_cache_pc, l2-cache-pcluster);
 };
 
 #define DIE

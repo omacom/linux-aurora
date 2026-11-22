@@ -499,6 +499,12 @@ pub(crate) enum Validated {
 }
 
 impl Validated {
+    /// A render with mesh shading: flagged DRM_ASAHI_RENDER_MESH_OUTPUT, or an M5 render whose
+    /// program table has a mesh program.
+    pub(crate) fn mesh_output(&self) -> bool {
+        matches!(self, Self::Render { pass, resources, .. }
+            if pass.mesh_output || resources.as_ref().is_some_and(|p| p.uses_mesh()))
+    }
     pub(crate) fn long_job(&self) -> bool {
         match self {
             Self::Render { long_job, .. } | Self::Compute { long_job, .. } => *long_job,
@@ -737,7 +743,14 @@ impl Payload {
                 })
             }
             Self::Compute(cmd, attachments, intersection, resources) => {
-                let as_build = if m5 { false } else { super::timeout::as_build(cmd.flags).ok_or(EINVAL)? };
+                let as_build = if m5 {
+                    false
+                } else {
+                    super::timeout::as_build(
+                        cmd.flags & !crate::file::DRM_ASAHI_COMPUTE_NO_QUERY_ACCESS,
+                    )
+                    .ok_or(EINVAL)?
+                };
                 if (m5
                     && (cmd.flags
                         & !(crate::file::DRM_ASAHI_COMPUTE_USES_MATRIX

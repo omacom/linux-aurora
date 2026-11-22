@@ -41,209 +41,129 @@ properties:
   compatible: true
 
 allOf:
-  - if:
-      properties:
-        compatible:
-          contains:
-            enum:
-              - apple,t8132-ave
-      required:
-        - compatible
-    then:
-      properties:
-        compatible:
-          items:
-            - const: apple,t8132-ave
-            - const: apple,ave
+  - properties:
+      compatible:
+        oneOf:
+          - enum:
+              - apple,t6000-ave
+              - apple,t6041-ave
+              - apple,t6050-ave
+              - apple,t8112-ave
+              - apple,t8140-ave
+              - apple,t8142-ave
+          - items:
+              - enum:
+                  - apple,t6020-ave
+                  - apple,t6021-ave
+                  - apple,t6022-ave
+                  - apple,t6030-ave
+                  - apple,t6031-ave
+                  - apple,t6032-ave
+                  - apple,t8103-ave
+                  - apple,t8122-ave
+                  - apple,t8132-ave
+              - const: apple,ave
 
-        reg:
-          minItems: 5
-          maxItems: 5
+      reg:
+        minItems: 3
+        maxItems: 5
+        description: Codec, mailbox, coprocessor and generation-specific auxiliary banks.
 
-        interrupts:
-          minItems: 5
-          maxItems: 5
+      reg-names:
+        minItems: 3
+        items:
+          - const: codec
+          - const: mailbox
+          - const: coproc
+          - enum: [pmgr, power-control]
+          - enum: [fabric, pio]
 
-        power-domains:
-          minItems: 1
-          maxItems: 6
+      clocks:
+        maxItems: 1
 
-        iommus:
-          minItems: 1
-          maxItems: 2
+      interrupts:
+        items:
+          - description: Mailbox, raised when the firmware posts to a host ring
+          - description: Codec interrupt handled by the firmware
+          - description: Codec interrupt handled by the firmware
+          - description: Codec interrupt handled by the firmware
+          - description: Codec interrupt handled by the firmware
 
-        clocks:
-          maxItems: 1
+      power-domains:
+        minItems: 1
+        maxItems: 6
 
-      required:
-        - compatible
-        - reg
-        - interrupts
-        - power-domains
-        - iommus
-    else:
-      allOf:
-        - if:
-            properties:
-              compatible:
-                contains:
-                  enum:
-                    - apple,t6032-ave
-            required:
-              - compatible
-          then:
-            properties:
-              compatible:
-                items:
-                  - const: apple,t6032-ave
-                  - const: apple,ave
+      power-domain-names:
+        minItems: 5
+        items:
+          - const: dma
+          - const: pipe4
+          - const: pipe5
+          - const: me0
+          - const: me1
+          - const: perf
+            description: |
+              A performance floor the encoder needs to run at full speed, held
+              while the encoder is powered (for example the SoC rail floor of a
+              PMC).
 
-              reg:
-                minItems: 5
-                maxItems: 5
+      iommus:
+        minItems: 2
+        maxItems: 4
+        description:
+          The encoder's stream on each of its DARTs. Where the motion-compensated
+          temporal filter has its own stream (stream 12 on T8140), that stream is
+          listed after the encoder's on each DART.
 
-              interrupts:
-                minItems: 5
-                maxItems: 5
+      memory-region:
+        items:
+          - description: Preloaded firmware text
+          - description: Preloaded firmware data
 
-              power-domains:
-                minItems: 5
-                maxItems: 6
+    required:
+      - compatible
+      - reg
+      - interrupts
+      - power-domains
+      - iommus
 
-              iommus:
-                minItems: 2
-                maxItems: 2
+    allOf:
+      - if:
+          properties:
+            compatible:
+              contains:
+                enum:
+                  - apple,t6020-ave
+                  - apple,t6021-ave
+                  - apple,t6022-ave
+        then:
+          properties:
+            reg:
+              minItems: 5
+        else:
+          properties:
+            power-domains:
+              minItems: 5
+          required:
+            - reg-names
+            - power-domain-names
+      - if:
+          properties:
+            compatible:
+              contains:
+                enum:
+                  - apple,t6041-ave
+                  - apple,t6050-ave
+                  - apple,t8132-ave
+                  - apple,t8140-ave
+                  - apple,t8142-ave
+        then:
+          properties:
+            reg:
+              maxItems: 3
+            reg-names:
+              maxItems: 3
 
-            required:
-              - compatible
-              - reg
-              - interrupts
-              - power-domains
-              - iommus
-          else:
-            properties:
-              compatible:
-                oneOf:
-                  - enum:
-                      - apple,t6000-ave
-                      - apple,t6041-ave
-                      - apple,t6050-ave
-                      - apple,t8112-ave
-                      - apple,t8140-ave
-                      - apple,t8142-ave
-                  - items:
-                      - enum:
-                          - apple,t6020-ave
-                          - apple,t6021-ave
-                          - apple,t6022-ave
-                          - apple,t6030-ave
-                          - apple,t6031-ave
-                          - apple,t8103-ave
-                          - apple,t8122-ave
-                      - const: apple,ave
-
-              reg:
-                minItems: 3
-                maxItems: 5
-                description: Codec, mailbox, coprocessor and generation-specific auxiliary banks.
-
-              reg-names:
-                minItems: 3
-                items:
-                  - const: codec
-                  - const: mailbox
-                  - const: coproc
-                  - enum: [pmgr, power-control]
-                  - enum: [fabric, pio]
-
-              clocks:
-                maxItems: 1
-
-              interrupts:
-                items:
-                  - description: Mailbox, raised when the firmware posts to a host ring
-                  - description: Codec interrupt handled by the firmware
-                  - description: Codec interrupt handled by the firmware
-                  - description: Codec interrupt handled by the firmware
-                  - description: Codec interrupt handled by the firmware
-
-              power-domains:
-                minItems: 1
-                maxItems: 6
-
-              power-domain-names:
-                minItems: 5
-                items:
-                  - const: dma
-                  - const: pipe4
-                  - const: pipe5
-                  - const: me0
-                  - const: me1
-                  - const: perf
-                    description: |
-                      A performance floor the encoder needs to run at full speed, held
-                      while the encoder is powered (for example the SoC rail floor of a
-                      PMC).
-
-              iommus:
-                minItems: 2
-                maxItems: 4
-                description:
-                  The encoder's stream on each of its DARTs. Where the motion-compensated
-                  temporal filter has its own stream (stream 12 on T8140), that stream is
-                  listed after the encoder's on each DART.
-
-              memory-region:
-                items:
-                  - description: Preloaded firmware text
-                  - description: Preloaded firmware data
-
-            required:
-              - compatible
-              - reg
-              - interrupts
-              - power-domains
-              - iommus
-
-            allOf:
-              - if:
-                  properties:
-                    compatible:
-                      contains:
-                        enum:
-                          - apple,t6020-ave
-                          - apple,t6021-ave
-                          - apple,t6022-ave
-                          - apple,t6030-ave
-                          - apple,t6031-ave
-                          - apple,t8122-ave
-                then:
-                  properties:
-                    reg:
-                      minItems: 5
-                else:
-                  properties:
-                    power-domains:
-                      minItems: 5
-                  required:
-                    - reg-names
-                    - power-domain-names
-              - if:
-                  properties:
-                    compatible:
-                      contains:
-                        enum:
-                          - apple,t6041-ave
-                          - apple,t6050-ave
-                          - apple,t8140-ave
-                          - apple,t8142-ave
-                then:
-                  properties:
-                    reg:
-                      maxItems: 3
-                    reg-names:
-                      maxItems: 3
-
-            additionalProperties: false
+    additionalProperties: false
 
 unevaluatedProperties: false

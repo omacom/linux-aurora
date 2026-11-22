@@ -203,7 +203,7 @@ def status(live=True):
     if xart == "enabled":
         r.add(PASS, "xart", xart, "the enclave's state writes reach the disk")
     else:
-        r.add(WARN, "xart", xart, "xART writes are off (xart_writes=0): enrol and verify are refused")
+        r.add(WARN, "xart", xart, "xART writes are disabled: the store is read-only this boot (key-store-only initrd phase, a failed writable reopen, or a leftover xart_writes setting under a kernel from before linux#2591, which should be removed): enrol and verify are refused")
 
     osid = d("os_identity")
     if osid is not None:

@@ -68,8 +68,8 @@ An architecture selecting ``ARCH_HAS_USER_PAGE_SIZE`` must implement:
 * ``arch_mm_alt_granule_enabled()``, optionally: report whether this boot
   may create alternative-granule address spaces. It must be fixed before
   memory management initialization. When it is false the ``MM_SUBPAGE``
-  page_ext record is not reserved. arm64 returns true only when booted
-  with ``user4k=on``.
+  page_ext record is not reserved. arm64 returns true unless booted
+  with ``user4k=off``.
 * Binary-loader integration that resolves the final executable policy
   before exposing the address space. ``bprm_set_page_shift()`` transfers
   staged argument bytes when the final choice changes the initial granule.

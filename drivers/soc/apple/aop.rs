@@ -211,6 +211,9 @@ const SETUP_SET_SOURCE_BUFFER: u64 = 0x6b80_3ce4_92bd_9547;
 const ALS_CALIBRATION_LEN: usize = 80;
 const ALS_CALIBRATION_OPERATION: u64 = 0x0746_b8d6_6515_2e31;
 const ALS_CALIBRATION_BODY_LEN: u64 = 56;
+/// The VD6286's calibration blob and the message that carries it (see `als_calibration_message`).
+const ALS_SENSOR_BLOB_LEN: usize = 193;
+const ALS_SENSOR_MESSAGE_LEN: usize = 216;
 
 mod aop_ring;
 
@@ -261,6 +264,28 @@ fn le_u32(b: &[u8], off: usize) -> u32 {
 /// Reads the little-endian `u64` at `off`; `b` must hold it.
 fn le_u64(b: &[u8], off: usize) -> u64 {
     u64::from(le_u32(b, off)) | u64::from(le_u32(b, off + 4)) << 32
+}
+
+/// The calibration file as the message the firmware takes on the ALS endpoint. T8140's file is
+/// that 80-byte message already. The 14-inch M5 Max's sensor takes the 193-byte blob its
+/// firmware keeps for the VD6286 in a longer one: the operation code, the blob's length, the
+/// blob and zeros, 216 bytes in all. Returns the message and its length.
+fn als_calibration_message(data: &[u8]) -> Option<([u8; ALS_SENSOR_MESSAGE_LEN], usize)> {
+    let mut message = [0u8; ALS_SENSOR_MESSAGE_LEN];
+    if data.len() == ALS_CALIBRATION_LEN
+        && le_u64(data, 0) == ALS_CALIBRATION_OPERATION
+        && le_u64(data, 8) == ALS_CALIBRATION_BODY_LEN
+    {
+        message[..ALS_CALIBRATION_LEN].copy_from_slice(data);
+        Some((message, ALS_CALIBRATION_LEN))
+    } else if data.len() == ALS_SENSOR_BLOB_LEN {
+        message[..8].copy_from_slice(&ALS_CALIBRATION_OPERATION.to_le_bytes());
+        message[8..16].copy_from_slice(&(ALS_SENSOR_BLOB_LEN as u64).to_le_bytes());
+        message[16..16 + ALS_SENSOR_BLOB_LEN].copy_from_slice(data);
+        Some((message, ALS_SENSOR_MESSAGE_LEN))
+    } else {
+        None
+    }
 }
 
 #[inline(always)]
@@ -1854,6 +1879,60 @@ impl AopData {
         result
     }
 
+    fn bootargs_has_ed0p(
+        aop_mmio: &Mmio<'_, Region<AOP_MMIO_SIZE>>,
+        word_access: bool,
+    ) -> Result<bool> {
+        let offset = aop_mmio.read32(BOOTARGS_OFFSET) as usize;
+        let size = aop_mmio.read32(BOOTARGS_SIZE) as usize;
+        if offset > aop_mmio.size() || size > aop_mmio.size() - offset {
+            return Err(EINVAL);
+        }
+        let start = if word_access { offset & !3 } else { offset };
+        let end = if word_access {
+            (offset + size).checked_add(3).ok_or(EINVAL)? & !3
+        } else {
+            offset + size
+        };
+        if end > aop_mmio.size() || (word_access && size == 0) {
+            return Err(EINVAL);
+        }
+        let mut bytes = KVec::<u8>::from_elem(0, end - start, GFP_KERNEL)?;
+        let aop_io_array: Mmio<'_, [u8; AOP_MMIO_SIZE]> = aop_mmio.try_cast()?;
+        let bootargs = io_project!(aop_io_array, [try: offset .. offset+size]);
+        if word_access {
+            for (i, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+                chunk.copy_from_slice(&aop_mmio.try_read32(start + i * 4)?.to_le_bytes());
+            }
+        } else {
+            bootargs.copy_to_slice(&mut bytes);
+        }
+        let ed0p_key = from_fourcc(b"ED0p");
+        let mut seen = false;
+        let first = offset - start;
+        let arg_bytes = &bytes[first..first + size];
+        let mut idx = 0;
+        while idx < size {
+            if size - idx < 8 {
+                return Err(EINVAL);
+            }
+            let key = u32::from_le_bytes(arg_bytes[idx..idx + 4].try_into().unwrap());
+            let len = u32::from_le_bytes(arg_bytes[idx + 4..idx + 8].try_into().unwrap()) as usize;
+            idx += 8;
+            if len > size - idx {
+                return Err(EINVAL);
+            }
+            if key == ed0p_key {
+                if seen || len != mem::size_of::<u64>() {
+                    return Err(EINVAL);
+                }
+                seen = true;
+            }
+            idx += len;
+        }
+        Ok(seen)
+    }
+
     fn patch_bootargs(
         &self,
         aop_mmio: &Mmio<'_, Region<AOP_MMIO_SIZE>>,
@@ -2036,6 +2115,14 @@ impl AopData {
         Ok((phys, iova, size))
     }
 
+    /// Whether the bootloader reserved any firmware `memory-region` for `dev`.
+    fn has_fw_regions(dev: &device::Device) -> bool {
+        // SAFETY: `dev` is a live device being probed.
+        let np = unsafe { (*dev.as_raw()).of_node };
+        // SAFETY: `np` is the device's node, valid while it is bound.
+        !np.is_null() && unsafe { bindings::of_reserved_mem_region_count(np) } > 0
+    }
+
     /// Checks the firmware segments the AOP runs from DRAM (T6040). The
     /// bootloader reserves them and lists them in `memory-region`, and each
     /// one's `iommu-addresses` gives the IOVA the firmware uses for it. The
@@ -2043,11 +2130,14 @@ impl AopData {
     /// (one to one when the IOVA is the physical address, translated
     /// otherwise), so they are only checked here. Every page has to be mapped
     /// where the DT says, with the external code (`__ETEXT`) at `ec0p`.
-    /// Other segments may also use translated IOVAs: macOS 27 firmware adds
-    /// `__EDATA` after the external code, while `__OS_LOG` remains
-    /// identity-mapped. Returns the unique additional translated region for
-    /// `ED0p`, if any, requiring it to follow and not overlap `__ETEXT`.
-    fn check_fw_regions(dev: &device::Device, ec0p: u64) -> Result<Option<(u64, u64)>> {
+    /// When the firmware bootargs declare `ED0p` (`allow_ed0p`), macOS 27
+    /// firmware may also supply one translated `__EDATA` segment after
+    /// `__ETEXT`, while `__OS_LOG` remains identity-mapped.
+    fn check_fw_regions(
+        dev: &device::Device,
+        ec0p: u64,
+        allow_ed0p: bool,
+    ) -> Result<Option<(u64, u64)>> {
         // SAFETY: `dev` is a live device being probed.
         let np = unsafe { (*dev.as_raw()).of_node };
         if np.is_null() {
@@ -2096,9 +2186,21 @@ impl AopData {
                 }
                 etext = true;
                 etext_end = iova + size;
-            } else if iova != phys && external_data.replace((iova, size)).is_some() {
-                dev_err!(dev, "Multiple translated external data regions");
-                return Err(EINVAL);
+            } else if iova != phys {
+                if !allow_ed0p {
+                    dev_err!(
+                        dev,
+                        "Firmware memory-region {} is translated without ED0p ({:#x} != {:#x})",
+                        idx,
+                        iova,
+                        phys
+                    );
+                    return Err(EINVAL);
+                }
+                if external_data.replace((iova, size)).is_some() {
+                    dev_err!(dev, "Multiple translated external data regions");
+                    return Err(EINVAL);
+                }
             }
             let mut off = 0;
             while off < size {
@@ -2790,22 +2892,19 @@ impl AopData {
                 return Ok(());
             }
         };
-        let data = calibration.data();
-        if data.len() != ALS_CALIBRATION_LEN
-            || le_u64(data, 0) != ALS_CALIBRATION_OPERATION
-            || le_u64(data, 8) != ALS_CALIBRATION_BODY_LEN
-        {
+        let Some((message, message_len)) = als_calibration_message(calibration.data()) else {
             dev_err!(
                 self.dev,
-                "ALS calibration {:?} is not an {}-byte calibration message",
+                "ALS calibration {:?} is neither an {}-byte calibration message nor a {}-byte sensor blob",
                 &*name,
-                ALS_CALIBRATION_LEN
+                ALS_CALIBRATION_LEN,
+                ALS_SENSOR_BLOB_LEN
             );
             return Err(EINVAL);
-        }
+        };
         let status = self.setup_request(
             SETUP_ALS_EP,
-            data,
+            &message[..message_len],
             &[SETUP_REPLY_READY, SETUP_REPLY_READY_ALT],
         )?;
         if status != 0 {
@@ -2934,6 +3033,22 @@ struct AopHwConfig {
     bootargs_word_access: bool,
     /// Halt the co-processor again when its start fails (T6040).
     halt_on_failed_start: bool,
+    /// The configuration to start with when the bootloader reserved no
+    /// firmware `memory-region` for a `fw_regions` block: the segments iBoot
+    /// left in DRAM are then neither reserved nor mapped, so it runs as its
+    /// fallback compatible's block did (T8122: `apple,t6020-aop`).
+    without_fw_regions: Option<&'static AopHwConfig>,
+}
+
+impl AopHwConfig {
+    /// The configuration to start the block with, given whether the
+    /// bootloader reserved its firmware regions.
+    fn for_regions(&'static self, has_fw_regions: bool) -> &'static AopHwConfig {
+        match self.without_fw_regions {
+            Some(alt) if self.fw_regions && !has_fw_regions => alt,
+            _ => self,
+        }
+    }
 }
 
 const HW_CFG_T8103: AopHwConfig = AopHwConfig {
@@ -2953,6 +3068,7 @@ const HW_CFG_T8103: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 /// `nCal` keeps the firmware's own value, as on T6040: the J413 image carries 1,
 /// and with 0 the firmware never announces its accelerometer and gyroscope.
@@ -2973,6 +3089,7 @@ const HW_CFG_T8112: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 /// `nCal` keeps the firmware's own value, as on T8112.
 const HW_CFG_T6000: AopHwConfig = AopHwConfig {
@@ -2992,6 +3109,7 @@ const HW_CFG_T6000: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 const HW_CFG_T6020: AopHwConfig = AopHwConfig {
     ec0p: 0x0100_00000000,
@@ -3010,6 +3128,7 @@ const HW_CFG_T6020: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 /// T6040 (J616s): the firmware's external code and log live in DRAM, mapped
 /// through the reserved regions the bootloader describes; the RTKit firmware
@@ -3033,11 +3152,20 @@ const HW_CFG_T6040: AopHwConfig = AopHwConfig {
     fw_regions: true,
     bootargs_word_access: true,
     halt_on_failed_start: true,
+    without_fw_regions: None,
 };
 /// T8132 (J713): as T6040. The bootloader hands the AOP over the same way, with
 /// the DART's DAPF programmed and its windows reserved alongside the firmware
 /// segments.
 const HW_CFG_T8132: AopHwConfig = HW_CFG_T6040;
+/// T8122 (M3): as T6040. iBoot leaves the AOP halted with its external code,
+/// data and log in DRAM, which the bootloader reserves in `memory-region`;
+/// the 27.2 firmware reads its `__EDATA` base from `ED0p`. A bootloader that
+/// reserves none leaves it to start as `apple,t6020-aop`, as before.
+const HW_CFG_T8122: AopHwConfig = AopHwConfig {
+    without_fw_regions: Some(&HW_CFG_T6020),
+    ..HW_CFG_T6040
+};
 /// T8140: the firmware is started with the boot arguments the bootloader
 /// left, boots through the setup port and speaks EPIC version 4. Of the
 /// advertised AFK endpoints, the application map is 0x20 misc, 0x21
@@ -3060,6 +3188,7 @@ const HW_CFG_T8140: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 /// T8152: like T8140, but the setup port (mailbox 1 of the AOP bank, and the
 /// ADT aop-exclave-mailbox) is not reachable from the AP: both bus-error.
@@ -3080,6 +3209,7 @@ const HW_CFG_T8152: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 
 /// T8142 (M5): booted through a setup port as on T8140, at the ADT's
@@ -3104,6 +3234,7 @@ const HW_CFG_T8142: AopHwConfig = AopHwConfig {
     fw_regions: false,
     bootargs_word_access: false,
     halt_on_failed_start: false,
+    without_fw_regions: None,
 };
 /// T6050 (M5 Pro and Max): booted as T8142, through the setup port at
 /// AOP ASC + 0x4007c000. Its EPMAP also names system endpoint 4, which never
@@ -3164,6 +3295,7 @@ kernel::of_device_table!(
         (of::DeviceId::new(c_str!("apple,t8103-aop")), &HW_CFG_T8103),
         (of::DeviceId::new(c_str!("apple,t8112-aop")), &HW_CFG_T8112),
         (of::DeviceId::new(c_str!("apple,t6000-aop")), &HW_CFG_T6000),
+        (of::DeviceId::new(c_str!("apple,t8122-aop")), &HW_CFG_T8122),
         (of::DeviceId::new(c_str!("apple,t6020-aop")), &HW_CFG_T6020),
         (of::DeviceId::new(c_str!("apple,t8140-aop")), &HW_CFG_T8140),
         (of::DeviceId::new(c_str!("apple,t6041-aop")), &HW_CFG_T6040),
@@ -3188,7 +3320,14 @@ impl platform::Driver for AopDriver {
         pdev: &'bound platform::Device<Core<'_>>,
         info: Option<&'bound Self::IdInfo>,
     ) -> impl PinInit<Self::Data<'bound>, Error> + 'bound {
-        let cfg = info.ok_or(ENODEV)?;
+        let matched: &'static AopHwConfig = info.ok_or(ENODEV)?;
+        let cfg = matched.for_regions(AopData::has_fw_regions(pdev.as_ref()));
+        if !core::ptr::eq(cfg, matched) {
+            dev_info!(
+                pdev.as_ref(),
+                "No firmware memory-region from the bootloader: starting with the fallback compatible's configuration"
+            );
+        }
         if RETIRED.load(Acquire) {
             dev_err!(
                 pdev.as_ref(),
@@ -3203,9 +3342,12 @@ impl platform::Driver for AopDriver {
         let asc_req = pdev.io_request_by_index(1).ok_or(EINVAL)?;
         let asc_mmio = asc_req.iomap_sized::<ASC_MMIO_SIZE>()?;
         let asc_mmio = asc_mmio.as_view().relaxed();
+        let aop_mmio = aop_mmio.as_view();
         let ed0p = if cfg.fw_regions {
             // Before anything is written to the AOP: no mapping, no start.
-            AopData::check_fw_regions(pdev.as_ref(), cfg.ec0p)?.map(|(iova, _)| iova)
+            let allow_ed0p = cfg.patch_bootargs
+                && AopData::bootargs_has_ed0p(&aop_mmio, cfg.bootargs_word_access)?;
+            AopData::check_fw_regions(pdev.as_ref(), cfg.ec0p, allow_ed0p)?.map(|(iova, _)| iova)
         } else {
             None
         };
@@ -3213,7 +3355,6 @@ impl platform::Driver for AopDriver {
         // Whatever fails below leaves the AOP running and its children
         // registering; the same teardown as unbind's cleans that up.
         let probe_guard = ScopeGuard::new_with_data(data.clone(), |data| data.remove());
-        let aop_mmio = aop_mmio.as_view();
         if cfg.patch_bootargs {
             data.patch_bootargs(
                 &aop_mmio,

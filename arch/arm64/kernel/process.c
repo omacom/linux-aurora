@@ -1076,7 +1076,7 @@ unsigned long arch_align_stack(unsigned long sp)
 #ifdef CONFIG_ARM64_USER4K_EXPERIMENTAL
 int arm64_bprm_prepare_mm(struct linux_binprm *bprm, bool compat)
 {
-	/* Without user4k=on every image, AArch32 included, stays native. */
+	/* With user4k=off every image, AArch32 included, stays native. */
 	bool enabled = user4k_enabled();
 	bool has_4k = enabled && cpus_have_final_cap(ARM64_HAS_USER4K_GRANULE);
 	unsigned int requested = 0, shift;
@@ -1094,7 +1094,7 @@ int arm64_bprm_prepare_mm(struct linux_binprm *bprm, bool compat)
 
 /*
  * Return zero for the native default, or a validated alternative shift.
- * Every alternative is refused with -EINVAL unless booted with user4k=on.
+ * Every alternative is refused with -EINVAL when booted with user4k=off.
  */
 int arch_exec_page_size_shift(unsigned long size)
 {

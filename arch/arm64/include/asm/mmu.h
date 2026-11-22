@@ -26,8 +26,8 @@
 extern bool arm64_user4k_on;
 
 /*
- * Mixed-granule userspace is built in but experimental: it stays off unless
- * the kernel is booted with user4k=on. Fixed once early parameters are parsed.
+ * Mixed-granule userspace is on unless the kernel is booted with user4k=off.
+ * Fixed once early parameters are parsed.
  */
 static inline bool user4k_enabled(void)
 {
@@ -43,7 +43,7 @@ static inline bool user4k_enabled(void)
 
 /*
  * Validate a page-size request for a later exec. Zero selects the native
- * granule; an alternative needs user4k=on and CPU support. Pure for KUnit.
+ * granule; an alternative needs user4k enabled and CPU support. Pure for KUnit.
  */
 static inline int arm64_exec_page_size_request(unsigned long size, bool enabled,
 					       bool has_4k, bool has_16k)

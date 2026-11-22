@@ -224,6 +224,8 @@
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
 		label = "sio_cpu";
+		/* The SIO is stopped at the sleep's commit, after the noirq phase. */
+		apple,sleep-wakeup-path;
 	};
 
 	ps_fpwm0: power-controller@270 {

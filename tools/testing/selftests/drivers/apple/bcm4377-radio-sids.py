@@ -104,6 +104,9 @@ struct apple_dart {
     bool locked, managed_failed, managed_lock, retained, retained_mtp, supports_bypass;
     bool four_level, per_stream, tunneled, fw_mirror, fw_handoff;
     bool pending, preserve_display;
+    bool isp_host, cold_ane, live_mtp, display_dark, display_tlb_stale;
+    void *tunables;
+    unsigned long static_bypass[4];
     void *dcp, *frontend[2];
     struct { bool ready; } iommu;
     void *dev;
@@ -170,10 +173,24 @@ static void *dev_get_drvdata(struct device *d) { return d->data; }
 static bool apple_dart_fault_pending(struct apple_dart *d) { return d->pending; }
 struct apple_dart_master_cfg { struct apple_dart_stream_map stream_maps[2]; bool supports_bypass, locked; };
 static struct apple_dart_master_cfg *active_cfg;
-static bool board_j713=true;
+static bool board_t8132_air=true;
 static void *dev_iommu_priv_get(struct device *d) { (void)d; return active_cfg; }
 static bool dev_is_pci(struct device *d) { return d->pci; }
-static bool of_machine_is_compatible(const char *s) { assert(!strcmp(s,"apple,j713")); return board_j713; }
+static bool apple_t8132_air(void) { return board_t8132_air; }
+static bool apple_dart_master_needs_strict(struct device *d) { assert(!d->of_node); return false; }
+static int apple_dart_isp_host_reset(struct apple_dart *d) { (void)d; abort(); }
+static void apple_dart_apply_own_tunables(struct apple_dart *d) { (void)d; abort(); }
+#define bitmap_weight(p,max) ({ int w=0, n; for_each_set_bit(n,p,max) w++; w; })
+#define test_bit(n,p) (!!((p)[(n)/64] & BIT((n)%64)))
+/* The radio DART is no J714s/J716c display provider and stays powered. */
+static int apple_dart_v27_cfg_enter(struct apple_dart_master_cfg *c) { (void)c; return 0; }
+static void apple_dart_v27_cfg_leave(struct apple_dart_master_cfg *c) { (void)c; }
+#define APPLE_DART_WRITER_CLOSED 2
+static int writer_gate, writer_refs;
+static int apple_dart_sleep_writer_get(struct apple_dart *d) { (void)d; writer_refs++; return writer_gate; }
+static void apple_dart_sleep_writer_put(struct apple_dart *d, int gate)
+{ (void)d; assert(gate==writer_gate && writer_refs>0); writer_refs--; }
+static void apple_dart_sleep_release_failed(void) { abort(); }
 static u32 readl(const void *p) { (void)p; abort(); }
 static int apple_dart_t8110_hw_tlb_command_range(struct apple_dart_stream_map *p,
         int op, bool range, unsigned long a, unsigned long b)
@@ -205,7 +222,9 @@ static int apple_dart_dcp_domain_flush(struct apple_dart_domain *d)
 #define DART_T8110_TLB_CMD_OP_FLUSH_SID 1
 #define for_each_stream_map(i,base,m) for ((i)=0,(m)=&(base)->stream_maps[0]; \
     (i)<MAX_DARTS_PER_DEVICE && (m)->dart; (m)=&(base)->stream_maps[++(i)])
-struct apple_pcie_hw { bool tunneled; };
+struct apple_pcie_hw { bool tunneled, adopt_link; };
+#define PORT_MSICFG 0x124
+#define BITS_PER_LONG 64
 struct apple_pcie { u16 managed_sids; struct apple_pcie_hw *hw; struct device *dev; };
 struct list_head { bool linked; };
 struct apple_pcie_port {
@@ -214,6 +233,7 @@ struct apple_pcie_port {
     u32 entries[16];
     void *base, *domain, *np;
     bool started, needs_stop;
+    unsigned long adopted_slots;
     unsigned irq;
     u32 status, link;
     struct list_head entry;
@@ -229,6 +249,7 @@ static void apple_pcie_port_disable_irq(struct apple_pcie_port *p) { (void)p; }
 static void apple_pcie_port_writel(struct apple_pcie_port *p, u32 v, unsigned o)
 { (void)p; assert(v==U32_MAX && o==PORT_INTMSK); pci_irq_writes++; }
 static void apple_pcie_tunnel_stop(struct apple_pcie_port *p) { (void)p; pci_tunnel_stops++; }
+static void apple_pcie_rid2sid_write(struct apple_pcie_port *p, int slot, u32 v) { (void)p; (void)slot; (void)v; abort(); }
 static void apple_pcie_port_unregister_irqs(struct apple_pcie_port *p) { (void)p; }
 static void irq_set_chained_handler(unsigned i, void *f) { (void)i; (void)f; }
 static void synchronize_rcu(void) {}
@@ -288,6 +309,8 @@ static u32 apple_pcie_port_readl(struct apple_pcie_port *p, unsigned o)
                  'apple_dart_mod_streams(',
                  'static int apple_dart_domain_add_streams(',
                  'apple_dart_setup_translation(',
+                 'static int apple_dart_attach_dev_paging_unguarded(',
+                 'static int apple_dart_attach_dev_paging_v27(',
                  'static int apple_dart_attach_dev_paging(',
                  'static int apple_dart_domain_flush_tlb_range('):
         # This definition has its static int return type on a preceding line.
@@ -300,8 +323,9 @@ static u32 apple_pcie_port_readl(struct apple_pcie_port *p, unsigned o)
     code += definition(pci, 'static int apple_pcie_radio_check_cold(struct apple_pcie_port *port)\n{') + '\n'
     code += definition(dart, 'static int apple_dart_retain_radio(') + '\n'
     probe = definition(dart, 'static int apple_dart_probe(struct platform_device *pdev)\n{')
-    start = probe.index('\tif (dart->managed_sids) {', probe.index('Retaining the live T8132 MTP bypass'))
-    end = probe.index('\n\t} else if (!dart->locked', start)
+    # The managed-SID branch of the reset/acquisition chain, up to its next sibling.
+    start = probe.index('} else if (dart->managed_sids) {') + len('} else ')
+    end = probe.index('\n\t} else if (', start)
     cleanup = probe[probe.index('err_clk_disable:'):probe.index('\n\tclk_bulk_disable_unprepare', probe.index('err_clk_disable:'))]
     code += 'static int test_probe_start(struct apple_dart *dart) { int ret; void *dev=dart->dev;\n' + probe[start:end] + '\n\t}\nreturn 0;\n' + cleanup + '\nreturn ret; }\n'
     code += r'''
@@ -445,8 +469,8 @@ int main(void)
     d.frontend[0]=&d;
     assert(apple_dart_def_domain_type(&dev)==IOMMU_DOMAIN_DMA);
     d.frontend[0]=NULL;
-    assert(apple_dart_def_domain_type(&dev)==IOMMU_DOMAIN_IDENTITY); /* legacy J713 */
-    board_j713=false;
+    assert(apple_dart_def_domain_type(&dev)==IOMMU_DOMAIN_IDENTITY); /* T8132 Air PCIe (J713/J715) */
+    board_t8132_air=false;
     assert(apple_dart_def_domain_type(&dev)==0); /* other machines retain default */
     d.managed_sids=BIT(1)|BIT(2);
     struct apple_dart_atomic_stream_map domain[2]={{.dart=&d}};
@@ -473,6 +497,12 @@ int main(void)
     assert(apple_dart_attach_dev_paging(&attach.domain,&dev,NULL)==0);
     assert(enable_writes==2 && last_enable==BIT(2) && !pm_refs);
     assert(attach.stream_maps[0].sidmap[0]==(BIT(1)|BIT(2)));
+    /* A DART closed for its sleep takes no attach and no register write. */
+    u32 closed[ARRAY_SIZE(d.regs)]; memcpy(closed,d.regs,sizeof(closed));
+    writer_gate=APPLE_DART_WRITER_CLOSED; all_writes=0;
+    assert(apple_dart_attach_dev_paging(&attach.domain,&dev,NULL)==-EBUSY);
+    assert(!all_writes && !pm_refs && !writer_refs && !memcmp(closed,d.regs,sizeof(closed)));
+    writer_gate=0;
     for (unsigned sid=3; sid<64; sid++) {
         assert(d.regs[DART_TCR(&d,sid)/4]==before[DART_TCR(&d,sid)/4]);
         assert(d.regs[DART_TTBR(&d,sid,0)/4]==before[DART_TTBR(&d,sid,0)/4]);

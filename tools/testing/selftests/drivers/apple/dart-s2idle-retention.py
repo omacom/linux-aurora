@@ -8,6 +8,7 @@ resume and quarantine its consumers, so that later maps are refused. These CPU
 tests do not qualify physical retention on a J713.
 """
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -21,6 +22,15 @@ def definition(source, name):
         depth += (source[end] == '{') - (source[end] == '}')
         end += 1
     return source[start:end]
+
+
+def macro(source, name):
+    start = source.index('#define ' + name + '(')
+    end = start
+    while True:
+        end = source.index('\n', end) + 1
+        if source[end - 2] != '\\':
+            return source[start:end]
 
 
 PRELUDE = r'''
@@ -37,6 +47,7 @@ typedef uint64_t u64;
 typedef u64 phys_addr_t;
 typedef unsigned int gfp_t;
 #define BIT(n) (1UL << (n))
+#define BIT_ULL(n) (1ULL << (n))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define READ_ONCE(x) (x)
@@ -50,15 +61,18 @@ typedef unsigned int gfp_t;
 #define spin_unlock_irqrestore(l, f) ((void)(l), (void)(f))
 static int errors;
 #define dev_err(dev, ...) (errors++)
+#define dev_info(dev, ...) ((void)0)
+#define MAX_DARTS_PER_DEVICE 8
 static void __set_bit(unsigned int n, unsigned long *p) { p[n / 64] |= 1UL << (n % 64); }
 
 struct apple_dart_hw { u32 tcr_bypass, ttbr_valid; unsigned int ttbr_count; };
 struct apple_dart;
-struct apple_dart_dcp { bool failed; struct apple_dart *dart; };
+struct apple_dart_dcp { bool failed, failed_logged; unsigned int sid; struct apple_dart *dart; };
 struct apple_dart {
     const struct apple_dart_hw *hw;
     u16 managed_sids;
     bool managed_failed, supports_bypass, s2idle_kept;
+    u32 host_off_slept : 1;
     int managed_lock;
     struct { bool ready; } iommu;
     struct apple_dart_dcp *dcp, *frontend[2];
@@ -90,7 +104,12 @@ static int apple_dart_check_fw_map(struct apple_dart_domain *d, u64 dva, phys_ad
 static int apple_dart_dcp_map(struct apple_dart_dcp *dcp, unsigned long iova, phys_addr_t pa,
                               size_t pgsize, size_t count, int prot, gfp_t gfp, size_t *mapped)
 { assert(!"the managed radio domain is not a borrowed display domain"); return 0; }
-static int maps;
+static int maps, writers, v27_ops;
+/* The sleep and T6050 display gates are not under test here: admit, but balance. */
+static int apple_dart_sleep_writer_get(struct apple_dart *d) { assert(d); writers++; return 1; }
+static void apple_dart_sleep_writer_put(struct apple_dart *d, int gate) { assert(d && gate == 1); writers--; }
+static int apple_dart_v27_enter(struct apple_dart *d, bool unmap) { assert(d && !unmap); v27_ops++; return 0; }
+static void apple_dart_v27_leave(struct apple_dart *d) { assert(d); v27_ops--; }
 static int test_map(struct io_pgtable_ops *ops, unsigned long iova, phys_addr_t pa, size_t pgsize,
                     size_t count, int prot, gfp_t gfp, size_t *mapped)
 { maps++; *mapped = pgsize * count; return 0; }
@@ -106,7 +125,9 @@ static struct apple_dart_domain radio;
 static void setup(void)
 {
     memset(&d, 0, sizeof(d));
-    dcp.failed = front0.failed = front1.failed = false;
+    dcp = (struct apple_dart_dcp){ .sid = 16, .dart = &d };
+    front0 = (struct apple_dart_dcp){ .sid = 0, .dart = &d };
+    front1 = (struct apple_dart_dcp){ .sid = 1, .dart = &d };
     d.hw = &hw;
     d.num_streams = 16;
     d.managed_sids = BIT(1) | BIT(2);
@@ -134,14 +155,18 @@ static void setup(void)
 static int map_16k(void)
 {
     size_t mapped = 0;
-    return apple_dart_map_pages(&radio.domain, 0x10000, 0x800000000ULL, 0x4000, 1, 3, 0, &mapped);
+    int ret = apple_dart_map_pages(&radio.domain, 0x10000, 0x800000000ULL, 0x4000, 1, 3, 0, &mapped);
+    assert(!writers && !v27_ops);
+    return ret;
 }
 
 static void expect_quarantined(int ret)
 {
-    assert(ret == -EIO && errors == 1);
+    /* One resume error, then each borrowed stream logs its retirement once. */
+    assert(ret == -EIO && errors == 4);
     assert(d.managed_failed && disabled == d.managed_sids);
     assert(dcp.failed && front0.failed && front1.failed);
+    assert(dcp.failed_logged && front0.failed_logged && front1.failed_logged);
     assert(map_16k() == -EIO && maps == 0);
 }
 
@@ -185,18 +210,27 @@ int main(void)
 def main():
     root = Path(__file__).resolve().parents[5]
     dart = (root / 'drivers/iommu/apple-dart.c').read_text()
+    dcp = (root / 'drivers/iommu/apple-dart-dcp.h').read_text()
     code = PRELUDE
-    for name in ('static bool apple_dart_state_retained(',
+    code += macro(dcp, 'apple_dart_dcp_fail') + '\n'
+    code += macro(dcp, 'apple_dart_fail_borrowed') + '\n'
+    for name in ('static bool apple_dart_state_retained_except(',
+                 'static bool apple_dart_state_retained(',
                  'static void apple_dart_managed_quarantine_locked(',
                  'static void apple_dart_managed_quarantine(',
                  'static void apple_dart_quarantine_borrowed(',
                  'static int apple_dart_resume_retained(',
+                 'static int apple_dart_map_pages_unguarded(',
+                 'static int apple_dart_map_pages_v27(',
                  'static int apple_dart_map_pages('):
         code += definition(dart, name) + '\n'
     code += TEST
-    quarantine = ('\tif (dart->managed_sids)\n\t\tapple_dart_managed_quarantine(dart);\n'
-                  '\tapple_dart_quarantine_borrowed(dart);\n')
-    assert code.count(quarantine) == 1, 'the resume quarantine was not found'
+    resume = definition(dart, 'static int apple_dart_resume_retained(')
+    found = re.findall(r'\tif \(dart->managed_sids\)\n\t\tapple_dart_managed_quarantine\(dart\);\n'
+                       r'\tapple_dart_quarantine_borrowed\(dart, [^\n]*\);\n', resume)
+    assert len(found) == 1, 'the resume quarantine was not found'
+    quarantine = found[0]
+    assert code.count(quarantine) == 1, 'the resume quarantine is not unique'
     with tempfile.TemporaryDirectory() as directory:
         c, exe = Path(directory) / 'resume.c', Path(directory) / 'resume'
         for control in ('production', 'missing-quarantine'):

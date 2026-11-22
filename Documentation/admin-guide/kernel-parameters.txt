@@ -8349,10 +8349,10 @@ Kernel parameters
 
 	user4k=		[ARM64,EARLY]
 			Format: <bool>
-			Enable the experimental per-process user page sizes
-			(4K userspace pages on a 16K or 64K kernel) built
-			with CONFIG_ARM64_USER4K_EXPERIMENTAL.
-			Default: off. While off, the private page-size
+			Enable or disable the experimental per-process user
+			page sizes (4K userspace pages on a 16K or 64K
+			kernel) built with CONFIG_ARM64_USER4K_EXPERIMENTAL.
+			Default: on. With user4k=off, the private page-size
 			prctls refuse every non-native size with EINVAL,
 			every exec uses the native page size and the 4K
 			ownership record is not reserved in page_ext.

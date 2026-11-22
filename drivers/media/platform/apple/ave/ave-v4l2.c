@@ -1525,7 +1525,8 @@ int ave_v4l2_register(struct ave_dev *ave)
 	int ret;
 
 	mutex_init(&ave->vdev_lock);
-	ave->wq = alloc_ordered_workqueue("apple-ave", WQ_MEM_RECLAIM);
+	ave->wq = alloc_ordered_workqueue("ave-%s", WQ_MEM_RECLAIM,
+					  dev_name(ave->dev));
 	if (!ave->wq)
 		return -ENOMEM;
 	INIT_WORK(&ave->irq_work, ave_irq_work);

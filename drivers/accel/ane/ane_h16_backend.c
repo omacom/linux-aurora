@@ -962,7 +962,7 @@ static int ane_h16_map(void *ctx)
 	int ret;
 
 	/* Unmanaged domains can otherwise attach retained, firmware-owned roots. */
-	ret = ane_h16_dart_protection(b, true);
+	ret = ane_h16_dart_protection(b, b->require_dart_unlocked);
 	if (ret)
 		return ret;
 	if (of_count_phandle_with_args(h->dev->of_node, "iommus", "#iommu-cells") != 3) {
@@ -1877,6 +1877,7 @@ static int ane_h16_preload_identity(struct ane_h16_device *h)
 			continue;
 		}
 		b->build = p->build;
+		b->require_dart_unlocked = p->require_dart_unlocked;
 		identity = p->identity;
 	}
 	if (ret) {

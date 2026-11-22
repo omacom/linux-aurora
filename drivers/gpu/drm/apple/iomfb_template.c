@@ -1105,8 +1105,15 @@ dcpep_cb_get_uint_prop(struct apple_dcp *dcp, struct dcp_get_uint_prop_req *req)
 	    .value = 0
 	};
 
-	if (dcp->panel.has_mini_led &&
-	    memcmp(req->obj, "SUMP", sizeof(req->obj)) == 0) { /* "PMUS */
+	/*
+	 * "PMUS"/"Temperature": the battery temperature in 0.1 K.  Every
+	 * firmware with a panel asks for it from TableCompensator::
+	 * set_PMU_service(), mini-LED or not: the OLED firmware (27.x on the
+	 * K116s) uses it as the panel's initial temperature guess and logs
+	 * "failed to read PMU temperature property!" when the reply is
+	 * false.  The H17P table already answers it unconditionally.
+	 */
+	if (memcmp(req->obj, "SUMP", sizeof(req->obj)) == 0) { /* "PMUS */
 	    if (strncmp(req->key, "Temperature", sizeof(req->key)) == 0) {
 		resp.value = dcp_pmu_temperature(dcp->dev);
 		resp.ret = true;
@@ -2874,6 +2881,9 @@ void DCP_FW_NAME(iomfb_poweroff)(struct apple_dcp *dcp)
 #endif
 	dcp_prepare_clear_swap(dcp, swap);
 #endif
+	/* The clear swap takes the panel to 0 (dcp_prepare_clear_swap()). */
+	if (dcp_has_panel(dcp))
+		dcp_backlight_presented(dcp, 0);
 
 	dcp_swap_start(dcp, false, &swap_req, dcp_swap_clear_started, cookie);
 
@@ -2978,9 +2988,11 @@ void DCP_FW_NAME(iomfb_blank)(struct apple_dcp *dcp)
 	kref_get(&cookie->refcount);
 
 	dcp_prepare_clear_swap(dcp, swap);
-	if (dcp_has_panel(dcp))
+	if (dcp_has_panel(dcp)) {
 		iomfb_encode_backlight_swap_h17p((u8 *)&swap->swap, 0,
 						 dcp->brightness.maximum, true);
+		dcp_backlight_presented(dcp, 0);
+	}
 
 	dcp_swap_start(dcp, false, &swap_req, dcp_swap_clear_started, cookie);
 	ret = wait_for_completion_timeout(&cookie->done, msecs_to_jiffies(500));
@@ -3495,6 +3507,9 @@ static void dcp_swap_started(struct apple_dcp *dcp, void *data, void *cookie)
 			dcp_drm_crtc_vblank(dcp->crtc);
 		return;
 	}
+#if DCP_FW_H17(DCP_FW_VER)
+	iomfb_prepare_indicator_h17p(dcp);
+#endif
 #if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
 	if (dcp_peer_start_second(dcp, resp))
 		return;
@@ -4608,10 +4623,12 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 			   dcp->brightness.bl_dev->props.brightness :
 			   dcp->brightness.nits;
 
-		if (nits > 0)
+		if (nits > 0) {
 			iomfb_encode_backlight_swap_h17p((u8 *)&req->swap, nits,
 							 dcp->brightness.maximum,
 							 true);
+			dcp_backlight_presented(dcp, nits);
+		}
 #else
 #if DCP_FW_LAYOUT_14_7(DCP_FW_VER)
 		req->swap.bl_update = 1;
@@ -4620,6 +4637,7 @@ void DCP_FW_NAME(iomfb_flush)(struct apple_dcp *dcp, struct drm_crtc *crtc, stru
 #endif
 		req->swap.bl_value = dcp->brightness.dac;
 		req->swap.bl_power = 0x40;
+		dcp_backlight_presented(dcp, dcp->brightness.level);
 #endif
 		dcp->brightness.update = false;
 	}

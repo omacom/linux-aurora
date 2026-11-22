@@ -53,7 +53,7 @@ struct sk_buff { unsigned values[32]; bool seen[32]; };
 struct nlattr { int n; };
 struct element { unsigned datalen; };
 struct cfg80211_bss_ies { unsigned len; const u8 *data; };
-struct cfg80211_bss { const u8 *bssid; const struct cfg80211_bss_ies *beacon_ies; };
+struct cfg80211_bss { const u8 *bssid; const struct cfg80211_bss_ies *beacon_ies; u16 beacon_interval; };
 struct net_device { int ifindex; };
 struct cfg80211_registered_device { int wiphy_idx,wiphy; };
 struct cfg80211_connect_resp_params {int status,timeout_reason;const u8 *req_ie,*resp_ie,*ap_mld_addr;size_t req_ie_len,resp_ie_len;unsigned valid_links;bool assoc_encrypted;
@@ -81,7 +81,7 @@ static void genlmsg_multicast_netns(int*f,int n,struct sk_buff*m,int p,int g,gfp
 ENCODER
 struct mt7932 {bool link_failed,stopping,connect_open,assoc_request_seen,connecting,connected,disconnecting,connect_cancelled,connect_publishing,connect_lost,rf_ready,connect_pmk_valid,roam_moving,roam_landed;
  int connect_error,response_lock,command_mutex,data_lock,wiphy,power_work;u16 disconnect_reason;struct net_device *netdev;struct cfg80211_bss *connect_bss;u8 connect_bssid[6],connect_pmk[32],connect_sae_pwd[63],connect_sae_pwd_length,assoc_request_ies[512];unsigned assoc_request_ie_len;
- struct {struct {bool ht_supported;}ht_cap;}band2;bool power_tim,data_ready,station_signal_valid,station_rx_rate_valid,station_tx_rate_valid;unsigned long station_tx_bytes,station_rx_bytes,station_tx_packets,station_rx_packets,station_connected;};
+ struct {struct {bool ht_supported;}ht_cap;}band2;bool power_tim,data_ready,station_signal_valid,station_rx_rate_valid,station_tx_rate_valid;unsigned long station_tx_bytes,station_rx_bytes,station_tx_packets,station_rx_packets,station_connected;u16 station_beacon_tu;};
 static unsigned long jiffies=1;
 static unsigned info_logs,err_logs,notifications,disconnections,retirements,releases,authorizations,carrier,work_count,carrier_offs,deferred;
 static u16 last_reason;static bool last_local;
@@ -109,7 +109,7 @@ HELPER
 static void report_worker(struct mt7932 *m,int ret,bool retirement_attempted,bool auth_submitted){
  struct cfg80211_connect_resp_params response={};unsigned long flags;bool submitted=true,peer_owned=true,cancelled;bool roam __attribute__((unused));struct mt7932_connect_report outcome __attribute__((unused));u16 reason;
 REPORT
-int main(void){struct net_device n={1};struct cfg80211_bss b={};
+int main(void){struct net_device n={1};struct cfg80211_bss b={.beacon_interval=100};
  int errors[]={0,-ETIMEDOUT,-ECONNREFUSED,-EPROTO,-ECANCELED,-ECONNRESET,-EIO};
  for(unsigned i=0;i<sizeof(errors)/sizeof(*errors);i++)for(unsigned k=0;k<4;k++){
   bool auth=k&1,failed=k&2;
@@ -130,6 +130,8 @@ int main(void){struct net_device n={1};struct cfg80211_bss b={};
   assert(!encoded.seen[NL80211_ATTR_TIMEOUT_REASON]||encoded.values[NL80211_ATTR_TIMEOUT_REASON]==NL80211_TIMEOUT_UNSPECIFIED);
   assert(encoded.values[NL80211_ATTR_STATUS_CODE]==(errors[i]?1:0));
   assert(m.connect_bss==NULL&&m.connected==!errors[i]);
+  /* A connection records its AP's beacon interval, for the lost-AP check. */
+  assert(m.station_beacon_tu==(errors[i]?0:100));
   assert(retirements==!!errors[i]);assert(authorizations==!errors[i]&&carrier==!errors[i]);
  }
  // Cancellation consumes the BSS and reports disconnect, not a connect result.

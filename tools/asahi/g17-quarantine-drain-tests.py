@@ -236,6 +236,8 @@ pub struct Pair {
 impl Pair {
     fn firmware_drained(&self, host: &impl Host) -> Result<bool> { Ok(host.drained()) }
     fn resync(&mut self) {}
+    // The cross-pair task-stage order is not modelled here (KUnit asahi_g17_render_cross_pair_order).
+    fn release_task_order_if_held(&self) {}
 ''' + pair + r'''
 }
 

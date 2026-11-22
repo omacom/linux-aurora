@@ -54,7 +54,7 @@ struct centauri_t6050_ipc { bool fenced; };
 struct centauri_t6050_rewake {
     struct pci_dev *bridge, *control, *beta;
     unsigned slot, generation, work_generation;
-    bool active, rerun;
+    bool active, rerun, beta_fallback;
     int error, node;
     void *arena;
     struct kref ref;
@@ -176,7 +176,8 @@ int main(void)
     assert(!centauri_t6050_domain_fence(&rw)); /* old-owner identity cannot vanish */
 
     reset(&c,&rw,fn,&bridge,&bus);
-    assert(!centauri_t6050_prepare(&fn[0].dev) && c.pm_prepared);
+    rw.beta_fallback=true;
+    assert(!centauri_t6050_prepare(&fn[0].dev) && c.pm_prepared && !rw.beta_fallback);
     wifi_error=-ETIMEDOUT; /* cfg80211 abort: F0 suspend never called */
     centauri_t6050_complete(&fn[0].dev);
     assert(!c.pm_prepared && rw.active && rw.error==-ETIMEDOUT && queues==1);

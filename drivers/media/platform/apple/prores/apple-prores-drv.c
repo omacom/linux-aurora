@@ -744,6 +744,233 @@ struct apr_stats_regs {
 	u32 lo, hi, size;
 };
 
+/*
+ * T8142 (M5) power-up rows, in the order the engine needs them: the
+ * SCODEC-system window (aux), the SCODEC control window (ctrl), the engine
+ * (core), then the AXI-to-fabric wrapper. Each row replaces the whole
+ * register. They are the values the SoC needs before its first job,
+ * recorded from an MMIO trace on a J815. The ADT's apr and dart-apr nodes
+ * carry no tunables, and the system rows match T6041's but for one value,
+ * so they belong to the SoC, not to the machine. An
+ * apple/prores-t8142-init.bin replaces them.
+ */
+#define APR_ROW(o, v)	{ (o), 0xffffffff, (v) }
+
+/*
+ * SCODEC system: eight configuration words (T6041 writes 0xa000003f at
+ * 0x01c), then the table at 0x1000-0x1130 cleared but for 0x10f0-0x10f8,
+ * with its words 0 and 30 set to 0x7f00.
+ */
+static const struct apr_tunable apr_t8142_aux_tunables[] = {
+	APR_ROW(0x008, 0x00000001),
+	APR_ROW(0x00c, 0x7f7f0001),
+	APR_ROW(0x014, 0x01100110),
+	APR_ROW(0x018, 0x7f007f00),
+	APR_ROW(0x01c, 0xa000003b),
+	APR_ROW(0x020, 0x001c0090),
+	APR_ROW(0x024, 0xa000003b),
+	APR_ROW(0x028, 0x08000002),
+	APR_ROW(0x1000, 0x00007f00),
+	APR_ROW(0x1004, 0x00000000),
+	APR_ROW(0x1008, 0x00000000),
+	APR_ROW(0x100c, 0x00000000),
+	APR_ROW(0x1010, 0x00000000),
+	APR_ROW(0x1014, 0x00000000),
+	APR_ROW(0x1018, 0x00000000),
+	APR_ROW(0x101c, 0x00000000),
+	APR_ROW(0x1020, 0x00000000),
+	APR_ROW(0x1024, 0x00000000),
+	APR_ROW(0x1028, 0x00000000),
+	APR_ROW(0x102c, 0x00000000),
+	APR_ROW(0x1030, 0x00000000),
+	APR_ROW(0x1034, 0x00000000),
+	APR_ROW(0x1038, 0x00000000),
+	APR_ROW(0x103c, 0x00000000),
+	APR_ROW(0x1040, 0x00000000),
+	APR_ROW(0x1044, 0x00000000),
+	APR_ROW(0x1048, 0x00000000),
+	APR_ROW(0x104c, 0x00000000),
+	APR_ROW(0x1050, 0x00000000),
+	APR_ROW(0x1054, 0x00000000),
+	APR_ROW(0x1058, 0x00000000),
+	APR_ROW(0x105c, 0x00000000),
+	APR_ROW(0x1060, 0x00000000),
+	APR_ROW(0x1064, 0x00000000),
+	APR_ROW(0x1068, 0x00000000),
+	APR_ROW(0x106c, 0x00000000),
+	APR_ROW(0x1070, 0x00000000),
+	APR_ROW(0x1074, 0x00000000),
+	APR_ROW(0x1078, 0x00007f00),
+	APR_ROW(0x107c, 0x00000000),
+	APR_ROW(0x1080, 0x00000000),
+	APR_ROW(0x1084, 0x00000000),
+	APR_ROW(0x1088, 0x00000000),
+	APR_ROW(0x108c, 0x00000000),
+	APR_ROW(0x1090, 0x00000000),
+	APR_ROW(0x1094, 0x00000000),
+	APR_ROW(0x1098, 0x00000000),
+	APR_ROW(0x109c, 0x00000000),
+	APR_ROW(0x10a0, 0x00000000),
+	APR_ROW(0x10a4, 0x00000000),
+	APR_ROW(0x10a8, 0x00000000),
+	APR_ROW(0x10ac, 0x00000000),
+	APR_ROW(0x10b0, 0x00000000),
+	APR_ROW(0x10b4, 0x00000000),
+	APR_ROW(0x10b8, 0x00000000),
+	APR_ROW(0x10bc, 0x00000000),
+	APR_ROW(0x10c0, 0x00000000),
+	APR_ROW(0x10c4, 0x00000000),
+	APR_ROW(0x10c8, 0x00000000),
+	APR_ROW(0x10cc, 0x00000000),
+	APR_ROW(0x10d0, 0x00000000),
+	APR_ROW(0x10d4, 0x00000000),
+	APR_ROW(0x10d8, 0x00000000),
+	APR_ROW(0x10dc, 0x00000000),
+	APR_ROW(0x10e0, 0x00000000),
+	APR_ROW(0x10e4, 0x00000000),
+	APR_ROW(0x10e8, 0x00000000),
+	APR_ROW(0x10ec, 0x00000000),
+	APR_ROW(0x10fc, 0x00000000),
+	APR_ROW(0x1100, 0x00000000),
+	APR_ROW(0x1104, 0x00000000),
+	APR_ROW(0x1108, 0x00000000),
+	APR_ROW(0x110c, 0x00000000),
+	APR_ROW(0x1110, 0x00000000),
+	APR_ROW(0x1114, 0x00000000),
+	APR_ROW(0x1118, 0x00000000),
+	APR_ROW(0x111c, 0x00000000),
+	APR_ROW(0x1120, 0x00000000),
+	APR_ROW(0x1124, 0x00000000),
+	APR_ROW(0x1128, 0x00000000),
+	APR_ROW(0x112c, 0x00000000),
+	APR_ROW(0x1130, 0x00000000),
+};
+
+/* SCODEC control: eleven configuration words and one at 0x1000. */
+static const struct apr_tunable apr_t8142_ctrl_tunables[] = {
+	APR_ROW(0x004, 0x00000001),
+	APR_ROW(0x00c, 0x00000001),
+	APR_ROW(0x010, 0x00000003),
+	APR_ROW(0x014, 0x00000000),
+	APR_ROW(0x018, 0x00000019),
+	APR_ROW(0x01c, 0x0000007f),
+	APR_ROW(0x020, 0x00000000),
+	APR_ROW(0x024, 0x000000fe),
+	APR_ROW(0x028, 0x00000000),
+	APR_ROW(0x02c, 0x00001c20),
+	APR_ROW(0x034, 0x00000003),
+	APR_ROW(0x1000, 0x00000001),
+};
+
+/*
+ * The core rows from 0x180 come in blocks of three words at a 0x40 stride:
+ * a word with bit 31 set, a small number unique to the block, and either a
+ * length or start << 16 | length. Read as channels with buffers in one
+ * memory, the start/length words of the blocks whose first word ends in
+ * 0x600 or 0xa00 tile 0xa00-0xc00 exactly, and those ending in 0x5ff or 0x9ff
+ * tile 0xa00-0xb40. The blocks at 0x380 and 0x700 hold the two statistics
+ * areas' address and size registers (APR_REG_STATS0/1_*). This is the
+ * layout the values show, not a documented one.
+ */
+#define APR_BUF(start, len)	((start) << 16 | (len))
+
+static const struct apr_tunable apr_t8142_engine_tunables[] = {
+	APR_ROW(0x008, 0x00000008),
+	APR_ROW(0x118, 0x00000800),
+	APR_ROW(0x11c, 0x00000740),
+	APR_ROW(0x148, 0x00000001),
+	APR_ROW(0x180, 0x800a0600), APR_ROW(0x184, 1), APR_ROW(0x188, APR_BUF(0xbb8, 0x038)),
+	APR_ROW(0x1c0, 0x80040600), APR_ROW(0x1c4, 3), APR_ROW(0x1c8, APR_BUF(0xa00, 0x0c0)),
+	APR_ROW(0x200, 0x80050600), APR_ROW(0x204, 2), APR_ROW(0x208, APR_BUF(0xac0, 0x0c0)),
+	APR_ROW(0x240, 0x800007ff), APR_ROW(0x244, 7), APR_ROW(0x248, 0x40),
+	APR_ROW(0x280, 0x80010600), APR_ROW(0x284, 6), APR_ROW(0x288, 0x80),
+	APR_ROW(0x2c0, 0x80020600), APR_ROW(0x2c4, 5), APR_ROW(0x2c8, 0x40),
+	APR_ROW(0x300, 0x80030600), APR_ROW(0x304, 4), APR_ROW(0x308, 0x40),
+	/* 0x340-0x350 and 0x640-0x6d0 are not single channels. */
+	APR_ROW(0x340, 0x81000047),
+	APR_ROW(0x344, 0x0b0a0908),
+	APR_ROW(0x348, 0x00000820),
+	APR_ROW(0x34c, 0x00001580),
+	APR_ROW(0x350, 0x00928170),
+	APR_ROW(0x380, 0x800b0a00), APR_ROW(0x384, 12), APR_ROW(0x388, APR_BUF(0xb80, 0x038)),
+	APR_ROW(APR_REG_STATS0_SIZE, APR_STATS_BYTES),
+	APR_ROW(0x3c0, 0x800b0a00), APR_ROW(0x3c4, 25), APR_ROW(0x3c8, APR_BUF(0xbf0, 0x010)),
+	APR_ROW(0x4c0, 0x800b09ff), APR_ROW(0x4c4, 27), APR_ROW(0x4c8, APR_BUF(0xb30, 0x010)),
+	APR_ROW(0x500, 0x800605ff), APR_ROW(0x504, 13), APR_ROW(0x508, APR_BUF(0xa00, 0x0a0)),
+	APR_ROW(0x540, 0x800005ff), APR_ROW(0x544, 17), APR_ROW(0x548, 0x80),
+	APR_ROW(0x580, 0x800105ff), APR_ROW(0x584, 16), APR_ROW(0x588, 0x80),
+	APR_ROW(0x5c0, 0x800205ff), APR_ROW(0x5c4, 15), APR_ROW(0x5c8, 0x40),
+	APR_ROW(0x600, 0x800305ff), APR_ROW(0x604, 14), APR_ROW(0x608, 0x40),
+	APR_ROW(0x640, 0x80070051),
+	APR_ROW(0x644, 0x00081716),
+	APR_ROW(0x648, 0x07ff0003),
+	APR_ROW(0x650, 0x07400040),
+	APR_ROW(0x680, 0x80081051),
+	APR_ROW(0x684, 0x00081514),
+	APR_ROW(0x688, 0x07ff0003),
+	APR_ROW(0x690, 0x07800040),
+	APR_ROW(0x6c0, 0x80092051),
+	APR_ROW(0x6c4, 0x00081312),
+	APR_ROW(0x6c8, 0x07ff0003),
+	APR_ROW(0x6d0, 0x07c00040),
+	APR_ROW(0x700, 0x800b09ff), APR_ROW(0x704, 24), APR_ROW(0x708, APR_BUF(0xaa0, 0x060)),
+	APR_ROW(APR_REG_STATS1_SIZE, APR_STATS_BYTES),
+	APR_ROW(0x740, 0x800b09ff), APR_ROW(0x744, 26), APR_ROW(0x748, APR_BUF(0xb00, 0x010)),
+	APR_ROW(0x780, 0x800b09ff), APR_ROW(0x784, 28), APR_ROW(0x788, APR_BUF(0xb10, 0x010)),
+	APR_ROW(0x7c0, 0x800b09ff), APR_ROW(0x7c4, 29), APR_ROW(0x7c8, APR_BUF(0xb20, 0x010)),
+};
+
+/*
+ * AXI-to-fabric wrapper: one word per port at 0x000-0x040, each with bit 31
+ * set, then the bridge's configuration words.
+ */
+static const struct apr_tunable apr_t8142_wrapper_tunables[] = {
+	APR_ROW(0x000, 0x80000019),
+	APR_ROW(0x004, 0x800b000b),
+	APR_ROW(0x008, 0x800b000b),
+	APR_ROW(0x00c, 0x800b000b),
+	APR_ROW(0x010, 0x80000016),
+	APR_ROW(0x014, 0x80000016),
+	APR_ROW(0x018, 0x80000003),
+	APR_ROW(0x01c, 0x80000003),
+	APR_ROW(0x020, 0x80000010),
+	APR_ROW(0x024, 0x80000010),
+	APR_ROW(0x028, 0x8010000a),
+	APR_ROW(0x02c, 0x8000001a),
+	APR_ROW(0x030, 0x80000004),
+	APR_ROW(0x034, 0x80000004),
+	APR_ROW(0x038, 0x80000012),
+	APR_ROW(0x03c, 0x9000000e),
+	APR_ROW(0x040, 0x9000000e),
+	APR_ROW(0x100, 0x000000ff),
+	APR_ROW(0x104, 0x00010002),
+	APR_ROW(0x108, 0x000413b0),
+	APR_ROW(0x300, 0x1c000211),
+	APR_ROW(0x304, 0x02020000),
+	APR_ROW(0x314, 0x80000140),
+	APR_ROW(0x31c, 0x800005a0),
+	APR_ROW(0x324, 0x800005a0),
+	APR_ROW(0x32c, 0x80000024),
+	APR_ROW(0x404, 0x00100071),
+	APR_ROW(0x748, 0x00200000),
+	APR_ROW(0x848, 0x00100030),
+	APR_ROW(0x948, 0x01400100),
+	APR_ROW(0xa50, 0x00800080),
+	APR_ROW(0xc00, 0x7fffffff),
+	APR_ROW(0xc04, 0x00000101),
+	APR_ROW(0x4008, 0x00000000),
+	APR_ROW(0x400c, 0x00000000),
+	APR_ROW(0x4014, 0x00000000),
+	APR_ROW(0x4018, 0x00000000),
+	APR_ROW(0x401c, 0x00000001),
+};
+
+/* The built-in rows have the counts a T8142 APRI file has. */
+static_assert(ARRAY_SIZE(apr_t8142_aux_tunables) == APRI_SYSTEM_COUNT);
+static_assert(ARRAY_SIZE(apr_t8142_ctrl_tunables) == APRI_CONTROL_COUNT);
+static_assert(ARRAY_SIZE(apr_t8142_engine_tunables) == APRI_CORE_COUNT);
+static_assert(ARRAY_SIZE(apr_t8142_wrapper_tunables) == APRI_T8142_WRAPPER_COUNT);
+
 /* Selected only by the DT compatible, before mapping any resources. */
 struct apr_variant {
 	int (*build_desc)(const struct apr_frame *f, u8 *desc);
@@ -818,6 +1045,22 @@ static const struct apr_variant apr_t6041 = {
 	.apri = &apri_t6041,
 };
 
+/* T6041's engine and windows, with T8132's own wrapper table; no built-in rows. */
+static const struct apr_variant apr_t8132 = {
+	.build_desc = apr_build_desc,
+	.stats = {
+		{ APR_REG_STATS0_LO, APR_REG_STATS0_HI, APR_REG_STATS0_SIZE },
+		{ APR_REG_STATS1_LO, APR_REG_STATS1_HI, APR_REG_STATS1_SIZE },
+	},
+	.reg_names = { "core", "wrapper", "aux" },
+	.num_regs = 3,
+	.num_irqs = 1,
+	.ring_bytes = APR_RING_BYTES,
+	.desc_bytes = APR_DESC_BYTES,
+	.firmware_name = APRI_T8132_FIRMWARE_NAME,
+	.apri = &apri_t8132,
+};
+
 /* T6041's engine plus the SCODEC control window. */
 static const struct apr_variant apr_t6050 = {
 	.build_desc = apr_build_desc,
@@ -840,6 +1083,30 @@ static const struct apr_variant apr_t6050 = {
 	.desc_bytes = APR_DESC_BYTES,
 	.firmware_name = APRI_T6050_FIRMWARE_NAME,
 	.apri = &apri_t6050,
+};
+
+/* T6050's engine and windows, with built-in rows (a Mac's own file replaces them). */
+static const struct apr_variant apr_t8142 = {
+	.build_desc = apr_build_desc,
+	.stats = {
+		{ APR_REG_STATS0_LO, APR_REG_STATS0_HI, APR_REG_STATS0_SIZE },
+		{ APR_REG_STATS1_LO, APR_REG_STATS1_HI, APR_REG_STATS1_SIZE },
+	},
+	.engine_tunables = apr_t8142_engine_tunables,
+	.num_engine_tunables = ARRAY_SIZE(apr_t8142_engine_tunables),
+	.wrapper_tunables = apr_t8142_wrapper_tunables,
+	.num_wrapper_tunables = ARRAY_SIZE(apr_t8142_wrapper_tunables),
+	.aux_tunables = apr_t8142_aux_tunables,
+	.num_aux_tunables = ARRAY_SIZE(apr_t8142_aux_tunables),
+	.ctrl_tunables = apr_t8142_ctrl_tunables,
+	.num_ctrl_tunables = ARRAY_SIZE(apr_t8142_ctrl_tunables),
+	.reg_names = { "core", "wrapper", "aux", "ctrl" },
+	.num_regs = 4,
+	.num_irqs = 1,
+	.ring_bytes = APR_RING_BYTES,
+	.desc_bytes = APR_DESC_BYTES,
+	.firmware_name = APRI_T8142_FIRMWARE_NAME,
+	.apri = &apri_t8142,
 };
 
 struct apr_dev {
@@ -1911,7 +2178,9 @@ static const struct of_device_id apr_of_match[] = {
 	{ .compatible = "apple,t6000-prores", .data = &apr_t6000 },
 	{ .compatible = "apple,t6041-prores", .data = &apr_t6041 },
 	{ .compatible = "apple,t6050-prores", .data = &apr_t6050 },
+	{ .compatible = "apple,t8132-prores", .data = &apr_t8132 },
 	{ .compatible = "apple,t8140-prores", .data = &apr_t8140 },
+	{ .compatible = "apple,t8142-prores", .data = &apr_t8142 },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, apr_of_match);
@@ -1931,3 +2200,5 @@ MODULE_DESCRIPTION("Apple ProRes encoder");
 MODULE_LICENSE("GPL");
 MODULE_FIRMWARE(APRI_T6041_FIRMWARE_NAME);
 MODULE_FIRMWARE(APRI_T6050_FIRMWARE_NAME);
+MODULE_FIRMWARE(APRI_T8132_FIRMWARE_NAME);
+MODULE_FIRMWARE(APRI_T8142_FIRMWARE_NAME);

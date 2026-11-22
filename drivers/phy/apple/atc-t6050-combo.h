@@ -256,6 +256,33 @@ static int combo_orientation(struct t6050_dp *dp, enum typec_orientation orienta
 	return ret;
 }
 
+/*
+ * DisplayPort pin D comes to a port that runs USB 3: the USB 3 start (apple_t6050_usb3_init_*)
+ * is the pin D start (mf_*_init) step for step, so the lanes are already as pin D has them,
+ * USB 3 on one pair and the other pair free. Only the AUX channel is turned on, as macOS does
+ * there on the running PHY once the port controller reports pin D; the PHY's firmware, the
+ * PIPE and the USB controller run on. The port is then as a pin D start leaves it, so its
+ * stop is pin D's (atc_stop()).
+ */
+static int combo_dp2_join_usb(struct t6050_dp *dp)
+{
+	int ret;
+
+	lockdep_assert_held(&dp->lock);
+	ret = ATC_SEQUENCE(dp, aux_on);
+	if (ret) {
+		dev_err(dp->dev, "AUX on beside the running USB 3 failed (%d)\n", ret);
+		return ret;
+	}
+	dp->usb_prepared = false;
+	dp->multifunction = true;
+	dp->enabled = true;
+	dp->combo_mode = COMBO_DP2;
+	dev_info(dp->dev, "Type-C DP: 2 lanes beside the running USB 3, %s orientation\n",
+		 dp->reverse ? "reverse" : "normal");
+	return 0;
+}
+
 static int combo_mux(struct t6050_dp *dp, struct typec_mux_state *state)
 {
 	enum combo_mode mode;
@@ -290,6 +317,8 @@ static int combo_mux(struct t6050_dp *dp, struct typec_mux_state *state)
 		return 0;
 	if (mode != COMBO_SAFE && dp->orientation == TYPEC_ORIENTATION_NONE)
 		return -ENOLINK;
+	if (mode == COMBO_DP2 && dp->combo_mode == COMBO_USB && dp->usb_prepared)
+		return combo_dp2_join_usb(dp);
 	/* A start right after a sleep finds the always-on side as the sleep kept it. */
 	ret = combo_stop(dp, mode != COMBO_SAFE && dp->aon_kept);
 	if (ret || mode == COMBO_SAFE)

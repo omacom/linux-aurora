@@ -210,12 +210,16 @@
 		compatible = "apple,t8142-cluster-cpufreq";
 		reg = <0x2 0x10e20000 0 0x1000>;
 		#performance-domain-cells = <0>;
+		/* E lane follows the ADT ordering; no changing sample yet. */
+		apple,fast-die-effort = <&pmp_report 0>;
 	};
 
 	cpufreq_p: performance-controller@211e20000 {
 		compatible = "apple,t8142-cluster-cpufreq";
 		reg = <0x2 0x11e20000 0 0x1000>;
 		#performance-domain-cells = <0>;
+		/* P lane has been observed under Linux CPU load. */
+		apple,fast-die-effort = <&pmp_report 1>;
 	};
 
 	/*
@@ -259,9 +263,8 @@
 		reg-names = "smc", "sram";
 		mboxes = <&smc_mbox>;
 
-		hwmon {
+		smc_hwmon: hwmon {
 			compatible = "apple,smc-hwmon";
-			apple,discover-temperatures;
 		};
 
 		smc_gpio: gpio {
@@ -389,3 +392,150 @@
 &cpu7 { capacity-dmips-mhz = <1024>; };
 &cpu8 { capacity-dmips-mhz = <1024>; };
 &cpu9 { capacity-dmips-mhz = <1024>; };
+
+&{/soc} {
+	/*
+	 * The CPU clusters' power-gate enables, in /arm-io/pmgr reg[34]: E at
+	 * +0x0 and P at +0x60, the offsets T8132 has and the two words
+	 * AppleT8142PMGR's restoreHW sets. iBoot leaves P's clear, and the
+	 * boot core (P core 0) then never powers down in WFI. The PMGR is the
+	 * SoC's, so J815 has the same words.
+	 */
+	cluster_pwrgate: power-gate@380724000 {
+		compatible = "apple,t8142-cluster-pwrgate", "apple,cluster-pwrgate";
+		reg = <0x3 0x80724000 0x0 0x4>,
+		      <0x3 0x80724060 0x0 0x4>;
+	};
+
+	/*
+	 * The internal display's power words for a DCP firmware stop (DPMS off):
+	 * /arm-io/pmgr reg[34] (pwrgate: DISP_CPU's retention words 0x11cc and
+	 * 0x11f0, the pmgr's retention_config_ff/_mem) and reg[32] (ps: DISP_CPU
+	 * 0x10000, DISP_FE 0x318, DISP_SYS 0x290). T8142's PMC keeps no count of
+	 * powered DCPs, so there is no pmc-dcp word.
+	 */
+	dcp_power: display-power@380724000 {
+		compatible = "apple,t8142-display-power";
+		reg = <3 0x80724000 0 0x2000>,
+		      <3 0x80700000 0 0x14000>;
+		reg-names = "pwrgate", "ps";
+	};
+};
+
+&dcp {
+	apple,display-power = <&dcp_power>;
+};
+
+&dcp_dart {
+	/* PMGR PS write-disable for DISP_CPU: offset 0x3fdc, bit 6. */
+	reg = <2 0x86340000 0 0x20000>,
+	      <3 0x80717fdc 0 0x4>;
+	reg-names = "dart", "ps-wr-dis";
+	apple,ps-wr-dis-bit = <6>;
+};
+
+/*
+ * The video encoder, its two DARTs and the VENC power tree: ADT ave behind
+ * dart-ave (DART + CPUDART), the same addresses, interrupts and power states
+ * on both boards. The boot loader hands over iBoot's preloaded firmware
+ * (memory regions, CRCs in /chosen) or disables the encoder when the ADT has
+ * no preload.
+ */
+&ps_venc_sys {
+	status = "okay";
+};
+
+&ps_venc_dma {
+	status = "okay";
+};
+
+&ps_venc_pipe4 {
+	status = "okay";
+};
+
+&ps_venc_pipe5 {
+	status = "okay";
+};
+
+&ps_venc_me0 {
+	status = "okay";
+};
+
+&ps_venc_me1 {
+	status = "okay";
+};
+
+&ave_dart0 {
+	status = "okay";
+};
+
+&ave_dart1 {
+	status = "okay";
+};
+
+&ave {
+	status = "okay";
+};
+
+/*
+ * The Neural Engine (ADT ane and dart-ane, the same on both boards). It stays
+ * off until the first request: the firmware is started then, from the preload,
+ * and system sleep cycles it cold. The boot loader hands the preload over by
+ * the engine's compatible, or disables the node when there is none.
+ */
+&ps_ane_sys {
+	status = "okay";
+};
+
+&ane_dart0 {
+	status = "okay";
+};
+
+&ane_dart1 {
+	status = "okay";
+};
+
+&ane_dart2 {
+	status = "okay";
+};
+
+&ane {
+	status = "okay";
+};
+
+/* Both JPEG engines and their DART (ADT jpeg0, jpeg1, dart-jpeg). */
+&ps_jpg {
+	status = "okay";
+};
+
+&jpeg_dart {
+	status = "okay";
+};
+
+&jpeg0 {
+	status = "okay";
+};
+
+&jpeg1 {
+	status = "okay";
+};
+
+/*
+ * SIO AES engine, software keys only. It registers below the CPU's aes-ce, so
+ * it is used only when asked for by driver name.
+ */
+&ps_sio {
+	status = "okay";
+};
+
+&ps_aes {
+	status = "okay";
+};
+
+&sio_dart {
+	status = "okay";
+};
+
+&aes {
+	status = "okay";
+};

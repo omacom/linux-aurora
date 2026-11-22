@@ -293,10 +293,15 @@ impl crate::g17::Firmware {
 }
 
 impl crate::g17::Firmware {
+    /// Commits a host growth prepared for the pair in `slot`. A `busy` pair's
+    /// growth only appends blocks to the inventory, as a firmware grow request's
+    /// does; if it cannot be committed the pair keeps its heap and the render
+    /// is published as it would have been without it.
     pub(super) fn commit_render_growth(
         &mut self,
         slot: u8,
         prepared: &mut Option<crate::g17::buffer::PreparedGrowth>,
+        busy: bool,
     ) -> Result {
         if prepared.is_none() {
             return Ok(());
@@ -308,28 +313,45 @@ impl crate::g17::Firmware {
             .pair
             .as_mut()
             .ok_or(EIO)?;
-        let vm = pair.context().vm().clone();
-        let pool = pair.pool_id();
-        let buffer_id = pair.buffer_id();
-        // Preflight every destination before the graph starts publishing.
-        let table = self.init.pb_descriptor_table()?;
-        let offset = usize::from(buffer_id) * 16;
-        let words = [
-            table.word(offset)?,
-            table.word(offset + 4)?,
-            table.word(offset + 8)?,
-            table.word(offset + 12)?,
-        ];
-        let descriptor = pair
-            .manager()
-            .commit_growth(prepared, |previous, blocks, mappings| {
-                vm.append_render_pool_mappings_prepared(slot, pool, previous, blocks, mappings)
-            })?;
-        if let Some(descriptor) = descriptor {
-            for (word, value) in words.into_iter().zip(descriptor) {
-                word.store(value, Ordering::Relaxed);
+        let previous = pair.manager().blocks();
+        let source = if busy {
+            crate::g17::trace::HEAP_HOST_BUSY
+        } else {
+            crate::g17::trace::HEAP_HOST_IDLE
+        };
+        let committed: Result = (|| {
+            let vm = pair.context().vm().clone();
+            let pool = pair.pool_id();
+            let buffer_id = pair.buffer_id();
+            // Preflight every destination before the graph starts publishing.
+            let table = self.init.pb_descriptor_table()?;
+            let offset = usize::from(buffer_id) * 16;
+            let words = [
+                table.word(offset)?,
+                table.word(offset + 4)?,
+                table.word(offset + 8)?,
+                table.word(offset + 12)?,
+            ];
+            let descriptor = pair
+                .manager()
+                .commit_growth(prepared, |previous, blocks, mappings| {
+                    vm.append_render_pool_mappings_prepared(slot, pool, previous, blocks, mappings)
+                })?;
+            if let Some(descriptor) = descriptor {
+                for (word, value) in words.into_iter().zip(descriptor) {
+                    word.store(value, Ordering::Relaxed);
+                }
+                fence(Ordering::SeqCst);
             }
-            fence(Ordering::SeqCst);
+            Ok(())
+        })();
+        let manager = pair.manager();
+        crate::g17::trace::heap(source, committed.is_ok(), previous, manager.blocks());
+        match committed {
+            Ok(()) if busy => manager.note_busy_growth(previous),
+            // The prepared growth is dropped by the caller after the device mutex.
+            Err(_) if busy => manager.defer_busy_growth(crate::g17::now_ns()),
+            committed => committed?,
         }
         Ok(())
     }
@@ -383,13 +405,13 @@ impl crate::g17::Shared {
                 render.grow.active = Some(request);
                 (request, slot, pair)
             };
+            let before = pair.as_mut().map_or(0, |pair| pair.manager().blocks());
             let prepared = match pair.as_mut() {
                 Some(pair) => {
                     let vm = pair.context().vm().clone();
                     let pool = pair.pool_id();
                     let slot = pair.slot();
                     let manager = pair.manager();
-                    let before = manager.blocks();
                     if vm.render_pool_tvb_blocks(slot, pool) != Some(before) {
                         Err(EFAULT)
                     } else {
@@ -465,6 +487,22 @@ impl crate::g17::Shared {
                     false
                 }
             };
+            // A refused or capped request leaves the tiling pass to partial-render
+            // within the heap it has.
+            let after = slot
+                .and_then(|slot| firmware.queues.render.entries[slot].as_mut())
+                .and_then(|entry| entry.pair.as_mut())
+                .map_or(before, |pair| pair.manager().blocks());
+            crate::g17::trace::heap(
+                if grew {
+                    crate::g17::trace::HEAP_FIRMWARE_GRANTED
+                } else {
+                    crate::g17::trace::HEAP_FIRMWARE_REFUSED
+                },
+                grew,
+                before,
+                after,
+            );
             firmware.queues.render.grow.reply = Some((request, grew, 0));
             if !firmware.flush_tvb_reply()? {
                 return Ok(());

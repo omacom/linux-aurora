@@ -6,7 +6,7 @@ For an existing Arch/Omarchy installation on a MacBook Neo (J700/T8140), use the
 bash install-aurora-sep.sh --neo-gpu
 ```
 
-Reboot and log in again. The installer puts the Neo kernel, J700 ESP bootloader and `mesa-neo` into one checked package transaction. It preserves this Neo's U-Boot, firmware and per-machine calibration. Native OpenGL and Honeykrisp Vulkan use `/opt/mesa-neo`; M1–M3 keep their existing graphics profiles.
+Reboot and log in again. The installer puts the Neo kernel, J700 ESP bootloader and `mesa-neo` into one checked package transaction. It preserves this Neo's U-Boot, firmware and per-machine calibration. Native OpenGL and Borealis Vulkan use `/opt/mesa-neo`; M1–M3 keep their existing graphics profiles.
 
 Check acceleration from the graphical session:
 

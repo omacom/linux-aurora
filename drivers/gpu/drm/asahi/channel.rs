@@ -45,6 +45,25 @@ use kernel::{
 
 pub(crate) use crate::fw::channels::PipeType;
 
+#[derive(Default)]
+struct PowerTransitionBatch {
+    final_powered: Option<bool>,
+}
+
+impl PowerTransitionBatch {
+    fn power_on(&mut self) {
+        self.final_powered = Some(true);
+    }
+
+    fn power_off(&mut self) {
+        self.final_powered = Some(false);
+    }
+
+    fn ends_powered_off(&self) -> bool {
+        self.final_powered == Some(false)
+    }
+}
+
 /// A receive (FW->driver) channel.
 pub(crate) struct RxChannel<T: RxChannelState, U: Copy + Default>
 where
@@ -600,6 +619,7 @@ pub(crate) struct StatsChannel {
     /// (`HwConfig::base_clock_hz`, 24 MHz on every supported SoC), not
     /// nanoseconds.
     busy: crate::stats_busy::BusyIntegrator,
+    gpu: Option<Arc<dyn gpu::GpuManager>>,
 }
 
 #[versions(AGX)]
@@ -618,7 +638,13 @@ impl StatsChannel::ver {
             snap,
             raw,
             busy: crate::stats_busy::BusyIntegrator::new(ts_hz),
+            gpu: None,
         })
+    }
+
+    /// Registers the manager that owns firmware objects retired by power events.
+    pub(crate) fn set_manager(&mut self, gpu: Arc<dyn gpu::GpuManager>) {
+        self.gpu = Some(gpu);
     }
 
     /// Returns the raw `ChannelRing` structure to pass to firmware.
@@ -628,6 +654,8 @@ impl StatsChannel::ver {
 
     /// Polls for new statistics messages on this ring.
     pub(crate) fn poll(&mut self) {
+        let mut power = PowerTransitionBatch::default();
+
         while let Some(msg) = self.ch.get(0) {
             // SAFETY: The raw view is always valid for all bit patterns.
             let tag = unsafe { msg.raw.0 };
@@ -638,6 +666,13 @@ impl StatsChannel::ver {
                     let msg = unsafe { msg.msg };
                     cls_dev_dbg!(StatsCh, self.dev, "Stats: {:?}\n", msg);
                     self.record_raw(&msg);
+
+                    match &msg {
+                        StatsMsg::ver::PowerOn { .. } => power.power_on(),
+                        StatsMsg::ver::PowerOff { .. } => power.power_off(),
+                        _ => {}
+                    }
+
                     if module_parameters::stats_export.value() != 0 {
                         // Retain the latest values for /sys/class/drm/card*/
                         // device/agx_stats. Read-only with respect to
@@ -700,6 +735,19 @@ impl StatsChannel::ver {
                     // SAFETY: The raw view is always valid for all bit patterns.
                     pr_warn!("Unknown stats message: {:?}\n", unsafe { msg.raw });
                 }
+            }
+        }
+
+        // Only the final transition in this batch is a release boundary. In
+        // particular, an old PowerOff followed by PowerOn must not release
+        // objects retired while the GPU is live again.
+        if power.ends_powered_off() {
+            match self.gpu.as_ref() {
+                Some(gpu) => gpu.fw_power_off(),
+                None => dev_crit!(
+                    self.dev.as_ref(),
+                    "StatsChannel: No GPU manager available!\n"
+                ),
             }
         }
     }
@@ -778,5 +826,33 @@ impl StatsChannel::ver {
             // The remaining tags are not decoded by the driver.
             _ => {}
         }
+    }
+}
+
+#[kunit_tests(asahi_agx_context_release)]
+mod tests {
+    use super::PowerTransitionBatch;
+
+    #[test]
+    fn power_off_is_release_boundary() {
+        let mut batch = PowerTransitionBatch::default();
+        batch.power_off();
+        assert!(batch.ends_powered_off());
+    }
+
+    #[test]
+    fn later_power_on_cancels_release() {
+        let mut batch = PowerTransitionBatch::default();
+        batch.power_off();
+        batch.power_on();
+        assert!(!batch.ends_powered_off());
+    }
+
+    #[test]
+    fn final_power_off_wins() {
+        let mut batch = PowerTransitionBatch::default();
+        batch.power_on();
+        batch.power_off();
+        assert!(batch.ends_powered_off());
     }
 }

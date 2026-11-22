@@ -1,0 +1,14 @@
+What:		/sys/class/drm/card*/device/gpu_mem_limit_pct
+Date:		November 2026
+Contact:	dri-devel@lists.freedesktop.org
+Description:
+		Write an unsigned integer. Values from 1 to 99 set the
+		device-wide and per-client limits to that percentage of RAM.
+		Zero and values of 100 or more disable both limits.
+
+		The new limits apply to allocation requests. Existing
+		allocations are not revoked. Values returned by earlier
+		GET_PARAMS calls do not change; clients must query again.
+
+		A read returns the current per-client limit as a percentage
+		of RAM. Zero means no limit. Only the owner can write.

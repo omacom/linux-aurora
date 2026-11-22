@@ -1277,7 +1277,8 @@ static void sim_use_t8132(struct ane_h16_sim *s)
 	s->build = ane_h16_build_t8132_25g83;
 	s->soc.dapf_count = 5;
 	s->soc.has_xl = false;
-	s->expect_tuning = ARRAY_SIZE(ane_t8132_axi) + ARRAY_SIZE(ane_t8132_axi_wd) +
+	s->expect_tuning = ARRAY_SIZE(ane_t8132_axi2af) + ARRAY_SIZE(ane_t8132_axi) +
+			   ARRAY_SIZE(ane_t8132_axi_wd) +
 			   ARRAY_SIZE(ane_t8132_axi_lock);
 }
 
@@ -1348,6 +1349,48 @@ static void ane_h16_t8132_locked_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ane_h16_prepare(&s->boot), -EPERM);
 }
 
+/*
+ * An aborted system suspend cycles the T8132 sub-blocks under a held
+ * ANE_SYS: the AXI2AF words lose their bit-31 load strobe, the lock and the
+ * fields stay. The locked set still matches; a changed field is refused.
+ */
+static void ane_h16_t8132_locked_strobe_test(struct kunit *test)
+{
+	struct ane_h16_sim *s = test->priv;
+	unsigned int i;
+	u32 writes;
+
+	sim_use_t8132(s);
+	KUNIT_ASSERT_EQ(test, ane_h16_prepare(&s->boot), 0);
+	writes = s->tuning_writes;
+	for (i = 0; i < ARRAY_SIZE(ane_t8132_axi2af); i++)
+		s->engine[ane_t8132_axi2af[i].offset / 4] &= ~BIT(31);
+	KUNIT_EXPECT_EQ(test, s->engine[0], 0x1bU);
+	KUNIT_EXPECT_EQ(test, ane_h16_prepare(&s->boot), 0);
+	KUNIT_EXPECT_EQ(test, s->tuning_writes, writes);
+	s->engine[0] ^= 0x1;
+	KUNIT_EXPECT_EQ(test, ane_h16_prepare(&s->boot), -EPERM);
+	KUNIT_EXPECT_EQ(test, s->tuning_writes, writes);
+}
+
+/*
+ * Only the AXI2AF words have the strobe: a bit-31 field further up that
+ * clears, or a lost write-disable bit, is refused.
+ */
+static void ane_h16_t8132_locked_wd_test(struct kunit *test)
+{
+	struct ane_h16_sim *s = test->priv;
+
+	sim_use_t8132(s);
+	KUNIT_ASSERT_EQ(test, ane_h16_prepare(&s->boot), 0);
+	s->engine[0x314 / 4] &= ~BIT(31);
+	KUNIT_EXPECT_EQ(test, ane_h16_prepare(&s->boot), -EPERM);
+	s->engine[0x314 / 4] |= BIT(31);
+	KUNIT_EXPECT_EQ(test, ane_h16_prepare(&s->boot), 0);
+	s->engine[ane_t8132_axi_wd[0].offset / 4] = 0;
+	KUNIT_EXPECT_EQ(test, ane_h16_prepare(&s->boot), -EPERM);
+}
+
 static struct kunit_case ane_h16_boot_cases[] = {
 	KUNIT_CASE(ane_h16_alloc_reuse_test),
 	KUNIT_CASE(ane_h16_happy_test),
@@ -1361,6 +1404,8 @@ static struct kunit_case ane_h16_boot_cases[] = {
 	KUNIT_CASE(ane_h16_no_xl_test),
 	KUNIT_CASE(ane_h16_t8132_tunables_test),
 	KUNIT_CASE(ane_h16_t8132_locked_test),
+	KUNIT_CASE(ane_h16_t8132_locked_strobe_test),
+	KUNIT_CASE(ane_h16_t8132_locked_wd_test),
 	KUNIT_CASE(ane_h16_unknown_revision_test),
 	KUNIT_CASE(ane_h16_heap_overlap_test),
 	KUNIT_CASE(ane_h16_native_free_test),

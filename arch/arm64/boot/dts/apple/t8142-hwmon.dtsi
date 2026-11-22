@@ -1,0 +1,169 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * SMC sensors shared by J704 and J813. J815 keeps its own
+ * apple,discover-temperatures block (with a duplicate soc-die-keys/mTPL
+ * copy) until it is verified on hardware.
+ */
+
+#include "hwmon-common.dtsi"
+#include "hwmon-laptop.dtsi"
+
+&smc_hwmon {
+	/*
+	 * CPU sensors respond to loads pinned to each cluster. The GPU keys
+	 * follow the M5 macOS sensor group; numbers identify sensors, not cores.
+	 * The hottest of these die readings supplies the driver's SoC zone.
+	 */
+	apple,soc-die-keys = "Te04", "Te08", "Te0C", "Te0R",
+			     "Tp00", "Tp04", "Tp0C", "Tp0G", "Tp0O",
+			     "Tp0R", "Tp0X", "Tp0a", "Tp0p", "Tp0u",
+			     "Tp0y", "Tp12", "Tp16", "Tp1E",
+			     "Tg0U", "Tg0X", "Tg0d", "Tg0g", "Tg0j",
+			     "Tg1Y", "Tg1c", "Tg1g";
+	apple,thermal-pressure-key = "mTPL";
+
+	temperature-Te04 {
+		apple,key-id = "Te04";
+		label = "CPU E-cluster Temperature 1";
+	};
+
+	temperature-Te08 {
+		apple,key-id = "Te08";
+		label = "CPU E-cluster Temperature 2";
+	};
+
+	temperature-Te0C {
+		apple,key-id = "Te0C";
+		label = "CPU E-cluster Temperature 3";
+	};
+
+	temperature-Te0R {
+		apple,key-id = "Te0R";
+		label = "CPU E-cluster Temperature 4";
+	};
+
+	temperature-Tp00 {
+		apple,key-id = "Tp00";
+		label = "CPU P-cluster Temperature 1";
+	};
+
+	temperature-Tp04 {
+		apple,key-id = "Tp04";
+		label = "CPU P-cluster Temperature 2";
+	};
+
+	temperature-Tp0C {
+		apple,key-id = "Tp0C";
+		label = "CPU P-cluster Temperature 3";
+	};
+
+	temperature-Tp0G {
+		apple,key-id = "Tp0G";
+		label = "CPU P-cluster Temperature 4";
+	};
+
+	temperature-Tp0O {
+		apple,key-id = "Tp0O";
+		label = "CPU P-cluster Temperature 5";
+	};
+
+	temperature-Tp0R {
+		apple,key-id = "Tp0R";
+		label = "CPU P-cluster Temperature 6";
+	};
+
+	temperature-Tp0X {
+		apple,key-id = "Tp0X";
+		label = "CPU P-cluster Temperature 7";
+	};
+
+	temperature-Tp0a {
+		apple,key-id = "Tp0a";
+		label = "CPU P-cluster Temperature 8";
+	};
+
+	temperature-Tp0p {
+		apple,key-id = "Tp0p";
+		label = "CPU P-cluster Temperature 9";
+	};
+
+	temperature-Tp0u {
+		apple,key-id = "Tp0u";
+		label = "CPU P-cluster Temperature 10";
+	};
+
+	temperature-Tp0y {
+		apple,key-id = "Tp0y";
+		label = "CPU P-cluster Temperature 11";
+	};
+
+	temperature-Tp12 {
+		apple,key-id = "Tp12";
+		label = "CPU P-cluster Temperature 12";
+	};
+
+	temperature-Tp16 {
+		apple,key-id = "Tp16";
+		label = "CPU P-cluster Temperature 13";
+	};
+
+	temperature-Tp1E {
+		apple,key-id = "Tp1E";
+		label = "CPU P-cluster Temperature 14";
+	};
+
+	temperature-Tg0U {
+		apple,key-id = "Tg0U";
+		label = "GPU Temperature 1";
+	};
+
+	temperature-Tg0X {
+		apple,key-id = "Tg0X";
+		label = "GPU Temperature 2";
+	};
+
+	temperature-Tg0d {
+		apple,key-id = "Tg0d";
+		label = "GPU Temperature 3";
+	};
+
+	temperature-Tg0g {
+		apple,key-id = "Tg0g";
+		label = "GPU Temperature 4";
+	};
+
+	temperature-Tg0j {
+		apple,key-id = "Tg0j";
+		label = "GPU Temperature 5";
+	};
+
+	temperature-Tg1Y {
+		apple,key-id = "Tg1Y";
+		label = "GPU Temperature 6";
+	};
+
+	temperature-Tg1c {
+		apple,key-id = "Tg1c";
+		label = "GPU Temperature 7";
+	};
+
+	temperature-Tg1g {
+		apple,key-id = "Tg1g";
+		label = "GPU Temperature 8";
+	};
+
+	temperature-TB1T {
+		apple,key-id = "TB1T";
+		label = "Battery Temperature 1";
+	};
+
+	temperature-TB2T {
+		apple,key-id = "TB2T";
+		label = "Battery Temperature 2";
+	};
+
+	temperature-TAOL {
+		apple,key-id = "TAOL";
+		label = "Ambient (TAOL)";
+	};
+};

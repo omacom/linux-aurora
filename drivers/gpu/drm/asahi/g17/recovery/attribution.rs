@@ -6,6 +6,39 @@ pub(super) const SLOTS: usize = 16;
 const STAMP_MASK: u64 = (1 << 40) - 1;
 /// Firmware recovery reason for a GPU MMU fault.
 pub(crate) const PAGE_FAULT: u32 = 3;
+/// M5 firmware recovery reason for a scheduling pause the GPU did not acknowledge in time. It was
+/// read from every recovery of a ten-minute mixed client load on a J716s with the 27.3 beta 1
+/// firmware.
+pub(crate) const SCHEDULING_PAUSE_TIMEOUT: u32 = 5;
+/// M5 firmware recovery reason for a GPU that did not reach forced idle after a sleep request.
+/// Not yet observed.
+pub(crate) const SLEEP_FORCED_IDLE_TIMEOUT: u32 = 6;
+
+/// What a firmware recovery reason means: 3 a GPU page fault (as on G17P), 5 a scheduling pause
+/// that timed out, 6 a forced idle that timed out after a sleep request. Reasons 0 to 4 are not
+/// named here. Only 5 has been read from a running M5 firmware; 3 and 6 are
+/// not yet confirmed from captured InitData.
+pub(crate) fn cause(reason: u32) -> &'static str {
+    match reason {
+        PAGE_FAULT => "GPU MMU page fault",
+        SCHEDULING_PAUSE_TIMEOUT => {
+            "scheduling pause timeout: the GPU did not pause scheduling in time"
+        }
+        SLEEP_FORCED_IDLE_TIMEOUT => "sleep forced-idle timeout",
+        0..=4 => "unnamed firmware reason",
+        _ => "unknown firmware reason",
+    }
+}
+
+/// The M5 firmware's recovery record in the primary status B (`M5_RECOVERY_REASON` and its
+/// neighbours), read while the firmware waits in recovery state 1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Record {
+    pub(crate) reason: u32,
+    pub(crate) slots_walked: u32,
+    pub(crate) slot_word: u32,
+    pub(crate) detail: u64,
+}
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Source {
@@ -17,7 +50,11 @@ pub(super) struct Source {
 }
 
 pub(crate) struct Sources {
+    /// The reason attribution uses. M5 leaves it unknown unless an MMU fault is latched; its
+    /// firmware's own word is in `record`, which only the log reads.
     pub(crate) reason: Option<u32>,
+    /// The M5 firmware's recovery record, for the log.
+    pub(crate) record: Option<Record>,
     mask: u32,
     records: [Source; SLOTS],
     count: usize,
@@ -33,13 +70,25 @@ pub(super) enum Attribution {
 impl Sources {
     /// Bounded evidence from the existing halted-firmware snapshot. No guessed
     /// MMIO/key addresses or additional firmware reads are used for diagnostics.
-    pub(super) fn report(&self, generation: u64, stampless_total: u64) {
+    pub(super) fn report(&self, generation: u64, stampless_total: u64, blamed: Option<u8>) {
         kernel::pr_warn!(
             "G17: recovery snapshot gen {} reason {:?} slot_mask {:#x} sampled {} known_keys {}; stampless lifetime total {} before restart\n",
             generation, self.reason, self.mask, self.count,
             self.records[..self.count].iter().filter(|source| source.qid.is_some()).count(),
             stampless_total
         );
+        match self.record {
+            Some(record) if record == Record::default() && self.mask == 0 => kernel::pr_warn!(
+                "G17: recovery cause gen {}: none recorded (the record reads all zero); firmware blames queue {:?}\n",
+                generation, blamed
+            ),
+            Some(record) => kernel::pr_warn!(
+                "G17: recovery cause gen {}: {} (firmware reason {}); firmware blames queue {:?}; slots walked {}, slot word {:#x}, detail {:#x}\n",
+                generation, cause(record.reason), record.reason, blamed, record.slots_walked,
+                record.slot_word, record.detail
+            ),
+            None => {}
+        }
         for source in &self.records[..self.count] {
             kernel::pr_warn!(
                 "G17: recovery slot {} queue {:?} kick {:#x} monitor {:#x}\n",
@@ -53,6 +102,7 @@ impl Sources {
     pub(crate) fn sample(mask: u32, mut read: impl FnMut(usize) -> Option<(u64, u32)>) -> Self {
         let mut sources = Self {
             reason: None,
+            record: None,
             mask,
             records: [Source::default(); SLOTS],
             count: 0,
@@ -75,6 +125,11 @@ impl Sources {
             sources.count += 1;
         }
         sources
+    }
+
+    /// The firmware's reason: the one attribution uses, else the M5 record's.
+    pub(super) fn firmware_reason(&self) -> Option<u32> {
+        self.reason.or(self.record.map(|record| record.reason))
     }
 
     pub(super) fn attribute(
@@ -198,6 +253,28 @@ mod tests {
         assert_eq!(attribution, Attribution::Firmware);
         assert_eq!(sources.host_fallback(attribution, || Some(3 << 60)), Attribution::Queues(3 << 60));
         assert_eq!(sources.host_fallback(attribution, || None), Attribution::Firmware);
+    }
+
+    #[test]
+    fn m5_record_names_the_cause_without_steering_blame() {
+        let mut sources = Sources::sample(0b101, |_| None);
+        sources.record = Some(Record {
+            reason: SCHEDULING_PAUSE_TIMEOUT,
+            ..Record::default()
+        });
+        assert_eq!(sources.firmware_reason(), Some(SCHEDULING_PAUSE_TIMEOUT));
+        assert_eq!(
+            cause(SCHEDULING_PAUSE_TIMEOUT),
+            "scheduling pause timeout: the GPU did not pause scheduling in time"
+        );
+        assert_eq!(
+            sources.attribute(Some(38), |_, _| panic!("no keys")),
+            Attribution::Firmware
+        );
+        assert_eq!(
+            sources.host_fallback(Attribution::Firmware, || panic!("reason unused")),
+            Attribution::Firmware
+        );
     }
 
     #[test]

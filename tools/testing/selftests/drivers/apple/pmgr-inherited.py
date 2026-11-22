@@ -28,7 +28,9 @@ def main():
         print("# SKIP: requires the matching kernel source tree")
         return 4
     source = path.read_text()
-    definitions = source[source.index("#define APPLE_PMGR_RESET"):source.index("static int apple_pmgr_ps_set")]
+    start = source.index("#define APPLE_PMGR_RESET")
+    end = source.index("\n", source.index("#define rcdev_to_apple_pmgr_ps", start))
+    definitions = source[start:end] + "\n"
     preamble = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -63,6 +65,9 @@ typedef uint32_t u32;
 #define dev_err_ratelimited(...) ((void)0)
 #define dev_err_probe(dev,err,...) (err)
 #define usleep_range(...) ((void)0)
+#define __iomem
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define PD_FLAG_NO_DEV_LINK BIT(0)
 struct device_node {
     struct device_node *parent;
     const char *name, *conflict;
@@ -70,7 +75,10 @@ struct device_node {
 };
 struct device { struct device_node *of_node; };
 struct platform_device { struct device dev; };
+struct dev_pm_ops { int (*runtime_suspend)(struct device *); };
+struct dev_pm_domain { struct dev_pm_ops ops; };
 struct generic_pm_domain {
+    struct dev_pm_domain domain;
     const char *name;
     unsigned flags, status, slock;
     int (*power_on)(struct generic_pm_domain *), (*power_off)(struct generic_pm_domain *);
@@ -83,18 +91,25 @@ struct reset_controller_dev {
     unsigned nr_resets, of_reset_n_cells;
     int (*of_xlate)(struct reset_controller_dev *, const struct of_phandle_args *);
 };
+struct resource { unsigned long long start; };
+struct dev_pm_domain_attach_data { unsigned pd_flags; };
+struct dev_pm_domain_list { struct device **pd_devs; unsigned num_pds; };
 struct regmap { u32 value; int error; unsigned reads, writes; };
 static struct regmap map;
 static unsigned init_count, provider_count, reset_count;
 static bool initialized_off;
 static int apple_pmgr_reset_ops;
+static int (*apple_pmgr_genpd_runtime_suspend)(struct device *dev);
+static unsigned parent_attach_count;
+static bool apple_t8132_firmware_path(void) { return true; }
+static bool apple_sleep_domain_is_down(struct device_node *n) { (void)n; return false; }
 static struct device_node *of_parse_phandle(struct device_node *n, const char *p, int i)
 { (void)n; (void)p; (void)i; return NULL; }
 static bool of_device_is_compatible(struct device_node *n, const char *p)
 { return n && !strcmp(p,"apple,t8132-pmgr-pwrstate"); }
 static bool of_machine_is_compatible(const char *p) { (void)p; return false; }
 static bool of_property_present(struct device_node *n, const char *p)
-{ return (n->conflict && !strcmp(n->conflict,p)) ||
+{ return !strcmp(p,"status") || (n->conflict && !strcmp(n->conflict,p)) ||
     (n->inherited && !strcmp(p,"apple,inherited-on")) ||
     (n->firmware && !strcmp(p,"apple,firmware-owned")); }
 static bool of_property_read_bool(struct device_node *n, const char *p)
@@ -104,6 +119,25 @@ static int of_property_read_string(struct device_node *n, const char *p, const c
 static int of_property_read_u32(struct device_node *n, const char *p, u32 *v)
 { if (!strcmp(p,"reg")) { *v=0x428; return 0; }
   if (of_property_present(n,p)) { *v=0; return 0; } return -EINVAL; }
+static int of_property_count_u32_elems(struct device_node *n, const char *p)
+{ (void)n; (void)p; return -EINVAL; }
+static int of_property_read_u32_index(struct device_node *n, const char *p, u32 i, u32 *v)
+{ (void)n; (void)p; (void)i; (void)v; return -EINVAL; }
+static int of_parse_phandle_with_fixed_args(struct device_node *n, const char *p, int c, int i,
+                                            struct of_phandle_args *a)
+{ (void)n; (void)p; (void)c; (void)i; (void)a; return -EINVAL; }
+static int of_address_to_resource(struct device_node *n, int i, struct resource *r)
+{ (void)n; (void)i; (void)r; return -EINVAL; }
+static void *devm_ioremap(struct device *d, unsigned long long a, size_t s)
+{ (void)d; (void)a; (void)s; return NULL; }
+static int of_count_phandle_with_args(struct device_node *n, const char *p, const char *c)
+{ (void)n; (void)p; (void)c; return 1; }
+static int dev_pm_domain_attach_list(struct device *d, const struct dev_pm_domain_attach_data *a,
+                                     struct dev_pm_domain_list **l)
+{ (void)d; (void)a; (void)l; parent_attach_count++; return -EINVAL; }
+static void dev_pm_domain_detach_list(struct dev_pm_domain_list *l) { (void)l; }
+static int pm_runtime_resume_and_get(struct device *d) { (void)d; return 0; }
+static void pm_runtime_put(struct device *d) { (void)d; }
 static void of_node_put(struct device_node *n) { (void)n; }
 static struct regmap *syscon_node_to_regmap(struct device_node *n) { (void)n; return &map; }
 static void *devm_kzalloc(struct device *d, size_t s, int flags)
@@ -139,7 +173,8 @@ static int apple_pmgr_ps_set(struct generic_pm_domain *g, u32 state, bool auto_e
     names = ["apple_pmgr_ps_is_active", "apple_pmgr_ps_check_inherited", "apple_pmgr_ps_power_on",
              "apple_pmgr_ps_power_off", "apple_pmgr_reset_assert", "apple_pmgr_reset_deassert",
              "apple_pmgr_reset_reset", "apple_pmgr_reset_status", "apple_pmgr_reset_xlate",
-             "apple_pmgr_ps_probe"]
+             "apple_pmgr_ps_hold_parents", "apple_pmgr_ps_release_parents",
+             "apple_pmgr_ps_always_on", "apple_pmgr_ps_probe"]
     tests = r'''
 static void clean(u32 value, int error)
 { map=(struct regmap){ .value=value, .error=error }; init_count=provider_count=reset_count=0;
@@ -152,6 +187,7 @@ int main(void)
     assert(!probe(&n,0xff,0));
     struct apple_pmgr_ps *ps=driver_data;
     assert(map.reads==1 && !map.writes && init_count==1 && provider_count==1 && reset_count==1);
+    assert(!parent_attach_count);
     assert(!initialized_off && (ps->genpd.flags&GENPD_FLAG_ALWAYS_ON));
     assert(!apple_pmgr_ps_power_on(&ps->genpd) && map.reads==2 && !map.writes);
     unsigned reads=map.reads;
@@ -186,7 +222,7 @@ int main(void)
     ps->system_sleep=true;
     assert(apple_pmgr_ps_power_off(&ps->genpd)==-EBUSY && !map.writes);
     puts("ok 3 - read errors and lost inherited activity never request a transition");
-    const char *conflicts[]={"apple,firmware-owned","apple,always-on","apple,min-state",
+    const char *conflicts[]={"apple,firmware-owned","apple,sleep-retained","apple,always-on","apple,min-state",
         "apple,force-disable","apple,force-reset","apple,externally-clocked"};
     for(unsigned i=0;i<sizeof(conflicts)/sizeof(*conflicts);i++) {
         n.conflict=conflicts[i];

@@ -57,6 +57,7 @@ static void mt_scan_finish_work(struct work_struct *work)
 		if (ret) {
 			WRITE_ONCE(m->link_failed, true);
 			dev_err(&m->pdev->dev, "SCAN_RETIREMENT_FAILED: %d; recovery required\n", ret);
+			mt_request_recovery(m, "a cancelled scan couldn't be retired");
 		}
 	}
 	mutex_unlock(&m->command_mutex);
@@ -349,6 +350,7 @@ int mt_connect_discover(struct mt7932 *m)
 		spin_lock_irqsave(&m->response_lock, flags);
 		if (!m->discovery_finished) {
 			m->link_failed = true;
+			mt_request_recovery(m, "the firmware didn't end a discovery scan");
 			ret = ret ?: -ETIMEDOUT;
 		}
 		m->discovering = false;

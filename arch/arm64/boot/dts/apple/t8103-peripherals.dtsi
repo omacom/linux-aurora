@@ -443,6 +443,7 @@
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 515 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_pmp>;
 		status = "disabled";
 	};
 

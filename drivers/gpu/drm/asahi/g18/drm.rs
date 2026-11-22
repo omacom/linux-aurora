@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 //! G18 (J873, T8152/G18G) DRM render-node adapter.
 //!
-//! A structural copy of the M5 adapter (`m5_drm.rs`): synchronous
-//! submission, one hardware command per submit, out-fences signalled by a
-//! publication guard. It differs where G18 differs:
+//! A structural copy of the M5 adapter (`m5_drm.rs`): one hardware command
+//! per submit, out-fences signalled by a publication guard. It differs where
+//! G18 differs:
+//! - submissions run in submission order on a job worker ([`JobQueue`]);
+//!   on a queue created with DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT, a submit
+//!   with output syncs returns once accepted, every other submit once it
+//!   has retired;
 //! - render commands go through `g18_application` to a job sink the G18
 //!   runtime implements, not through a captured reference profile;
 //! - `map_timestamp_buffer` is implemented (contract K8) with the shared
@@ -17,9 +21,10 @@
 //! [`G18DrmRuntime`].
 
 use core::ops::Range;
-use kernel::{bindings, macros::vtable, new_mutex, prelude::*, static_lock_class,
+use core::sync::atomic::{AtomicI32, Ordering};
+use kernel::{bindings, macros::vtable, new_condvar, new_mutex, prelude::*, static_lock_class,
     dma_fence::{Fence, FenceContexts, FenceObject, FenceOps, RawDmaFence, UserFence},
-    sync::{Arc, Mutex, SpinLock}, uapi, xarray};
+    sync::{Arc, CondVar, Mutex, SpinLock}, uapi, workqueue, xarray};
 use crate::{alloc, driver::AsahiRegData, file, g18::uapi::command as g17_uapi, g18::hw,
     g18::uapi::application::{self as g18_application, G18ApplicationRefusal, G18RenderJobSink, G18RenderRetirement},
     gem, gpu, g18::fw::vm_layout as m5_vm, mmu, queue, stats, stats_raw, timestamp};
@@ -118,6 +123,7 @@ pub(crate) struct G18DrmGpu {
     runtime: Arc<dyn G18DrmRuntime>,
     /// Serializes job-sink calls across every queue of this device.
     submit_lock: Arc<Mutex<()>>,
+    jobs: Arc<JobQueue>,
     config: G18DrmConfig,
     revision: u32,
     ids: gpu::SequenceIDs,
@@ -143,7 +149,8 @@ impl G18DrmGpu {
             None => G18_REVISION_B1,
         };
         let submit_lock = Arc::pin_init(new_mutex!(()), GFP_KERNEL)?;
-        Ok(Self { runtime, submit_lock, config, revision, ids: Default::default() })
+        let jobs = JobQueue::new()?;
+        Ok(Self { runtime, submit_lock, jobs, config, revision, ids: Default::default() })
     }
 }
 
@@ -185,6 +192,7 @@ impl gpu::Gpu for G18DrmGpu {
             params.features |= uapi::drm_asahi_feature_DRM_ASAHI_FEATURE_G18_GRAPHICS_SCRATCH as u64;
         }
         params.features |= uapi::DRM_ASAHI_FEATURE_G18_NATIVE_TILE_SAMPLES as u64;
+        params.features |= uapi::DRM_ASAHI_FEATURE_ASYNC_SUBMIT as u64;
         Ok(())
     }
     fn supports_vm_status(&self) -> bool { true }
@@ -222,6 +230,8 @@ impl gpu::Gpu for G18DrmGpu {
             runtime: self.runtime.clone(), submit_lock: self.submit_lock.clone(),
             config: self.config, vm, window,
             fences: FenceContexts::new(1, QUEUE_NAME, QUEUE_CLASS_KEY)?,
+            jobs: self.jobs.clone(), failed: Arc::new(AtomicI32::new(0), GFP_KERNEL)?,
+            asynchronous: false, recent: [0; QUEUE_DEPTH], next: 0, last: 0,
         };
         Ok(KBox::new(queue, GFP_KERNEL)?)
     }
@@ -263,23 +273,249 @@ impl FenceOps for G18SubmissionFence {
 
 /// Keep the original sync vector: creating a second output list would add an
 /// allocation failure after userspace has already supplied its wait targets.
+/// Dropped unaccepted, it signals the fence with `result` and installs it.
 struct OutputPublication {
-    fence: UserFence<G18SubmissionFence>,
+    fence: Option<UserFence<G18SubmissionFence>>,
     syncs: KVec<file::SyncItem>,
     input_count: usize,
     result: Result,
 }
 
-impl Drop for OutputPublication {
-    fn drop(&mut self) {
-        if let Err(error) = self.result { self.fence.set_error(error); }
-        let fence = Fence::from_fence(&self.fence);
+impl OutputPublication {
+    fn install(&mut self) {
+        let Some(fence) = &self.fence else { return };
+        let fence = Fence::from_fence(fence);
         for mut sync in self.syncs.drain(self.input_count..) {
             if let Some(chain) = sync.chain_fence.take() {
                 sync.syncobj.add_point(chain, &fence, sync.timeline_value);
             } else { sync.syncobj.replace_fence(Some(&fence)); }
         }
-        self.fence.signal();
+    }
+
+    /// The input fences, for a job to check.
+    fn input_fences(&self) -> Result<KVec<Fence>> {
+        let mut fences = KVec::new();
+        for sync in &self.syncs[..self.input_count] {
+            if let Some(fence) = &sync.fence {
+                fences.push(Fence::from_fence(fence), GFP_KERNEL)?;
+            }
+        }
+        Ok(fences)
+    }
+
+    /// Install the fence in every output syncobj and hand it to the job,
+    /// which signals it. Only [`JobQueue::push`] calls this.
+    fn accept(mut self) -> JobFence {
+        self.install();
+        JobFence { fence: self.fence.take(), result: Err(ECANCELED) }
+    }
+}
+
+impl Drop for OutputPublication {
+    fn drop(&mut self) {
+        let Some(fence) = &self.fence else { return };
+        if let Err(error) = self.result { fence.set_error(error); }
+        // Signalled before it is installed: a submission that finds one of
+        // this adapter's fences in a syncobj does not wait for it.
+        fence.signal();
+        self.install();
+    }
+}
+
+/// An accepted job's installed output fence. Signals, with `result`, when
+/// the job drops.
+struct JobFence {
+    fence: Option<UserFence<G18SubmissionFence>>,
+    result: Result,
+}
+
+impl Drop for JobFence {
+    fn drop(&mut self) {
+        let Some(fence) = &self.fence else { return };
+        if let Err(error) = self.result { fence.set_error(error); }
+        fence.signal();
+    }
+}
+
+/// Accepted jobs a queue may have waiting or running; a further submit
+/// waits for the oldest.
+const QUEUE_DEPTH: usize = 32;
+
+/// One accepted submission. Dropping it signals its output fence.
+struct G18Job {
+    runtime: Arc<dyn G18DrmRuntime>,
+    submit_lock: Arc<Mutex<()>>,
+    vm: mmu::Vm,
+    vm_job: Option<mmu::VmJobGuard>,
+    commands: KVec<Admitted>,
+    /// Set for a submission without outputs: its ioctl waits for the job
+    /// and returns this (0 or a negative errno).
+    result: Option<Arc<AtomicI32>>,
+    inputs: KVec<Fence>,
+    fence: JobFence,
+    /// The queue's [`G18Queue::failed`].
+    queue_failed: Arc<AtomicI32>,
+    /// The submit ioctl that accepted the job, for its failure report.
+    submission: u64,
+    pid: i32,
+    comm: [u8; 16],
+}
+
+impl G18Job {
+    fn run(mut job: KBox<Self>) {
+        let result = job.execute();
+        // Release the mappings before the fence signals, as a synchronous
+        // submit did.
+        job.vm_job = None;
+        match (&job.result, result) {
+            (Some(slot), result) =>
+                slot.store(result.err().map_or(0, |error| error.to_errno()), Ordering::Release),
+            // The ioctl returned long ago and cannot report this; the output
+            // fence carries the error and the queue's next submit returns it.
+            (None, Err(error)) => {
+                let len = job.comm.iter().position(|&c| c == 0).unwrap_or(job.comm.len());
+                pr_warn!("G18 job failed: submission {} pid {} ({}): {:?}\n", job.submission,
+                    job.pid, kernel::str::BStr::from_bytes(&job.comm[..len]), error);
+                let _ = job.queue_failed.compare_exchange(0, error.to_errno(),
+                    Ordering::AcqRel, Ordering::Acquire);
+            }
+            (None, Ok(())) => {}
+        }
+        job.fence.result = result;
+    }
+
+    fn execute(&mut self) -> Result {
+        // Every input has signalled: the submit waited for those that no job
+        // of this adapter signals (see [`wait_foreign_inputs`]), and the
+        // others belong to earlier jobs, which retired first. A failed one
+        // fails this job, also inside a timeline point or a fence array,
+        // which do not carry their fences' errors themselves.
+        for fence in &self.inputs {
+            // SAFETY: the input fence is strongly held for the call.
+            let status = unsafe { asahi_g18_fence_error(fence.raw()) };
+            if status < 0 { return Err(Error::from_errno(status)); }
+        }
+        let _serialized = self.submit_lock.lock();
+        if self.vm.status().map_or(0, |s| s.get()) != 0 { return Err(EIO); }
+        if self.runtime.is_crashed() { return Err(ENODEV); }
+        // An empty command buffer is a synchronization-only submission.
+        // Never manufacture a hardware job or relax hardware retirement checks.
+        if self.commands.is_empty() {
+            pr_debug!("G18_SYNC_ONLY inputs={}\n", self.inputs.len());
+            return Ok(());
+        }
+        // Commands run in submission order and each retires before the next
+        // starts, so every barrier (an earlier command of this submission, or
+        // any earlier submission) has completed when its waiter begins.
+        for command in self.commands.drain_all() {
+            if self.vm.status().map_or(0, |s| s.get()) != 0 { return Err(EIO); }
+            if self.runtime.is_crashed() { return Err(ENODEV); }
+            // Without job stage ticks, the CPU bracket `[t0, t1]` around the
+            // job bounds every stage: starts get t0, ends get t1.
+            let t0 = counter_ticks();
+            match command {
+                Admitted::Render(render, slots) => {
+                    let retired = self.runtime.submit_render(&self.vm, &render)?;
+                    let t1 = counter_ticks();
+                    slots.publish(retired.stage_ticks.unwrap_or([t0, t1, t0, t1]),
+                        counter_frequency());
+                }
+                Admitted::Compute(command, slots) => {
+                    let retired = self.runtime.submit_compute(&self.vm, &command)?;
+                    let t1 = counter_ticks();
+                    let [start, _, _, end] = retired.stage_ticks.unwrap_or([t0, t1, t0, t1]);
+                    slots.publish([start, end, 0, 0], counter_frequency());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The accepted jobs of every queue of the device, run one at a time in
+/// submission order on a worker. The GPU runs one job at a time anyway; the
+/// worker lets a submit return once its job is accepted instead of when it
+/// retires. Running in submission order across queues keeps the ordering
+/// the synchronous adapter gave: every fence of an earlier submission has
+/// signalled when a job starts.
+#[pin_data]
+struct JobQueue {
+    #[pin]
+    state: Mutex<JobQueueState>,
+    /// Notified whenever `completed` advances.
+    #[pin]
+    retired: CondVar,
+}
+
+struct JobQueueState {
+    pending: KVec<KBox<G18Job>>,
+    /// A worker is draining `pending`.
+    running: bool,
+    /// Sequence numbers of the last accepted and the last finished job.
+    submitted: u64,
+    completed: u64,
+}
+
+impl JobQueue {
+    fn new() -> Result<Arc<Self>> {
+        Arc::pin_init(pin_init!(Self {
+            state <- new_mutex!(JobQueueState {
+                pending: KVec::new(), running: false, submitted: 0, completed: 0,
+            }, "G18 jobs"),
+            retired <- new_condvar!("G18 job retired"),
+        }), GFP_KERNEL)
+    }
+
+    /// Accept the job that `job` builds around the publication's fence and
+    /// return its sequence number, or give the publication back if the job
+    /// cannot be queued. The fence is installed under the lock, once the
+    /// job has its place: a submission that finds it in a syncobj is
+    /// accepted later and so runs after the job that signals it.
+    fn push(self: &Arc<Self>, publication: OutputPublication,
+        job: impl FnOnce(JobFence) -> KBox<G18Job>)
+        -> core::result::Result<u64, OutputPublication> {
+        let mut state = self.state.lock();
+        if state.pending.reserve(1, GFP_KERNEL).is_err() { return Err(publication); }
+        if !state.running {
+            let this = self.clone();
+            if workqueue::system_unbound().try_spawn(GFP_KERNEL, move || this.drain()).is_err() {
+                return Err(publication);
+            }
+            state.running = true;
+        }
+        let job = job(publication.accept());
+        // Cannot fail: room was reserved above.
+        let _ = state.pending.push_within_capacity(job);
+        state.submitted += 1;
+        Ok(state.submitted)
+    }
+
+    fn drain(&self) {
+        loop {
+            let job = {
+                let mut state = self.state.lock();
+                match state.pending.remove(0) {
+                    Ok(job) => job,
+                    Err(_) => { state.running = false; return; }
+                }
+            };
+            G18Job::run(job);
+            self.state.lock().completed += 1;
+            self.retired.notify_all();
+        }
+    }
+
+    /// Wait until job `seq` has finished and its fence has signalled.
+    fn wait(&self, seq: u64, interruptible: bool) -> Result {
+        let mut state = self.state.lock();
+        while state.completed < seq {
+            if !interruptible {
+                self.retired.wait(&mut state);
+            } else if self.retired.wait_interruptible(&mut state) {
+                return Err(ERESTARTSYS);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -317,84 +553,147 @@ struct G18Queue {
     vm: mmu::Vm,
     window: g17_uapi::QueueUscWindow,
     fences: FenceContexts,
+    jobs: Arc<JobQueue>,
+    /// The error of a job of this queue that failed after its submit
+    /// returned (0: none). The next submit returns and clears it: Mesa learns
+    /// of a GPU fault only from a submit error, and then treats the context
+    /// as lost, as it did when a submit returned the error of its own job.
+    failed: Arc<AtomicI32>,
+    /// Created with DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT.
+    asynchronous: bool,
+    /// Sequence numbers of this queue's last [`QUEUE_DEPTH`] jobs, oldest at
+    /// `next`, and of its last job.
+    recent: [u64; QUEUE_DEPTH],
+    next: usize,
+    last: u64,
 }
 
 impl queue::Queue for G18Queue {
-    fn submit(&mut self, _reg_data: &AsahiRegData<'_>, _submission_id: u64,
+    /// Userspace that reads GPU results right after a submit returns (Mesa's
+    /// G18G indirect dispatch sizes, before its fix) opts out by not setting
+    /// the flag; its submissions keep returning once they have retired.
+    fn set_async_submit(&mut self) -> Result {
+        self.asynchronous = true;
+        Ok(())
+    }
+
+    /// On an asynchronous queue, a submission with output syncs returns once
+    /// its job is accepted; the outputs signal when it retires. Every other
+    /// submission returns once it has retired: one without outputs gives
+    /// userspace nothing to wait on (Mesa's G18G split compute prepass reads
+    /// GPU results after such submissions).
+    fn submit(&mut self, _reg_data: &AsahiRegData<'_>, submission_id: u64,
         syncs: KVec<file::SyncItem>,
         in_sync_count: usize, cmdbuf_raw: &[u8],
         objects: Pin<&xarray::XArray<KBox<file::Object>>>) -> Result {
         if in_sync_count > syncs.len() { return Err(EINVAL); }
-        let fence = self.fences.new_fence(0, G18SubmissionFence)?.into();
+        // Nothing is published until these waits are done, so a signal
+        // simply restarts the ioctl.
+        self.jobs.wait(self.recent[self.next], true)?;
+        let fence: UserFence<G18SubmissionFence> =
+            self.fences.new_fence(0, G18SubmissionFence)?.into();
+        wait_foreign_inputs(&fence, &syncs[..in_sync_count])?;
+        let synchronous = !self.asynchronous || syncs.len() == in_sync_count;
         let mut publication = OutputPublication {
-            fence, syncs, input_count: in_sync_count, result: Err(ECANCELED),
+            fence: Some(fence), syncs, input_count: in_sync_count, result: Err(ECANCELED),
         };
-        let result = self.submit_one(&publication.syncs[..in_sync_count], cmdbuf_raw, objects);
-        // The runtime records and quarantines a failed published VM before
-        // this output fence is installed/signalled by the publication guard.
-        publication.result = result;
-        result
+        let accepted = (|| {
+            let slot = KBox::<G18Job>::new_uninit(GFP_KERNEL)?;
+            let result = if synchronous {
+                Some(Arc::new(AtomicI32::new(0), GFP_KERNEL)?)
+            } else {
+                None
+            };
+            let inputs = publication.input_fences()?;
+            let (vm_job, commands) = self.prepare(cmdbuf_raw, objects)?;
+            Ok((slot, result, inputs, vm_job, commands))
+        })();
+        let (slot, result, inputs, vm_job, commands) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // The runtime records and quarantines a failed published VM
+                // before this output fence is installed/signalled by the
+                // publication guard, after the queue's earlier fences.
+                publication.result = Err(error);
+                self.jobs.wait(self.last, false)?;
+                return Err(error);
+            }
+        };
+        let task = kernel::current!();
+        // SAFETY: `comm` of the current task is a NUL-terminated array that
+        // only the task itself renames; a torn copy is only a log string.
+        let comm = unsafe { (*task.as_ptr()).comm }.map(|c| c as u8);
+        let job = |fence| slot.write(G18Job {
+            runtime: self.runtime.clone(), submit_lock: self.submit_lock.clone(),
+            vm: self.vm.clone(), vm_job, commands, result: result.clone(), inputs,
+            fence, queue_failed: self.failed.clone(),
+            submission: submission_id, pid: task.pid(), comm,
+        });
+        let seq = match self.jobs.push(publication, job) {
+            Ok(seq) => seq,
+            Err(mut publication) => {
+                // As above: the fence signals after the queue's earlier ones.
+                publication.result = Err(ENOMEM);
+                self.jobs.wait(self.last, false)?;
+                return Err(ENOMEM);
+            }
+        };
+        self.recent[self.next] = seq;
+        self.next = (self.next + 1) % QUEUE_DEPTH;
+        self.last = seq;
+        let Some(result) = result else { return Ok(()) };
+        self.jobs.wait(seq, false)?;
+        match result.load(Ordering::Acquire) {
+            0 => Ok(()),
+            errno => Err(Error::from_errno(errno)),
+        }
+    }
+
+    fn drain(&mut self) {
+        let _ = self.jobs.wait(self.last, false);
     }
 }
 
+unsafe extern "C" {
+    fn asahi_g18_wait_foreign_fences(head: *mut bindings::dma_fence,
+        own: *const bindings::dma_fence_ops) -> i32;
+    fn asahi_g18_fence_error(head: *mut bindings::dma_fence) -> i32;
+}
+
+/// Wait for every input fence that no job of this adapter signals, inside
+/// chains and arrays too (Mesa's timeline points wrap this adapter's
+/// fences). The job worker waits for nothing: an input that it waited for
+/// would hold every queue of the device. This adapter's own fences are
+/// skipped, since they belong to earlier jobs, which retire first.
+fn wait_foreign_inputs(ours: &UserFence<G18SubmissionFence>, inputs: &[file::SyncItem])
+    -> Result {
+    // SAFETY: `ours` is held and not yet signalled, so its ops are still set;
+    // the pointer is only compared.
+    let own = unsafe { (*ours.raw()).ops };
+    for sync in inputs {
+        let Some(fence) = &sync.fence else { continue };
+        // SAFETY: the input fence is strongly held for the call.
+        let error = unsafe { asahi_g18_wait_foreign_fences(fence.raw(), own) };
+        if error != 0 { return Err(Error::from_errno(error)); }
+    }
+    Ok(())
+}
+
 impl G18Queue {
-    fn submit_one(&self, inputs: &[file::SyncItem], cmdbuf_raw: &[u8],
-        objects: Pin<&xarray::XArray<KBox<file::Object>>>) -> Result {
+    /// Check and admit a submission. An empty command buffer is a
+    /// synchronization-only submission and holds no VM job.
+    fn prepare(&self, cmdbuf_raw: &[u8], objects: Pin<&xarray::XArray<KBox<file::Object>>>)
+        -> Result<(Option<mmu::VmJobGuard>, KVec<Admitted>)> {
+        match self.failed.swap(0, Ordering::AcqRel) {
+            0 => {}
+            errno => return Err(Error::from_errno(errno)),
+        }
         if self.vm.status().map_or(0, |s| s.get()) != 0 { return Err(EIO); }
         if self.runtime.is_crashed() { return Err(ENODEV); }
-        // Wait outside the submission lock; another client may own the job
-        // whose fence satisfies this submission's dependency.
-        for sync in inputs {
-            if let Some(fence) = &sync.fence {
-                // SAFETY: both calls borrow the strongly held input fence.
-                let waited = unsafe { bindings::dma_fence_wait_timeout(
-                    fence.raw(), true, kernel::task::MAX_SCHEDULE_TIMEOUT) };
-                if waited < 0 { return Err(Error::from_errno(waited as i32)); }
-                if waited == 0 { return Err(ETIMEDOUT); }
-                let status = unsafe { bindings::dma_fence_get_status(fence.raw()) };
-                if status < 0 { return Err(Error::from_errno(status)); }
-            }
-        }
-        // An empty command buffer is a synchronization-only submission. Input
-        // fences have completed above; the normal publication guard installs
-        // and signals its output fence, preserving timeline chaining. Never
-        // manufacture a hardware job or relax hardware retirement checks.
-        if cmdbuf_raw.is_empty() {
-            let _serialized = self.submit_lock.lock();
-            if self.vm.status().map_or(0, |s| s.get()) != 0 { return Err(EIO); }
-            if self.runtime.is_crashed() { return Err(ENODEV); }
-            pr_info!("G18_SYNC_ONLY inputs={}\n", inputs.len());
-            return Ok(());
-        }
-        let _vm_job = self.vm.retain_t8140_job()?;
-        // Parsing and translation frames end here, before the job runs its
-        // own register builders on this stack.
+        if cmdbuf_raw.is_empty() { return Ok((None, KVec::new())); }
+        let vm_job = self.vm.retain_t8140_job()?;
         let admitted = self.admit(cmdbuf_raw, objects)?;
-        let _serialized = self.submit_lock.lock();
-        // Commands run in submission order and each retires before the next
-        // starts, so every barrier (an earlier command of this submission, or
-        // any earlier submission) has completed when its waiter begins.
-        for command in admitted {
-            if self.runtime.is_crashed() { return Err(ENODEV); }
-            // Without job stage ticks, the CPU bracket `[t0, t1]` around the
-            // synchronous job bounds every stage: starts get t0, ends get t1.
-            let t0 = counter_ticks();
-            match command {
-                Admitted::Render(render, slots) => {
-                    let retired = self.runtime.submit_render(&self.vm, &render)?;
-                    let t1 = counter_ticks();
-                    slots.publish(retired.stage_ticks.unwrap_or([t0, t1, t0, t1]),
-                        counter_frequency());
-                }
-                Admitted::Compute(command, slots) => {
-                    let retired = self.runtime.submit_compute(&self.vm, &command)?;
-                    let t1 = counter_ticks();
-                    let [start, _, _, end] = retired.stage_ticks.unwrap_or([t0, t1, t0, t1]);
-                    slots.publish([start, end, 0, 0], counter_frequency());
-                }
-            }
-        }
-        Ok(())
+        Ok((Some(vm_job), admitted))
     }
 
     /// Parse every hardware command of a submission, apply the G18 admission

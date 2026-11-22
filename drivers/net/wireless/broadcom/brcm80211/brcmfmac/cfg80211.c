@@ -9700,9 +9700,16 @@ static int brcmf_cfg80211_update_country(struct brcmf_cfg80211_info *cfg)
 		 * As such, we force the bands to be re-set the first
 		 * time we try to set a country for real.
 		 */
-		if (err != -EAGAIN)
+		if (err != -EAGAIN) {
+			bphy_info_once(drvr, "country %c%c: no firmware code for it (%d)\n",
+				       cfg->country_alpha2[0],
+				       cfg->country_alpha2[1], err);
 			return err;
+		}
 		if (!cfg->force_band_setup) {
+			brcmf_info("country %c%c already set in firmware (%.3s rev %d)\n",
+				   cfg->country_alpha2[0], cfg->country_alpha2[1],
+				   ccreq.ccode, le32_to_cpu(ccreq.rev));
 			cfg->country_pending = false;
 			return 0;
 		}
@@ -9712,6 +9719,9 @@ static int brcmf_cfg80211_update_country(struct brcmf_cfg80211_info *cfg)
 		bphy_err(drvr, "Firmware rejected country setting\n");
 		return err;
 	}
+	brcmf_info("country %c%c set in firmware (%.3s rev %d)\n",
+		   cfg->country_alpha2[0], cfg->country_alpha2[1], ccreq.ccode,
+		   le32_to_cpu(ccreq.rev));
 	err = brcmf_setup_wiphybands(cfg);
 	if (err)
 		return err;

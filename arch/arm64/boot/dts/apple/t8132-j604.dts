@@ -351,7 +351,7 @@
 
 #include "hwmon-common.dtsi"
 #include "hwmon-laptop.dtsi"
-#include "hwmon-fan-dual.dtsi"
+#include "hwmon-fan.dtsi"
 #include "t8132-j604-hwmon-rails.dtsi"
 
 /*
@@ -619,4 +619,34 @@
 			};
 		};
 	};
+};
+
+/*
+ * Keyboard backlight on macOS's scale: its levels 0.0625..1.0 drive
+ * 69..336 of 960 PWM cycles, on = 52 + 284 * level, so the top level is
+ * 35 % duty and the line starts at 5.42 %.
+ */
+&kbd_led {
+	min-duty-cycle-bp = <542>;
+	max-duty-cycle-bp = <3500>;
+};
+
+/*
+ * The headset jack reports the plug on ring sense; tip sense keeps
+ * re-asserting with nothing plugged in.
+ */
+&jack_codec {
+	cirrus,ring-sense-detect;
+};
+
+/*
+ * ProRes: the engine and its DART. The driver binds the T8132 engine whenever
+ * apple/prores-t8132-init.bin is installed and leaves it off without it.
+ */
+&dart_apr0 {
+	status = "okay";
+};
+
+&apr {
+	status = "okay";
 };

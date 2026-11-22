@@ -368,7 +368,38 @@ static inline bool dcp_bl_swap_finish(struct dcp_backlight_state *state,
 			      swap->accepted && swap->completed);
 }
 
+/*
+ * Firmware that takes the panel level in each present without the policy
+ * above: a DAC value (12.3, 13.5, the 14.7 template) or H17G nits.  Its own
+ * reports of the level do not follow the presents.  The present that powers
+ * the panel off takes it to 0, and the report goes to 0 with it; the present
+ * that lights the panel again after the power-on brings no new report.  On a
+ * J414s with 13.5 firmware the report stayed 0 for hours under a panel lit
+ * at 500 nits, across nine display power cycles.  Once Linux has
+ * presented a level, that level is the panel's; before that, only the
+ * firmware's report of the loader's level is known.
+ */
+struct dcp_bl_presented {
+	u32 nits;
+	bool valid;
+};
+
+static inline void dcp_bl_presented_set(struct dcp_bl_presented *presented,
+					u32 nits)
+{
+	presented->nits = nits;
+	presented->valid = true;
+}
+
+static inline int dcp_bl_presented_actual(const struct dcp_bl_presented *presented,
+					  int reported)
+{
+	return presented->valid ? presented->nits : reported;
+}
+
 struct apple_dcp;
+
+void dcp_backlight_presented(struct apple_dcp *dcp, u32 nits);
 
 void dcp_backlight_desktop_power(struct apple_dcp *dcp, bool on);
 u32 dcp_backlight_desktop_nits(struct apple_dcp *dcp);

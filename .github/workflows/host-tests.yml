@@ -1,9 +1,10 @@
 name: Host tests
 
 # Every host-side test of the Aurora drivers: tools/asahi (with their mutation
-# and old-code controls) and the apple-dcp, apple-afkv2, asahi-g15 and asahi-m4
-# selftests. They extract production code from this tree and build it on the
-# host, so a driver change can break them while the kernel build stays green.
+# and old-code controls), the apple-dcp, apple-afkv2, asahi-g15 and asahi-m4
+# selftests and the host-runnable selftests in tools/testing/selftests/drivers/apple.
+# They extract production code from this tree and build it on the host, so a
+# driver change can break them while the kernel build stays green.
 
 on:
   push:

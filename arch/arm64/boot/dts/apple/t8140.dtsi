@@ -1562,6 +1562,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 698 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&ps_disp_cpu>;
 			/* VM window of streams 0 and 16 */
 			apple,dma-range = <0x100 0x0 0x10 0x0>;
 			status = "disabled";
@@ -1573,6 +1574,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 698 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&ps_disp_cpu>;
 			status = "disabled";
 		};
 
@@ -1584,6 +1586,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 698 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&ps_disp_cpu>;
 			/* VM window of stream 23 */
 			apple,dma-range = <0x100 0x0 0x10 0x0>;
 			status = "disabled";
@@ -1763,6 +1766,7 @@
 			      <0x3 0x81100000 0x0 0x10000>;
 			reg-names = "code", "sram", "mbox", "ctrl";
 			iommus = <&avd_dart 0>, <&avd_dart 1>, <&avd_dart 2>;
+			dma-coherent;
 		};
 
 		avd_dart: iommu@381020000 {

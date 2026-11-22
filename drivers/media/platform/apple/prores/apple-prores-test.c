@@ -442,6 +442,91 @@ static void apr_test_apri_t6050(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t6050, data, pos, init), -EINVAL);
 }
 
+/* A T8132 container: T6041's blocks with a 48-row wrapper table. */
+static void apr_test_apri_t8132(struct kunit *test)
+{
+	static const u32 counts[APRI_T6041_BLOCKS] = {
+		APRI_SYSTEM_COUNT, APRI_CORE_COUNT, APRI_T8132_WRAPPER_COUNT,
+	};
+	struct apr_init_data *init = kunit_kzalloc(test, sizeof(*init), GFP_KERNEL);
+	u8 *data = kunit_kzalloc(test, APRI_T8132_FIRMWARE_SIZE, GFP_KERNEL);
+	size_t pos = 16;
+	u32 block, entry;
+
+	KUNIT_ASSERT_NOT_NULL(test, init);
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	memcpy(data, "APRI", 4);
+	put_unaligned_le32(1, data + 4);
+	put_unaligned_le32(0x8132, data + 8);
+	put_unaligned_le32(APRI_T6041_BLOCKS, data + 12);
+	for (block = 0; block < APRI_T6041_BLOCKS; block++) {
+		put_unaligned_le32(block + 1, data + pos);
+		put_unaligned_le32(counts[block], data + pos + 4);
+		pos += 8;
+		for (entry = 0; entry < counts[block]; entry++, pos += 12) {
+			put_unaligned_le32(entry * 4, data + pos);
+			put_unaligned_le32(0xffffffff, data + pos + 4);
+			put_unaligned_le32(entry, data + pos + 8);
+		}
+	}
+	KUNIT_ASSERT_EQ(test, pos, (size_t)APRI_T8132_FIRMWARE_SIZE);
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t8132, data, pos, init), 0);
+	KUNIT_EXPECT_EQ(test, init->blocks[APRI_WRAPPER_BLOCK].count,
+			(u32)APRI_T8132_WRAPPER_COUNT);
+	/* T6041 does not take it, nor T8132 a T6041 SoC field. */
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t6041, data, pos, init), -EINVAL);
+	put_unaligned_le32(0x6041, data + 8);
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t8132, data, pos, init), -EINVAL);
+	put_unaligned_le32(0x8132, data + 8);
+	/* A wrapper row past its window. */
+	put_unaligned_le32(0x1000000, data + pos - 12);
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t8132, data, pos, init), -EINVAL);
+}
+
+/* A T8142 container: T6050's blocks with a 38-row wrapper. */
+static void apr_test_apri_t8142(struct kunit *test)
+{
+	static const u32 counts[APRI_T8142_BLOCKS] = {
+		APRI_SYSTEM_COUNT, APRI_CORE_COUNT, APRI_T8142_WRAPPER_COUNT,
+		APRI_CONTROL_COUNT,
+	};
+	struct apr_init_data *init = kunit_kzalloc(test, sizeof(*init), GFP_KERNEL);
+	u8 *data = kunit_kzalloc(test, APRI_T8142_FIRMWARE_SIZE, GFP_KERNEL);
+	size_t pos = 16;
+	u32 block, entry;
+
+	KUNIT_ASSERT_NOT_NULL(test, init);
+	KUNIT_ASSERT_NOT_NULL(test, data);
+	memcpy(data, "APRI", 4);
+	put_unaligned_le32(1, data + 4);
+	put_unaligned_le32(0x8142, data + 8);
+	put_unaligned_le32(APRI_T8142_BLOCKS, data + 12);
+	for (block = 0; block < APRI_T8142_BLOCKS; block++) {
+		put_unaligned_le32(block + 1, data + pos);
+		put_unaligned_le32(counts[block], data + pos + 4);
+		pos += 8;
+		for (entry = 0; entry < counts[block]; entry++, pos += 12) {
+			put_unaligned_le32(entry * 4, data + pos);
+			put_unaligned_le32(0xffffffff, data + pos + 4);
+			put_unaligned_le32(entry, data + pos + 8);
+		}
+	}
+	KUNIT_ASSERT_EQ(test, pos, (size_t)APRI_T8142_FIRMWARE_SIZE);
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t8142, data, pos, init), 0);
+	KUNIT_EXPECT_EQ(test, init->blocks[APRI_CONTROL_BLOCK].count,
+			(u32)APRI_CONTROL_COUNT);
+	KUNIT_EXPECT_EQ(test, init->blocks[APRI_CONTROL_BLOCK].entries[11].offset,
+			(u32)11 * 4);
+	/* T6050 refuses it by size, T8142 refuses T6050's SoC id. */
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t6050, data, pos, init), -EINVAL);
+	put_unaligned_le32(0x6050, data + 8);
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t8142, data, pos, init), -EINVAL);
+	put_unaligned_le32(0x8142, data + 8);
+	/* A control row past its window. */
+	put_unaligned_le32(0x4000, data + pos - 12);
+	KUNIT_EXPECT_EQ(test, apr_parse_init(&apri_t8142, data, pos, init), -EINVAL);
+}
+
 static void apri_test_expect_rejected(struct kunit *test, const u8 *data,
 				      size_t size, struct apr_init_data *init)
 {
@@ -534,6 +619,8 @@ static struct kunit_case apr_test_cases[] = {
 	KUNIT_CASE(apr_test_output),
 	KUNIT_CASE(apr_test_apri_valid),
 	KUNIT_CASE(apr_test_apri_t6050),
+	KUNIT_CASE(apr_test_apri_t8132),
+	KUNIT_CASE(apr_test_apri_t8142),
 	KUNIT_CASE(apr_test_apri_header_rejects),
 	KUNIT_CASE(apr_test_apri_shape_rejects),
 	KUNIT_CASE(apr_test_apri_row_rejects),

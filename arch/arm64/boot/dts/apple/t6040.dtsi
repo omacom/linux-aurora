@@ -343,6 +343,7 @@
 		compatible = "apple,t6041-dart", "apple,t8110-dart";
 		reg = <0x4 0x11000000 0x0 0x20000>;
 		#iommu-cells = <1>;
+		power-domains = <&ps_apcie_sys_gp>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 1733 IRQ_TYPE_LEVEL_HIGH>;
 		status = "disabled";
@@ -589,6 +590,31 @@
 
 #include "t6040-pmgr.dtsi"
 #include "t6040-peripherals.dtsi"
+
+/*
+ * A DART probes as a device of its own, so it holds the power state of the
+ * block it sits in; reading it with that block off faults. The internal PCIe
+ * block's states are only in the T6040 PMGR, so they are given here and not
+ * in t604x.dtsi.
+ *
+ * The internal PCIe DARTs sit in APCIE_SYS_GP. iBoot leaves APCIE_GP and
+ * APCIE_SYS_GP on, and the PCIe driver keeps internal links up through
+ * suspend-to-idle and cannot retrain them after a power cycle, so they are
+ * described always-on, as on J616s.
+ */
+&ps_apcie_gp {
+	apple,always-on;
+	status = "okay";
+};
+
+&ps_apcie_sys_gp {
+	apple,always-on;
+	status = "okay";
+};
+
+&pcie_dart {
+	power-domains = <&ps_apcie_sys_gp>;
+};
 
 /* The M4 Pro has five cores in each P cluster. */
 /delete-node/ &cpu_p05;

@@ -168,7 +168,7 @@ enum ave_opcode {
 /* The M4 Pro (T6040) build of the same 25G83 firmware. */
 #define AVE_FW_TEXT_CRC_T6040_25G83 0x68d5f9f6
 /*
- * The M4 Max (J575c) build of AppleAVE2FW 9003.78.0, as iBoot 25G83 loads it:
+ * The M4 Max (J575c) build of encoder firmware 9003.78.0, as iBoot 25G83 loads it:
  * DATA is 0x130000, and the loader writes a per-boot word at TEXT 0x4224, so
  * this is the TEXT CRC with that word zeroed.
  */
@@ -176,8 +176,17 @@ enum ave_opcode {
 #define AVE_FW_TEXT_CRC_T6050_26A428 0x87279429
 /* macOS 27.3 beta 1 (26C5035r) / T6050: TEXT 0x158000, DATA 0x134000. */
 #define AVE_FW_TEXT_CRC_T6050_26C5035 0xc25b4ddb
-/* The M5 (T8142) build of the same 26A428 firmware (AppleAVE2FW 9013.45.1). */
+/* The M5 (T8142) build of the same 26A428 firmware (encoder firmware 9013.45.1). */
 #define AVE_FW_TEXT_CRC_T8142_26A428 0x8a3784bd
+/* The M4 (T8132) build preloaded by the macOS 27.2 (26B123) stub. */
+#define AVE_FW_TEXT_CRC_T8132_26B123 0x99fc929a
+/* The M3 (T8122) build preloaded by the macOS 27.2 (26B123) stub. */
+#define AVE_FW_TEXT_CRC_T8122_26B123 0x918d70d3
+/*
+ * The M5 build of macOS 27.2 (26B123; 27.2.1 26B131 ships it unchanged),
+ * AppleAVE2FW 9013.55.1: TEXT 0x154000, DATA 0x12c000, as 26A428's.
+ */
+#define AVE_FW_TEXT_CRC_T8142_26B123 0x24eb4625
 
 struct ave_ctx;
 
@@ -551,7 +560,8 @@ static inline struct ave_ctx *ave_file_to_ctx(struct file *file)
 	return container_of(file_to_v4l2_fh(file), struct ave_ctx, fh);
 }
 
-extern const struct ave_variant ave_t6000, ave_t6041, ave_t8112;
+extern const struct ave_variant ave_t6000, ave_t6041, ave_t8112, ave_t8132,
+	ave_m3;
 
 /* ave-fw.c */
 u64 ave_fw_vcbar(const struct ave_variant *variant, u64 text_iova);

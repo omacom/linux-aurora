@@ -578,3 +578,37 @@ int centauri_t6050_alpha_resources(struct centauri_t6050 *c, struct cen_alpha_re
 	resources->mcr = ipc->alpha.mcr;
 	return 0;
 }
+
+struct pci_dev *centauri_t6050_ipc_alpha_dev(struct centauri_t6050 *c)
+{
+	return c->ipc ? c->ipc->function[1] : NULL;
+}
+
+static u32 control_sleep_status(struct centauri_t6050 *c)
+{
+	return le32_to_cpu(READ_ONCE(*(__le32 *)(c->ipc->control.buffer->cpu + 0x70)));
+}
+
+int centauri_t6050_ipc_control_sleep(struct centauri_t6050 *c, bool asleep)
+{
+	u32 status;
+	int ret;
+
+	if (!c->ipc || !c->ipc->control.buffer ||
+	    readl(c->bar + 0x8000) != 2 || readl(c->bar + 0x8050) != 2)
+		return -EIO;
+	dma_wmb();
+	writel(asleep ? 3 : 0, c->bar + 0x9078);
+	ret = read_poll_timeout(control_sleep_status, status,
+				(asleep ? status == 3 : status <= 1) ||
+				readl(c->bar + 0x8000) != 2,
+				100, 2000000, false, c);
+	dma_rmb();
+	if (readl(c->bar + 0x8000) != 2)
+		ret = -EIO;
+	dev_dbg(&c->pdev->dev,
+		"Control ACIPC host %s: ret=%d status=%u exec=%u ipc=%u\n",
+		asleep ? "sleep" : "wake", ret, status,
+		readl(c->bar + 0x8000), readl(c->bar + 0x8050));
+	return ret;
+}

@@ -1035,7 +1035,13 @@ buffered:
 	pos = iocb->ki_pos;
 	written_buffered = btrfs_buffered_write(iocb, from);
 	if (written_buffered < 0) {
-		ret = written_buffered;
+		/*
+		 * Direct IO may already have written a part, and the file
+		 * position has moved past it.  Report that part, like
+		 * direct_write_fallback() does, the caller sees the error on
+		 * the next write.
+		 */
+		ret = written ? 0 : written_buffered;
 		goto out;
 	}
 	/*

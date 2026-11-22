@@ -330,6 +330,7 @@ pub(crate) const IOC_LOCKOUT_STATE: u32 = _IOR::<Lockout>(MAGIC, 0x0e);
 pub(crate) const IOC_REARM: u32 = _IOW::<Rearm>(MAGIC, 0x0f);
 pub(crate) const IOC_REQUIRE_PASSWORD: u32 = _IO(MAGIC, 0x10);
 
+#[derive(Clone)]
 pub(crate) struct MatchEvidence {
     identity: [u8; UUID_LEN],
 }
@@ -340,6 +341,7 @@ impl MatchEvidence {
     }
 }
 
+#[derive(Clone)]
 pub(crate) enum VerifyOutcome {
     Failed(u32),
     NoMatch,

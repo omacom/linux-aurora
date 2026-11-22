@@ -4,26 +4,30 @@
 $id: http://devicetree.org/schemas/cpu/apple,t8140-cpuidle.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Apple T6040, T8132 and T8140 CPU idle controller
+title: Apple T6040, T8132, T8140 and T8152 CPU idle controller
 
 maintainers:
   - Ryan Murray <ryan@aurorasilicon.org>
 
 description:
-  Selects the Apple CPU idle driver on T6040, T8132 and T8140 systems. On these
-  SoCs the hardware decides when an idle core is power-gated after WFI;
-  software cannot request core or cluster power-down, so WFI is the only
-  idle state.
+  Selects the Apple CPU idle driver on T6040, T8132, T8140 and T8152 systems.
+  On these SoCs the hardware decides when an idle core is power-gated after
+  WFI; software cannot request core or cluster power-down, so WFI is the only
+  idle state. T8152 uses the T8140 driver profile.
 
 properties:
   $nodename:
     const: cpuidle
 
   compatible:
-    enum:
-      - apple,t6041-cpuidle
-      - apple,t8132-cpuidle
-      - apple,t8140-cpuidle
+    oneOf:
+      - enum:
+          - apple,t6041-cpuidle
+          - apple,t8132-cpuidle
+          - apple,t8140-cpuidle
+      - items:
+          - const: apple,t8152-cpuidle
+          - const: apple,t8140-cpuidle
 
 required:
   - compatible

@@ -687,8 +687,9 @@ static void program_add128_slots_test(struct kunit *test)
 	put_unaligned_le32(5, generic + ANE_H16_GENERIC_HEADER + 4);
 	put_unaligned_le32(4, generic + ANE_H16_GENERIC_HEADER + ANE_H16_GENERIC_ENTRY + 4);
 	put_unaligned_le32(6, generic + ANE_H16_GENERIC_HEADER + 2 * ANE_H16_GENERIC_ENTRY + 4);
+	memset(&scratch, 0, sizeof(scratch));
 	KUNIT_ASSERT_EQ(test, ane_h16_process_bindings(hwx, generic, generic_size, bindings,
-						       &count, NULL), 0);
+						       &count, &scratch), 0);
 	KUNIT_EXPECT_EQ(test, count, 3);
 	KUNIT_EXPECT_EQ(test, bindings[0].index, 5);
 	KUNIT_EXPECT_EQ(test, bindings[0].class, 0);

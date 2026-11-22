@@ -7,7 +7,7 @@
 		reg = <0x2 0xa1110000 0 0x4000>;
 		interrupt-parent = <&aic>;
 		interrupts = <AIC_IRQ 769 IRQ_TYPE_LEVEL_HIGH>;
-		clocks = <&clk_200m>;
+		clocks = <&clkref>;
 		power-domains = <&ps_spi4>;
 		#address-cells = <1>;
 		#size-cells = <0>;

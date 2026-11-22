@@ -4,9 +4,9 @@ Per-process userspace page-size launcher
 =======================================
 
 Build with ``make`` in this directory. The running arm64 kernel must provide
-Aurora's experimental per-process granule API and be booted with
-``user4k=on``. The feature is off by default; without that parameter every
-non-native size is refused with ``EINVAL`` and ``native`` still works.
+Aurora's experimental per-process granule API. The feature is on by default;
+a kernel booted with ``user4k=off`` refuses every non-native size with
+``EINVAL``, and ``native`` still works.
 
 Examples::
 

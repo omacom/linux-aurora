@@ -1267,7 +1267,8 @@ class SurveyTest(MaxBase):
         block = SRC[SRC.index('\nargs=()\nfor a in "$@"; do'):SRC.index('if preflight_needed "${1:-}"')]
         for args, want in [("--m3-power-survey", "ok --m3-power-survey"),
                            ("--m3-power-survey --m3-handoff", "error: --m3-handoff goes with an install"),
-                           ("--m3-power-survey --read-only", "error: unexpected arguments after --m3-power-survey")]:
+                           ("--m3-power-survey --uninstall", "error: unexpected arguments after --m3-power-survey"),
+                           ("--m3-power-survey --read-only", "error: --read-only was removed")]:
             with self.subTest(args=args):
                 # The option defaults of this script (M3_PRO_MESA is the M3 Pro Mesa's, once merged).
                 script = ('die() { echo "error: $*"; exit 1; }\nM3_TRY=0\nM3_GPU_EXPERIMENT=0\nM3_PRO_MESA=1\n'

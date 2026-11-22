@@ -105,6 +105,30 @@ impl MappedObject {
         })
     }
 
+    /// As [`Self::new_wc_at`], for memory whose owner holds a user charge for
+    /// it ([`crate::memacct::Charge::user`]) instead of counting it as kernel
+    /// memory.
+    pub(crate) fn new_wc_at_user_charged(
+        dev: &AsahiDrmDevice,
+        vm: &mmu::Vm,
+        address: u64,
+        size: usize,
+        prot: mmu::Prot,
+    ) -> Result<Self> {
+        let mut object = gem::new_kernel_object_wc_user_charged(dev, size)?;
+        zero_object(&mut object)?;
+        let mapping = object.map_at(vm, address, prot, false)?;
+        let iova = mapping.iova();
+        Ok(Self {
+            mapping: Some(mapping),
+            object,
+            iova,
+            object_offset: 0,
+            logical_size: size,
+            cpu_wc: true,
+        })
+    }
+
     /// Replace this object's backing with a larger one at the SAME address.
     ///
     /// The replacement is allocated and zeroed before the old aperture is

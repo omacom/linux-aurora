@@ -3890,7 +3890,7 @@ static int ane_rtclient_probe_inner(struct platform_device *pdev,
 
 	if (!ane_t6021_fwload_placement_ok(dev)) {
 		dev_err(dev,
-			"fw_alias_reserved=1, but no no-map /reserved-memory node covers the iBoot firmware windows (this m1n1 does not reserve them); refusing before power access, ANE off\n");
+			"fw_alias_reserved=1, but no no-map /reserved-memory node covers the iBoot firmware windows (this aura does not reserve them); refusing before power access, ANE off\n");
 		return -ENODEV;
 	}
 

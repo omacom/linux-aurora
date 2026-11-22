@@ -7,6 +7,112 @@ from common import block
 import rate
 
 
+def indicator_dpms(root):
+    source = (root / 'drivers/gpu/drm/apple/iomfb.c').read_text()
+    return r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <string.h>
+#define SWAP_SURFACES 4
+#define BIT(i) (1U << (i))
+#define IOMFB_SET_BACKGROUND BIT(31)
+#define lockdep_assert_held(lock) ((void)(lock))
+#define scoped_guard(kind, lock) for (int once = ((void)(lock), 1); once; once = 0)
+struct drm_framebuffer { unsigned int refs; };
+struct dcp_swap_submit_req_h17p {
+    struct {
+        unsigned int swap_enabled, swap_completed, bg_color;
+        unsigned int src_rect[4], dst_rect[4], surf_ids[4], surf_flags[4], surf_unk[4];
+    } swap;
+    unsigned int surf[4], surf_iova[4];
+    bool surf_null[4];
+};
+struct iomfb_scanout_h17p {
+    struct drm_framebuffer *fb[4];
+    struct dcp_swap_submit_req_h17p request;
+};
+struct apple_dcp {
+    struct dcp_camera_indicator {
+        bool has_surf;
+        unsigned int surf;
+        int lock;
+        struct { bool wanted; } state;
+    } camera_ind;
+    struct { struct dcp_swap_submit_req_h17p h17p; } swap;
+    struct { int lock; struct iomfb_scanout_h17p *scanout, *next_scanout; } iomfb;
+};
+static void drm_framebuffer_put(struct drm_framebuffer *fb)
+{
+    assert(fb->refs);
+    fb->refs--;
+}
+static void iomfb_scanout_release_h17p(struct iomfb_scanout_h17p *scanout)
+{
+    if (scanout)
+        for (unsigned int i = 0; i < SWAP_SURFACES; ++i)
+            if (scanout->fb[i])
+                drm_framebuffer_put(scanout->fb[i]);
+}
+static struct drm_framebuffer *confirmed;
+static void dcp_indicator_swap_done(struct apple_dcp *dcp, struct drm_framebuffer *fb)
+{
+    assert(dcp->camera_ind.has_surf);
+    confirmed = fb;
+}
+''' + '\n'.join(block(source, name) for name in (
+    'static void iomfb_null_surface_h17p(',
+    'void iomfb_prepare_indicator_h17p(',
+    'static void iomfb_retire_indicator_h17p(',
+    'void iomfb_scanout_complete_h17p(',
+)) + r'''
+int main(void)
+{
+    struct drm_framebuffer desktop = { 1 }, dot = { 2 };
+    struct iomfb_scanout_h17p old = { .fb = { [3] = &dot } };
+    struct iomfb_scanout_h17p next = { .fb = { [0] = &desktop, [3] = &dot } };
+    struct apple_dcp dcp = {
+        .camera_ind = { .has_surf = true, .surf = 3 },
+        .iomfb = { .scanout = &old, .next_scanout = &next },
+        .swap.h17p = {
+            .swap.swap_enabled = BIT(0),
+            .swap.swap_completed = BIT(0),
+            .surf_null = { false, true, true, true },
+        },
+    };
+    iomfb_prepare_indicator_h17p(&dcp);
+    assert(dcp.swap.h17p.swap.swap_enabled == (BIT(0) | BIT(3)));
+    assert(dcp.swap.h17p.swap.swap_completed == dcp.swap.h17p.swap.swap_enabled);
+    assert(old.fb[3] == &dot && dot.refs == 2);
+    confirmed = &dot;
+    iomfb_scanout_complete_h17p(&dcp);
+    assert(dcp.iomfb.scanout == &next && !dcp.iomfb.next_scanout);
+    assert(!next.fb[3] && !dot.refs && !confirmed);
+    assert(next.request.surf_null[3] && !(next.request.swap.swap_enabled & BIT(3)));
+    assert(next.fb[0] == &desktop && desktop.refs == 1);
+    assert(next.request.swap.swap_enabled == BIT(0));
+
+    /* A brightness or wake replay shares the retained scanout, with no next one. */
+    dot.refs = 1;
+    next.fb[3] = &dot;
+    next.request.surf_null[3] = false;
+    next.request.surf_iova[3] = 42;
+    next.request.swap.swap_enabled |= BIT(3);
+    dcp.swap.h17p = next.request;
+    dcp.camera_ind.state.wanted = true;
+    iomfb_prepare_indicator_h17p(&dcp);
+    assert(!dcp.swap.h17p.surf_null[3] && dcp.swap.h17p.surf_iova[3] == 42);
+    dcp.camera_ind.state.wanted = false;
+    iomfb_prepare_indicator_h17p(&dcp);
+    assert(dcp.swap.h17p.surf_null[3] && !dcp.swap.h17p.surf_iova[3]);
+    assert(next.fb[3] == &dot && dot.refs == 1);
+    iomfb_retire_indicator_h17p(&dcp, &next);
+    assert(!next.fb[3] && !dot.refs && !next.request.surf_iova[3]);
+    assert(next.request.surf_null[3] && next.request.swap.swap_enabled == BIT(0));
+    return 0;
+}
+'''
+
+
 def backlight(root):
     header = (root / 'drivers/gpu/drm/apple/dcp_backlight.h').read_text()
     header = '\n'.join(line for line in header.splitlines()
@@ -92,9 +198,93 @@ int main(void)
     assert(!dcp_bl_dpms(&s,false) && dcp_bl_effective(&s)==0);
     assert(!dcp_bl_dpms(&s,true) && dcp_bl_effective(&s)==450);
     assert(!dcp_bl_resend(&s));
+    /*
+     * DAC firmware: the report stays 0 after a display power cycle while the
+     * panel is lit again (J414s, 13.5). Boot and resume end at the same level.
+     */
+    {
+        struct dcp_bl_presented boot={0}, resume={0};
+        assert(dcp_bl_presented_actual(&boot,140)==140);
+        dcp_bl_presented_set(&boot,500);
+        dcp_bl_presented_set(&boot,0);
+        assert(dcp_bl_presented_actual(&boot,0)==0);
+        dcp_bl_presented_set(&boot,500);
+        assert(dcp_bl_presented_actual(&boot,0)==500);
+        dcp_bl_presented_set(&resume,500);
+        dcp_bl_presented_set(&resume,0);
+        dcp_bl_presented_set(&resume,0);
+        assert(dcp_bl_presented_actual(&resume,0)==0);
+        dcp_bl_presented_set(&resume,500);
+        assert(dcp_bl_presented_actual(&resume,500)==dcp_bl_presented_actual(&boot,0));
+    }
     return 0;
 }
 '''
+
+
+
+def dac_words(root):
+    """The production DAC tables, interpolate() and calculate_dac() at every level."""
+    import re
+    source = (root / 'drivers/gpu/drm/apple/dcp_backlight.c').read_text()
+    defines = '\n'.join(re.findall(r'^#define (?:MIN|MAX)_BRIGHTNESS_PART[12]\s.*$', source, re.M))
+    tables = '\n'.join(re.findall(r'^static u32 brightness_part[0-9]+\[\] = \{.*?\};', source, re.M | re.S))
+    functions = '\n'.join(block(source, marker) for marker in (
+        'static u32 interpolate(', 'static u32 calculate_dac('))
+    return r"""
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef uint32_t u32;
+typedef uint64_t u64;
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#define WARN(c, ...) (c)
+#define SCALE_FACTOR (1 << 10)
+struct apple_dcp;
+""" + defines + '\n' + tables + '\n' + functions + r"""
+/* Every word is two 16-bit DAC halves, each a table value times 16. */
+static void check_word(u32 word, u32 *hi, u32 *lo)
+{
+    *hi = word >> 16;
+    *lo = word & 0xffff;
+    assert(!(*hi & 0xf) && !(*lo & 0xf));
+    assert(*hi <= 0x7ff0 && *lo <= *hi);
+}
+/* The widest gap between a table word's two halves, times 16. */
+static u32 widest(const u32 *tbl, size_t n, u32 gap)
+{
+    for (size_t i = 0; i < n; i++)
+        if (16 * ((tbl[i] >> 16) - (tbl[i] & 0xffff)) > gap)
+            gap = 16 * ((tbl[i] >> 16) - (tbl[i] & 0xffff));
+    return gap;
+}
+int main(void)
+{
+    u32 prev_hi = 0, prev_lo = 0, hi, lo, gap;
+    gap = widest(brightness_part1, ARRAY_SIZE(brightness_part1), 0);
+    gap = widest(brightness_part12, ARRAY_SIZE(brightness_part12), gap);
+    gap = widest(brightness_part2, ARRAY_SIZE(brightness_part2), gap);
+    /* The table points themselves, as before. */
+    assert(calculate_dac(NULL, 2) == 0);
+    assert(calculate_dac(NULL, MAX_BRIGHTNESS_PART1) == 16 * brightness_part1[ARRAY_SIZE(brightness_part1) - 1]);
+    assert(calculate_dac(NULL, MIN_BRIGHTNESS_PART2) == 16 * brightness_part2[0]);
+    assert(calculate_dac(NULL, MAX_BRIGHTNESS_PART2) == 16 * brightness_part2[ARRAY_SIZE(brightness_part2) - 1]);
+    for (int nits = 0; nits <= (int)MAX_BRIGHTNESS_PART2; nits++) {
+        check_word(calculate_dac(NULL, nits), &hi, &lo);
+        /* Both halves rise with the level; neither picks up the other's fraction. */
+        assert(hi >= prev_hi && lo >= prev_lo);
+        /* The lower half stays the half step below, as in the table. */
+        assert(hi - lo <= gap);
+        prev_hi = hi;
+        prev_lo = lo;
+    }
+    /* 370 nits (J313): the lower half was 0x10a0, a 4 to 5 nit value. */
+    check_word(calculate_dac(NULL, 370), &hi, &lo);
+    assert(hi > 0x7800 && lo > 0x7800);
+    return 0;
+}
+"""
 
 
 def modes(root):

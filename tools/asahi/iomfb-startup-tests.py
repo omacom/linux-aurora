@@ -27,6 +27,10 @@ struct apple_dcp { int fw_compat; struct {int iomfb_method_profile;} hw;
  struct {int lock; bool active, scanout, stopped;} iomfb;
  void *rtk, *shmem, *dev; bool ext; };
 static int alloc_calls, iomfb_calls, fail_ep;
+/* Firmware 27 lists the endpoints it uses; whether that list has the allocator. */
+static bool alloc_advertised;
+static bool apple_rtkit_has_endpoint(void *r, int ep) {return ep!=REMOTE_ALLOC_ENDPOINT || alloc_advertised;}
+#define dev_info(...) ((void)0)
 static bool iomfb_uses_queue(struct apple_dcp *d) {return false;}
 static bool dcp_is_ext26(struct apple_dcp *d) {return d->ext;}
 static void mutex_lock(int *p) {}
@@ -42,9 +46,11 @@ static void dcp_send_message(struct apple_dcp *d,int ep,int m) {}
 '''
 main = r'''
 int main(void) {
- for(int fw=0;fw<4;fw++) for(int ext=0;ext<2;ext++) for(int profile=0;profile<5;profile+=4) {
+ for(int fw=0;fw<4;fw++) for(int ext=0;ext<2;ext++) for(int profile=0;profile<5;profile+=4) for(int adv=0;adv<2;adv++) {
   struct apple_dcp d={.fw_compat=fw,.ext=ext,.hw.iomfb_method_profile=profile};
-  bool alloc=(fw==1 || fw==2) && !ext && profile!=4;
+  /* Firmware 27 starts the allocator only where it advertises it; H17P always does. */
+  bool alloc=(fw==1 || (fw==2 && adv)) && !ext && profile!=4;
+  alloc_advertised=adv;
   alloc_calls=iomfb_calls=0;fail_ep=-1;
   assert(iomfb_start_rtkit(&d)==0);
   assert(alloc_calls==alloc);assert(iomfb_calls==(fw!=3));
@@ -59,4 +65,4 @@ with tempfile.TemporaryDirectory() as t:
  p=Path(t)/'test.c';p.write_text(pre+body+main)
  subprocess.run(['cc','-Werror','-Wno-unused-function','-fsanitize=address,undefined',str(p),'-o',str(p.with_suffix(''))],check=True)
  subprocess.run([str(p.with_suffix(''))],check=True)
-print('PASS production IOMFB startup firmware/profile matrix and allocator failures')
+print('PASS production IOMFB startup firmware/profile/advertisement matrix and allocator failures')

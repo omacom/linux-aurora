@@ -41,7 +41,7 @@
  * number the cores 18 * d + 6 * c + n. The boot loader removes the nodes of
  * the cores it did not start.
  */
-#define T6050_CPU(label, mpidr, type, opp, cluster, cpu_cap)	\
+#define T6050_CPU(label, mpidr, type, opp, cluster, cpu_cap, l2, l1i, l1d)	\
 	label: cpu@mpidr {					\
 		compatible = type;				\
 		device_type = "cpu";				\
@@ -50,6 +50,9 @@
 		operating-points-v2 = <&opp>;			\
 		performance-domains = <&cluster>;		\
 		capacity-dmips-mhz = <cpu_cap>;		\
+		next-level-cache = <&l2>;			\
+		i-cache-size = <l1i>;				\
+		d-cache-size = <l1d>;				\
 		cpu-release-addr = <0 0>; /* to be filled by the loader */ \
 	}
 
@@ -59,10 +62,29 @@
  * zstd -3 compression at 0.736, decompression at 0.871 and a Python dict loop at 0.728 of a P
  * core, geometric mean 0.776, so M 794 and P 1024. Small L1-resident loops run at 0.92-1.01.
  */
-#define T6050_M_CPU(label, mpidr, cluster) \
-	T6050_CPU(label, mpidr, "apple,sawtooth", mcluster_opp, cluster, 794)
-#define T6050_P_CPU(label, mpidr, cluster) \
-	T6050_CPU(label, mpidr, "apple,everest", pcluster_opp, cluster, 1024)
+#define T6050_M_CPU(label, mpidr, cluster, l2) \
+	T6050_CPU(label, mpidr, "apple,sawtooth", mcluster_opp, cluster, 794, l2, 0x20000, 0x10000)
+#define T6050_P_CPU(label, mpidr, cluster, l2) \
+	T6050_CPU(label, mpidr, "apple,everest", pcluster_opp, cluster, 1024, l2, 0x30000, 0x20000)
+
+/*
+ * Caches. Every cluster has its own unified L2, shared by its six cores: the ADT's /cpus/cpuN
+ * l2-cache-size is 8 MiB on the M-tier (apple,sawtooth) cores and 16 MiB on the P-tier
+ * (apple,everest) cores in the J714c/s, J716c/s, J775c/d and J873s ADTs, and macOS reports
+ * hw.perflevelN.cpusperl2 = 6 on both tiers. The L1 sizes are macOS's
+ * hw.perflevelN.l1icachesize/l1dcachesize: 128 KiB I and 64 KiB D on the M tier, 192 KiB I and
+ * 128 KiB D on the P tier. The system level cache sits behind the memory controllers and is
+ * shared with every agent; it is not part of the CPUs' cache hierarchy and is not described here.
+ */
+#define T6050_L2(label, name, bytes)	\
+	label: name {			\
+		compatible = "cache";	\
+		cache-level = <2>;	\
+		cache-unified;		\
+		cache-size = <bytes>;	\
+	}
+#define T6050_M_L2(label, name)	T6050_L2(label, name, 0x800000)
+#define T6050_P_L2(label, name)	T6050_L2(label, name, 0x1000000)
 
 / {
 	compatible = "apple,t6050", "apple,arm-platform";

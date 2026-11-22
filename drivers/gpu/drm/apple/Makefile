@@ -5,6 +5,7 @@ CFLAGS_trace.o = -I$(src)
 appledrm-y := apple_drv.o apple_resume.o
 appledrm-y += afk.o dcp.o dcp-fabric.o dcp_backlight.o dptxep.o iomfb.o parser.o systemep.o
 appledrm-y += dcp-hdmi.o
+appledrm-$(CONFIG_DRM_APPLE_CEC) += cec.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += audio.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += av.o
 appledrm-y += connector.o dcp-panel-adt.o dcp-display-metadata.o dcp-180hz.o
@@ -35,6 +36,7 @@ appledrm-y += iomfb_v27.o
 appledrm-y += epic/dpavservep.o
 appledrm-y += epic/panelavep.o
 appledrm-y += plane.o
+appledrm-y += dcp-indicator.o
 
 
 appledrm-$(CONFIG_TRACING) += trace.o
@@ -42,9 +44,11 @@ appledrm-$(CONFIG_TRACING) += trace.o
 obj-$(CONFIG_DRM_APPLE) += appledrm.o
 obj-$(CONFIG_DRM_APPLE_KUNIT_TEST) += afk_test.o
 obj-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp_backlight_test.o
+obj-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp-indicator-test.o
 obj-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp-announce-test.o
 
 obj-$(CONFIG_DRM_APPLE_KUNIT_TEST) += afk-service-test.o
+obj-$(CONFIG_DRM_APPLE_KUNIT_TEST) += dcp_cec_test.o
 
 obj-$(CONFIG_DRM_APPLE_PARSER_KUNIT_TEST) += afkv2-test.o
 

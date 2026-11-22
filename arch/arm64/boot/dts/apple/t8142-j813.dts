@@ -126,6 +126,7 @@
 #include "t8142-j813-isp.dtsi"
 #include "t8142-j813-n1.dtsi"
 #include "t8142-j813-audio.dtsi"
+#include "t8142-hwmon.dtsi"
 
 /*
  * Ambient light sensor, the AOP's "als" service: an ST VD6286, as on J815
@@ -190,108 +191,10 @@
 	};
 };
 
-/*
- * N1 functions behind apcie port 0 (0000:00:00.0 -> 01:00.{0,1,2}), so the
- * loader has somewhere to put the factory addresses: it copies ADT /chosen
- * mac-address-wifi0 and mac-address-bluetooth0 into the wifi0/bluetooth0
- * alias targets. Same nodes as t8142-j815.dts (same N1, same PCI IDs).
- */
-/ {
-	aliases {
-		wifi0 = &n1_alpha;
-		bluetooth0 = &n1_beta;
-	};
-};
-
-&pcie0 {
-	n1_port: pci@0,0 {
-		device_type = "pci";
-		reg = <0x0 0x0 0x0 0x0 0x0>;
-		bus-range = <1 1>;
-		#address-cells = <3>;
-		#size-cells = <2>;
-		ranges;
-
-		n1_control: control@0,0 {
-			compatible = "apple,t8142-centauri-control", "pci106b,1900";
-			reg = <0x10000 0x0 0x0 0x0 0x0>;
-		};
-
-		n1_alpha: wifi@0,1 {
-			compatible = "pci106b,1902";
-			reg = <0x10100 0x0 0x0 0x0 0x0>;
-			/* Filled by the loader */
-			local-mac-address = [00 00 00 00 00 00];
-		};
-
-		n1_beta: bluetooth@0,2 {
-			compatible = "pci106b,1903";
-			reg = <0x10200 0x0 0x0 0x0 0x0>;
-			/* Filled by the loader */
-			local-bd-address = [00 00 00 00 00 00];
-		};
-	};
-};
-
 &mtp_hid {
 	multi-touch {
 		firmware-name = "apple/tpmtfw-j813.bin";
 	};
-};
-
-&{/soc} {
-	/*
-	 * The CPU clusters' power-gate enables, in /arm-io/pmgr reg[34]: E at
-	 * +0x0 and P at +0x60, the offsets T8132 has and the two words
-	 * AppleT8142PMGR's restoreHW sets. iBoot leaves P's clear, and the
-	 * boot core (P core 0) then never powers down in WFI.
-	 */
-	cluster_pwrgate: power-gate@380724000 {
-		compatible = "apple,t8142-cluster-pwrgate", "apple,cluster-pwrgate";
-		reg = <0x3 0x80724000 0x0 0x4>,
-		      <0x3 0x80724060 0x0 0x4>;
-	};
-};
-
-/*
- * The video encoder, its two DARTs and the VENC power tree. The J813 ADT has
- * the same ave and dart-ave as the J815. The boot loader hands over iBoot's
- * preloaded firmware, or disables the encoder when there is none.
- */
-&ps_venc_sys {
-	status = "okay";
-};
-
-&ps_venc_dma {
-	status = "okay";
-};
-
-&ps_venc_pipe4 {
-	status = "okay";
-};
-
-&ps_venc_pipe5 {
-	status = "okay";
-};
-
-&ps_venc_me0 {
-	status = "okay";
-};
-
-&ps_venc_me1 {
-	status = "okay";
-};
-
-&ave_dart0 {
-	status = "okay";
-};
-
-&ave_dart1 {
-	status = "okay";
-};
-
-&ave {
-	status = "okay";
 };
 
 /* Unexposed chassis port instances remain described and disabled. */
@@ -304,84 +207,10 @@
 	status = "okay";
 };
 
-/*
- * Video encoder: ADT ave ("ave2", pre-loaded) behind dart-ave, the same
- * addresses, interrupts and power states as on the J815. aura hands over the
- * preloaded firmware or disables the node.
- */
-&ps_venc_sys {
-	status = "okay";
-};
-
-&ps_venc_dma {
-	status = "okay";
-};
-
-&ps_venc_pipe4 {
-	status = "okay";
-};
-
-&ps_venc_pipe5 {
-	status = "okay";
-};
-
-&ps_venc_me0 {
-	status = "okay";
-};
-
-&ps_venc_me1 {
-	status = "okay";
-};
-
-&ave_dart0 {
-	status = "okay";
-};
-
-&ave_dart1 {
-	status = "okay";
-};
-
-&ave {
-	status = "okay";
-};
-
 #include "t8142-j813-sep.dtsi"
 #include "t8142-j813-j815-sleep.dtsi"
 
 #include "t8142-j813-dcpext.dtsi"
-
-&sleep {
-	/* PMU RTC: peripheral source 2, routed through NUB.SPMI0.SW3. */
-	apple,spmi-pmu-sources = <0x600 0x4>;
-};
-
-&{/soc} {
-	/*
-	 * The internal display's power words for a DCP firmware stop (DPMS off):
-	 * /arm-io/pmgr reg[34] (pwrgate: DISP_CPU's retention words 0x11cc and
-	 * 0x11f0, the pmgr's retention_config_ff/_mem) and reg[32] (ps: DISP_CPU
-	 * 0x10000, DISP_FE 0x318, DISP_SYS 0x290). T8142's PMC keeps no count of
-	 * powered DCPs, so there is no pmc-dcp word.
-	 */
-	dcp_power: display-power@380724000 {
-		compatible = "apple,t8142-display-power";
-		reg = <3 0x80724000 0 0x2000>,
-		      <3 0x80700000 0 0x14000>;
-		reg-names = "pwrgate", "ps";
-	};
-};
-
-&dcp {
-	apple,display-power = <&dcp_power>;
-};
-
-&dcp_dart {
-	/* PMGR PS write-disable for DISP_CPU: offset 0x3fdc, bit 6. */
-	reg = <2 0x86340000 0 0x20000>,
-	      <3 0x80717fdc 0 0x4>;
-	reg-names = "dart", "ps-wr-dis";
-	apple,ps-wr-dis-bit = <6>;
-};
 
 &{/reserved-memory} {
 	/*
@@ -404,4 +233,63 @@
 	memory-region-names = "ttbs", "pagetables", "handoff",
 			      "shared-l2", "gfx-data", "gfx1-data", "fw-data",
 			      "fw-text";
+};
+
+/* Touch ID uses SPI2, with power on NUB GPIO 36 and data ready on AP GPIO 200. */
+&pmgr {
+	ps_spi2: power-controller@440 {
+		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x440 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		power-domains = <&ps_spi_p>;
+		label = "spi2";
+	};
+};
+
+&{/soc} {
+	spi2: spi@3a5108000 {
+		compatible = "apple,t8142-spi", "apple,t8103-spi";
+		reg = <0x3 0xa5108000 0x0 0x4000>;
+		interrupt-parent = <&aic>;
+		interrupts = <AIC_IRQ 1241 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&clkref>;
+		power-domains = <&ps_spi2>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		status = "okay";
+
+		mesa: fingerprint@0 {
+			compatible = "apple,mesa-fingerprint";
+			reg = <0>;
+			spi-max-frequency = <8000000>;
+			spi-cpol;
+			spi-cs-setup-delay-ns = <20>;
+			spi-cs-hold-delay-ns = <20>;
+			enable-gpios = <&pinctrl_nub 36 GPIO_ACTIVE_HIGH>;
+			interrupt-parent = <&pinctrl_ap>;
+			interrupts = <200 IRQ_TYPE_EDGE_RISING>;
+			/* Per-device files, built from the Mac's own factory records. */
+			firmware-name = "apple/mesacal-j813.bin", "apple/msrk-j813.bin";
+			status = "okay";
+		};
+	};
+};
+
+/* Expose the sensor's two pins next to the ones sound uses. */
+&pinctrl_ap {
+	gpio-reserved-ranges = <0 100>, <101 49>, <152 48>, <201 23>;
+};
+
+&pinctrl_nub {
+	gpio-reserved-ranges = <0 18>, <19 17>, <37 3>;
+};
+
+/* The port controllers follow the sleep's command rules (tipd: woken first, read at intervals) */
+&hpm0 {
+	apple,sleep-ssps-rules;
+};
+
+&hpm1 {
+	apple,sleep-ssps-rules;
 };

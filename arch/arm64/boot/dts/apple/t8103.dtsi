@@ -1715,6 +1715,7 @@
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 810 IRQ_TYPE_LEVEL_HIGH>;
 				#iommu-cells = <1>;
+				power-domains = <&ps_atc0_cio>;
 			};
 
 			usb4_0_nhi: nhi@f00000 {
@@ -1773,6 +1774,7 @@
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 771 IRQ_TYPE_LEVEL_HIGH>;
 				#iommu-cells = <1>;
+				power-domains = <&ps_atc0_pcie>;
 			};
 
 			apciec0: pcie@3b0000000 {
@@ -1941,6 +1943,7 @@
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 890 IRQ_TYPE_LEVEL_HIGH>;
 				#iommu-cells = <1>;
+				power-domains = <&ps_atc1_cio>;
 			};
 
 			usb4_1_nhi: nhi@f00000 {
@@ -1999,6 +2002,7 @@
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 851 IRQ_TYPE_LEVEL_HIGH>;
 				#iommu-cells = <1>;
+				power-domains = <&ps_atc1_pcie>;
 			};
 
 			apciec1: pcie@530000000 {

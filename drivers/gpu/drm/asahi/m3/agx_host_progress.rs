@@ -27,12 +27,12 @@ impl Progress {
         if (old & 1 != 0) != pending {
             // Exhaustion remains permanently busy, never wraps back to idle.
             self.activity_epoch.store(old.saturating_add(1), Ordering::Release);
-            // J613 memory floor: report the same idle/busy edge. The
-            // callee takes only a spinlock and may queue work; it is a no-op
-            // unless pmp_report.j613_floor=1 admitted an owner.
+            // PMP CPU memory floor: report the same idle/busy edge. The
+            // callee takes only a spinlock; it is a no-op unless a report
+            // with apple,cpu-memory-floor admitted an owner.
             #[cfg(CONFIG_APPLE_PMP_REPORT)]
             // SAFETY: callable in any context but NMI; takes no GPU state.
-            unsafe { kernel::bindings::apple_pmp_j613_floor_gpu_activity(pending) };
+            unsafe { kernel::bindings::apple_pmp_floor_gpu_activity(pending) };
             if pending {
                 // Order the new marker before device queue publication. While
                 // already pending there is no new idle-to-busy state to order.

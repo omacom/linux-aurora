@@ -90,6 +90,14 @@ properties:
     description:
       Firmware temporal-filter strength selected for the attached sensor.
 
+  apple,camera-indicator:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Optional. The display coprocessor asked to present the software camera
+      indicator while the camera streams. The request is best-effort and the
+      camera streams whether or not the indicator is shown. The indicator is
+      software, not a privacy guarantee.
+
   sensor-presets:
     type: object
     description:

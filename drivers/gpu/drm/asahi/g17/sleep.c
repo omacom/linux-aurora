@@ -370,7 +370,7 @@ struct asahi_g17_commit {
 /*
  * Whether the commit's stop raises the GPU's domain before it touches the coprocessor: on the
  * SoCs the raise was made for, the T8142 (J815: the GPU gates itself between frames and its
- * registers may not answer below full power) and the T6050. Elsewhere the stop goes straight
+ * registers may not answer below full power). Elsewhere the stop goes straight
  * to the idle poll, as before the raise. On the T8140 (J700) the domain reads its target on
  * and nothing powered under automatic power at the commit (0x1000230f); a raise from there
  * times out with BUSY latched, the PMP's AP IDLE then goes unanswered, the sleep takes the
@@ -378,8 +378,7 @@ struct asahi_g17_commit {
  */
 static bool asahi_g17_commit_raises(struct device *dev)
 {
-	return of_device_is_compatible(dev->of_node, "apple,agx-t8142") ||
-	       of_device_is_compatible(dev->of_node, "apple,agx-g17s");
+	return of_device_is_compatible(dev->of_node, "apple,agx-t8142");
 }
 
 /*

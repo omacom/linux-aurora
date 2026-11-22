@@ -358,7 +358,9 @@ pub(crate) trait Backend: Send + Sync {
     /// packet lacks. Called again once it signals.
     fn prepare(&self, packet: &Arc<Packet>) -> Option<Fence>;
     fn publish(&self, packet: Arc<Packet>) -> Result<Fence>;
-    fn timed_out(&self, packet: Arc<Packet>) -> sched::Status;
+    /// `again`: the watchdog already gave up on `packet` once while it was published, and
+    /// settling it then did not end it.
+    fn timed_out(&self, packet: Arc<Packet>, again: bool) -> sched::Status;
     fn cancel(&self, packet: Arc<Packet>);
     /// Transfer a timeout to an outstanding off-lock graph transaction, if any, or decide it
     /// against other VMs' older work ([`super::timeout::decide`]). `renewals` and `excused`
@@ -395,7 +397,25 @@ struct Timeout<B: Backend> {
     execution_renewals: u8,
     shared_renewals: u8,
     allowance: super::timeout::Allowance,
+    /// Whether the watchdog already expired the job while it was published.
+    published_expiry: PublishedExpiry,
     packet: Arc<Packet>,
+}
+
+/// Whether a job's watchdog already expired while it was published: then settling it did not
+/// end it, and the next expiry is passed to [`Backend::timed_out`] as `again`.
+#[derive(Default)]
+struct PublishedExpiry(bool);
+
+impl PublishedExpiry {
+    /// An expiry of a job that was `published` before [`Backend::timed_out`] saw it; returns
+    /// `again` for that call. A publication racing the call is read as unpublished, so it gets
+    /// one more expiry of its own.
+    fn expire(&mut self, published: bool) -> bool {
+        let again = self.0;
+        self.0 |= published;
+        again
+    }
 }
 
 impl<B: Backend> Drop for Job<B> {
@@ -422,6 +442,7 @@ impl<B: Backend> sched::JobImpl for Job<B> {
             execution_renewals: 0,
             shared_renewals: 0,
             allowance: super::timeout::Allowance::new(self.allowance_ms),
+            published_expiry: PublishedExpiry::default(),
             packet: self.packet.clone(),
         }
     }
@@ -499,7 +520,8 @@ impl<B: Backend> sched::JobImpl for Job<B> {
         // its parent callback intact while the driver settles the exact owner;
         // reinsertion also handles completion racing with timeout observation.
         if !finished {
-            job.backend.timed_out(job.packet.clone());
+            let again = job.published_expiry.expire(job.packet.is_published());
+            job.backend.timed_out(job.packet.clone(), again);
         }
         sched::Status::NoHang
     }
@@ -645,5 +667,24 @@ impl<B: Backend> Scheduler<B> {
         }
         job.push();
         Ok(Fences { ready, completed, publication: host_publication, owner: packet.completion.clone() })
+    }
+}
+
+#[kernel::macros::kunit_tests(asahi_g17_job_expiry)]
+mod tests {
+    use super::PublishedExpiry;
+
+    #[test]
+    fn only_an_expiry_after_a_published_one_is_again() {
+        let mut expiry = PublishedExpiry::default();
+        // Expiries before publication (capacity or graph waits) are never again.
+        assert!(!expiry.expire(false));
+        assert!(!expiry.expire(false));
+        // The first published expiry is the command's own; every later one is again.
+        assert!(!expiry.expire(true));
+        assert!(expiry.expire(true));
+        assert!(expiry.expire(true));
+        // Published at the read stays published: a later unpublished read cannot reset it.
+        assert!(expiry.expire(false));
     }
 }

@@ -165,6 +165,14 @@ static const char gate_pmp_uuid[] __initconst = "2F4EB4C4-001B-3ACF-A9A0-68D8E42
 static const char gate_t8122_pmp_uuid[] __initconst = "3B18C886-4C70-349B-B1C4-70F35DE2C5CD";
 
 /*
+ * The T8122 PMP image of the 27.2 (26B123) system firmware. The PMP report
+ * driver checks the running image against the values the boot loader passes
+ * and reads the soc-device records from them, so the same PMP support takes
+ * either image.
+ */
+static const char gate_t8122_pmp_uuid_27_2[] __initconst = "C6CCB960-AC83-34A2-9493-C3131BD5AE4B";
+
+/*
  * The T6031 PMP image, as the J516C ADT names it (iop-pmp-nub, passed on by
  * the boot loader in /chosen/asahi,t6031-pmp). It is not the T6030 image.
  */
@@ -203,6 +211,7 @@ struct gate_soc {
 	const char *dcp_full_name;	/* the DCP node the PMP overlay expects, under /soc */
 	const char *pmp_values;		/* the boot loader's PMP values for this Mac */
 	const char *pmp_uuid;		/* the PMP image the PMP support is written for */
+	const char *pmp_uuid_alt;	/* another PMP image it takes, or NULL */
 	const char *report_compat;	/* the PMP report the overlay adds, or the reused one */
 	const char *disp_entry;		/* its display request entry, which the DCP waits for */
 	const u8 *pmp_dtbo, *pmp_dtbo_end;	/* NULL: no PMP description built in */
@@ -274,6 +283,7 @@ static const struct gate_soc gate_t8122 __initconst = {
 	.dcp_full_name = "dcp@28ec00000",
 	.pmp_values = "/chosen/asahi,t8122-pmp",
 	.pmp_uuid = gate_t8122_pmp_uuid,
+	.pmp_uuid_alt = gate_t8122_pmp_uuid_27_2,
 	.report_compat = "apple,t8122-pmp-v2-report",
 	.disp_entry = "report@7",
 	.reuse_pmp = true,
@@ -766,9 +776,12 @@ static int __init gate_pmp_resolve(struct device_node **np, struct device_node *
 			gate_pmp_values = NULL;
 			return -EINVAL;
 		}
-		if (strcmp(uuid, gate_soc->pmp_uuid)) {
-			gate_warn("PMP not added: this Mac's PMP firmware image is %s, not %s\n",
-				uuid, gate_soc->pmp_uuid);
+		if (strcmp(uuid, gate_soc->pmp_uuid) &&
+		    (!gate_soc->pmp_uuid_alt || strcmp(uuid, gate_soc->pmp_uuid_alt))) {
+			gate_warn("PMP not added: this Mac's PMP firmware image is %s, not %s%s%s\n",
+				uuid, gate_soc->pmp_uuid,
+				gate_soc->pmp_uuid_alt ? " or " : "",
+				gate_soc->pmp_uuid_alt ?: "");
 			of_node_put(gate_pmp_values);
 			gate_pmp_values = NULL;
 			return -EINVAL;
@@ -3301,7 +3314,7 @@ static void __init gate_t6041_max_run(void)
 	if (!internal)
 		internal = of_find_compatible_node(NULL, NULL, gate_soc->dcp_compat);
 	if (gate_t6041_v27_unapproved(internal, false)) {
-		staged_info("firmware 27 internal display only, external displays left off\n");
+		staged_info("unapproved firmware 27 on internal dcp, external displays left off\n");
 		of_node_put(internal);
 		of_node_put(display);
 		return;
@@ -3336,16 +3349,29 @@ static void __init gate_t6041_max_run(void)
  * every available route. Enable them only for a dcpext the boot loader handed
  * over (apple,t8132-dcpext-firmware-ready = 1). A handed-over dcpext that is
  * not adopted then disables them again, see dcp_platform_probe_t8132_ext().
- * Only the device tree changes here; no register is touched.
+ * Only the T8132 display driver binds a dcpext and can do that, so without it,
+ * or with nomodeset, the routes stay disabled: the ports would wait for mode
+ * switches that never register. Only the device tree changes here; no
+ * register is touched.
  */
 static void __init gate_j713_dcpext_routes(void)
 {
-	struct of_changeset *cs = gate_cs_alloc();
+	struct of_changeset *cs;
 	struct device_node *np;
 	unsigned int n = 0;
 	u32 ready;
 	int ret = 0;
 
+	if (!IS_ENABLED(CONFIG_DRM_APPLE_DCP_T8132)) {
+		pr_info("apple-j713-display: dcpext Type-C routes left disabled: the T8132 display driver is not built\n");
+		return;
+	}
+	if (IS_ENABLED(CONFIG_VIDEO) && video_firmware_drivers_only()) {
+		pr_info("apple-j713-display: dcpext Type-C routes left disabled: nomodeset is on the command line\n");
+		return;
+	}
+
+	cs = gate_cs_alloc();
 	if (!cs)
 		return;
 	for_each_compatible_node(np, NULL, "apple,t8132-dcpext") {

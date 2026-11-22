@@ -513,6 +513,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1387 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc0_cio)>;
 		};
 
 		DIE_NODE(usb4_0_nhi): nhi@f00000 {
@@ -573,6 +574,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1265 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc0_pcie)>;
 			apple,dma-range = <0x0 0x80000000 0x0 0x80000000>;
 			apple,dma-offset = <0x100 0x0>;
 #include "t602x-pciec-dart-tunables.dtsi"
@@ -740,6 +742,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1435 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc1_cio)>;
 		};
 
 		DIE_NODE(usb4_1_nhi): nhi@f00000 {
@@ -800,6 +803,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1283 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc1_pcie)>;
 			apple,dma-range = <0x0 0x80000000 0x0 0x80000000>;
 			apple,dma-offset = <0x100 0x0>;
 #include "t602x-pciec-dart-tunables.dtsi"
@@ -967,6 +971,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1483 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc2_cio)>;
 		};
 
 		DIE_NODE(usb4_2_nhi): nhi@f00000 {
@@ -1027,6 +1032,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1301 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc2_pcie)>;
 			apple,dma-range = <0x0 0x80000000 0x0 0x80000000>;
 			apple,dma-offset = <0x100 0x0>;
 #include "t602x-pciec-dart-tunables.dtsi"
@@ -1192,6 +1198,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1531 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc3_cio)>;
 		};
 
 		DIE_NODE(usb4_3_nhi): nhi@f00000 {
@@ -1263,6 +1270,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1319 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <1>;
+			power-domains = <&DIE_NODE(ps_atc3_pcie)>;
 			apple,dma-range = <0x0 0x80000000 0x0 0x80000000>;
 			apple,dma-offset = <0x100 0x0>;
 #ifndef APPLE_T602X_NON_ULTRA

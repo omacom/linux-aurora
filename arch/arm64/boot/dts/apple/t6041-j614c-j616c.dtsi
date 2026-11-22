@@ -170,6 +170,12 @@
 						<&cpu_p14 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
 						<&cpu_p15 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
+
+				map-dcs {
+					trip = <&cpu_die_passive>;
+					cooling-device =
+						<&pmc THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
 			};
 		};
 
@@ -1755,7 +1761,12 @@
 	phandle = <&dcp>;
 
 	panel: panel {
-		apple,max-brightness = <500>;
+		/*
+		 * The panel's user-accessible SDR maximum in nits (ADT backlight
+		 * user-accessible-max-nits on a J616c), as the J616s gets without
+		 * the property. 500 kept the panel below macOS's range.
+		 */
+		apple,max-brightness = <600>;
 		status = "disabled";
 	};
 };
@@ -1780,6 +1791,7 @@
 			     <17 IRQ_TYPE_EDGE_RISING>,
 			     <19 IRQ_TYPE_EDGE_RISING>;
 		interrupt-names = "irq", "select", "sleep", "wake";
+		apple,event-irq-in-sleep;
 
 		typec0: connector {
 			compatible = "usb-c-connector";
@@ -1817,6 +1829,7 @@
 			     <69 IRQ_TYPE_EDGE_RISING>,
 			     <71 IRQ_TYPE_EDGE_RISING>;
 		interrupt-names = "irq", "select", "sleep", "wake";
+		apple,event-irq-in-sleep;
 	};
 
 	hpm1: usb-pd@a {
@@ -1827,6 +1840,7 @@
 			     <43 IRQ_TYPE_EDGE_RISING>,
 			     <45 IRQ_TYPE_EDGE_RISING>;
 		interrupt-names = "irq", "select", "sleep", "wake";
+		apple,event-irq-in-sleep;
 
 		typec1: connector {
 			compatible = "usb-c-connector";
@@ -1867,6 +1881,7 @@
 			     <17 IRQ_TYPE_EDGE_RISING>,
 			     <19 IRQ_TYPE_EDGE_RISING>;
 		interrupt-names = "irq", "select", "sleep", "wake";
+		apple,event-irq-in-sleep;
 
 		typec2: connector {
 			compatible = "usb-c-connector";

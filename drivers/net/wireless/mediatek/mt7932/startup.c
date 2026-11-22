@@ -956,6 +956,7 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	}
 	m->wiphy_registered = true;
 	mt_policy_debugfs_init(m);
+	mt_restart_debugfs_init(m);
 	ret = mt_register_interface(m);
 	if (ret)
 		return ret;

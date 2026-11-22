@@ -1789,6 +1789,23 @@ pub(crate) const M5_HOST_RECOVERY: usize = 0x4af0;
 pub(crate) const M5_RECOVERY_INFO: usize = 0x4298;
 pub(crate) const M5_RECOVERY_SLOT_MASK: usize = 0x4ab8;
 
+/// The rest of the M5 firmware's recovery record in the primary status B, beside the slot mask,
+/// read while the firmware waits in recovery state 1:
+///
+/// - +0x4aa0: the number of busy slots the firmware walked;
+/// - +0x4aa8: a word describing the slot the record names, or 0 without one;
+/// - +0x4aac: the recovery reason (`recovery::cause`); 5 was read here from every recovery of a
+///   ten-minute mixed client load on a J716s with the 27.3 beta 1 firmware;
+/// - +0x4ab0: a u64 the reason's raiser leaves (for a page fault, its latched MMU fault status).
+///
+/// A record that reads all zero, slot mask included, is logged as none recorded. Only the reason
+/// has been read from a running firmware; the other words and their meanings are
+/// not yet confirmed from captured InitData.
+pub(crate) const M5_RECOVERY_SLOTS_WALKED: usize = 0x4aa0;
+pub(crate) const M5_RECOVERY_SLOT_WORD: usize = 0x4aa8;
+pub(crate) const M5_RECOVERY_REASON: usize = 0x4aac;
+pub(crate) const M5_RECOVERY_DETAIL: usize = 0x4ab0;
+
 pub(crate) const M5_STATUS_CONFIG_LINK_WORD: usize = 0x774;
 
 pub(crate) const M5_STATUS_CONFIG_LINK_PTR: usize = 0x778;
@@ -1796,6 +1813,19 @@ pub(crate) const M5_STATUS_CONFIG_LINK_PTR: usize = 0x778;
 pub(crate) const M5_HW_DATA_INSERT: usize = 0x267c;
 
 pub(crate) const M5_HW_DATA_INSERT_LEN: usize = 8;
+
+/// The HW data word that bounds how long the GPU may take to pause scheduling, us. The M5
+/// encoding holds the inherited fixed word (150) there: [`COMMON26_HW_FIXED_WORD_OFFSET`] moved
+/// by the M5 insert. Measured on a J716s under a ten-minute mixed client load: with 150 here, three
+/// GPU recoveries occurred, all with firmware reason 5 (a scheduling pause that timed out); with
+/// 2000 here, the same load produced none. One run each. This is the M5 Pro's offset; a board
+/// without the insert has the word eight bytes lower ([`hw_offset`]).
+pub(crate) const M5_HW_PAUSE_TIMEOUT_US: usize = 0x271c;
+
+const _: () = assert!(
+    M5_HW_DATA_INSERT < COMMON26_HW_FIXED_WORD_OFFSET
+        && COMMON26_HW_FIXED_WORD_OFFSET + M5_HW_DATA_INSERT_LEN == M5_HW_PAUSE_TIMEOUT_US
+);
 
 /// The common 26A428 private cluster (J873, J813): status config 0x6d0 bytes, the secondary
 /// root's second extra 0x60.

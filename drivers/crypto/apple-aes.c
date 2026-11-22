@@ -393,7 +393,14 @@ out:
 	if (ret)
 		aes->errors++;
 	memzero_explicit(next, sizeof(next));
+
+	/*
+	 * The request is done in the engine kthread, but crypto_finalize_*()
+	 * runs the completion callback, which expects softirq context.
+	 */
+	local_bh_disable();
 	crypto_finalize_skcipher_request(engine, req, ret);
+	local_bh_enable();
 	return 0;
 }
 
@@ -699,6 +706,7 @@ static const struct of_device_id apple_sio_aes_of_match[] = {
 	{ .compatible = "apple,t8112-aes", .data = &apple_sio_aes_v3 },
 	{ .compatible = "apple,t6041-aes", .data = &apple_sio_aes_v5 },
 	{ .compatible = "apple,t8140-aes", .data = &apple_sio_aes_v5 },
+	{ .compatible = "apple,t8142-aes", .data = &apple_sio_aes_v5 },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, apple_sio_aes_of_match);

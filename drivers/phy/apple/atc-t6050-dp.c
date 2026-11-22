@@ -893,6 +893,8 @@ static int t6050_typec_register(struct t6050_dp *dp)
 	struct typec_mux_desc mux_desc = {
 		.fwnode = dev_fwnode(dp->dev), .drvdata = dp,
 		.set = t6050_typec_mode,
+		/* USB 3 starts with the lanes as pin D has them: combo_dp2_join_usb() */
+		.dp_joins_usb = dp->combo,
 	};
 	struct typec_switch_dev *sw;
 	struct typec_mux_dev *mux;

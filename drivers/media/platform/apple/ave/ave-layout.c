@@ -278,262 +278,283 @@ const struct ave_fw_layout ave_layout_9003_78_0 = {
 	},
 };
 
+/*
+ * The macOS 27.0 (26A428) command layout. The macOS 27.2 (26B123) build
+ * keeps every field where 26A428 has it; only the Process commands grow
+ * (ave_layout_26b123).
+ */
+#define AVE_LAYOUT_26A428_FIELDS \
+	.abi = &ave_abi_9003, \
+	.kind = AVE_LAYOUT_26A428, \
+	.encode_ready = true, \
+	.hdr_bytes = 0xec000, \
+	.meta_bytes = 0x10000, \
+	.process_timeout_us = 46400000, \
+	.process_subtype = 0x13, \
+	.max_slots = 7, \
+	.mcc_dsid = 0x12, \
+	.counted = true, \
+	.start = { \
+		[0] = { \
+			.header = AVE_SURFACE(0x48, 0x10), \
+			.secondary = AVE_SURFACE(0x58, 0x10), \
+			.ref_a = AVE_SURFACE(0x98, 0x40), \
+			.ref_b = AVE_SURFACE(0xa8, 0x40), \
+			.ref_c = AVE_SURFACE(0xfe8, 0x40), \
+			.ref_c_alias = AVE_SURFACE(0xff8, 0x40), \
+			.ref_d = AVE_SURFACE(0xdc0, 0x10), \
+			.ref_e = AVE_SURFACE(0xb8, 0x40), \
+			.ref_f = AVE_SURFACE(0xc8, 0x40), \
+			.mb = AVE_SURFACE(0x1870, 0x10), \
+			.coded = AVE_SURFACE(0x920, 0x10), \
+			.meta = AVE_SURFACE(0xb08, 0x10), \
+			.row_a = AVE_SURFACE(0x19c0, 0x10), \
+			.row_b = AVE_SURFACE(0x1a08, 0x10), \
+			.fixed = AVE_SURFACE(0x1a50, 0x10), \
+			.hevc_extra = AVE_SURFACE(0x70, 0x10), \
+			.tiles = { AVE_SURFACE(0x1bb8, 0x10), \
+				AVE_SURFACE(0x1bd8, 0x10), \
+				AVE_SURFACE(0x1db8, 0x10), \
+				AVE_SURFACE(0x1dd8, 0x10), \
+				AVE_SURFACE(0x1bf8, 0x10), \
+				AVE_SURFACE(0x1c18, 0x10), \
+				AVE_SURFACE(0x1df8, 0x10), \
+				AVE_SURFACE(0x1e18, 0x10) }, \
+			.refs_count = 0x94, \
+			.work_count = 0xdbc, \
+			.lfs_count = 0xfe4, \
+			.slots_count = 0x918, \
+			.meta_count = 0xb00, \
+			.mb_count = 0x1868, \
+			.row_a_count = 0x19b8, \
+			.row_b_count = 0x1a00, \
+			.fixed_count = 0x1a48, \
+			.tiles_count = 0x1bb4, \
+			.codec = 0x3248, \
+			.flag_8bit = 0x35e8, \
+			.const_214 = 0x35f4, \
+			.const_218 = 0x35f8, \
+			.fps = { .numerator = 0x3600 }, \
+			.rc_mode = 0x3614, \
+			.bitrate = 0x3618, \
+			.init_qp = 0x3620, \
+			.limits = 0x3630, \
+			.limit_bytes = 0x3638, \
+			.limit_secs = 0x3640, \
+			.f64_288 = 0x3668, \
+			.f64_290 = 0x3670, \
+			.min_qp = 0x3678, \
+			.max_qp = 0x367c, \
+			.gop_flags = 0x36d0, \
+			.p_frames = 0x36dc, \
+			.max_b = 0x36e0, \
+			.ref_depth = 0x36e4, \
+			.idr_interval = 0x36e8, \
+			.f64_2c0 = 0x36f0, \
+			.f64_2c8 = 0x36f8, \
+			.rc_flags = 0x3734, \
+			.min_qp2 = 0x3740, \
+			.max_qp2 = 0x3744, \
+			.rc_310 = 0x3748, \
+			.size_class = 0x3760, \
+			.coded_w = 0x322c, \
+			.coded_h = 0x3230, \
+			.coded_h2 = 0x32a0, \
+			.bit_depth = 0x383c, \
+			.h264_profile = 0x37b0, \
+			.h264_level = 0x37b8, \
+			.h264_max_refs = 0x37d0, \
+			.h264_crop = 0x3800, \
+			.h264_crop_right = 0x3804, \
+			.h264_crop_bottom = 0x3808, \
+			.h264_cabac = 0x380c, \
+			.h264_8x8 = 0x3823, \
+			.geometry_mode = 0x31f8, \
+			.geometry_depth = 0x3234, \
+			.profile_idc = 0x3a98, \
+			.level_idc = 0x3aa0, \
+			.max_refs_copy = 0x3abe, \
+			.mb_size = 0x3ac0, \
+			.mb_height = 0x37d4, \
+			.crop_copy = 0x3ac7, \
+			.crop_right_copy = 0x3aca, \
+			.crop_bottom_copy = 0x3ace, \
+			.codec_byte = 0x3830, \
+			.cabac_copy = 0x3af9, \
+			.transform_copy = 0x3b0d, \
+		}, \
+		[1] = { \
+			.header = AVE_SURFACE(0x48, 0x10), \
+			.secondary = AVE_SURFACE(0x58, 0x10), \
+			.ref_a = AVE_SURFACE(0x98, 0x40), \
+			.ref_b = AVE_SURFACE(0xa8, 0x40), \
+			.ref_c = AVE_SURFACE(0xfe8, 0x40), \
+			.ref_c_alias = AVE_SURFACE(0xff8, 0x40), \
+			.ref_d = AVE_SURFACE(0xdc0, 0x10), \
+			.ref_e = AVE_SURFACE(0xb8, 0x40), \
+			.ref_f = AVE_SURFACE(0xc8, 0x40), \
+			.mb = AVE_SURFACE(0x1870, 0x10), \
+			.coded = AVE_SURFACE(0x920, 0x10), \
+			.meta = AVE_SURFACE(0xb08, 0x10), \
+			.row_a = AVE_SURFACE(0x19c0, 0x10), \
+			.row_b = AVE_SURFACE(0x1a08, 0x10), \
+			.fixed = AVE_SURFACE(0x1a50, 0x10), \
+			.hevc_extra = AVE_SURFACE(0x70, 0x10), \
+			.tiles = { AVE_SURFACE(0x1bb8, 0x10), \
+				AVE_SURFACE(0x1bd8, 0x10), \
+				AVE_SURFACE(0x1db8, 0x10), \
+				AVE_SURFACE(0x1dd8, 0x10), \
+				AVE_SURFACE(0x1bf8, 0x10), \
+				AVE_SURFACE(0x1c18, 0x10), \
+				AVE_SURFACE(0x1df8, 0x10), \
+				AVE_SURFACE(0x1e18, 0x10) }, \
+			.refs_count = 0x94, \
+			.work_count = 0xdbc, \
+			.lfs_count = 0xfe4, \
+			.slots_count = 0x918, \
+			.meta_count = 0xb00, \
+			.mb_count = 0x1868, \
+			.row_a_count = 0x19b8, \
+			.row_b_count = 0x1a00, \
+			.fixed_count = 0x1a48, \
+			.tiles_count = 0x1bb4, \
+			.codec = 0x3248, \
+			.flag_8bit = 0x35e8, \
+			.const_214 = 0x35f4, \
+			.const_218 = 0x35f8, \
+			.fps = { .numerator = 0x3600 }, \
+			.rc_mode = 0x3614, \
+			.bitrate = 0x3618, \
+			.init_qp = 0x3620, \
+			.limits = 0x3630, \
+			.limit_bytes = 0x3638, \
+			.limit_secs = 0x3640, \
+			.f64_288 = 0x3668, \
+			.f64_290 = 0x3670, \
+			.min_qp = 0x3678, \
+			.max_qp = 0x367c, \
+			.gop_flags = 0x36d0, \
+			.p_frames = 0x36dc, \
+			.max_b = 0x36e0, \
+			.ref_depth = 0x36e4, \
+			.idr_interval = 0x36e8, \
+			.f64_2c0 = 0x36f0, \
+			.f64_2c8 = 0x36f8, \
+			.rc_flags = 0x3734, \
+			.min_qp2 = 0x3740, \
+			.max_qp2 = 0x3744, \
+			.rc_310 = 0x3748, \
+			.size_class = 0x3760, \
+			.coded_w = 0x322c, \
+			.coded_h = 0x3230, \
+			.coded_h2 = 0x32a0, \
+			.bit_depth = 0x37c0, \
+			.hevc_pad = 0x37ec, \
+			.hevc_refs = 0x37c4, \
+			.hevc_rc_9604 = 0x9dec, \
+			.hevc_rc_9608 = 0x9df0, \
+			.hevc_profile_a = 0x3a38, \
+			.hevc_compat_a = 0x3a3d, \
+			.hevc_8bit_a = 0x3a62, \
+			.hevc_level_a = 0x3a6c, \
+			.hevc_profile_b = 0x6508, \
+			.hevc_compat_b = 0x650d, \
+			.hevc_8bit_b = 0x6532, \
+			.hevc_level_b = 0x653c, \
+			.hevc_width = 0x66b8, \
+			.hevc_height = 0x66bc, \
+			.hevc_width_ctb = 0x66c0, \
+			.hevc_height_ctb = 0x66c4, \
+			.hevc_conf = 0x66c8, \
+			.hevc_conf_left = 0x66cc, \
+			.hevc_conf_right = 0x66d0, \
+			.hevc_conf_top = 0x66d4, \
+			.hevc_conf_bottom = 0x66d8, \
+			.hevc_depth_luma = 0x66dc, \
+			.hevc_depth_chroma = 0x66e0, \
+			.hevc_reorder_copy = 0x495c, \
+			.hevc_dpb_minus1 = 0x6704, \
+			.hevc_reorder = 0x6708, \
+			.geometry_mode = 0x31f8, \
+			.geometry_depth = 0x3234, \
+			.hevc_cq = 0x3708, \
+			.hevc_cq_copy = 0xbefc, \
+			.hevc_cq_codec = 0x37c8, \
+			.hevc_cq_picture = 0x9e38, \
+		}, \
+	}, \
+	.process = { \
+		[0] = { \
+			.first_frame = 0xdc0, \
+			.fps_int = 0x1328, \
+			.in_w = 0x5648, \
+			.in_h = 0x564c, \
+			.ordinal = 0x5650, \
+			.const5 = 0x5660, \
+			.fps = 0x5758, \
+			.pts = 0x5760, \
+			.timescale = 0x5768, \
+			.slot = 0x57b8, \
+			.y = 0x57c0, \
+			.uv = 0x57e0, \
+			.coded = 0x58a0, \
+			.coded_cap = 0x58a8, \
+			.meta = 0x58b0, \
+			.meta_size = 0x58b8, \
+			.extra = 0x58c0, \
+			.frame_buf = 0x58d8, \
+			.frame_size = 0x58e0, \
+		}, \
+		[1] = { \
+			.first_frame = 0x1568, \
+			.fps_int = 0x1ad0, \
+			.in_w = 0x5df0, \
+			.in_h = 0x5df4, \
+			.ordinal = 0x5df8, \
+			.const5 = 0x5e08, \
+			.fps = 0x5f00, \
+			.pts = 0x5f08, \
+			.timescale = 0x5f10, \
+			.slot = 0x5f60, \
+			.y = 0x5f68, \
+			.uv = 0x5f88, \
+			.coded = 0x6048, \
+			.coded_cap = 0x6050, \
+			.meta = 0x6058, \
+			.meta_size = 0x6060, \
+			.extra = 0x6068, \
+			.crop = 0x3190, \
+		}, \
+	}, \
+	.result = { \
+		[0] = { \
+			.coded_bytes = 0x120, \
+			.coded_bytes_copy = 0x12c, \
+		}, \
+		[1] = { \
+			.coded_bytes = 0x120, \
+			.coded_bytes_copy = 0x12c, \
+			.hevc_slice_header_bytes = 0x128, \
+		}, \
+	},
+
 const struct ave_fw_layout ave_layout_26a428 = {
 	.name = "26A428",
-	.abi = &ave_abi_9003,
-	.kind = AVE_LAYOUT_26A428,
-	.encode_ready = true,
 	.bytes = { { 0x3b40, 0x6df8 }, { 0x13ee0, 0x78b8 } },
-	.hdr_bytes = 0xec000,
-	.meta_bytes = 0x10000,
-	.process_timeout_us = 46400000,
-	.process_subtype = 0x13,
-	.max_slots = 7,
-	.mcc_dsid = 0x12,
-	.counted = true,
-	.start = {
-		[0] = {
-			.header = AVE_SURFACE(0x48, 0x10),
-			.secondary = AVE_SURFACE(0x58, 0x10),
-			.ref_a = AVE_SURFACE(0x98, 0x40),
-			.ref_b = AVE_SURFACE(0xa8, 0x40),
-			.ref_c = AVE_SURFACE(0xfe8, 0x40),
-			.ref_c_alias = AVE_SURFACE(0xff8, 0x40),
-			.ref_d = AVE_SURFACE(0xdc0, 0x10),
-			.ref_e = AVE_SURFACE(0xb8, 0x40),
-			.ref_f = AVE_SURFACE(0xc8, 0x40),
-			.mb = AVE_SURFACE(0x1870, 0x10),
-			.coded = AVE_SURFACE(0x920, 0x10),
-			.meta = AVE_SURFACE(0xb08, 0x10),
-			.row_a = AVE_SURFACE(0x19c0, 0x10),
-			.row_b = AVE_SURFACE(0x1a08, 0x10),
-			.fixed = AVE_SURFACE(0x1a50, 0x10),
-			.hevc_extra = AVE_SURFACE(0x70, 0x10),
-			.tiles = { AVE_SURFACE(0x1bb8, 0x10),
-				AVE_SURFACE(0x1bd8, 0x10),
-				AVE_SURFACE(0x1db8, 0x10),
-				AVE_SURFACE(0x1dd8, 0x10),
-				AVE_SURFACE(0x1bf8, 0x10),
-				AVE_SURFACE(0x1c18, 0x10),
-				AVE_SURFACE(0x1df8, 0x10),
-				AVE_SURFACE(0x1e18, 0x10) },
-			.refs_count = 0x94,
-			.work_count = 0xdbc,
-			.lfs_count = 0xfe4,
-			.slots_count = 0x918,
-			.meta_count = 0xb00,
-			.mb_count = 0x1868,
-			.row_a_count = 0x19b8,
-			.row_b_count = 0x1a00,
-			.fixed_count = 0x1a48,
-			.tiles_count = 0x1bb4,
-			.codec = 0x3248,
-			.flag_8bit = 0x35e8,
-			.const_214 = 0x35f4,
-			.const_218 = 0x35f8,
-			.fps = { .numerator = 0x3600 },
-			.rc_mode = 0x3614,
-			.bitrate = 0x3618,
-			.init_qp = 0x3620,
-			.limits = 0x3630,
-			.limit_bytes = 0x3638,
-			.limit_secs = 0x3640,
-			.f64_288 = 0x3668,
-			.f64_290 = 0x3670,
-			.min_qp = 0x3678,
-			.max_qp = 0x367c,
-			.gop_flags = 0x36d0,
-			.p_frames = 0x36dc,
-			.max_b = 0x36e0,
-			.ref_depth = 0x36e4,
-			.idr_interval = 0x36e8,
-			.f64_2c0 = 0x36f0,
-			.f64_2c8 = 0x36f8,
-			.rc_flags = 0x3734,
-			.min_qp2 = 0x3740,
-			.max_qp2 = 0x3744,
-			.rc_310 = 0x3748,
-			.size_class = 0x3760,
-			.coded_w = 0x322c,
-			.coded_h = 0x3230,
-			.coded_h2 = 0x32a0,
-			.bit_depth = 0x383c,
-			.h264_profile = 0x37b0,
-			.h264_level = 0x37b8,
-			.h264_max_refs = 0x37d0,
-			.h264_crop = 0x3800,
-			.h264_crop_right = 0x3804,
-			.h264_crop_bottom = 0x3808,
-			.h264_cabac = 0x380c,
-			.h264_8x8 = 0x3823,
-			.geometry_mode = 0x31f8,
-			.geometry_depth = 0x3234,
-			.profile_idc = 0x3a98,
-			.level_idc = 0x3aa0,
-			.max_refs_copy = 0x3abe,
-			.mb_size = 0x3ac0,
-			.mb_height = 0x37d4,
-			.crop_copy = 0x3ac7,
-			.crop_right_copy = 0x3aca,
-			.crop_bottom_copy = 0x3ace,
-			.codec_byte = 0x3830,
-			.cabac_copy = 0x3af9,
-			.transform_copy = 0x3b0d,
-		},
-		[1] = {
-			.header = AVE_SURFACE(0x48, 0x10),
-			.secondary = AVE_SURFACE(0x58, 0x10),
-			.ref_a = AVE_SURFACE(0x98, 0x40),
-			.ref_b = AVE_SURFACE(0xa8, 0x40),
-			.ref_c = AVE_SURFACE(0xfe8, 0x40),
-			.ref_c_alias = AVE_SURFACE(0xff8, 0x40),
-			.ref_d = AVE_SURFACE(0xdc0, 0x10),
-			.ref_e = AVE_SURFACE(0xb8, 0x40),
-			.ref_f = AVE_SURFACE(0xc8, 0x40),
-			.mb = AVE_SURFACE(0x1870, 0x10),
-			.coded = AVE_SURFACE(0x920, 0x10),
-			.meta = AVE_SURFACE(0xb08, 0x10),
-			.row_a = AVE_SURFACE(0x19c0, 0x10),
-			.row_b = AVE_SURFACE(0x1a08, 0x10),
-			.fixed = AVE_SURFACE(0x1a50, 0x10),
-			.hevc_extra = AVE_SURFACE(0x70, 0x10),
-			.tiles = { AVE_SURFACE(0x1bb8, 0x10),
-				AVE_SURFACE(0x1bd8, 0x10),
-				AVE_SURFACE(0x1db8, 0x10),
-				AVE_SURFACE(0x1dd8, 0x10),
-				AVE_SURFACE(0x1bf8, 0x10),
-				AVE_SURFACE(0x1c18, 0x10),
-				AVE_SURFACE(0x1df8, 0x10),
-				AVE_SURFACE(0x1e18, 0x10) },
-			.refs_count = 0x94,
-			.work_count = 0xdbc,
-			.lfs_count = 0xfe4,
-			.slots_count = 0x918,
-			.meta_count = 0xb00,
-			.mb_count = 0x1868,
-			.row_a_count = 0x19b8,
-			.row_b_count = 0x1a00,
-			.fixed_count = 0x1a48,
-			.tiles_count = 0x1bb4,
-			.codec = 0x3248,
-			.flag_8bit = 0x35e8,
-			.const_214 = 0x35f4,
-			.const_218 = 0x35f8,
-			.fps = { .numerator = 0x3600 },
-			.rc_mode = 0x3614,
-			.bitrate = 0x3618,
-			.init_qp = 0x3620,
-			.limits = 0x3630,
-			.limit_bytes = 0x3638,
-			.limit_secs = 0x3640,
-			.f64_288 = 0x3668,
-			.f64_290 = 0x3670,
-			.min_qp = 0x3678,
-			.max_qp = 0x367c,
-			.gop_flags = 0x36d0,
-			.p_frames = 0x36dc,
-			.max_b = 0x36e0,
-			.ref_depth = 0x36e4,
-			.idr_interval = 0x36e8,
-			.f64_2c0 = 0x36f0,
-			.f64_2c8 = 0x36f8,
-			.rc_flags = 0x3734,
-			.min_qp2 = 0x3740,
-			.max_qp2 = 0x3744,
-			.rc_310 = 0x3748,
-			.size_class = 0x3760,
-			.coded_w = 0x322c,
-			.coded_h = 0x3230,
-			.coded_h2 = 0x32a0,
-			.bit_depth = 0x37c0,
-			.hevc_pad = 0x37ec,
-			.hevc_refs = 0x37c4,
-			.hevc_rc_9604 = 0x9dec,
-			.hevc_rc_9608 = 0x9df0,
-			.hevc_profile_a = 0x3a38,
-			.hevc_compat_a = 0x3a3d,
-			.hevc_8bit_a = 0x3a62,
-			.hevc_level_a = 0x3a6c,
-			.hevc_profile_b = 0x6508,
-			.hevc_compat_b = 0x650d,
-			.hevc_8bit_b = 0x6532,
-			.hevc_level_b = 0x653c,
-			.hevc_width = 0x66b8,
-			.hevc_height = 0x66bc,
-			.hevc_width_ctb = 0x66c0,
-			.hevc_height_ctb = 0x66c4,
-			.hevc_conf = 0x66c8,
-			.hevc_conf_left = 0x66cc,
-			.hevc_conf_right = 0x66d0,
-			.hevc_conf_top = 0x66d4,
-			.hevc_conf_bottom = 0x66d8,
-			.hevc_depth_luma = 0x66dc,
-			.hevc_depth_chroma = 0x66e0,
-			.hevc_reorder_copy = 0x495c,
-			.hevc_dpb_minus1 = 0x6704,
-			.hevc_reorder = 0x6708,
-			.geometry_mode = 0x31f8,
-			.geometry_depth = 0x3234,
-			.hevc_cq = 0x3708,
-			.hevc_cq_copy = 0xbefc,
-			.hevc_cq_codec = 0x37c8,
-			.hevc_cq_picture = 0x9e38,
-		},
-	},
-	.process = {
-		[0] = {
-			.first_frame = 0xdc0,
-			.fps_int = 0x1328,
-			.in_w = 0x5648,
-			.in_h = 0x564c,
-			.ordinal = 0x5650,
-			.const5 = 0x5660,
-			.fps = 0x5758,
-			.pts = 0x5760,
-			.timescale = 0x5768,
-			.slot = 0x57b8,
-			.y = 0x57c0,
-			.uv = 0x57e0,
-			.coded = 0x58a0,
-			.coded_cap = 0x58a8,
-			.meta = 0x58b0,
-			.meta_size = 0x58b8,
-			.extra = 0x58c0,
-			.frame_buf = 0x58d8,
-			.frame_size = 0x58e0,
-		},
-		[1] = {
-			.first_frame = 0x1568,
-			.fps_int = 0x1ad0,
-			.in_w = 0x5df0,
-			.in_h = 0x5df4,
-			.ordinal = 0x5df8,
-			.const5 = 0x5e08,
-			.fps = 0x5f00,
-			.pts = 0x5f08,
-			.timescale = 0x5f10,
-			.slot = 0x5f60,
-			.y = 0x5f68,
-			.uv = 0x5f88,
-			.coded = 0x6048,
-			.coded_cap = 0x6050,
-			.meta = 0x6058,
-			.meta_size = 0x6060,
-			.extra = 0x6068,
-			.crop = 0x3190,
-		},
-	},
-	.result = {
-		[0] = {
-			.coded_bytes = 0x120,
-			.coded_bytes_copy = 0x12c,
-		},
-		[1] = {
-			.coded_bytes = 0x120,
-			.coded_bytes_copy = 0x12c,
-			.hevc_slice_header_bytes = 0x128,
-		},
-	},
+	AVE_LAYOUT_26A428_FIELDS
+};
+
+/*
+ * macOS 27.2 (26B123), the build the M4 (T8132) runs: Start commands as in
+ * 26A428, Process commands 0x10 bytes longer for each codec. The fields the
+ * driver writes keep their 26A428 offsets, and the bytes the build adds are
+ * left zero.
+ */
+const struct ave_fw_layout ave_layout_26b123 = {
+	.name = "26B123",
+	.bytes = { { 0x3b40, 0x6e08 }, { 0x13ee0, 0x78c8 } },
+	AVE_LAYOUT_26A428_FIELDS
+	.any_gop = true,
 };
 
 /*
@@ -961,7 +982,7 @@ const struct ave_fw_layout *ave_layout_for_crc(u32 crc)
 		return &ave_layout_6070_11_1;
 	/*
 	 * The macOS 27.0 build for the M5 Pro and Max, and the M5's build of the
-	 * same firmware version (9013.45.1): one AppleAVE2 kext builds the
+	 * same firmware version (9013.45.1): one macOS driver builds the
 	 * commands for both.
 	 */
 	if (crc == AVE_FW_TEXT_CRC_T6050_26A428 ||
@@ -972,6 +993,17 @@ const struct ave_fw_layout *ave_layout_for_crc(u32 crc)
 	 * and HEVC encode with it on a J714s.
 	 */
 	if (crc == AVE_FW_TEXT_CRC_T6050_26C5035)
+		return &ave_layout_26a428;
+	if (crc == AVE_FW_TEXT_CRC_T8132_26B123 ||
+	    crc == AVE_FW_TEXT_CRC_T8122_26B123)
+		return &ave_layout_26b123;
+	/*
+	 * The M5's macOS 27.2 build (9013.55.1), between 26A428 and the 27.3
+	 * beta, speaks 26A428's layout: on the J815's 27.2 stub, H.264
+	 * Baseline (ffmpeg), H.264 and HEVC with B-frames (v4l2-ctl) encode
+	 * with it.
+	 */
+	if (crc == AVE_FW_TEXT_CRC_T8142_26B123)
 		return &ave_layout_26a428;
 	return NULL;
 }

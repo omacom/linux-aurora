@@ -102,6 +102,65 @@ static void hwx_tensor_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, ane_h16_hwx_validate(f->bytes, f->size, &info), -ENOEXEC);
 }
 
+/*
+ * fp16, int8 and uint8 surfaces, as Apple's H16 and H17 objects describe
+ * them: format code at +0x24, element bytes at +0x68 (a u64). An 8-bit
+ * surface's rows need width bytes, not 2 * width. Only the known pairs load.
+ */
+static void hwx_element_format_test(struct kunit *test)
+{
+	static const struct {
+		u32 format;
+		u64 element;
+		int ret;
+	} pairs[] = {
+		{ 5, 2, 0 }, { 2, 1, 0 }, { 3, 1, 0 },
+		{ 5, 1, -ENOEXEC }, { 2, 2, -ENOEXEC }, { 3, 2, -ENOEXEC },
+		{ 2, 0, -ENOEXEC }, { 0, 1, -ENOEXEC }, { 1, 1, -ENOEXEC },
+		{ 4, 1, -ENOEXEC }, { 4, 4, -ENOEXEC }, { 6, 2, -ENOEXEC },
+		/* fp32, int16 and uint16: seen in Apple's objects, not yet admitted */
+		{ 6, 4, -ENOEXEC }, { 4, 2, -ENOEXEC }, { 15, 2, -ENOEXEC },
+		{ 2, 1ULL << 32 | 1, -ENOEXEC }, { 5, 1ULL << 32 | 2, -ENOEXEC },
+	};
+	struct hwx_fixture *f = fixture_create(test, false, false);
+	struct ane_h16_hwx info;
+	unsigned int i, t;
+
+	KUNIT_ASSERT_NOT_NULL(test, f);
+	for (t = 0; t < 2; t++) {
+		u8 *tensor = f->bytes + f->tensor[t];
+
+		/* 64 wide: the 256-byte rows fit even 4-byte elements. */
+		put_unaligned_le32(64, tensor + 0x34);
+		for (i = 0; i < ARRAY_SIZE(pairs); i++) {
+			put_unaligned_le32(pairs[i].format, tensor + 0x24);
+			put_unaligned_le64(pairs[i].element, tensor + 0x68);
+			KUNIT_EXPECT_EQ_MSG(test,
+					    ane_h16_hwx_validate(f->bytes, f->size, &info),
+					    pairs[i].ret, "tensor %u format %u element %#llx",
+					    t, pairs[i].format, pairs[i].element);
+			if (!pairs[i].ret)
+				KUNIT_EXPECT_EQ(test, info.surfaces[t].span, 256ULL);
+		}
+		/* Leave this surface 8-bit: int8 in with uint8 out loads too. */
+		put_unaligned_le32(t ? 3 : 2, tensor + 0x24);
+		put_unaligned_le64(1, tensor + 0x68);
+	}
+	KUNIT_ASSERT_EQ(test, ane_h16_hwx_validate(f->bytes, f->size, &info), 0);
+
+	/* A 256-byte row holds 256 int8 elements but only 128 fp16 ones. */
+	put_unaligned_le32(256, f->bytes + f->tensor[0] + 0x34);
+	KUNIT_EXPECT_EQ(test, ane_h16_hwx_validate(f->bytes, f->size, &info), 0);
+	put_unaligned_le32(257, f->bytes + f->tensor[0] + 0x34);
+	KUNIT_EXPECT_EQ(test, ane_h16_hwx_validate(f->bytes, f->size, &info), -ENOEXEC);
+	put_unaligned_le32(256, f->bytes + f->tensor[0] + 0x34);
+	put_unaligned_le32(5, f->bytes + f->tensor[0] + 0x24);
+	put_unaligned_le64(2, f->bytes + f->tensor[0] + 0x68);
+	KUNIT_EXPECT_EQ(test, ane_h16_hwx_validate(f->bytes, f->size, &info), -ENOEXEC);
+	put_unaligned_le32(128, f->bytes + f->tensor[0] + 0x34);
+	KUNIT_EXPECT_EQ(test, ane_h16_hwx_validate(f->bytes, f->size, &info), 0);
+}
+
 static u8 *fixture_ref(struct hwx_fixture *f, unsigned int index)
 {
 	size_t pos = 32;
@@ -750,6 +809,7 @@ static struct kunit_case hwx_cases[] = {
 	KUNIT_CASE(hwx_header_test),
 	KUNIT_CASE(hwx_command_test),
 	KUNIT_CASE(hwx_tensor_test),
+	KUNIT_CASE(hwx_element_format_test),
 	KUNIT_CASE(hwx_surface_order_test),
 	KUNIT_CASE(hwx_program_test),
 	KUNIT_CASE(hwx_staged_counts_test),

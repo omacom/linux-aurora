@@ -348,30 +348,35 @@
 			opp-level = <16>;
 			clock-latency-ns = <55900>;
 			opp-microwatt = <2495800>;
+			turbo-mode;
 		};
 		opp17 {
 			opp-hz = /bits/ 64 <3780000000>;
 			opp-level = <17>;
 			clock-latency-ns = <56000>;
 			opp-microwatt = <2599300>;
+			turbo-mode;
 		};
 		opp18 {
 			opp-hz = /bits/ 64 <3864000000>;
 			opp-level = <18>;
 			clock-latency-ns = <56000>;
 			opp-microwatt = <2749900>;
+			turbo-mode;
 		};
 		opp19 {
 			opp-hz = /bits/ 64 <3960000000>;
 			opp-level = <19>;
 			clock-latency-ns = <61800>;
 			opp-microwatt = <2930000>;
+			turbo-mode;
 		};
 		opp20 {
 			opp-hz = /bits/ 64 <4056000000>;
 			opp-level = <20>;
 			clock-latency-ns = <61900>;
 			opp-microwatt = <3119000>;
+			turbo-mode;
 		};
 	};
 
@@ -517,12 +522,13 @@
 				<AIC_IRQ 680 IRQ_TYPE_LEVEL_HIGH>;
 			power-domains = <&ps_avd_sys>;
 			resets = <&ps_avd_sys>;
-			reg = <0x2 0x89080000 0x0 0x12000>,
-				<0x2 0x89092000 0x0 0x12000>,
+			reg = <0x2 0x89080000 0x0 0x10000>,
+				<0x2 0x89090000 0x0 0x12000>,
 				<0x2 0x890a4000 0x0 0x4000>,
 				<0x2 0x89100000 0x0 0x10000>;
 			reg-names = "code", "sram", "mbox", "ctrl";
 			iommus = <&avd_dart 0>;
+			dma-coherent;
 		};
 
 		avd_dart: iommu@289010000 {
@@ -591,13 +597,13 @@
 			status = "disabled";
 		};
 
-		/* Touch ID: pads muxed by iBoot, native chip select, 200 MHz. */
+		/* Touch ID: pads muxed by iBoot, native chip select. */
 		spi2: spi@2a1108000 {
 			compatible = "apple,t8122-spi", "apple,t8103-spi";
 			reg = <0x2 0xa1108000 0x0 0x4000>;
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ 767 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clk_200m>;
+			clocks = <&clkref>;
 			power-domains = <&ps_spi2>;
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -1020,10 +1026,23 @@
 			reg = <0x2 0xe4714000 0x0 0x100>;
 			#address-cells = <2>;
 			#size-cells = <0>;
+			#interrupt-cells = <2>;
+			interrupt-controller;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 437 IRQ_TYPE_LEVEL_HIGH>;
 
 			pmic1: pmic@e {
 				compatible = "apple,stowe-pmic", "apple,spmi-nvmem";
 				reg = <0xe SPMI_USID>;
+
+				pmu_rtc: rtc {
+					compatible = "apple,t8122-pmu-rtc", "apple,t8112-pmu-rtc";
+					interrupt-parent = <&nub_spmi>;
+					interrupts = <2 IRQ_TYPE_EDGE_RISING>;
+					nvmem-cells = <&rtc_offset>;
+					nvmem-cell-names = "rtc_offset";
+					wakeup-source;
+				};
 
 				nvmem-layout {
 					compatible = "fixed-layout";
@@ -1617,6 +1636,7 @@
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 1011 IRQ_TYPE_LEVEL_HIGH>;
 				#iommu-cells = <5>;
+				power-domains = <&ps_atc0_cio>;
 			};
 
 			usb4_0_nhi: nhi@f00000 {
@@ -1784,6 +1804,7 @@
 				interrupt-parent = <&aic>;
 				interrupts = <AIC_IRQ 1069 IRQ_TYPE_LEVEL_HIGH>;
 				#iommu-cells = <5>;
+				power-domains = <&ps_atc1_cio>;
 			};
 
 			usb4_1_nhi: nhi@f00000 {

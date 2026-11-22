@@ -80,12 +80,18 @@ static size_t declared, arrived;
 static u32 echo_flip, compact_status;
 /* An HPD low closes the 14.7 external AV client first; the stub counts it. */
 static struct dcp *expected_dcp;
-static unsigned int v14_closes, closes_at_send;
+static unsigned int v14_closes, cec_closes, closes_at_send, cec_closes_at_send;
 /* Kept even if a mutant drops the call, so the count check is what fails. */
 __attribute__((unused)) static void dcpavserv_v14_close(struct dcp *dcp)
 {
  assert(dcp == expected_dcp);
  v14_closes++;
+}
+__attribute__((unused)) static void dcp_cec_close_port(struct dcp *dcp,
+ struct apple_epic_service *service)
+{
+ assert(dcp == expected_dcp && service != NULL);
+ cec_closes++;
 }
 static int afk_send_command_timeout_len(struct apple_epic_service *s, u8 type,
  const void *payload, size_t payload_len, void *output, size_t output_len,
@@ -100,6 +106,7 @@ static int afk_send_command_timeout_len(struct apple_epic_service *s, u8 type,
  assert(output_len == sizeof(*call) + 32 && call->data_len == 32);
  assert(call->group == 8 && call->command == 8);
  closes_at_send = v14_closes;
+ cec_closes_at_send = cec_closes;
  if (wire_v2 && !received && arrived < output_len - sizeof(*call))
   return -EMSGSIZE;
  memcpy(&echo, body + 16, sizeof(echo));
@@ -130,11 +137,12 @@ static void expect(bool ok, const char *what, bool hpd, int ret)
 /* Every request closes the AV client exactly when it lowers HPD, and before it is sent. */
 static int set_hpd(struct apple_epic_service *service, int hpd)
 {
- unsigned int before = v14_closes;
+ unsigned int before = v14_closes, cec_before = cec_closes;
  int ret = dptxport_set_hpd_timeout(service, hpd, 1000);
 
- expect(v14_closes == before + !hpd && closes_at_send == before + !hpd,
-        "AV client closed before an HPD low only", hpd, ret);
+ expect(v14_closes == before + !hpd && closes_at_send == before + !hpd &&
+        cec_closes == cec_before + !hpd && cec_closes_at_send == cec_before + !hpd,
+        "AV/CEC clients closed before an HPD low only", hpd, ret);
  return ret;
 }
 int main(void)

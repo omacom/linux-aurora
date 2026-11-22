@@ -48,25 +48,6 @@
 #define FLT_MANT_MASK	GENMASK(22, 0)
 #define FLT_SIGN_MASK	BIT(31)
 
-/*
- * Fans whose device tree node has apple,fan-manual-control take a target speed
- * from userspace. This parameter, kept for compatibility, allows it for every
- * fan with a mode key, whatever the device tree says.
- */
-static bool fan_control;
-module_param_unsafe(fan_control, bool, 0644);
-MODULE_PARM_DESC(fan_control,
-		 "Allow manual fan speeds on every fan with a mode key, also where the device tree does not (default: the device tree decides)");
-
-static bool macsmc_hwmon_is_m3(void)
-{
-	return of_machine_is_compatible("apple,t6030") ||
-	       of_machine_is_compatible("apple,t6031") ||
-	       of_machine_is_compatible("apple,t6032") ||
-	       of_machine_is_compatible("apple,t6034") ||
-	       of_machine_is_compatible("apple,t8122");
-}
-
 struct macsmc_hwmon_sensor {
 	struct apple_smc_key_info info;
 	smc_key macsmc_key;
@@ -548,10 +529,13 @@ relock:
 	return ret;
 }
 
-/* Whether userspace may set this fan's speed. */
+/*
+ * Whether userspace may set this fan's speed: only fans whose device tree
+ * node has apple,fan-manual-control. On other fans fanX_target is read-only.
+ */
 static bool macsmc_hwmon_fan_user_control(const struct macsmc_hwmon_fan *fan)
 {
-	return fan->mode.macsmc_key && (fan->manual_control || fan_control);
+	return fan->mode.macsmc_key && fan->manual_control;
 }
 
 static int macsmc_hwmon_set_fan(struct macsmc_hwmon *hwmon, int channel, long val)
@@ -691,7 +675,20 @@ EXPORT_SYMBOL_GPL(macsmc_hwmon_fans_request);
 static int macsmc_hwmon_write_fan(struct device *dev, u32 attr, int channel,
 				  long val)
 {
-	return macsmc_hwmon_set_fan(dev_get_drvdata(dev), channel, val);
+	struct macsmc_hwmon *hwmon = dev_get_drvdata(dev);
+	int ret;
+
+	/*
+	 * Unlocking or releasing system fan control polls the SMC for up to
+	 * MACSMC_FAN_MODE_TIMEOUT_MS. Drop the chip-wide hwmon lock so thermal
+	 * zones and sensor reads are not stalled while waiting on the SMC;
+	 * hwmon->fan.lock and smc->mutex serialize fan state and SMC accesses.
+	 */
+	hwmon_unlock(dev);
+	ret = macsmc_hwmon_set_fan(hwmon, channel, val);
+	hwmon_lock(dev);
+
+	return ret;
 }
 
 /* Hand every manual fan back to the firmware. */
@@ -863,22 +860,25 @@ static int macsmc_hwmon_create_sensor(struct device *dev, struct apple_smc *smc,
 	if (ret)
 		return ret;
 
-	if (macsmc_hwmon_is_m3()) {
-		if (!(sensor->info.flags & APPLE_SMC_READABLE))
-			return -EACCES;
+	/*
+	 * macsmc_hwmon_read_key() decodes only these two types, so a key of any
+	 * other type, or one the SMC does not let us read, could only ever
+	 * return an error: do not set up a channel for it.
+	 */
+	if (!(sensor->info.flags & APPLE_SMC_READABLE))
+		return -EACCES;
 
-		switch (sensor->info.type_code) {
-		case __SMC_KEY('f', 'l', 't', ' '):
-			if (sensor->info.size != sizeof(u32))
-				return -EINVAL;
-			break;
-		case __SMC_KEY('i', 'o', 'f', 't'):
-			if (sensor->info.size != sizeof(u64))
-				return -EINVAL;
-			break;
-		default:
-			return -EOPNOTSUPP;
-		}
+	switch (sensor->info.type_code) {
+	case __SMC_KEY('f', 'l', 't', ' '):
+		if (sensor->info.size != sizeof(u32))
+			return -EINVAL;
+		break;
+	case __SMC_KEY('i', 'o', 'f', 't'):
+		if (sensor->info.size != sizeof(u64))
+			return -EINVAL;
+		break;
+	default:
+		return -EOPNOTSUPP;
 	}
 
 	ret = of_property_read_string(sensor_node, "label", &label);
@@ -1680,8 +1680,7 @@ static int macsmc_hwmon_probe(struct platform_device *pdev)
 		return dev_err_probe(hwmon->dev, PTR_ERR(hwmon->hwmon_dev),
 				     "Probing SMC hwmon device failed\n");
 
-	if (macsmc_hwmon_is_m3() || of_machine_is_compatible("apple,t6050"))
-		macsmc_hwmon_debugfs_init(hwmon);
+	macsmc_hwmon_debugfs_init(hwmon);
 
 	ret = macsmc_hwmon_die_register(hwmon);
 	if (ret)

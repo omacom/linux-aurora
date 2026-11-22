@@ -102,6 +102,8 @@ struct dwc3_apple {
 	bool pre_core_rpm;
 	/* J714s only: the start after a sleep waits for its Type-C PHY; never set here. */
 	bool sleep_phy_wait, sleep_phy_pending;
+	/* J714s only: a SuperSpeed device looked for after a sleep; never set here. */
+	bool ss_retry;
 	bool dt_dis_u3_susphy;
 	unsigned long usb2_power_off_pending, usb3_power_off_pending;
 	/* The PM sleep epoch (dwc3_apple_pm_notify()); the fixtures stay IDLE. */
@@ -370,6 +372,11 @@ static void dwc3_apple_setup_cio(struct dwc3_apple *a)
 {
 	(void)a;
 	setup_cio++;
+}
+/* The check after a sleep is only for a fixed hub or a J714s SuperSpeed device; neither here. */
+static void dwc3_apple_check_hub_later(struct dwc3_apple *a)
+{
+	assert(!a->fixed_hub && !a->ss_retry);
 }
 /* The hibernation block's register setup; teardown order doesn't depend on it. */
 static void __attribute__((unused)) dwc3_apple_setup_hibernation(struct dwc3_apple *a)

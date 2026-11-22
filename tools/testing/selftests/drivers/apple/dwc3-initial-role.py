@@ -37,6 +37,8 @@ def main():
     states = (root / "drivers/usb/dwc3/dwc3-apple-state.h").read_text()
     enum = states[states.index("enum dwc3_apple_state {"):]
     enum = enum[:enum.index("};") + 2]
+    sleep_phase = apple[apple.index("enum dwc3_apple_sleep_phase {"):]
+    sleep_phase = sleep_phase[:sleep_phase.index("};") + 2]
     probe = function(core, "dwc3_core_probe")
     sequence = probe[probe.index("\tret = dwc3_get_dr_mode(dwc);"):probe.index("\tdwc3_check_params(dwc);")]
     preamble = r'''
@@ -71,6 +73,10 @@ typedef uint32_t u32;
 #define WARN_ON_ONCE(x) ((void)(x))
 #define dev_warn(...) ((void)0)
 #define dev_err(...) ((void)0)
+#define dev_dbg(...) ((void)0)
+#define DWC3_GCTL_PWRDNSCALE(n) ((n)<<19)
+#define DWC3_GCTL_PWRDNSCALE_MASK GENMASK(31,19)
+#define DWC3_GCTL_GBLHIBERNATIONEN BIT(1)
 #define dev_err_probe(dev,err,...) fake_dev_err_probe(err)
 #define GFP_KERNEL 0
 #define DWC3_DEFAULT_PROPERTIES ((struct properties){0})
@@ -78,8 +84,11 @@ enum usb_role { USB_ROLE_NONE, USB_ROLE_HOST, USB_ROLE_DEVICE };
 enum usb_dr_mode { USB_DR_MODE_UNKNOWN, USB_DR_MODE_HOST, USB_DR_MODE_PERIPHERAL, USB_DR_MODE_OTG };
 struct device { const char *of_node; bool host_only; void *driver_data; };
 static void dev_set_drvdata(struct device *d,void *data) { d->driver_data=data; }
+struct dwc3_glue_ops { int unused; };
+static const struct dwc3_glue_ops dwc3_apple_glue_ops;
 struct dwc3 {
     struct device *dev;
+    const struct dwc3_glue_ops *glue_ops;
     unsigned lock;
     struct { unsigned hwparams0; } hwparams;
     enum usb_dr_mode dr_mode;
@@ -103,12 +112,16 @@ struct dwc3_apple {
     void *apple_regs, *reset, *usb2_phy;
     bool reset_pending, core_active;
     unsigned usb2_power_off_pending, usb3_power_off_pending;
+    bool idle_rpm, rpm_held, pre_core_rpm, sleep_phy_wait, sleep_syscore;
+    unsigned sleep_pm_lock;
+    enum dwc3_apple_sleep_phase sleep_phase;
 };
 enum phy_mode { PHY_MODE_INVALID, PHY_MODE_USB_HOST, PHY_MODE_USB_DEVICE };
 static bool j713=true, stall_reset=true, io_ready;
 static unsigned role_writes, dctl_writes, core_calls, releases, mode_at_init, dr_mode_at_init;
 static u32 cio[64];
-static unsigned cio_writes;
+static unsigned cio_writes, tunable_calls, rpm_gets;
+static bool syscore;
 static int stop_error;
 static int fake_dev_err_probe(int error) { return error; }
 static void fake_guard(void *p) { (void)p; }
@@ -144,12 +157,21 @@ static u32 readl(void *p)
 static void writel(u32 value,void *p) { (void)readl(p); cio_writes++; *(u32 *)p=value; }
 static int phy_set_mode(void *p,enum phy_mode mode) { (void)p; (void)mode; return 0; }
 static int reset_control_deassert(void *p) { (void)p; return 0; }
-static void dev_pm_syscore_device(struct device *d,bool on) { (void)d; (void)on; }
+static void dev_pm_syscore_device(struct device *d,bool on) { (void)d; syscore=on; }
+static void pm_runtime_get_noresume(struct device *d) { (void)d; rpm_gets++; }
+static void pm_runtime_allow(struct device *d) { (void)d; }
+static int pm_runtime_resume_and_get(struct device *d) { (void)d; rpm_gets++; return 0; }
+static void pm_runtime_disable(struct device *d) { (void)d; }
+static void pm_runtime_put_noidle(struct device *d) { (void)d; }
+/* The ADT tunables are outside this model; the core reset undoes them, so they follow it. */
+static void dwc3_apple_apply_tunables(struct dwc3_apple *a) { (void)a; assert(core_calls); tunable_calls++; }
 static int dwc3_apple_core_stop(struct dwc3_apple *a) { (void)a; return stop_error; }
 '''
     cio_defines = "\n".join(line for line in apple.splitlines()
-                            if line.startswith("#define APPLE_DWC3_")) + "\n"
-    program = preamble + enum + "\n" + cio_defines + function(core,"dwc3_set_prtcap")
+                            if line.startswith(("#define APPLE_DWC3_",
+                                                "#define DWC3_APPLE_T8140_PWRDNSCALE"))) + "\n"
+    program = preamble.replace("struct dwc3_apple {", sleep_phase + "\nstruct dwc3_apple {", 1)
+    program += enum + "\n" + cio_defines + function(core,"dwc3_set_prtcap")
     program += function(core,"dwc3_core_soft_reset") + function(core,"dwc3_core_set_initial_role")
     program += r'''
 static int dwc3_core_init(struct dwc3 *dwc)
@@ -173,12 +195,12 @@ err_free_event_buffers:
     for name in ["apple_t8132_air", "apple_t8132_pro_mini_imac",
                  "apple_t8132_usb_host_first"]:
         program += function(t8132,name)
-    for name in ["dwc3_apple_set_ptrcap", "dwc3_apple_host_before_core_init",
+    for name in ["dwc3_apple_syscore", "dwc3_apple_set_ptrcap", "dwc3_apple_host_before_core_init",
                  "dwc3_apple_core_probe", "dwc3_apple_core_init"]:
         program += function(apple,name)
     program += function(states,"dwc3_apple_usb2_mode_before_reset")
     for name in ["dwc3_apple_readl", "dwc3_apple_writel", "dwc3_apple_mask",
-                 "dwc3_apple_setup_cio", "dwc3_apple_core_start"]:
+                 "dwc3_apple_setup_hibernation", "dwc3_apple_setup_cio", "dwc3_apple_core_start"]:
         program += function(apple,name)
     program += r'''
 static struct device dev;
@@ -190,7 +212,7 @@ static void clean(void)
     a.dwc.gctl=0xa5a50000;
     j713=stall_reset=true; io_ready=false;
     role_writes=dctl_writes=core_calls=releases=mode_at_init=dr_mode_at_init=0;
-    cio_writes=0; stop_error=0; memset(cio,0xa5,sizeof(cio));
+    cio_writes=tunable_calls=rpm_gets=0; syscore=false; stop_error=0; memset(cio,0xa5,sizeof(cio));
 }
 int main(void)
 {
@@ -236,6 +258,8 @@ int main(void)
     assert(!dwc3_apple_core_start(&a,DWC3_APPLE_HOST));
     assert(cio_writes==5 && cio[0x38/4]==0x0f800f80 && cio[0x3c/4]==0x0fc00fc0);
     assert(cio[0x40/4]==0xa5140a10 && a.core_active);
+    assert(tunable_calls==1 && syscore && a.sleep_syscore && a.rpm_held && rpm_gets==1);
+    assert(a.dwc.glue_ops==&dwc3_apple_glue_ops);
     clean(); stop_error=-EBUSY;
     assert(dwc3_apple_core_start(&a,DWC3_APPLE_HOST)==-EBUSY && !cio_writes);
     clean(); dev.host_only=false;

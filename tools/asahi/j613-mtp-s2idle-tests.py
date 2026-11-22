@@ -30,7 +30,6 @@ static void device_set_awake_path(struct device *d){d->awake=true;}
 static unsigned forced_suspend,forced_resume;
 static int pm_runtime_force_suspend(struct device *d){forced_suspend++;return 7;}
 static int pm_runtime_force_resume(struct device *d){forced_resume++;return 8;}
-static bool of_machine_is_compatible(const char *s){return true;}
 static unsigned readl(void *p){return *(unsigned *)p;}
 /* #1445: only a firmware-driven (T8140 S2R) sleep takes the noirq or AP-idle paths. */
 static bool pm_suspend_via_firmware(void){return false;}

@@ -97,6 +97,17 @@
 	status = "okay";
 };
 
+/*
+ * With the PMP managing DCS and fabric, CPU-only load stays at the idle
+ * memory state; the CPU clients' floor raises it while the CPUs are busy:
+ * request class 0x21 (DRAM) at 3 and class 0x25 (fabric) at 2, the top of
+ * this SoC's four DRAM and three fabric states.
+ */
+&pmp_report {
+	apple,pmp-tables = <&pmp>;
+	apple,cpu-memory-floor = <0x21 3 0x25 2>;
+};
+
 &pmp_report_avd_sys {
 	apple,adt-dvfs;
 };
@@ -147,11 +158,6 @@
 
 &ps_gp_usb_aon {
 	status = "disabled";
-};
-
-/* The video decoder is IO-coherent in both directions. */
-&avd {
-	dma-coherent;
 };
 
 #include "t6000-peripherals.dtsi"

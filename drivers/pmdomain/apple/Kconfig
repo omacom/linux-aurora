@@ -65,14 +65,14 @@ config APPLE_PMP_REPORT
 	  apple_t6031_display.enable=1. The start's state is in debugfs, in
 	  apple-pmp-report/<report device>.
 
-config APPLE_PMP_J613_FLOOR_KUNIT_TEST
-	tristate "KUnit tests for the J613 CPU memory-floor governor" if !KUNIT_ALL_TESTS
+config APPLE_PMP_FLOOR_KUNIT_TEST
+	tristate "KUnit tests for the PMP CPU memory-floor governor" if !KUNIT_ALL_TESTS
 	depends on KUNIT && PM
 	select PM_GENERIC_DOMAINS
 	default KUNIT_ALL_TESTS
 	help
 	  Exercise the demand, hold, rate-limit, request-word and response
-	  logic of the J613 CPU memory floor without Apple hardware.
+	  logic of the PMP CPU memory floor without Apple hardware.
 
 config APPLE_PMP_ANE_KUNIT_TEST
 	tristate "KUnit tests for T600x ANE performance requests" if !KUNIT_ALL_TESTS

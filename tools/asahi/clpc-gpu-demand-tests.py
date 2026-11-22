@@ -28,8 +28,9 @@ def main():
     reasons = '\n'.join(re.findall(r'^#define APPLE_CLPC_REASON_\w+\s.*$', source, re.M))
     types = '\n'.join(item(source, s) + ';' for s in [
         'struct apple_clpc_hw {', 'struct apple_clpc_vote {'])
-    tables = '\n'.join(item(source, 'static const struct apple_clpc_hw ' + n) + ';'
-                       for n in ['apple_clpc_hw_t8132', 'apple_clpc_hw_t8140', 'apple_clpc_hw_t6040'])
+    tables = '\n'.join(item(source, 'static const struct apple_clpc_hw ' + n + ' =') + ';'
+                       for n in ['apple_clpc_hw_t8132', 'apple_clpc_hw_t8140',
+                                 'apple_clpc_hw_t6040', 'apple_clpc_hw_t6041'])
     methods = '\n'.join(item(source, s) for s in [
         'static unsigned int apple_clpc_vote(', 'static u32 apple_clpc_floor(',
         'static bool apple_clpc_gpu_streaming(',
@@ -186,6 +187,36 @@ static void check_t8132(void) {
  jiffies=132; apple_clpc_sample(&c); assert(published==0 && queued_idle);
 }
 
+// T6041 (M4 Max) votes DCS 5 / fabric 3 for CPU and host GPU demand without a
+// streak, samples on time while idle, preserves T6041's DCS 5 / fabric 2 ANE
+// floor, and carries the 2808 MHz Low Power ceiling.
+static void check_t6041(void) {
+ struct apple_clpc_gpu gpu={0};
+ struct apple_clpc_ane ane={0};
+ struct apple_clpc c={.hw=&apple_clpc_hw_t6041,.agent=1,.mask=3,.gpu=&gpu,.ane=&ane};
+ c.ane_states[APPLE_CLPC_DCS]=c.hw->ane[APPLE_CLPC_DCS];
+ c.ane_states[APPLE_CLPC_SOC]=c.hw->ane[APPLE_CLPC_SOC];
+ assert(!c.hw->gpu_demand && c.hw->gpu_input && c.hw->sustain==0 && c.hw->idle_on_time);
+ assert(!apple_clpc_hw_t8132.idle_on_time && !apple_clpc_hw_t8140.idle_on_time && !apple_clpc_hw_t6040.idle_on_time);
+ assert(c.hw->low_power_khz==2808000 && apple_clpc_hw_t6040.low_power_khz==0);
+ read_error=vote_error=0; pmgr_status=0xf0; pmp_floor=0; jiffies=3000; published=~0u; qos_adds=0;
+ apple_clpc_sample(&c); assert(published==0 && queued_idle && c.last_reason==0);
+ gpu.active=true; jiffies=3004; apple_clpc_sample(&c);
+ assert(published==0x35 && c.last_reason==2);
+ gpu.active=false; jiffies=3035; apple_clpc_sample(&c);
+ assert(published==0x35 && c.last_reason==16);
+ jiffies=3036; apple_clpc_sample(&c);
+ assert(published==0 && queued_idle);
+ ane.active=true; jiffies=3040; apple_clpc_sample(&c);
+ assert(published==0x25 && c.last_reason==32 && qos_adds==0);
+ gpu.active=true; jiffies=3044; apple_clpc_sample(&c);
+ assert(published==0x35 && c.last_reason==34);
+ gpu.active=false; jiffies=3048; apple_clpc_sample(&c);
+ assert(published==0x25 && c.last_reason==32);
+ ane.active=false; jiffies=3080; apple_clpc_sample(&c);
+ assert(published==0 && queued_idle);
+}
+
 // A failed power-state read still protects an active graphics consumer.
 static void check_read_error(void) {
  struct apple_clpc c={.hw=&apple_clpc_hw_t8140,.agent=1,.mask=3,.gpu_pmgr=(void *)1};
@@ -245,6 +276,20 @@ static void check_t8140_dense(void) {
  assert(c.last_reason==16);
 }
 
+// Low power samples on time only where it has a CPU ceiling to keep
+// (low_power_khz); a High Power-only profile stays deferrable when idle.
+static void check_low_power(void) {
+ struct apple_clpc_gpu gpu={0};
+ struct apple_clpc_hw lp=apple_clpc_hw_t6040;
+ struct apple_clpc c={.hw=&lp,.agent=1,.mask=3,.gpu=&gpu,.low_power=true};
+ read_error=vote_error=0; pmgr_status=0xf0; published=~0u;
+ jiffies=3000; apple_clpc_sample(&c); assert(published==0 && queued_idle);
+ lp.low_power_khz=2808000;
+ jiffies=3004; apple_clpc_sample(&c); assert(published==0 && !queued_idle);
+ c.low_power=false;
+ jiffies=3008; apple_clpc_sample(&c); assert(published==0 && queued_idle);
+}
+
 int main(void) {
  // T6040's supplier is always powered: it must NEVER substitute for work.
  struct apple_clpc_gpu gpu={0};
@@ -269,12 +314,14 @@ int main(void) {
  c.clusters[0].request[0]=c.clusters[0].request[1]=0;
  jiffies=264; apple_clpc_sample(&c); assert(published==0);
  check_t8132();
+ check_t6041();
  check_read_error();
  check_t8140();
  check_t8140_dense();
  check_t8140_ane();
+ check_low_power();
  check_t6040_ane();
- puts("PASS: T6040 and T8132 host demand; T8140 ANE, streaming, dense work, read errors and PMP backoff; idle release");
+ puts("PASS: T6040, T6041 and T8132 host demand; T8140/T604x ANE, streaming, dense work, read errors and PMP backoff; idle release");
 }
 '''
     code = code.replace('#define APPLE_PMC_RAIL_SHIFT(r) ((r)*8)', rail_shift)

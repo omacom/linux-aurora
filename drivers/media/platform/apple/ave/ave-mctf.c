@@ -181,7 +181,7 @@ static const struct ave_mctf_word ave_mctf_process_25g83[] = {
 	}
 
 static const struct ave_mctf_layout ave_mctf_layouts[] = {
-	/* MacBook Neo (T8140), AppleAVE2FW 9003.78.0: captured at 1080p */
+	/* MacBook Neo (T8140), encoder firmware 9003.78.0: captured at 1080p */
 	AVE_MCTF_25G83(AVE_FW_TEXT_CRC_9003_78_0, true),
 	/* M4 Pro (T6040): same carrier sizes, no capture yet */
 	AVE_MCTF_25G83(AVE_FW_TEXT_CRC_T6040_25G83, false),

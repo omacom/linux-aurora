@@ -702,6 +702,12 @@ static const iomfb_cb_handler cb_handlers[IOMFB_MAX_CB] = {
 	[587] = trampoline_nop,
 	[588] = trampoline_nop,
 	[589] = trampoline_swap_info_h17p,
+	/*
+	 * 27.2 sends this 20-byte notification with no reply after swaps (the
+	 * macOS handler next to swap_info is the buffer-release notification);
+	 * nothing here consumes it.
+	 */
+	[590] = trampoline_nop,
 
 	[592] = trampoline_nop,
 	[594] = trampoline_swap_complete,
@@ -788,6 +794,7 @@ static const struct {
 	[587] = { 0x0, 0x0 },
 	[588] = { 0x18, 0x0 },
 	[589] = { 0xe4, 0xe0 },
+	[590] = { 0x14, 0x0 },
 	[592] = { 0x0, 0x0 },
 	[594] = { 0x730, 0x0 },
 	[596] = { 0x14, 0x0 },

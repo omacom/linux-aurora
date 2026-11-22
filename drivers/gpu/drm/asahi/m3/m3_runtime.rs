@@ -530,8 +530,8 @@ impl Inner {
     fn publish_mixed(&mut self,entries:&[(Arc<crate::m3::m3_submit::Packet>,usize)],
         base:usize,overlap:bool)->core::result::Result<Batch,(Error,bool)> {
         let early=|e:Error|(e,false);
-        if overlap || base!=0 || self.device.soc().chip_id!=0x6030
-            || !self.render_initialized || entries.len()>policy::SLOTS {return Err(early(EINVAL));}
+        // next_batch() builds a two-engine batch only where policy::mixed_prefix() allows one.
+        if overlap || base!=0 || !self.render_initialized || entries.len()>policy::SLOTS {return Err(early(EINVAL));}
         let packet=&entries[0].0;
         if entries.iter().any(|(p,_)|!Arc::ptr_eq(packet,p)) {return Err(early(EINVAL));}
         let prepare=Instant::<Monotonic>::now();
@@ -1273,10 +1273,6 @@ impl Runtime {
         let inner: &mut Inner = &mut *self.inner;
         inner.config.drain(&inner.drm)?;
         inner.config.log_ready(&inner.drm)?;
-        if inner.device.soc().chip_id==0x6030 &&
-            (crate::m3::m3_params::active_power() || crate::m3::m3_params::globals_debug_off()) {
-            inner.config.log_globals_debug(&inner.drm)?;
-        }
         inner.config.check_pstate(&inner.drm, &inner.device, "after boot")?;
         inner.state.health.set_gpu_pending(false);
         dev_info!(pdev.as_ref(), "M3: firmware accepted owned initdata and device controls\n");

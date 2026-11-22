@@ -4,12 +4,15 @@
 
 use crate::debug::*;
 use crate::gem;
-use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use kernel::{new_mutex, prelude::*, str::BStr, sync::Mutex, task::Pid};
 
 const DEBUG_CLASS: DebugFlags = DebugFlags::Errors;
 
 const MIRROR_MAX_SIZE: usize = 64 * 1024;
+
+/// [`VmStatus::restarts_left`] of a VM no restart has been charged to.
+const UNCHARGED: u32 = u32::MAX;
 
 /// A VM and its accepted jobs share this status, including after queue destruction.
 /// Client failure is separate from hardware admission: recovery may preserve the
@@ -27,6 +30,9 @@ pub(crate) struct VmStatus {
     warned: AtomicBool,
     /// A GPU recovery found this VM's work guilty.
     recovery_guilty: AtomicBool,
+    /// Further restarts that may find this VM guilty and still be charged to it
+    /// ([`Self::charge_restart`]), or [`UNCHARGED`] before the first.
+    restarts_left: AtomicU32,
     /// The process that created the VM, named in the failure report.
     tgid: Pid,
     comm: [u8; 16],
@@ -62,6 +68,7 @@ impl VmStatus {
             teardown_expired: AtomicBool::new(false),
             warned: AtomicBool::new(false),
             recovery_guilty: AtomicBool::new(false),
+            restarts_left: AtomicU32::new(UNCHARGED),
             tgid,
             comm,
             mirror <- new_mutex!(None, "Asahi VM status mirror"),
@@ -72,6 +79,16 @@ impl VmStatus {
         self.error.load(Ordering::Acquire)
     }
 
+    /// The process that created the VM: its name and thread-group ID.
+    pub(crate) fn client(&self) -> (&BStr, Pid) {
+        let len = self
+            .comm
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(self.comm.len());
+        (BStr::from_bytes(&self.comm[..len]), self.tgid)
+    }
+
     pub(crate) fn note_recovery_guilty(&self) {
         self.recovery_guilty.store(true, Ordering::Release);
     }
@@ -80,6 +97,22 @@ impl VmStatus {
     /// failed only for its own client.
     pub(crate) fn recovery_guilty(&self) -> bool {
         self.recovery_guilty.load(Ordering::Acquire)
+    }
+
+    /// Charges a firmware restart that found this VM guilty to it, with `in_flight` of its
+    /// commands still held then. The first such restart costs its client the device. After it the
+    /// VM publishes nothing new, but each command it had in flight may still hang or fault the
+    /// GPU once as it runs. Returns false once restarts have found the VM guilty more often than
+    /// that: the firmware keeps blaming it for something it no longer runs. Called only from a
+    /// recovery, under the device mutex.
+    pub(crate) fn charge_restart(&self, in_flight: u32) -> bool {
+        let left = match self.restarts_left.load(Ordering::Relaxed) {
+            UNCHARGED => in_flight.min(UNCHARGED - 1),
+            0 => return false,
+            left => left - 1,
+        };
+        self.restarts_left.store(left, Ordering::Relaxed);
+        true
     }
 
     /// The client's VM handle is gone (`release_mirror`): the client submits nothing more.
@@ -284,6 +317,25 @@ mod tests {
         assert_eq!(status.get(), 0);
         // Device loss after a hidden teardown error is still warned about.
         assert!(status.warned.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn restarts_are_charged_to_a_vm_only_for_the_work_it_had_in_flight() {
+        let Ok(status) = KBox::pin_init(VmStatus::new(), GFP_KERNEL) else {
+            panic!("allocation failed");
+        };
+        // The first restart is charged whatever the VM holds, then one per command it held.
+        assert!(status.charge_restart(3));
+        for _ in 0..3 {
+            assert!(status.charge_restart(5));
+        }
+        assert!(!status.charge_restart(5));
+        assert!(!status.charge_restart(0));
+        let Ok(status) = KBox::pin_init(VmStatus::new(), GFP_KERNEL) else {
+            panic!("allocation failed");
+        };
+        assert!(status.charge_restart(0));
+        assert!(!status.charge_restart(1));
     }
 
     #[test]

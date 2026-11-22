@@ -92,10 +92,27 @@ pub(super) const CONTROL: u8 = 1;
 pub(super) const EFFORT: u8 = 2;
 
 /// A host-to-firmware message: a mailbox message, a device-control record by
-/// opcode, or a new performance effort value.
+/// opcode, a new performance effort value, or a tiler heap size change.
 pub(super) fn message(kind: u8, value: u64) {
     // SAFETY: Plain values only.
     unsafe { asahi_g17_trace_message(kind, value) };
+}
+
+/// `message` kind of a tiler heap size change ([`heap`]).
+pub(super) const HEAP: u8 = 3;
+pub(super) const HEAP_HOST_IDLE: u8 = 1;
+pub(super) const HEAP_HOST_BUSY: u8 = 2;
+pub(super) const HEAP_FIRMWARE_GRANTED: u8 = 3;
+pub(super) const HEAP_FIRMWARE_REFUSED: u8 = 4;
+pub(super) const HEAP_SHRINK: u8 = 5;
+
+/// A tiler heap growth or shrink of `source` (HEAP_*), as a `message` of kind
+/// [`HEAP`]: `source << 56 | grew << 48 | blocks_before << 24 | blocks_after`.
+/// `grew` is whether the heap changed (a shrink that applied sets it too).
+pub(super) fn heap(source: u8, grew: bool, before: usize, after: usize) {
+    let blocks = |blocks: usize| (blocks as u64) & 0xff_ffff;
+    message(HEAP, u64::from(source) << 56 | u64::from(grew) << 48 | blocks(before) << 24
+        | blocks(after));
 }
 
 /// Failed-context teardown: 1 compute fault (qid, stamp), 2 unstamped render retire (slot,

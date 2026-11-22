@@ -484,7 +484,13 @@ static const struct avd_variant avd_t8132_variant = {
 			AVD_CAPABILITY_H264 |
 			AVD_CAPABILITY_VP9 |
 			AVD_CAPABILITY_AV1,
-	.fw_name = "apple/avd-fw-v5-t1.bin",
+	/*
+	 * The node places the SRAM at code + 0x14000, as on T6040/T6041, so the
+	 * queued transport needs the tier 2 image; tier 1 still decodes over
+	 * the legacy transport.
+	 */
+	.fw_name = "apple/avd-fw-v5-t2.bin",
+	.fw_name_fallback = "apple/avd-fw-v5-t1.bin",
 	.revision = 4,
 	.vp_slot_offset = 0xc,
 	.submit_offset = 0x40,

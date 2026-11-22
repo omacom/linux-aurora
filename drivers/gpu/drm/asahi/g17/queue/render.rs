@@ -186,6 +186,16 @@ pub(crate) enum Registration {
     M5(crate::g17::fw::m5::queue::HardwareSubmission),
 }
 
+/// A tiler heap growth the host makes before publishing a render, to this many blocks.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HostGrowth {
+    /// The pair is idle: the page list and the PB descriptor are rebuilt.
+    Idle(usize),
+    /// The pair has work in flight: blocks are only appended to the inventory,
+    /// as for a firmware grow request.
+    Busy(usize),
+}
+
 /// Installed kick backing remains owned even when this pair has no logical
 /// owner. Commands retain their exact descriptor and allocation generations.
 pub(crate) struct Pair {
@@ -662,9 +672,61 @@ struct RenderBarriers {
     fragment_types: [u8; 5 + crate::g17::hazard::PUBLICATION_BARRIERS],
 }
 
-/// The last fragment kick published on any pair: on the J813 the next tiling kick waits for it
-/// (see [`Pair::publish`]).
-static J813_LAST_FRAGMENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The last fragment kick published on any pair, and the last one of a render with an API task
+/// stage. The next tiling kick may wait for one of them ([`CrossPairOrder`]).
+static LAST_FRAGMENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static LAST_TASK_FRAGMENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Which earlier fragment kick, published on any pair, a render's tiling kick waits for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CrossPairOrder {
+    /// A render with an API task stage waits for the last fragment kick of such a render.
+    TaskAfterTask,
+    /// Every render waits for the last fragment kick of any render.
+    All,
+}
+
+/// A pair holding a task-stage group failed or was quarantined, or the firmware dropped its groups: no
+/// later task-stage render waits for the recorded fragment kick, which may not complete. The order
+/// only sequences tiling and carries no data, so dropping it is always safe; the next task-stage
+/// render may then overlap one still running elsewhere, once. Task-stage renders already published
+/// behind that kick stay ordered behind it in the firmware until it completes or their own
+/// watchdogs end them.
+fn release_task_order() {
+    LAST_TASK_FRAGMENT.store(0, core::sync::atomic::Ordering::Release);
+}
+
+/// Whether `packet` is a render with an API task stage.
+fn packet_uses_task(packet: &Packet) -> bool {
+    matches!(&packet.command, Validated::Render { resources: Some(programs), .. } if programs.uses_task())
+}
+
+impl CrossPairOrder {
+    /// On the J813 macOS 27.0's TA kick for render n names render n - 1's 3D kick (see
+    /// [`Pair::publish`]). Everywhere else a task-stage render's tiling kick waits for the
+    /// previous task-stage render's fragment kick, so that two clients' task-stage tiling
+    /// never runs at once.
+    fn of(j813: bool) -> Self {
+        if j813 { Self::All } else { Self::TaskAfterTask }
+    }
+
+    /// The fragment kick a tiling kick of a render with (`task`) or without an API task stage
+    /// waits for, if any.
+    fn source(self, task: bool) -> Option<&'static core::sync::atomic::AtomicU64> {
+        match self {
+            Self::All => Some(&LAST_FRAGMENT),
+            Self::TaskAfterTask => task.then_some(&LAST_TASK_FRAGMENT),
+        }
+    }
+
+    /// The dependency a tiling kick of the pair `qids` gets from the recorded fragment kick `last`:
+    /// none without one, nor, for the task-stage order, when it is the pair's own, because a pair's
+    /// tiling ring already runs its own kicks in order.
+    fn dependency(self, last: u64, qids: [u8; 2]) -> Option<KickDependency> {
+        let last = KickDependency::from_word(last).filter(|d| d.word() != 0 && d.qid() != qids[0])?;
+        (self != Self::TaskAfterTask || last.qid() != qids[1]).then_some(last)
+    }
+}
 
 fn render_barriers(
     fragment_stage: bool,
@@ -962,11 +1024,12 @@ impl Pair {
         }
         let queues = qids.map(|qid| self.memory.graph.queue_va(qid));
         let Validated::Render {
-            pass, ray_query, ..
+            pass, ray_query, resources, ..
         } = &packet.command
         else {
             return Err(EINVAL);
         };
+        let task = resources.as_ref().is_some_and(|programs| programs.uses_task());
         let own_tiling = KickDependency::new(qids[0], kicks[0]).ok_or(EINVAL)?;
         let mut barriers =
             render_barriers(pass.fragment_barriers, pass.stage_prefixes, dependencies, own_tiling,
@@ -976,11 +1039,12 @@ impl Pair {
         // 3D kick (every such dependency in its captured queues). Without it a TA ran beside
         // another context's 3D, and that 3D fetched its own tile data (ISP parameter fetch,
         // requestor 0x9a) through the TA's VM slot, or slot 0, and faulted.
-        if j813 {
-            let last = KickDependency::from_word(
-                J813_LAST_FRAGMENT.load(core::sync::atomic::Ordering::Acquire),
-            )
-            .filter(|d| d.word() != 0 && d.qid() != qids[0]);
+        // Everywhere else renders with an API task stage are ordered the same way among
+        // themselves: eight clients' task-stage renders run at once started tiling, consumed
+        // their kicks and never ended, and none of them was ever stamped.
+        let order = CrossPairOrder::of(j813);
+        if let Some(source) = order.source(task) {
+            let last = order.dependency(source.load(core::sync::atomic::Ordering::Acquire), qids);
             if let Some(last) = last {
                 if barriers.tiling_count < barriers.tiling.len() {
                     barriers.tiling[barriers.tiling_count] = last;
@@ -1264,7 +1328,10 @@ impl Pair {
         self.ordinal = next_ordinal;
         if let Some(fragment) = KickDependency::new(qids[1], kicks[1]) {
             packet.completion.note_render_publication(fragment);
-            J813_LAST_FRAGMENT.store(fragment.word(), core::sync::atomic::Ordering::Release);
+            LAST_FRAGMENT.store(fragment.word(), core::sync::atomic::Ordering::Release);
+            if task {
+                LAST_TASK_FRAGMENT.store(fragment.word(), core::sync::atomic::Ordering::Release);
+            }
         }
         self.cursors = windows.map(|window| window.target());
         for stage in 0..2 {
@@ -1473,6 +1540,8 @@ impl Pair {
         })();
         if let Err(error) = publish {
             self.quarantined = true;
+            // The firmware may never run this kick, and its own watchdog will not end it.
+            self.release_task_order_if_held();
             self.active
                 .back()
                 .ok_or(EIO)?
@@ -1648,14 +1717,19 @@ impl Pair {
     /// started and never finished, which the error alone does not say. The first few groups of a
     /// boot report; the rest would repeat them.
     pub(crate) fn report_timeout(&self, stamps: [u32; 2], state: u32) {
+        /// Timeouts reported per boot: enough for every client of a parallel batch; the rest repeat them.
+        const REPORTS: u32 = 8;
         static REPORTED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-        if REPORTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 4 {
+        if REPORTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= REPORTS {
             return;
         }
         let Some(front) = self.active.front() else {
             return;
         };
         let ordinal = front.ticket.ordinal;
+        // M5: tiling start and end, fragment start and end; which of them were written says
+        // which half of the render stopped.
+        let stages = self.memory.stage_timestamps(ordinal).unwrap_or_default();
         let Ok(snapshot) = observation::snapshot(&self.memory, ordinal) else {
             pr_warn!(
                 "G17: render timeout slot {} ordinal {}: its graph could not be read\n",
@@ -1665,7 +1739,7 @@ impl Pair {
             return;
         };
         pr_warn!(
-            "G17: render timeout slot {} ordinal {} qids {:?}: stamps [{:#x}, {:#x}], recovery state {}, pass [{:#x}, {:#x}], tiler {:?}, fragment {:?}, job list {}\n",
+            "G17: render timeout slot {} ordinal {} qids {:?}: stamps [{:#x}, {:#x}], recovery state {}, pass [{:#x}, {:#x}], stages [{:#x}, {:#x}, {:#x}, {:#x}], tiler {:?}, fragment {:?}, job list {}\n",
             self.slot,
             ordinal,
             self.qids(),
@@ -1674,6 +1748,10 @@ impl Pair {
             state,
             snapshot.pass[0],
             snapshot.pass[1],
+            stages[0],
+            stages[1],
+            stages[2],
+            stages[3],
             snapshot.cursors[0],
             snapshot.cursors[1],
             if snapshot.job_list_empty { "empty" } else { "not empty" }
@@ -1725,9 +1803,11 @@ impl Pair {
     pub(crate) fn oldest_packet(&self) -> Option<Arc<Packet>> {
         self.active.front().map(|active| active.packet.clone())
     }
-    /// Sample PM feedback only after this pair's exact retirement. Busy pairs
-    /// keep their current capacity and let firmware request growth as needed.
-    pub(crate) fn host_growth_target(&mut self, packet: &Packet) -> Result<Option<usize>> {
+    /// Sample PM feedback only after this pair's exact retirement. A busy pair
+    /// grows ahead of the render only by appending blocks to its inventory, as a
+    /// firmware grow request does (`buffer::Manager::busy_target`), and otherwise
+    /// keeps its current capacity and lets firmware request growth as needed.
+    pub(crate) fn host_growth_target(&mut self, packet: &Packet) -> Result<Option<HostGrowth>> {
         let mut required =
             m5_render_submission::layout(&packet.command, self.clusters, self.variant.programs)?
                 .tvb_blocks;
@@ -1742,11 +1822,18 @@ impl Pair {
                 required = required.max(floor);
             }
         }
-        self.memory
-            .manager
-            .note_required(required, crate::g17::now_ns());
+        let now = crate::g17::now_ns();
+        self.memory.manager.note_required(required, now);
         if self.in_flight() {
-            return Ok(None);
+            if self.quarantined {
+                return Ok(None);
+            }
+            let client = self.memory.context.vm().memory_client().cloned();
+            return Ok(self
+                .memory
+                .manager
+                .busy_target(required, now, client.as_ref())?
+                .map(HostGrowth::Busy));
         }
         if !self.idle_for_context(self.context())? {
             return Err(EBUSY);
@@ -1762,7 +1849,7 @@ impl Pair {
         // ERANGE: a 16384x16384 no-attachment render after smaller ones lost the device
         // (dEQP-GLES31.functional.fbo.no_attachments.maximums.*).
         let required = required.max(feedback).min(self.memory.manager.max_blocks());
-        Ok((required > self.memory.manager.blocks()).then_some(required))
+        Ok((required > self.memory.manager.blocks()).then_some(HostGrowth::Idle(required)))
     }
 
     /// A quarantined pair, or a closed owner's pair that holds only groups whose stamps are
@@ -1958,6 +2045,13 @@ impl Pair {
             && Arc::ptr_eq(self.context(), context)
             && context.is_current())
     }
+    /// Releases the task-stage order ([`release_task_order`]) if this pair holds a task-stage group.
+    fn release_task_order_if_held(&self) {
+        if self.active.iter().any(|active| packet_uses_task(&active.packet)) {
+            release_task_order();
+        }
+    }
+
     /// Classification controls VM poisoning. Every failed render fence settles,
     /// while command memory remains owned until paired retirement or stop.
     pub(crate) fn quarantine(
@@ -1966,6 +2060,9 @@ impl Pair {
         defer: &mut impl FnMut(Deferred) -> Result,
     ) -> Result {
         self.quarantined = true;
+        // Its groups end here, without their own watchdogs: none of their fragment kicks may hold
+        // the task-stage order of other clients.
+        self.release_task_order_if_held();
         // Successors published after recovery can still fail behind its spared
         // head. Classify the whole failing group before any fence can settle.
         if self
@@ -2290,6 +2387,8 @@ impl Pair {
                 return Ok(false);
             }
         }
+        // The firmware dropped these groups: their fragment kicks may not complete as published.
+        self.release_task_order_if_held();
         if decision == Decision::Fail {
             return self.fail_dropped(host, defer);
         }
@@ -2686,6 +2785,7 @@ impl Pair {
         if !self.active.iter().any(|a| Arc::ptr_eq(&a.packet, packet)) {
             return Ok(false);
         }
+        self.release_task_order_if_held();
         // Groups the firmware dropped unexecuted are published again, with their successors.
         if self.replay_abandoned(host, defer, false)? {
             return Ok(true);
@@ -3284,6 +3384,42 @@ impl Pair {
 pub(crate) fn completion_noted(qids: [u8; 2], masks: [u64; 2]) -> bool {
     let fragment = usize::from(qids[1]);
     masks[fragment / 64] & (1u64 << (fragment % 64)) != 0
+}
+
+#[kunit_tests(asahi_g17_render_cross_pair_order)]
+mod cross_pair_order_tests {
+    use super::{CrossPairOrder, LAST_FRAGMENT, LAST_TASK_FRAGMENT};
+    use crate::g17::fw::kick::{KickDependency, KickTimestamp};
+
+    fn is(source: Option<&'static core::sync::atomic::AtomicU64>,
+        want: &'static core::sync::atomic::AtomicU64) -> bool {
+        source.is_some_and(|source| core::ptr::eq(source, want))
+    }
+
+    fn word(qid: u8) -> u64 {
+        KickDependency::new(qid, KickTimestamp::FIRST).map_or(0, |d| d.word())
+    }
+
+    #[test]
+    fn the_j813_orders_every_render_and_elsewhere_only_task_stage_ones() {
+        let j813 = CrossPairOrder::of(true);
+        assert!(is(j813.source(false), &LAST_FRAGMENT));
+        assert!(is(j813.source(true), &LAST_FRAGMENT));
+        let other = CrossPairOrder::of(false);
+        assert!(other.source(false).is_none());
+        assert!(is(other.source(true), &LAST_TASK_FRAGMENT));
+    }
+
+    #[test]
+    fn a_task_stage_render_waits_only_for_another_pairs_fragment_kick() {
+        let order = CrossPairOrder::TaskAfterTask;
+        assert!(order.dependency(word(9), [4, 5]).map(|d| d.word()) == Some(word(9)));
+        // Its own pair's previous fragment kick: the tiling ring already orders it.
+        assert!(order.dependency(word(5), [4, 5]).is_none());
+        assert!(order.dependency(0, [4, 5]).is_none());
+        // The J813 order keeps its own pair's kick, as before.
+        assert!(CrossPairOrder::All.dependency(word(5), [4, 5]).map(|d| d.word()) == Some(word(5)));
+    }
 }
 
 #[kunit_tests(asahi_g17_render_completion_noted)]

@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 root = Path(__file__).resolve().parents[2]
 s = (root / 'drivers/gpu/drm/asahi/file.rs').read_text()
-a = s.index('        if data.flags != 0', s.index('pub(crate) fn queue_create('))
+a = s.index('        if data.flags & !', s.index('pub(crate) fn queue_create('))
 # Keep this credential/priority fixture scoped before queue-quota accounting.
 b = s.index('        let share =', a)
 gate = s[a:b]
@@ -23,6 +23,7 @@ macro_rules! cls_pr_debug { ($($arg:tt)*) => {} }
 mod uapi {
  pub const drm_asahi_priority_DRM_ASAHI_PRIORITY_REALTIME:u32=3;
  pub const drm_asahi_priority_DRM_ASAHI_PRIORITY_HIGH:u32=2;
+ pub const drm_asahi_queue_create_flags_DRM_ASAHI_QUEUE_CREATE_ASYNC_SUBMIT:u32=1;
 }
 mod bindings { pub const CAP_SYS_NICE:u32=23;
  pub unsafe fn capable(_:i32)->bool { CAP.with(|c|c.get()) }
@@ -60,7 +61,8 @@ fn main() {
   let reg=Reg{gpu:Gpu(gpu)};
   bindings::CAP.with(|c|c.set(cap));
   for flags in [0,1,u32::MAX] { for priority in [0,1,2,3,4,u32::MAX] {
-   let expected=if flags!=0 || priority>=3 {Err(EINVAL)}
+   // The async flag passes this gate; a backend without it refuses it later.
+   let expected=if flags&!1!=0 || priority>=3 {Err(EINVAL)}
     else if priority!=2 {Ok(())}
     else if backend!=0 && !(backend==1 && cfg!(CONFIG_DRM_ASAHI_M3_T8122)) {Err(EINVAL)}
     else if cap||master {Ok(())} else {Err(EACCES)};

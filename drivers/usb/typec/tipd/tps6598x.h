@@ -357,6 +357,10 @@ struct tipd_data {
 struct tps6598x {
 	/* Native H17 routes retain ENOSPC admission and their own HPD path. */
 	u8 h17_display:1;
+	/* On the list tipd_port_replug() looks a port up on, by its role switch; its replug. */
+	struct list_head port_node;
+	struct work_struct replug_work;
+	u8 replug_seconds;
 	struct device *dev;
 	struct regmap *regmap;
 	struct mutex lock; /* device lock */
@@ -399,6 +403,10 @@ struct tps6598x {
 	struct typec_altmode *partner_altmode_dp;
 	/* USB remote wake armed on this port for the sleep (USBw). */
 	bool usbw_armed;
+	/* An SN201202x's boot power state is left at the end of the probe: tipd_boot_power_on() */
+	bool boot_s0_deferred;
+	bool boot_no_debounce;
+	bool boot_usbw_due;
 };
 
 /* TPS_REG_USB4_STATUS */
@@ -466,6 +474,9 @@ struct cd321x {
 	struct notifier_block tbt_watch;
 	struct work_struct tbt_attach_work;
 	bool tbt_watch_registered;
+	/* Closes the USB4/Thunderbolt session before device_shutdown() */
+	struct notifier_block reboot_nb;
+	bool reboot_nb_registered;
 	atomic_t link_event;
 	atomic_t ready_event;
 	atomic_t restore_event;
@@ -482,6 +493,10 @@ struct cd321x {
 	/* A plug was in when the sleep began, and a wake's first port state is still to be applied */
 	bool sleep_plug;
 	bool wake_apply;
+	/* J714s: macOS's USBw 0x00 after an attach is due at the next update */
+	bool macos_usbw_due;
+	/* ... and the controller is in macOS's no-partner state 0x02 since a detach */
+	bool macos_detached;
 
 	struct cd321x_status update_status;
 	struct delayed_work update_work;
@@ -498,6 +513,8 @@ struct sn201202x {
 	struct cd321x cd;
 	bool polled;
 	bool select_polled;
+	/* Sleeps while idle: its event interrupt stays live while it sleeps */
+	bool idle_sleep;
 	struct completion select_completion;
 	struct completion sleep_completion;
 	struct completion wake_completion;
@@ -515,6 +532,20 @@ struct sn201202x {
 	bool ldcm_mitigation_known;
 	/* A mitigation was requested since the controller's last reset */
 	bool ldcm_requested;
+	/* J714s: this sleep is entered and left as macOS does, see sn201202x_prepare() */
+	bool macos_sleep;
+	/* ... and the controller has been sent SLEEP at the prepare and not woken since */
+	bool entry_asleep;
+	/* ... and its suspend has run since: nothing sends SLEEP again before the wake */
+	bool entry_suspended;
+	/* Register accesses that reached it meanwhile */
+	unsigned int entry_strays;
+	/* J714s: macOS's USBw 0x09 after the PHYs' stop, handed back at the wake */
+	struct notifier_block usbw_nb;
+	/* ... for a controller with a connector (not MagSafe's) */
+	bool usbw_port;
+	/* ... and sent in this sleep, not yet handed back */
+	bool usbw_macos;
 };
 
 extern const struct tipd_data *tipd_hw_variants[];
@@ -522,10 +553,19 @@ extern const struct regmap_config tps6598x_regmap_config;
 
 int tipd_init(struct tps6598x *tps);
 void tipd_remove(struct tps6598x *tps);
+bool tipd_replug_supported(struct tps6598x *tps);
+int tipd_replug_request(struct tps6598x *tps, u8 seconds);
 int tipd_prepare(struct device *dev);
 void tipd_complete(struct device *dev);
 int tipd_suspend(struct tps6598x *tps);
 int tipd_resume(struct tps6598x *tps);
+void tipd_poll_stop(struct tps6598x *tps);
+void tipd_poll_start(struct tps6598x *tps);
+int tipd_usbw_locked(struct tps6598x *tps, u8 mode);
+/* USBw modes: the USB2 lines watched for a full/high-speed remote wakeup, handed back, off */
+#define TIPD_USBW_HIGH_SPEED	0x09
+#define TIPD_USBW_HAND_BACK	0x80
+#define TIPD_USBW_OFF		0x00
 
 /* Internal to tps6598x-core */
 int tps6598x_block_read(struct tps6598x *tps, u8 reg, void *val, size_t len);
@@ -539,6 +579,10 @@ struct cd321x_sleep_state {
 };
 
 int cd321x_sleep_events(struct tps6598x *tps, struct cd321x_sleep_state *st);
+/* INT_EVENT1 and INT_CLEAR1 as macOS reads and clears them at the wake: 13 bytes */
+#define CD321X_WAKE_EVENT_LEN	13
+int cd321x_wake_events(struct tps6598x *tps, u8 event[CD321X_WAKE_EVENT_LEN], u32 *status,
+		       u32 *data_status);
 void tipd_usb_wake(struct tps6598x *tps, bool asleep);
 int tps6598x_exec_cmd_tmo(struct tps6598x *tps, const char *cmd,
 			  size_t in_len, const u8 *in_data,
@@ -572,6 +616,9 @@ void cd321x_mux_gave_up(struct cd321x *cd321x, unsigned int retries, unsigned in
 void cd321x_init_work(struct cd321x *cd321x);
 int cd321x_init_mux(struct cd321x *cd321x);
 void cd321x_stop_work(struct cd321x *cd321x);
+int cd321x_reboot_close(struct cd321x *cd321x);
+int cd321x_reboot_notify(struct notifier_block *nb, unsigned long action,
+			 void *data);
 bool cd321x_tbt_switch_keep_waiting(struct device *dev);
 struct typec_thunderbolt_switch *
 cd321x_tbt_switch_get(struct device *dev, struct fwnode_handle *fwnode,

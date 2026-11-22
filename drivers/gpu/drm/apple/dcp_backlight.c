@@ -269,7 +269,24 @@ static int dcp_get_brightness(struct backlight_device *bd)
 		return actual;
 	}
 
-	return dcp->brightness.nits;
+	spin_lock_irqsave(&dcp->backlight.lock, flags);
+	actual = dcp_bl_presented_actual(&dcp->brightness.presented,
+					 READ_ONCE(dcp->brightness.nits));
+	spin_unlock_irqrestore(&dcp->backlight.lock, flags);
+	return actual;
+}
+
+/*
+ * A present set the panel to @nits, outside the policy: every one that
+ * carries a level, and the power-off present, which carries 0.
+ */
+void dcp_backlight_presented(struct apple_dcp *dcp, u32 nits)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&dcp->backlight.lock, flags);
+	dcp_bl_presented_set(&dcp->brightness.presented, nits);
+	spin_unlock_irqrestore(&dcp->backlight.lock, flags);
 }
 
 int dcp_backlight_configure(struct apple_dcp *dcp, u32 maximum,
@@ -630,11 +647,18 @@ void dcp_backlight_desktop_finish(struct apple_dcp *dcp, u32 id,
 
 #define SCALE_FACTOR (1 << 10)
 
+/*
+ * Each table word holds two DAC values, one in each 16-bit half: the
+ * level's and the one half a step below it.  Interpolate the halves
+ * separately.  A blend of the whole word carries the upper half's fraction
+ * into the lower one: for 370 nits the lower half became 0x10a, a 4 to 5
+ * nit value, and for most levels it left the DAC range altogether.
+ */
 static u32 interpolate(int val, int min, int max, u32 *tbl, size_t tbl_size)
 {
-	u32 frac;
-	u64 low, high;
+	u32 frac, word = 0;
 	u32 interpolated = (tbl_size - 1) * ((val - min) * SCALE_FACTOR) / (max - min);
+	unsigned int shift;
 
 	size_t index = interpolated / SCALE_FACTOR;
 
@@ -642,10 +666,14 @@ static u32 interpolate(int val, int min, int max, u32 *tbl, size_t tbl_size)
 		return tbl[tbl_size / 2];
 
 	frac = interpolated & (SCALE_FACTOR - 1);
-	low = tbl[index];
-	high = tbl[index + 1];
+	for (shift = 0; shift < 32; shift += 16) {
+		u32 low = (tbl[index] >> shift) & 0xffff;
+		u32 high = (tbl[index + 1] >> shift) & 0xffff;
 
-	return ((frac * high) + ((SCALE_FACTOR - frac) * low)) / SCALE_FACTOR;
+		word |= ((frac * high + (SCALE_FACTOR - frac) * low) / SCALE_FACTOR) << shift;
+	}
+
+	return word;
 }
 
 static u32 calculate_dac(struct apple_dcp *dcp, int val)
@@ -659,7 +687,7 @@ static u32 calculate_dac(struct apple_dcp *dcp, int val)
 	else if (val == MIN_BRIGHTNESS_PART2)
 		return 16 * brightness_part2[0];
 	else if (val >= MAX_BRIGHTNESS_PART2)
-		return brightness_part2[ARRAY_SIZE(brightness_part2) - 1];
+		return 16 * brightness_part2[ARRAY_SIZE(brightness_part2) - 1];
 
 	if (val < MAX_BRIGHTNESS_PART1) {
 		dac = interpolate(val, MIN_BRIGHTNESS_PART1, MAX_BRIGHTNESS_PART1,

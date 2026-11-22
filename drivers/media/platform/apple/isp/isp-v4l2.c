@@ -74,7 +74,8 @@ static bool isp_p010_buffer_matches(const struct isp_format *fmt,
  * the fourth section opens with the frame's exposure: the integration time in
  * microseconds (le32 at 0) and the total sensor gain in 1/256 steps, 256 for
  * unity (le16 at 6). Observed on T6040 and T8140 with AE converging under a
- * fixed scene and with the frame rate capping the integration time.
+ * fixed scene and with the frame rate capping the integration time, and the
+ * same on the T8122 running 27.2 firmware.
  */
 #define ISP_META_SECTIONS		0x10
 #define ISP_META_SECTION_EXPOSURE	3

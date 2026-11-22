@@ -9,7 +9,13 @@ import tempfile
 
 
 def function(source, name):
-    match = re.search(r"^static [^\n]*\b" + name + r"\(", source, re.M)
+    # The first definition, skipping forward declarations.
+    for match in re.finditer(r"^static [^\n]*\b" + name + r"\(", source, re.M):
+        rest = source[match.end():]
+        if rest.find(";") < 0 or rest.find("{") < rest.find(";"):
+            break
+    else:
+        match = None
     assert match, name
     start = source.index("{", match.start())
     depth = 1
@@ -41,7 +47,7 @@ def run(tmp, name, program, expect_failure=False):
     path = tmp / (name + ".c")
     path.write_text(program)
     binary = tmp / name
-    subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", str(path), "-o", str(binary)],
+    subprocess.run(["cc", "-std=gnu11", "-Wall", "-Werror", "-Wno-unused-function", str(path), "-o", str(binary)],
                    check=True)
     result = subprocess.run([str(binary)], capture_output=expect_failure)
     if expect_failure:
@@ -75,6 +81,8 @@ typedef uint32_t u32;
 #define guard(x) fake_guard
 #define dev_warn(...) ((void)0)
 #define dev_err(...) ((void)0)
+#define dev_dbg(...) ((void)0)
+#define READ_ONCE(x) (x)
 #define lockdep_assert_held(x) ((void)0)
 static void fake_guard(void *p) { (void)p; }
 static void delay_event(char type, unsigned n);
@@ -85,10 +93,22 @@ static void fsleep(unsigned n) { (void)n; }
     declarations = r'''
 struct apple_tunable { unsigned id; };
 struct atcphy_hw { int gen; bool usb2_only, has_usb2phy_reg, park_pipe_unlocked; u32 usb2phy_sig_host; };
+enum suspend_state { PM_SUSPEND_TO_IDLE = 1, PM_SUSPEND_MEM = 3 };
+static enum suspend_state pm_suspend_target_state;
+static bool rpm_suspended;
+static unsigned tunnel_stops, dp_stops;
+struct device;
+struct atcphy_mode_configuration { u32 crossbar, crossbar_dp_single_pma; bool crossbar_dp_both_pma;
+    unsigned lane_mode[2]; bool set_swap; };
 struct apple_atcphy {
     const struct atcphy_hw *hw;
+    struct device *dev;
     bool t8132_ss, t8132_common_owned, t8132_suspended, t8132_failed, host_active;
     bool ss_tunables, mode_dirty, pipe_pending, swap_lanes;
+    bool cio_tunables, t8132_dp_alt, fixed_usb2, hibernated, pd_was_off, idle_rpm;
+    bool t8103_dummy_pending, t8103_usb3_workaround;
+    unsigned tunnel_users;
+    struct { bool prepared, changed, restored; } cio_sleep;
     int mode, pipe_state, lock;
     struct { void *regs, *resource; struct apple_tunable *tunable; } t8132_banks[6];
     struct { struct apple_tunable *lane_usb3[2], *usb2phy_reg_dflt, *usb3_dp; } tunables;
@@ -176,6 +196,14 @@ static u32 core_read32(struct apple_atcphy *a, u32 off) { return readl(a->regs.c
         (v) = readl(p); if (condition) { poll_ret=0; break; } \
     } poll_ret; })
 static int atcphy_disable_dp_aux(struct apple_atcphy *a) { (void)a; assert(0); return -1; }
+/* No DP tunnel clock, DP alt mode or CIO runs on this port: the stops are no-ops. */
+static int atc_t8122_tunnel_stop(struct apple_atcphy *a) { (void)a; tunnel_stops++; return 0; }
+static void atcphy_dp_stop_t8122(struct apple_atcphy *a) { (void)a; dp_stops++; }
+static void atcphy_dp_aux_on_t8122(struct apple_atcphy *a) { (void)a; assert(0); }
+static void atcphy_t8132_cio_start(struct apple_atcphy *a) { (void)a; assert(0); }
+static const struct atcphy_mode_configuration *
+atcphy_get_mode_config(struct apple_atcphy *a, enum atcphy_mode m) { (void)a; (void)m; assert(0); return 0; }
+static inline bool pm_runtime_status_suspended(struct device *d) { (void)d; return rpm_suspended; }
 static inline void atcphy_restore_after_pd_off(struct apple_atcphy *a) { (void)a; }
 static void apple_tunable_apply(void *regs, struct apple_tunable *t)
 {
@@ -186,8 +214,10 @@ static void apple_tunable_apply(void *regs, struct apple_tunable *t)
     tunes[tune_count++] = t->id;
 }
 '''
-    names = ["atcphy_usb2_power_off", "atcphy_power_off", "atcphy_usb2_power_on",
-             "atcphy_t8132_cold", "atcphy_t8132_common_start", "atcphy_t8132_full_stop",
+    names = ["atcphy_mode_is_cio", "atcphy_usb2_sig_host", "atcphy_t8132_dp_on",
+             "atcphy_usb2_power_off", "atcphy_power_off", "atcphy_usb2_power_on",
+             "atcphy_t8132_cold", "atcphy_t8132_common_start", "atcphy_t8132_phy_stop",
+             "atcphy_t8132_full_stop",
              "atcphy_configure_t8132", "atcphy_usb2_set_mode", "atcphy_t8132_bist_pulse",
              "atcphy_t8132_bist_ack", "atcphy_configure_pipehandler_usb3_host_t8132",
              "atcphy_suspend", "atcphy_resume"]
@@ -296,6 +326,16 @@ int main(void)
     assert(!atcphy_resume(&dev) && !a.t8132_suspended);
     assert(!atcphy_configure_t8132(&a,APPLE_ATCPHY_MODE_USB3));
     assert(atcphy_suspend(&dev)==-EBUSY && !a.t8132_suspended);
+    /* A running host keeps the epoch through suspend-to-idle only (cda0923e3d56). */
+    a.host_active=true; pm_suspend_target_state=PM_SUSPEND_MEM;
+    assert(atcphy_suspend(&dev)==-EBUSY && !a.t8132_suspended);
+    pm_suspend_target_state=PM_SUSPEND_TO_IDLE;
+    unsigned kept=writes;
+    assert(!atcphy_suspend(&dev) && a.t8132_suspended && a.t8132_common_owned);
+    assert(atcphy_configure_t8132(&a,APPLE_ATCPHY_MODE_USB3)==-EBUSY && writes==kept);
+    assert(!atcphy_resume(&dev) && !a.t8132_suspended && a.t8132_common_owned);
+    a.host_active=false; pm_suspend_target_state=0;
+    assert(atcphy_suspend(&dev)==-EBUSY && !a.t8132_suspended);
     assert(!atcphy_configure_t8132(&a,APPLE_ATCPHY_MODE_OFF));
     assert(!a.t8132_common_owned && !a.mode_dirty && !atcphy_suspend(&dev));
     init(&a); stall_power=1;
@@ -337,24 +377,29 @@ int main(void)
 #define DWC3_GCTL_PRTCAP_DEVICE 2
 enum phy_mode { PHY_MODE_USB_HOST, PHY_MODE_USB_DEVICE };
 struct device { const char *of_node; };
-struct dwc3 { int dr_mode; };
-struct dwc3_apple { struct dwc3 dwc; struct device *dev; void *usb3_phy; int lock, state; };
-static int phy_error, host_calls, gadget_calls, stops;
+struct dwc3 { int dr_mode, current_dr_role; bool dis_u3_susphy_quirk; };
+struct dwc3_apple { struct dwc3 dwc; struct device *dev; void *usb2_phy, *usb3_phy; int lock, state;
+    bool dt_dis_u3_susphy, host_only, sleep_ddr; };
+static int phy_error, host_calls, gadget_calls, stops, syscore;
 static bool of_device_is_compatible(const char *node, const char *name) { return !strcmp(node,name); }
 static int phy_set_mode(void *phy, int mode) { (void)phy; (void)mode; return phy_error; }
 static void dwc3_apple_set_ptrcap(struct dwc3_apple *a, int cap) { (void)a; (void)cap; }
 static void dwc3_enable_susphy(struct dwc3 *d, bool on) { (void)d; assert(on); }
 static int dwc3_host_init(struct dwc3 *d) { (void)d; host_calls++; return 0; }
 static int dwc3_gadget_init(struct dwc3 *d) { (void)d; gadget_calls++; return 0; }
-static void dev_pm_syscore_device(struct device *d, bool on) { (void)d; assert(on); }
+static int phy_reset(void *phy) { (void)phy; return 0; }
+static void dwc3_host_exit(struct dwc3 *d) { (void)d; assert(0); }
+static void apple_sleep_usb_slp_ddr(bool on) { (void)on; assert(0); }
+static void dwc3_apple_usb3_pipe_reset(struct dwc3_apple *a) { (void)a; assert(0); }
 ''' + enum(states, "dwc3_apple_state") + r'''
 static int dwc3_apple_core_start(struct dwc3_apple *a, enum dwc3_apple_state s) { (void)a; (void)s; return 0; }
 static int dwc3_apple_core_stop(struct dwc3_apple *a) { (void)a; stops++; return 0; }
+static void dwc3_apple_syscore(struct dwc3_apple *a, bool on) { (void)a; assert(on); syscore++; }
 ''' + function(dwc, "dwc3_apple_set_role") + function(dwc, "dwc3_apple_init") + r'''
 int main(void)
 {
     struct device dev = { "apple,t8132-dwc3" };
-    struct dwc3_apple a = { .dev=&dev, .state=DWC3_APPLE_NO_CABLE };
+    struct dwc3_apple a = { .dev=&dev, .usb3_phy=&dev, .state=DWC3_APPLE_NO_CABLE };
     phy_error=-ETIMEDOUT;
     assert(dwc3_apple_init(&a,DWC3_APPLE_HOST)==-ETIMEDOUT);
     assert(!host_calls && !gadget_calls && stops==1 && a.state==DWC3_APPLE_NO_CABLE);
@@ -363,16 +408,23 @@ int main(void)
     assert(!gadget_calls && stops==2);
     phy_error=0;
     assert(!dwc3_apple_init(&a,DWC3_APPLE_HOST));
-    assert(host_calls==1 && a.state==DWC3_APPLE_HOST);
+    assert(host_calls==1 && a.state==DWC3_APPLE_HOST && syscore==1);
+    /* A T8132 host keeps its USB3 PHY out of P3. */
+    assert(a.dwc.dis_u3_susphy_quirk);
     dev.of_node="apple,t8103-dwc3"; phy_error=-ETIMEDOUT;
-    assert(!dwc3_apple_init(&a,DWC3_APPLE_HOST) && host_calls==2);
+    assert(!dwc3_apple_init(&a,DWC3_APPLE_HOST) && host_calls==2 && syscore==2);
+    assert(!a.dwc.dis_u3_susphy_quirk);
     puts("ok 7 - T8132 PHY failures stop before xHCI, older fallback preserved");
     return 0;
 }
 '''
         run(Path(directory), "dwc3-t8132", role_program)
         permissive = program.replace(
-            "if (atcphy->t8132_common_owned || atcphy->mode_dirty)", "if (false)", 1)
+            "(!atcphy->host_active || pm_suspend_target_state != PM_SUSPEND_TO_IDLE)", "false", 1)
+        assert permissive != program
+        run(Path(directory), "suspend-deep-negative-control", permissive, expect_failure=True)
+        permissive = program.replace(
+            "if (atcphy->mode_dirty)\n\t\treturn -EBUSY;", "if (false)\n\t\treturn -EBUSY;", 1)
         assert permissive != program
         run(Path(directory), "suspend-negative-control", permissive, expect_failure=True)
         late_admit = program.replace(
@@ -398,11 +450,12 @@ int main(void)
 struct atcphy_hw { int gen; bool has_usb4, has_t8140_dp, dp_t8122; };
 struct apple_atcphy {
     const struct atcphy_hw *hw;
-    bool dp_only, dp_tunables, ss_tunables;
+    bool dp_only, dp_tunables, ss_tunables, cio_tunables, t8132_dp_alt;
     struct { void *usb3_dp; } tunables;
 };
 struct { bool enable_dp_aux; } atcphy_modes[APPLE_ATCPHY_MODE_DP + 1];
-''' + function(source, "atcphy_mux_check") + r'''
+''' + function(source, "atcphy_mode_is_cio") + function(source, "atcphy_t8132_dp_on") + \
+    function(source, "atcphy_mux_check") + r'''
 struct typec_mux_dev {
     int (*set)(struct typec_mux_dev *, int *);
     bool transient_timeouts;
@@ -439,6 +492,20 @@ int main(void)
             assert(ret == -ENODEV && !mux.applied && mux.aborted);
         }
     }
+    /* CIO and 4-lane DP alt mode are admitted only with their calibration. */
+    atc.cio_tunables = true;
+    assert(!atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_TBT));
+    assert(!atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_USB4));
+    assert(atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_DP) == -ENODEV);
+    atc.t8132_dp_alt = true;
+    assert(atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_DP) == -ENODEV);
+    assert(atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_USB3_DP) == -ENODEV);
+    atc.tunables.usb3_dp = &atc;
+    assert(!atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_DP));
+    assert(!atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_USB3_DP));
+    atc.ss_tunables = false;
+    assert(atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_DP) == -ENODEV);
+    atc.cio_tunables = atc.t8132_dp_alt = false; atc.ss_tunables = true; atc.tunables.usb3_dp = 0;
     /* Preserve unrelated older providers' EOPNOTSUPP semantics. */
     hw.gen = ATCPHY_GENERATION_T8103;
     assert(atcphy_mux_check(&atc, APPLE_ATCPHY_MODE_USB4) == -EOPNOTSUPP);
@@ -547,7 +614,7 @@ int main(void)
         for name in ["atcphy_generation", "atcphy_mode", "atcphy_pipehandler_state", "atcphy_t8132_bank"]:
             mode4_program += enum(source,name)
         mode4_names = [name for name in names if name not in
-                       {"atcphy_usb2_set_mode", "atcphy_resume", "atcphy_t8132_bist_pulse",
+                       {"atcphy_usb2_set_mode", "atcphy_usb2_sig_host", "atcphy_resume", "atcphy_t8132_bist_pulse",
                         "atcphy_t8132_bist_ack", "atcphy_configure_pipehandler_usb3_host_t8132"}]
         mode4_program += declarations + "\n".join(function(source,name) for name in mode4_names)
         mode4_program += function(source,"atcphy_usb3_exit") + mode4_tests
@@ -590,11 +657,14 @@ struct phy { unsigned type; };
 struct dwc3 {
     struct device *dev;unsigned num_usb3_ports,num_usb2_ports;
     struct phy *usb3_generic_phy[1],*usb2_generic_phy[1];void *usb3_phy,*usb2_phy;
+    const void *glue_ops;bool dis_u3_susphy_quirk;
 };
 struct dwc3_apple {
-    struct dwc3 dwc; struct device *dev; void *mmio_resource,*reset;
+    struct dwc3 dwc; struct device *dev; void *mmio_resource,*reset,*usb2_phy;
     int lock,state; bool core_active,core_exit_pending,reset_pending,shutting_down,fixed_hub;
-    unsigned usb2_power_off_pending,usb3_power_off_pending;
+    unsigned usb2_power_off_pending,usb3_power_off_pending,hub_port;
+    bool host_only,idle_rpm,rpm_held,dt_dis_u3_susphy,sleep_ddr,sleep_in_place;
+    int sleep_pm_lock,sleep_start_work,sleep_stop_work,hub_check;
 };
 #define to_dwc3_apple(d) ((struct dwc3_apple *)(d))
 struct props { bool xhci_run_in_s2idle; };
@@ -628,7 +698,21 @@ static void dwc3_core_exit_after_phy_power_off(struct dwc3 *d) {
     (void)d;assert(!atc.t8132_common_owned);event(6);
 }
 static int reset_control_assert(void *p) { (void)p;reset_calls++;event(7);return 0; }
-static void dev_pm_syscore_device(struct device *d,bool on) { (void)d;assert(!on); }
+static unsigned rpm_puts,cancels;
+static const int dwc3_apple_glue_ops;
+static void pm_runtime_get_noresume(struct device *d) { (void)d;assert(0); }
+static void pm_runtime_allow(struct device *d) { (void)d;assert(0); }
+static void pm_runtime_mark_last_busy(struct device *d) { (void)d; }
+static void pm_runtime_put_autosuspend(struct device *d) { (void)d;rpm_puts++; }
+static void dwc3_apple_syscore(struct dwc3_apple *a,bool on) { (void)a;assert(!on); }
+static void apple_sleep_usb_slp_ddr(bool on) { (void)on;assert(0); }
+#define scoped_guard(t,l) for (int scoped_once=1; scoped_once; scoped_once=0)
+static void devm_release_action(struct device *d,void *f,void *data) { (void)d;(void)f;(void)data; }
+static void dwc3_apple_pm_notifier_remove(void *data) { (void)data; }
+static void cancel_work_sync(int *w) { (void)w;cancels++; }
+static void cancel_delayed_work_sync(int *w) { (void)w;cancels++; }
+static void apple_sleep_usb_set_wake_ports(unsigned m) { (void)m;assert(0); }
+static void apple_atcphy_sleep_finish_async(void *p,bool ok) { (void)p;(void)ok;assert(0); }
 static void dwc3_host_exit(struct dwc3 *d) { (void)d;atc.host_active=false;event(1); }
 static void dwc3_gadget_exit(struct dwc3 *d) { (void)d;assert(0); }
 static int atcphy_configure_t8132(struct apple_atcphy *a,int mode) {
@@ -642,13 +726,16 @@ static int dwc3_core_probe(struct dwc3_probe_data *d) {
     if(failed_probe) { d->dwc->dev->data=NULL;return -EIO; }
     return 0;
 }
-''' + function(dwc,"dwc3_apple_core_probe") + function(dwc,"dwc3_apple_core_stop") + function(dwc,"dwc3_apple_exit") + function(dwc,"dwc3_apple_shutdown") + function(source,"atcphy_shutdown")
+''' + function(dwc,"dwc3_apple_core_probe") + function(dwc,"dwc3_apple_core_stop") + function(dwc,"dwc3_apple_exit") + function(dwc,"dwc3_apple_pm_quiesce") + function(dwc,"dwc3_apple_shutdown") + function(source,"atcphy_shutdown")
         # Execute the actual early glue-probe prefix through stable owner publication.
         probe = function(dwc,"dwc3_apple_probe")
         prefix = probe[probe.index("\tappledwc->dev ="):probe.index("\n\tappledwc->reset =")]
         shutdown += r'''
 static void mutex_init(int *p) { *p=0; }
-static bool dwc3_apple_has_fixed_hub(struct device *d) { (void)d;return false; }
+static bool dwc3_apple_has_fixed_hub(struct device *d,unsigned *port) { (void)d;(void)port;return false; }
+static bool dwc3_apple_host_only(struct device *d) { (void)d;return false; }
+static bool device_property_read_bool(struct device *d,const char *name) { (void)d;(void)name;return false; }
+static void spin_lock_init(int *p) { *p=0; }
 static void publish_owner(struct platform_device *pdev,struct dwc3_apple *appledwc)
 {
     struct device *dev=&pdev->dev;
@@ -663,7 +750,7 @@ static void init(struct platform_device *p,struct dwc3_apple *a)
     a->state=DWC3_APPLE_PROBE_PENDING;a->dwc.num_usb3_ports=a->dwc.num_usb2_ports=1;
     a->dwc.usb3_generic_phy[0]=&ss;a->dwc.usb2_generic_phy[0]=&hs;
     atc=(struct apple_atcphy){.hw=&hw,.t8132_ss=true,.pipe_state=ATCPHY_PIPEHANDLER_STATE_DUMMY};
-    count=fail_phy=reset_calls=provider_stops=failed_probe=0;
+    count=fail_phy=reset_calls=provider_stops=failed_probe=rpm_puts=cancels=0;
 }
 int main(void)
 {
@@ -674,14 +761,15 @@ int main(void)
             failed_probe=1;assert(dwc3_apple_core_probe(&a,DWC3_APPLE_HOST)==-EIO);
             assert(platform_get_drvdata(&p)==&a.dwc);
         }
-        dwc3_apple_shutdown(&p);assert(a.shutting_down && !count && !reset_calls);
+        dwc3_apple_shutdown(&p);assert(a.shutting_down && !count && !reset_calls && cancels==3);
     }
     init(&p,&a);a.state=DWC3_APPLE_HOST;a.core_active=a.reset_pending=true;
     a.usb3_power_off_pending=a.usb2_power_off_pending=1;
-    atc.t8132_common_owned=atc.host_active=true;
+    atc.t8132_common_owned=atc.host_active=true;a.rpm_held=true;
     dwc3_apple_shutdown(&p);
     unsigned expected[]={1,2,3,4,5,6,7};
     assert(count==7 && !memcmp(stage,expected,sizeof(expected)));
+    assert(!a.rpm_held && rpm_puts==1);
     assert(!a.core_active && !a.reset_pending && a.state==DWC3_APPLE_NO_CABLE);
     supplier.dev.data=&atc;atcphy_shutdown(&supplier);
     assert(atc.t8132_suspended && !provider_stops && !atc.t8132_common_owned);
@@ -704,8 +792,9 @@ int main(void)
         if(blocked==3) atc.pipe_state=ATCPHY_PIPEHANDLER_STATE_USB3;
         atcphy_shutdown(&supplier);assert(!provider_stops && atc.t8132_common_owned);
     }
+    /* Other controllers are quiesced (a6671210b88c), never torn down. */
     init(&p,&a);p.dev.of_node="apple,t8103-dwc3";
-    dwc3_apple_shutdown(&p);assert(!a.shutting_down && !count);
+    dwc3_apple_shutdown(&p);assert(a.shutting_down && !count && !reset_calls);
     puts("ok 11 - consumer/provider shutdown ordering, probe-pending lifetime and retained failures");
     return 0;
 }
@@ -743,6 +832,8 @@ static int fail_release(struct phy *p) {
 static unsigned park_calls;
 static int atcphy_configure_pipehandler_dummy(struct apple_atcphy *a,bool lock)
 { (void)a;(void)lock;park_calls++;return -ETIMEDOUT; }
+/* The M1 live-PIPE workaround never applies to T8132. */
+static int atcphy_park_live_t8103_pipehandler(struct apple_atcphy *a) { (void)a;assert(0);return -1; }
 ''' + "\n".join(function(framework,name) for name in ["phy_init","phy_exit","phy_power_off"]) + function(source,"atcphy_park_pipehandler") + r'''
 int main(void)
 {

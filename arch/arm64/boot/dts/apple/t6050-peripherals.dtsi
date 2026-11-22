@@ -3355,6 +3355,7 @@
 		compatible = "apple,t6050-dart", "apple,t8110-dart";
 		reg = <0x5 0x9800000 0x0 0xc000>,
 		      <0x5 0x9810000 0x0 0x4000>;
+		reg-names = "dart", "dapf";
 		interrupts = <AIC_IRQ 0 955 IRQ_TYPE_LEVEL_HIGH>;
 		#iommu-cells = <1>;
 		power-domains = <&ps_ane_sys>;

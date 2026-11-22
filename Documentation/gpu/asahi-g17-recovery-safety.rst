@@ -40,14 +40,23 @@ reproduction is claimed here.
   render replays similarly expire after 10 s rather than polling forever when
   admission or publication cannot proceed. Wakes/new clients do not refresh
   either transaction timestamp; exact completion clears it.
-* A per-device burst limit stops the runtime on the eighth actual scheduler
+* A per-device burst limit stops the runtime on the eighth repeated scheduler
   timeout in a 30 s window or the eighth restart handshake in a 30 s window.
-  VM changes, new publications, recovery generations and replay do not reset
-  those counters; terminal loss latches. The 30 s window contains eight
-  two-second expirations, including a stalled deferred timeout that cannot
-  complete its normal per-client settlement. This limits host recovery load even
-  when each individual handshake succeeds. Legitimate long jobs only consume
-  this budget after their independent bounded execution allowance expires.
+  A command's first expiry is charged to its own client, whose work it fails
+  (or spares behind another VM's), and does not count: otherwise one process
+  could spend the budget with one hung command per queue. Only an expiry of a
+  command whose earlier settlement did not end it counts. Likewise a restart
+  is counted only once it is classified, and not when it is charged to the VMs
+  it finds guilty: each found guilty for the first time, which costs its client
+  the device, or blamed again for no more restarts than the commands it held
+  then. A restart without a guilty VM, or one that keeps blaming a VM beyond
+  that, counts. VM changes, new publications, recovery generations and replay
+  do not reset those counters; terminal loss latches. The 30 s window holds
+  the nine two-second expirations of a stalled deferred timeout that cannot
+  complete its normal per-client settlement: its first, then the eight that
+  count. This limits host recovery load even when each individual handshake
+  succeeds. Legitimate long jobs only consume this budget after their
+  independent bounded execution allowance expires.
 
 Lock order remains stop -> state and state -> preparation wait/reclaim. All
 preparation joins and deferred fence completion/destruction run outside state.
@@ -63,13 +72,14 @@ EVENT_SLOTS; trace/statistics consume a snapshot producer. Render retirement
 loops remove one retained tracker per successful iteration (or mark one as
 accounted); compute replay consumes a retained replay per iteration. Shared
 capacity deadlines remain absolute and failed fences do not release mappings
-or return physical reservations. The new storm limits additionally bound
+or return physical reservations. The storm limits additionally bound
 repeated recoveries and timeouts across those paths.
 
 KUnit exercises 64 consecutive watchdog timeouts with recovery pending under
 real state/preparation mutexes, a retained lease that must time out rather
 than be freed, late lease return with failed admission still closed, restart
-storms and nonblocking replay status checks. The mailbox tests use normal RAM
+storms, the published-expiry record and nonblocking replay status checks.
+The mailbox tests use normal RAM
 as never-empty RX and never-draining TX registers, invoking the production
 poll/send functions for 64 RX passes and eight atomic TX timeouts plus a
 sleeping TX timeout/removal control. The isolated Asahi scenario runs with

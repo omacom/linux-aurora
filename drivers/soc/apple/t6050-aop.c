@@ -16,6 +16,12 @@
  * After the sleep: AP ON, then one element on each TX ring again, the device tree's wake message,
  * each answered by interrupt. An endpoint whose wake element was not answered stays closed and
  * gets no sleep element at the next sleep.
+ *
+ * macOS stops AOP2 before AOP, and both about 200 ms before the commit: AOP2's elements and AP
+ * IDLE first, then AOP's endpoint stops, and AOP's AP IDLE 18-25 ms after AOP2's (J714s, macOS 27
+ * under the hypervisor, five captures). AOP2 is therefore a consumer of AOP for the PM core, so
+ * that its late suspend, which stops it, runs before AOP's, which stops AOP; the commit's pass
+ * then finds it stopped. Without that link it is stopped in that pass, as before.
  */
 
 #include <linux/bitfield.h>
@@ -27,6 +33,7 @@
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/soc/apple/rtkit.h>
@@ -91,6 +98,10 @@ struct t6050_aop {
 	void __iomem *asc;
 	struct apple_rtkit *rtk;
 	bool registered;
+	/* Ordered before AOP by the PM core: stopped at its late suspend, not at the commit */
+	struct device_link *aop_link;
+	/* This sleep's stop ran at the late suspend: the commit's pass has nothing to send */
+	bool stopped_late;
 	unsigned long opened;	/* bit (ep - AOP_EP_FIRST): open as its side of the protocol needs */
 	unsigned long seen;	/* bit (ep - AOP_EP_FIRST): the firmware sent something */
 	struct t6050_aop_ring ring[AOP_EP_COUNT];
@@ -382,7 +393,10 @@ static int t6050_aop2_element(struct t6050_aop *aop, u8 ep)
 	return 0;
 }
 
-/* The sleep's first pass, interrupts off: the CPU keeps running. */
+/*
+ * At the late suspend, before AOP's, or else in the sleep's first pass with interrupts off: the
+ * CPU keeps running.
+ */
 static int t6050_aop_sleep_stop(void *data)
 {
 	struct t6050_aop *aop = data;
@@ -447,13 +461,42 @@ static int t6050_aop_sleep_stop(void *data)
 	return aop->stop_errors || aop->idle_ret;
 }
 
+/* The commit's first pass: nothing more once the late suspend has stopped it. */
+static int t6050_aop_commit_stop(void *data)
+{
+	struct t6050_aop *aop = data;
+
+	if (aop->stopped_late)
+		return aop->stop_errors || aop->idle_ret;
+
+	return t6050_aop_sleep_stop(aop);
+}
+
 static int t6050_aop_suspend(struct device *dev)
 {
 	struct t6050_aop *aop = dev_get_drvdata(dev);
 
 	if (!pm_suspend_via_firmware() || !aop->registered)
 		return 0;
+	aop->stopped_late = false;
+	/* Ready for the commit either way: a registered coprocessor that isn't refuses the sleep. */
 	apple_sleep_coproc_set_ready(dev, true);
+
+	return 0;
+}
+
+/*
+ * Before AOP's late suspend stops AOP, as macOS stops AOP2 first. A stop that fails leaves the
+ * sleep to go on, as at the commit; the resume restarts what it closed.
+ */
+static int t6050_aop_suspend_late(struct device *dev)
+{
+	struct t6050_aop *aop = dev_get_drvdata(dev);
+
+	if (!pm_suspend_via_firmware() || !aop->registered || !aop->aop_link)
+		return 0;
+	t6050_aop_sleep_stop(aop);
+	aop->stopped_late = true;
 
 	return 0;
 }
@@ -538,6 +581,7 @@ static int t6050_aop_resume(struct device *dev)
 	/* Read before the ready flag goes: clearing that clears the stopped flag with it. */
 	stopped = apple_sleep_coproc_stopped(dev);
 	apple_sleep_coproc_set_ready(dev, false);
+	aop->stopped_late = false;
 	if (!stopped && !aop->asleep)
 		return 0;
 	t6050_aop_restart(aop);
@@ -545,7 +589,36 @@ static int t6050_aop_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(t6050_aop_pm_ops, t6050_aop_suspend, t6050_aop_resume);
+static const struct dev_pm_ops t6050_aop_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(t6050_aop_suspend, t6050_aop_resume)
+	.suspend_late = pm_sleep_ptr(t6050_aop_suspend_late),
+};
+
+/* AOP2 becomes a consumer of AOP (the Rust apple_aop driver's device) for the PM core's order. */
+static void t6050_aop_order_before_aop(struct t6050_aop *aop)
+{
+	struct device_node *np;
+	struct platform_device *aop_pdev = NULL;
+
+	for_each_compatible_node(np, NULL, "apple,t6050-aop") {
+		if (!of_device_is_available(np))
+			continue;
+		aop_pdev = of_find_device_by_node(np);
+		of_node_put(np);
+		break;
+	}
+	if (!aop_pdev) {
+		dev_info(aop->dev, "no AOP to stop before: stopped at the commit\n");
+		return;
+	}
+	aop->aop_link = device_link_add(aop->dev, &aop_pdev->dev, DL_FLAG_STATELESS);
+	if (aop->aop_link)
+		dev_info(aop->dev, "stopped before %s for a sleep, as macOS\n", dev_name(&aop_pdev->dev));
+	else
+		dev_warn(aop->dev, "not ordered before %s: stopped at the commit\n",
+			 dev_name(&aop_pdev->dev));
+	put_device(&aop_pdev->dev);
+}
 
 /*
  * An endpoint order from the device tree. Without the property, or with one that is not a list
@@ -644,11 +717,13 @@ static int t6050_aop_probe(struct platform_device *pdev)
 		t6050_aop_send(aop, ep, FIELD_PREP(AFK_TYPE, AFK_INIT) | aop->init_arg);
 	}
 
-	ret = apple_sleep_coproc_register_first(dev, t6050_aop_sleep_stop, aop);
+	ret = apple_sleep_coproc_register_first(dev, t6050_aop_commit_stop, aop);
 	if (ret)
 		dev_warn(dev, "not told of a system sleep: %d\n", ret);
 	else
 		aop->registered = true;
+	if (aop->registered)
+		t6050_aop_order_before_aop(aop);
 	dev_info(dev, "firmware started (control %#x), %u endpoints started\n",
 		 readl(aop->asc + AOP_CPU_CONTROL), started);
 

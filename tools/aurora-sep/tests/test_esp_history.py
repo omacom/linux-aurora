@@ -197,12 +197,21 @@ class HistoryTest(unittest.TestCase):
             self.assertEqual(run.stdout.splitlines(),
                              (['HISTORY:archive'] if enabled else []) + ['PLAN'])
 
-    def test_read_only_install_does_not_archive(self):
-        run = self.shell('release_source(){ :; }; require_supported_soc(){ :; }; '
-                         'esp_history_run(){ echo ARCHIVE; }; '
-                         'ESP_ARCHIVE_HISTORY=1; READ_ONLY=1; install_all')
+    def test_removed_read_only_option_does_not_archive(self):
+        # --read-only was removed (SEP writes are always on): with --archive-esp-history the
+        # option parser refuses it before anything runs.
+        installer = SCRIPT.with_name('install-aurora-sep.sh')
+        text = installer.read_text()
+        tail = text[text.index('args=()\n', text.index('# Tests source this file')):]
+        stubs = ('preflight(){ :; }; esp_history_run(){ echo ARCHIVE; }; '
+                 'install_all(){ echo INSTALL; }; ')
+        run = subprocess.run(['bash', '-c', 'export AURORA_SEP_SOURCE_ONLY=1; source "$1"; shift; '
+                              + stubs + tail, 'test', str(installer),
+                              '--archive-esp-history', '--read-only'],
+                             capture_output=True, text=True)
         self.assertNotEqual(run.returncode, 0)
-        self.assertNotIn('ARCHIVE', run.stdout)
+        self.assertEqual(run.stdout, '')
+        self.assertIn('--read-only was removed: SEP writes are always on', run.stderr)
 
 
 if __name__ == '__main__':

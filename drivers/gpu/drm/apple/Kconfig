@@ -21,9 +21,20 @@ config DRM_APPLE
 	depends on BACKLIGHT_CLASS_DEVICE
 	select MULTIPLEXER
 	select DRM_APPLE_FABRIC_CORE
+	select CEC_CORE if DRM_APPLE_CEC
 	help
 	  Say Y if you have an Apple Silicon chipset. This includes the
 	  Type-C display fabric and Thunderbolt display routing.
+
+config DRM_APPLE_CEC
+	bool "HDMI CEC support"
+	default y
+	depends on DRM_APPLE
+	help
+	  Enable HDMI Consumer Electronics Control (CEC) support on Apple
+	  Silicon machines with a built-in HDMI port via the compact EPIC
+	  dcpav-cec-interface-epic service. Say Y here to expose a standard
+	  Linux /dev/cecX adapter bound to the built-in HDMI connector.
 
 config DRM_APPLE_AUDIO
 	bool "DisplayPort/HDMI Audio support"

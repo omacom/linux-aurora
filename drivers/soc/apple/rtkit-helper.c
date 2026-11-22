@@ -299,7 +299,7 @@ static int apple_rtkit_helper_probe(struct platform_device *pdev)
 			helper->preserved = true;
 	}
 
-	if (!live && apple_t8132_live_mtp() && of_machine_is_compatible("apple,t8132")) {
+	if (!live && apple_t8132_live_mtp()) {
 		struct property *prop;
 		u32 inherited;
 		int len;
@@ -543,7 +543,11 @@ static int __maybe_unused apple_rtkit_helper_suspend(struct device *dev)
 
 	if (helper->adopted && pm_suspend_target_state != PM_SUSPEND_TO_IDLE)
 		return -EBUSY;
-	if (!helper->adopted || !of_machine_is_compatible("apple,j613"))
+	/*
+	 * An adopted session (apple,rtkit-handoff) was handed over running
+	 * because it cannot be restarted, whatever the board.
+	 */
+	if (!helper->adopted)
 		return 0;
 	if (!(readl(helper->asc_base + APPLE_ASC_CPU_CONTROL) & APPLE_ASC_CPU_CONTROL_RUN))
 		return -EHOSTDOWN;
@@ -559,7 +563,7 @@ static int __maybe_unused apple_rtkit_helper_resume(struct device *dev)
 
 	/* After a firmware-driven suspend's idle notice; nothing otherwise. */
 	apple_rtkit_helper_ap_on(helper);
-	if (!helper->adopted || !of_machine_is_compatible("apple,j613"))
+	if (!helper->adopted)
 		return 0;
 	if (!(readl(helper->asc_base + APPLE_ASC_CPU_CONTROL) & APPLE_ASC_CPU_CONTROL_RUN)) {
 		dev_err(dev, "adopted MTP lost ASC RUN; refusing firmware restart\n");

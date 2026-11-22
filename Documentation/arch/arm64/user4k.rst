@@ -11,8 +11,8 @@ fixed for its lifetime; exec can create a new address space with another
 supported granule. See :doc:`../../mm/user_page_size` for the generic launch
 policy and architecture integration contract.
 
-This is an experimental feature and ABI. It is built into the kernel but
-stays off unless the kernel is booted with ``user4k=on``. The launch
+This is an experimental feature and ABI. It is built into the kernel and
+on unless the kernel is booted with ``user4k=off``. The launch
 commands use private prctl numbers, not assigned upstream UAPI. The
 implementation and tests do not establish complete application, device or
 hardware qualification.
@@ -36,7 +36,7 @@ Native kernel size  AArch64 default    AArch64 alternatives
 =================== ================== ============================
 
 Capability detection uses the sanitized system-wide granule intersection,
-and only runs with ``user4k=on``. AArch32 executables select 4K when that
+and does not run with ``user4k=off``. AArch32 executables select 4K when that
 capability is available and retain the native granule otherwise, regardless
 of launch preferences. The latter case still enforces native
 mapping/protection alignment. AArch32 mmap2 file offsets retain their 4K
@@ -52,12 +52,12 @@ Larger-than-native process granules are not exposed. Internal 64K-on-16K
 fixtures exercise allocation, mappings and argument staging, but those
 fixtures do not enable a public 64K process ABI on a 16K kernel.
 
-Enabling at boot
-================
+Turning it off at boot
+======================
 
-Building the option in does not enable it. Add ``user4k=on`` to the kernel
-command line to enable it for that boot; ``user4k=off`` or no parameter
-leaves it off. The value is parsed with ``kstrtobool()``, so ``1``/``0``
+Building the option in enables it. Add ``user4k=off`` to the kernel
+command line to turn it off for that boot; ``user4k=on`` or no parameter
+leaves it on. The value is parsed with ``kstrtobool()``, so ``1``/``0``
 and ``y``/``n`` also work, and it cannot be changed after boot.
 
 While it is off:
@@ -76,13 +76,13 @@ While it is off:
 The shared MM code paths that serve every process are compiled in either
 way and do not change with the parameter.
 
-With ``user4k=on`` the CPU capability line appears on CPUs that support
+While it is on, the CPU capability line appears on CPUs that support
 the 4K translation granule, and the launcher below can select 4K pages.
 
 Selecting an executable's page size
 ===================================
 
-The kernel must be booted with ``user4k=on``. Build the development
+The kernel must not be booted with ``user4k=off``. Build the development
 launcher with::
 
     make -C tools/aurora-userpages
@@ -194,8 +194,8 @@ Test coverage
 =============
 
 The arm64 selftests are in ``tools/testing/selftests/arm64/user4k``. The
-fixtures that select another page size need a guest booted with
-``user4k=on``. The ``page-contract`` executable checks the exposed
+fixtures that select another page size need a guest booted without
+``user4k=off``. The ``page-contract`` executable checks the exposed
 userspace contract. Extended
 fixtures cover exec policy, AArch32, shared mappings, accounting, reclaim,
 I/O and device-facing interfaces. Several are disposable-guest PID1 programs
@@ -203,9 +203,10 @@ with companion executables or storage requirements; they are not ordinary
 host test commands.
 
 ``CONFIG_ARM64_USER4K_KUNIT_TEST`` and the data/TLB suites exercise internal
-geometry and ownership. Boot them with ``user4k=on``, for example
-``kunit.py run --kernel_args user4k=on``. The ``arm64-user4k-policy`` suite
-also runs without it and checks that the feature stays closed while off.
+geometry and ownership. Boot them without ``user4k=off``. The
+``arm64-user4k-policy`` suite also runs with ``user4k=off`` (for example
+``kunit.py run --kernel_args user4k=off``) and checks that the feature stays
+closed while off.
 Some fixtures additionally require ``arm64.user4k_test=1`` and
 some hardware translation tests are disabled under KASAN. Check individual
 KTAP results and skips rather than treating boot success as a suite pass.

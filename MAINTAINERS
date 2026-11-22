@@ -2821,6 +2821,7 @@ F:	tools/asahi/pmp-bootargs-tests.rs
 F:	drivers/spi/spi-apple-test.c
 F:	tools/asahi/test-m3-uapi.py
 F:	drivers/spi/spi-apple.c
+F:	tools/spi/apple-spi-clock-test.py
 F:	drivers/spmi/spmi-apple-controller.c
 F:	drivers/thermal/apple-pmp*
 F:	drivers/thunderbolt/.kunitconfig.apple-dpin

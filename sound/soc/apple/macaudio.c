@@ -4074,6 +4074,32 @@ struct macaudio_platform_cfg macaudio_j873_cfg = {
 };
 
 /*
+ * J775c and J775d (T6050, Mac Studio M5 Max and M5 Ultra): as on J714s, the
+ * AOP firmware owns the audio fabric and the CPU component is the AOP audio
+ * driver. The jack is a CS42L84 on "cout", the speaker one SN012776 on
+ * "spkr" in a frame of 250 BCLKs of 12 MHz.
+ *
+ * The speaker stays off. The ADT's audio-speaker stream lists one TX slot and
+ * no RX (sense) slot, so the speaker can only be run under a protection lease
+ * held by speakerguardd with a no-sense model, as on the J773g; that model
+ * does not exist for these machines yet. Until it does there is no safe
+ * level: macaudio_speakers_allowed() keeps the speaker off, as on the J873.
+ * The jack is unaffected.
+ */
+struct macaudio_platform_cfg macaudio_j775_cfg = {
+	.enable_speakers = false,
+	.amp = AMP_SN012776,
+	.speakers = SPKR_1W,
+	.stereo = false,
+	.safe_vol = 0,
+	.fe_dai_names = { "j873-pcm-0", "j873-pcm-1", "j873-pcm-2" },
+	.dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBC_CFC | SND_SOC_DAIFMT_IB_NF,
+	.spk_dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC |
+		       SND_SOC_DAIFMT_GATED | SND_SOC_DAIFMT_NB_IF,
+	.spk_secondary_only = true,
+};
+
+/*
  * J813 (T8142, MacBook Air M5 13"): as on J873, the AOP firmware owns the
  * audio fabric and the CPU component is the T8152-style AOP audio driver.
  * The jack is a CS42L84 on "cout"; the speakers are four SN012776 (one
@@ -4445,6 +4471,10 @@ static const struct of_device_id macaudio_snd_device_id[]  = {
 	{ .compatible = "apple,j773-macaudio-jack", .data = &macaudio_j616_jack_cfg },
 	/* j873    AID48   sn012776    15      1x 1W    (AOP-fed, no protection) */
 	{ .compatible = "apple,j873-macaudio", .data = &macaudio_j873_cfg },
+	/* j775c   -       sn012776    -       1x 1W    (AOP-fed, no sense: speaker off) */
+	{ .compatible = "apple,j775c-macaudio", .data = &macaudio_j775_cfg },
+	/* j775d   -       sn012776    -       1x 1W    (AOP-fed, no sense: speaker off) */
+	{ .compatible = "apple,j775d-macaudio", .data = &macaudio_j775_cfg },
 	/* j813    AID?    sn012776    15      2x 1W+1T (AOP-fed, V/I sense) */
 	{ .compatible = "apple,j813-macaudio", .data = &macaudio_j813_cfg },
 	/* j815    AID43   sn012776    15      2x 2W+1T (AOP-fed, V/I sense) */

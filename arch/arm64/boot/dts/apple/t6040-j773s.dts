@@ -262,6 +262,7 @@
 };
 
 &apcie2_dart {
+	power-domains = <&ps_apcie_sys_gp>;
 	status = "okay";
 };
 

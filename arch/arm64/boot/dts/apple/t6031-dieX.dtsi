@@ -494,6 +494,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1567 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc0_cio)>;
 		};
 
 		DIE_NODE(usb4_0_nhi): nhi@f00000 {
@@ -661,6 +662,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1615 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc1_cio)>;
 		};
 
 		DIE_NODE(usb4_1_nhi): nhi@f00000 {
@@ -828,6 +830,7 @@
 			interrupt-parent = <&aic>;
 			interrupts = <AIC_IRQ DIE_NO 1663 IRQ_TYPE_LEVEL_HIGH>;
 			#iommu-cells = <5>;
+			power-domains = <&DIE_NODE(ps_atc2_cio)>;
 		};
 
 		DIE_NODE(usb4_2_nhi): nhi@f00000 {

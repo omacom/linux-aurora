@@ -4,8 +4,9 @@
  * the shared PCIe block the wake brings back, and the port controllers' sleep power state.
  * Included at the end of each board's device tree, after the nodes it refers to.
  *
- * The boot core's power gate (cluster_pwrgate) and the DCP DART's PS write-disable bit come
- * with the board's own nodes (aurora-silicon/linux#1942, #1941).
+ * The boot core's power gate (cluster_pwrgate), the internal display's power words (dcp_power)
+ * and the DCP DART's PS write-disable bit are in t8142-j813-j815.dtsi (aurora-silicon/linux#1942,
+ * #1941).
  */
 
 #include <dt-bindings/gpio/gpio.h>
@@ -105,6 +106,8 @@
 		 * SMC.OutboxNotEmpty, MTP.DOCK.CHANNELS.AP0.IRQ and MTP.OutboxNotEmpty.
 		 */
 		apple,wake-enable = <152 72 168 190 89 108>;
+		/* PMU RTC: peripheral source 2, routed through NUB.SPMI0.SW3 (wake source 152). */
+		apple,spmi-pmu-sources = <0x600 0x4>;
 		/*
 		 * The DCP, then the external DCPs once the tree describes them (dcpext0, dcpext1):
 		 * the sleep lowers them with the display, and refuses while an undescribed one is up.
@@ -151,7 +154,7 @@
  * The port controllers' system power state (SSPS 3 before the commit, 0 at the wake), as
  * macOS's AppleHPM sends it on the J700 and J714s, measured there on the same SN201202x;
  * not traced on an M5 Air. Only a firmware-driven sleep sends it, and a controller that
- * does not take S3 refuses the sleep (tipd sleep_s3_refuse).
+ * does not take S3 refuses the sleep (tipd's cd321x_prepare()).
  */
 &hpm0 {
 	apple,sleep-ssps;

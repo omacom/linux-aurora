@@ -28,6 +28,7 @@
 		interrupts = <AIC_IRQ 948 IRQ_TYPE_LEVEL_HIGH>,
 		             <AIC_IRQ 949 IRQ_TYPE_LEVEL_HIGH>;
 		iommus = <&avd_dart 0>;
+		dma-coherent;
 		power-domains = <&ps_avd_sys>;
 		resets = <&ps_avd_sys>;
 		status = "disabled";

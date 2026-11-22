@@ -43,10 +43,40 @@ const TILECTL_DISABLE_CLUSTERING: u32 = 1u32 << 0;
 #[versions(AGX)]
 impl super::QueueInner::ver {
     /// Get the appropriate tiling parameters for a given userspace command buffer.
+    ///
+    /// This validates the flags and dimensions of the command first, so that every caller,
+    /// including the submission-wide TVB sizing pass that runs before [`Self::submit_render`],
+    /// rejects a malformed command with `EINVAL` before any arithmetic on its dimensions.
     fn get_tiling_params(
         cmdbuf: &uapi::drm_asahi_cmd_render,
         num_clusters: u32,
     ) -> Result<buffer::TileInfo> {
+        if cmdbuf.flags
+            & !(uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_VERTEX_SCRATCH
+                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES
+                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING
+                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT
+                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_FRAGMENT_BARRIERS)
+            != 0
+        {
+            cls_pr_debug!(Errors, "Invalid flags ({:#x})\n", cmdbuf.flags);
+            return Err(EINVAL);
+        }
+
+        if cmdbuf.width_px == 0
+            || cmdbuf.height_px == 0
+            || cmdbuf.width_px > 16384
+            || cmdbuf.height_px > 16384
+        {
+            cls_pr_debug!(
+                Errors,
+                "Invalid dimensions ({}x{})\n",
+                cmdbuf.width_px,
+                cmdbuf.height_px
+            );
+            return Err(EINVAL);
+        }
+
         let width: u32 = u32::from(cmdbuf.width_px);
         let height: u32 = u32::from(cmdbuf.height_px);
         let layers: u32 = u32::from(cmdbuf.layers);
@@ -181,7 +211,24 @@ impl super::QueueInner::ver {
         })
     }
 
+    /// TVB blocks a render command needs, with the clustering decision [`Self::submit_render`] makes.
+    ///
+    /// Fails with `EINVAL` for a command [`Self::get_tiling_params`] rejects.
+    pub(super) fn render_min_tvb_blocks(
+        gpu: &gpu::GpuManager::ver,
+        cmdbuf: &uapi::drm_asahi_cmd_render,
+    ) -> Result<usize> {
+        let nclusters = gpu.get_dyncfg().id.num_clusters;
+        let clustering = nclusters > 1
+            && !debug_enabled(debug::DebugFlags::DisableClustering)
+            && cmdbuf.flags & uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING == 0;
+        Ok(Self::get_tiling_params(cmdbuf, if clustering { nclusters } else { 1 })?.min_tvb_blocks)
+    }
+
     /// Submit work to a render queue.
+    ///
+    /// `init_slot` is set on the first render of a submission when the TVB grew since the last
+    /// render the queue published, so that this render re-initialises the buffer slot.
     #[expect(
         clippy::too_many_arguments,
         reason = "Submission inputs are retained separately by the existing queue interface."
@@ -196,33 +243,9 @@ impl super::QueueInner::ver {
         objects: Pin<&xarray::XArray<KBox<file::Object>>>,
         id: u64,
         flush_stamps: bool,
+        init_slot: bool,
     ) -> Result {
         mod_dev_dbg!(self.dev, "[Submission {}] Render!\n", id);
-
-        if cmdbuf.flags
-            & !(uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_VERTEX_SCRATCH
-                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_PROCESS_EMPTY_TILES
-                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING
-                | uapi::drm_asahi_render_flags_DRM_ASAHI_RENDER_DBIAS_IS_INT)
-            != 0
-        {
-            cls_pr_debug!(Errors, "Invalid flags ({:#x})\n", cmdbuf.flags);
-            return Err(EINVAL);
-        }
-
-        if cmdbuf.width_px == 0
-            || cmdbuf.height_px == 0
-            || cmdbuf.width_px > 16384
-            || cmdbuf.height_px > 16384
-        {
-            cls_pr_debug!(
-                Errors,
-                "Invalid dimensions ({}x{})\n",
-                cmdbuf.width_px,
-                cmdbuf.height_px
-            );
-            return Err(EINVAL);
-        }
 
         let mut vtx_user_timestamps: fw::job::UserTimestamps = Default::default();
         let mut frg_user_timestamps: fw::job::UserTimestamps = Default::default();
@@ -267,33 +290,6 @@ impl super::QueueInner::ver {
 
         let buffer = &self.buffer;
         let notifier = self.notifier.clone();
-
-        let tvb_autogrown = buffer.auto_grow()?;
-        if tvb_autogrown {
-            let new_size = buffer.block_count() as usize;
-            cls_dev_dbg!(
-                TVBStats,
-                &self.dev,
-                "[Submission {}] TVB grew to {} bytes ({} blocks) due to overflows\n",
-                id,
-                new_size * buffer::BLOCK_SIZE,
-                new_size,
-            );
-        }
-
-        let tvb_grown = buffer.ensure_blocks(tile_info.min_tvb_blocks)?;
-        if tvb_grown {
-            cls_dev_dbg!(
-                TVBStats,
-                &self.dev,
-                "[Submission {}] TVB grew to {} bytes ({} blocks) due to dimensions ({}x{})\n",
-                id,
-                tile_info.min_tvb_blocks * buffer::BLOCK_SIZE,
-                tile_info.min_tvb_blocks,
-                cmdbuf.width_px,
-                cmdbuf.height_px
-            );
-        }
 
         let scene = Arc::new(buffer.new_scene(kalloc, &tile_info)?, GFP_KERNEL)?;
 
@@ -948,7 +944,7 @@ impl super::QueueInner::ver {
         let fence = job.fence.clone();
         let vtx_job = job.get_vtx()?;
 
-        if scene.rebind() || tvb_grown || tvb_autogrown {
+        if scene.rebind() || init_slot {
             mod_dev_dbg!(self.dev, "[Submission {}] Create Bind Buffer\n", id);
             let bind_buffer = kalloc.private.new_init(
                 {
@@ -1399,5 +1395,62 @@ impl super::QueueInner::ver {
         job.get_frag()?.next_seq();
 
         Ok(())
+    }
+}
+
+#[kunit_tests(asahi_render_tiling_params)]
+mod tests {
+    use super::super::QueueInnerG13V12_3 as Inner;
+    use kernel::prelude::*;
+    use kernel::uapi;
+
+    fn render(width: u16, height: u16, layers: u16) -> uapi::drm_asahi_cmd_render {
+        uapi::drm_asahi_cmd_render {
+            width_px: width,
+            height_px: height,
+            layers,
+            utile_width_px: 32,
+            utile_height_px: 32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn zero_or_oversized_dimensions_are_einval() {
+        // The submission-wide TVB sizing pass calls this before submit_render() runs, so these
+        // must fail here and not reach `width - 1` / `tiles_x - 1` (an overflow-check panic).
+        for (w, h) in [(0, 0), (0, 64), (64, 0), (16385, 64), (64, 16385)] {
+            for clusters in [1, 2] {
+                let err = Inner::get_tiling_params(&render(w, h, 1), clusters).err();
+                assert_eq!(err, Some(EINVAL));
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_flags_are_einval() {
+        let mut cmd = render(64, 64, 1);
+        cmd.flags = 1 << 31;
+        assert_eq!(Inner::get_tiling_params(&cmd, 2).err(), Some(EINVAL));
+    }
+
+    #[test]
+    fn smallest_and_largest_valid_sizes() {
+        let one = Inner::get_tiling_params(&render(1, 1, 1), 2).expect("1x1 is valid");
+        assert_eq!(one.tiles_x, 1);
+        assert_eq!(one.tiles_y, 1);
+        assert_eq!(one.params.x_max, 0);
+        assert_eq!(one.params.te_screen, 0);
+        let max = Inner::get_tiling_params(&render(16384, 16384, 1), 2).expect("16K is valid");
+        assert_eq!(max.params.x_max, 16383);
+    }
+
+    #[test]
+    fn clustered_layered_render_needs_7_plus_2_layers_blocks() {
+        // The sizing that makes a 3D blit grow a fresh TVB on G13S (see Queue::submit).
+        let clustered = Inner::get_tiling_params(&render(64, 64, 16), 2).expect("valid");
+        assert_eq!(clustered.min_tvb_blocks, 7 + 2 * 16);
+        let single = Inner::get_tiling_params(&render(64, 64, 16), 1).expect("valid");
+        assert_eq!(single.min_tvb_blocks, 8);
     }
 }

@@ -3,6 +3,7 @@
 #define __APPLE_IOMFB_M4_H__
 
 #include <linux/types.h>
+#include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/kconfig.h>
 
@@ -10,6 +11,7 @@ struct apple_dcp;
 struct device;
 struct dentry;
 struct drm_connector;
+struct drm_edid;
 struct drm_display_mode;
 struct drm_rect;
 struct iosys_map;
@@ -51,6 +53,7 @@ void iomfb_m4_external_link_gone(struct apple_dcp *dcp);
 /* An adopted external DCP's sink, for its DRM connector (t8132_ext_drm.c). */
 int iomfb_m4_ext_detect(struct apple_dcp *dcp);
 int iomfb_m4_ext_get_modes(struct apple_dcp *dcp, struct drm_connector *connector);
+const struct drm_edid *iomfb_m4_ext_edid(struct apple_dcp *dcp);
 /* DRM drives the external output: modeset, copied frames, disable. */
 int iomfb_m4_ext_mode_ids(struct apple_dcp *dcp, const struct drm_display_mode *mode,
 			  struct iomfb_m4_ext_ids *ids);
@@ -70,6 +73,14 @@ void iomfb_m4_ext_sleep_wake(struct apple_dcp *dcp);
 bool iomfb_m4_ext_stale(struct apple_dcp *dcp);
 int iomfb_m4_ext_restore_result(struct apple_dcp *dcp, unsigned int timeout_ms);
 void iomfb_m4_ext_restore_end(struct apple_dcp *dcp);
+void iomfb_m4_ext_relink_own(struct apple_dcp *dcp);
+void iomfb_m4_ext_relink_expect(struct apple_dcp *dcp);
+bool iomfb_m4_ext_relinking(struct apple_dcp *dcp);
+void iomfb_m4_ext_relink_arm(struct apple_dcp *dcp, bool cable);
+void iomfb_m4_ext_relink_lost(struct apple_dcp *dcp);
+void iomfb_m4_ext_relink_wait(struct apple_dcp *dcp, unsigned long deadline);
+int iomfb_m4_ext_relink_end(struct apple_dcp *dcp);
+bool iomfb_m4_ext_stopped(struct apple_dcp *dcp);
 
 /* The caller has waited for the producer fence before publishing the DMA GEM. */
 int iomfb_m4_present(struct apple_dcp *dcp, struct drm_framebuffer *fb,
@@ -101,6 +112,11 @@ static inline int iomfb_m4_ext_detect(struct apple_dcp *dcp) { return -ENODEV; }
 static inline int iomfb_m4_ext_get_modes(struct apple_dcp *dcp, struct drm_connector *connector)
 {
 	return 0;
+}
+
+static inline const struct drm_edid *iomfb_m4_ext_edid(struct apple_dcp *dcp)
+{
+	return ERR_PTR(-ENODEV);
 }
 
 static inline int iomfb_m4_ext_mode_ids(struct apple_dcp *dcp,
@@ -140,6 +156,14 @@ static inline int iomfb_m4_ext_restore_result(struct apple_dcp *dcp, unsigned in
 }
 
 static inline void iomfb_m4_ext_restore_end(struct apple_dcp *dcp) { }
+static inline void iomfb_m4_ext_relink_own(struct apple_dcp *dcp) { }
+static inline void iomfb_m4_ext_relink_expect(struct apple_dcp *dcp) { }
+static inline bool iomfb_m4_ext_relinking(struct apple_dcp *dcp) { return false; }
+static inline void iomfb_m4_ext_relink_arm(struct apple_dcp *dcp, bool cable) { }
+static inline void iomfb_m4_ext_relink_lost(struct apple_dcp *dcp) { }
+static inline void iomfb_m4_ext_relink_wait(struct apple_dcp *dcp, unsigned long deadline) { }
+static inline int iomfb_m4_ext_relink_end(struct apple_dcp *dcp) { return 0; }
+static inline bool iomfb_m4_ext_stopped(struct apple_dcp *dcp) { return false; }
 
 static inline int iomfb_m4_present(struct apple_dcp *dcp, struct drm_framebuffer *fb,
 				  dma_addr_t dva, size_t mapped)

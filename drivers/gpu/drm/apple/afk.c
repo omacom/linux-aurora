@@ -476,6 +476,14 @@ static bool afk_compact_capable(struct apple_dcp_afkep *ep)
 		ep->endpoint == AV_AUDIO_ENDPOINT_DESKTOP);
 }
 
+bool afk_compact_av_capable(struct apple_dcp *dcp)
+{
+	return (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP &&
+		dcp->desktop_external) ||
+	       dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL ||
+	       dcp_is_v27_external(dcp);
+}
+
 static u32 afk_compact_next_status(struct apple_epic_service *service)
 {
 	unsigned long flags;
@@ -760,11 +768,11 @@ int afk_start_service(struct apple_epic_service *service)
 	return ret;
 }
 
-/* "prefix:name[:suffix]": match on name; "*" takes every service. */
+/* "prefix:name[:suffix]": match on name, cut or not; "*" takes every other service. */
 static const struct apple_epic_service_ops *
 afk_compact_match_service(struct apple_dcp_afkep *ep, const char *name)
 {
-	const struct apple_epic_service_ops *ops;
+	const struct apple_epic_service_ops *ops, *any = NULL;
 	const char *service_name;
 	size_t len;
 
@@ -778,8 +786,10 @@ afk_compact_match_service(struct apple_dcp_afkep *ep, const char *name)
 		service_name = name;
 
 	for (ops = ep->ops; ops->name[0]; ops++) {
-		if (!strcmp(ops->name, "*"))
-			return ops;
+		if (!strcmp(ops->name, "*")) {
+			any = any ?: ops;
+			continue;
+		}
 
 		len = strlen(ops->name);
 		if (strncmp(ops->name, service_name, len))
@@ -792,12 +802,12 @@ afk_compact_match_service(struct apple_dcp_afkep *ep, const char *name)
 
 	/* An announcement that filled its field may have lost its end. */
 	if (strlen(name) < AFK_COMPACT_NAME_LEN - 1)
-		return NULL;
+		return any;
 	for (ops = ep->ops; ops->name[0]; ops++)
 		if (afk_compact_cut_of(ops, service_name))
 			return ops;
 
-	return NULL;
+	return any;
 }
 
 /*
@@ -1199,6 +1209,18 @@ static bool afk_compact_report_dictionary(const void *payload, size_t size)
 	       ((get_unaligned_le32(payload + sizeof(u32)) >> 24) & 0x1f) == 1;
 }
 
+/*
+ * A bare compact report starts with the service-call header. Its magic
+ * is at the usual offset from the start of the payload.
+ */
+static bool afk_compact_report_service_call(const void *payload, size_t size)
+{
+	const struct epic_service_call *call = payload;
+
+	return size >= sizeof(*call) &&
+	       get_unaligned_le32(&call->magic) == EPIC_SERVICE_CALL_MAGIC;
+}
+
 static void afk_recv_compact_message(struct apple_dcp_afkep *ep, u16 intf_id,
 				     const void *body, size_t size)
 {
@@ -1221,10 +1243,11 @@ static void afk_recv_compact_message(struct apple_dcp_afkep *ep, u16 intf_id,
 		return;
 	}
 	if (sub->category == 0) {
-		/* Preserve bare dictionaries; command-style reports have a descriptor. */
+		/* Preserve bare dictionaries and EPIC call headers; others carry a descriptor. */
 		if (sub->type == EPIC_SUBTYPE_STD_SERVICE &&
 		    payload_size >= sizeof(struct epic_compact_desc) &&
-		    !afk_compact_report_dictionary(payload, payload_size)) {
+		    !afk_compact_report_dictionary(payload, payload_size) &&
+		    !afk_compact_report_service_call(payload, payload_size)) {
 			payload += sizeof(struct epic_compact_desc);
 			payload_size -= sizeof(struct epic_compact_desc);
 		}
@@ -1745,6 +1768,7 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
 		     (ep->dcp->fw_compat == DCP_FIRMWARE_V_27_0 &&
 		      ep->dcp->hw.firmware_compat == DCP_FIRMWARE_H17P) ||
 		     ep->dcp->v27_j714s ||
+		     (ep->dcp->fw_compat == DCP_FIRMWARE_V_27_0 && ep->dcp->dcpext) ||
 		     (ep->dcp->v27_sleep_transport && !strcmp(name, "md-manager")))) {
 			/*
 			 * H17G and firmware-27 T8142 can omit EPIC identity

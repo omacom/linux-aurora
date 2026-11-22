@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only OR MIT
-"""J613 CPU memory floor: governor and admission logic on the host.
+"""PMP CPU memory floor: governor and admission logic on the host.
 
-Compiles drivers/pmdomain/apple/pmp-j613-floor-gov.h (the production header,
+Compiles drivers/pmdomain/apple/pmp-floor-gov.h (the production header,
 unmodified unless --mutant names a deliberate defect) into a harness that
 drives it with synthetic time, CPU/GPU load traces and PMP tables. Also checks
 the driver source statically: one read of the request word, every store
@@ -17,13 +17,16 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-HDR = ROOT / 'drivers/pmdomain/apple/pmp-j613-floor-gov.h'
+HDR = ROOT / 'drivers/pmdomain/apple/pmp-floor-gov.h'
 SRC = ROOT / 'drivers/pmdomain/apple/pmp-report.c'
 
 MUTANTS = {
-    'no-board': ('return j613 && native_default && allowed;', 'return (void)j613, native_default && allowed;'),
-    'no-default': ('return j613 && native_default && allowed;', 'return (void)native_default, j613 && allowed;'),
-    'no-disable': ('return j613 && native_default && allowed;', 'return (void)allowed, j613 && native_default;'),
+    # Accept a floor whose levels are all 0 (a request for nothing) from the DT.
+    'zero-ok': ('	if (w == PMP_FLOOR_VALID)\n		return false;\n', ''),
+    # Accept a level wider than its 4-bit lane.
+    'lane-wide': ('		    level > PMP_FLOOR_LEVEL_MAX || seen', '		    seen'),
+    # Accept a request class twice.
+    'class-twice': ('seen & (1U << (cls - PMP_FLOOR_CLASS_FIRST)))', '((void)seen, 0))'),
     # Drop as soon as demand stops, ignoring the hold time.
     'no-hold': ('now - g->last_demand_ns >= c->hold_ms * PMP_FLOOR_NS_PER_MS', '1'),
     # Never defer a transition.
@@ -31,7 +34,7 @@ MUTANTS = {
     # Raise on the first demand sample.
     'no-streak': ('g->streak >= (c->raise_samples ? c->raise_samples : 1)', '1'),
     # Lose the valid bit.
-    'bad-word': ('return PMP_FLOOR_VALID | (unsigned long long)(dcs & 0xf)', 'return (unsigned long long)(dcs & 0xf)'),
+    'bad-word': ('unsigned long long w = PMP_FLOOR_VALID;', 'unsigned long long w = 0;'),
     # Accept a foreign producer's request.
     'foreign-ok': ('return word == 0 || word == PMP_FLOOR_VALID;', 'return (void)word, 1;'),
     # Ignore the cluster sum.
@@ -60,24 +63,34 @@ static struct pmp_floor_gov_cfg cfg(void)
 	return c;
 }
 
+#define LANE(cls, level) ((unsigned long long)(level) << (32 + 4 * ((cls) - 0x21)))
+
 static int words(void)
 {
-	/* Only native J613 is enabled, and the parameter can always veto it. */
-	for (unsigned int board = 0; board <= 1; board++)
-		for (unsigned int native = 0; native <= 1; native++)
-			for (unsigned int allowed = 0; allowed <= 1; allowed++)
-				CHECK(pmp_floor_enabled(board, native, allowed) ==
-				      (bool)(board && native && allowed));
-	CHECK(pmp_floor_word(4, 0) == 0x2004000000000000ULL);
-	CHECK(pmp_floor_word(0, 0) == 0x2000000000000000ULL);
-	CHECK(pmp_floor_word(4, 2) == 0x2004000200000000ULL);
-	CHECK(pmp_floor_word(0, 0) == PMP_FLOOR_VALID);
+	/* apple,cpu-memory-floor: J613 <0x21 2 0x25 4>, T6000 <0x21 3 0x25 2>. */
+	const unsigned int j613[] = { 0x21, 2, 0x25, 4 }, t6000[] = { 0x21, 3, 0x25, 2 };
+	const unsigned int zero[] = { 0x21, 0, 0x25, 0 }, twice[] = { 0x21, 1, 0x21, 2 };
+	const unsigned int wide[] = { 0x21, 16 }, low[] = { 0x20, 1 }, high[] = { 0x26, 1 };
+	unsigned long long w = 0, j;
+
+	CHECK(pmp_floor_word_of(j613, 4, &w) && w == (PMP_FLOOR_VALID | LANE(0x21, 2) | LANE(0x25, 4)));
+	/* The word the J613 floor has always written. */
+	CHECK(w == 0x2004000200000000ULL);
+	j = w;
+	CHECK(pmp_floor_word_of(t6000, 4, &w) && w == (PMP_FLOOR_VALID | LANE(0x21, 3) | LANE(0x25, 2)));
+	CHECK(pmp_floor_level(w, 0x21) == 3 && pmp_floor_level(w, 0x25) == 2 && pmp_floor_level(w, 0x22) == 0);
+	w = 1;
+	CHECK(!pmp_floor_word_of(zero, 4, &w) && !pmp_floor_word_of(twice, 4, &w));
+	CHECK(!pmp_floor_word_of(wide, 2, &w) && !pmp_floor_word_of(low, 2, &w) && !pmp_floor_word_of(high, 2, &w));
+	CHECK(!pmp_floor_word_of(j613, 3, &w) && !pmp_floor_word_of(j613, 0, &w) && !pmp_floor_word_of(0, 2, &w));
+	CHECK(w == 1);
 	CHECK(pmp_floor_initial_ok(0) && pmp_floor_initial_ok(PMP_FLOOR_VALID));
-	CHECK(!pmp_floor_initial_ok(pmp_floor_word(4, 0)) && !pmp_floor_initial_ok(1));
+	CHECK(!pmp_floor_initial_ok(j) && !pmp_floor_initial_ok(1));
 	CHECK(pmp_floor_clamp(9, 1, 4) == 4 && pmp_floor_clamp(0, 1, 4) == 1 && pmp_floor_clamp(3, 0, 2) == 2);
-	/* Measured J613 responses: 0x3204 held (DCS4 SOC0), 0x3200 released. */
-	CHECK(pmp_floor_raise_confirmed(0x3204, 4, 0) && !pmp_floor_raise_confirmed(0x3200, 4, 0));
-	CHECK(!pmp_floor_raise_confirmed(0x3204, 4, 1) && pmp_floor_raise_confirmed(0x3224, 4, 2));
+	/* Measured J613 responses: 0x3224 held (0x25 at 4, 0x21 at 2), 0x3204 part-way, 0x3200 released. */
+	CHECK(pmp_floor_raise_confirmed(0x3224, j) && !pmp_floor_raise_confirmed(0x3204, j));
+	CHECK(!pmp_floor_raise_confirmed(0x3200, j));
+	CHECK(pmp_floor_raise_confirmed(0x3204, PMP_FLOOR_VALID | LANE(0x25, 4)));
 	CHECK(pmp_floor_drop_confirmed(0x3200, 0x3204) && !pmp_floor_drop_confirmed(0x3204, 0x3204));
 	return 0;
 }
@@ -252,7 +265,7 @@ static void put32(unsigned char *p, unsigned int v)
 		p[i] = v >> (8 * i);
 }
 
-/* A synthetic 20-record soc-device table and PTD range table, J613-shaped. */
+/* A synthetic 20-record soc-device table and PTD range table, J613-shaped (T6000 has the same ids). */
 #define RECORDS 20
 static unsigned char dev[RECORDS * PMP_FLOOR_REC_SIZE], rng[6 * 32];
 
@@ -324,7 +337,7 @@ int main(void)
 	for (unsigned int i = 0; i < sizeof(t) / sizeof(t[0]); i++)
 		if (t[i]())
 			return 1;
-	printf("pmp-j613-floor: %zu groups passed\n", sizeof(t) / sizeof(t[0]));
+	printf("pmp-floor: %zu groups passed\n", sizeof(t) / sizeof(t[0]));
 	return 0;
 }
 '''
@@ -338,46 +351,49 @@ def block(text, start):
 
 def static_checks():
     src = SRC.read_text()
-    begin = src.index('J613 (T8122, 25G83 firmware) demand-driven CPU memory floor')
+    begin = src.index(' * Demand-driven CPU memory floor.')
     end = src.index('static int apple_pmp_report_probe(struct platform_device *pdev)')
     floor = src[begin:end]
     req_reads = re.findall(r'readq\([^;]*pmp_floor_req_read\(', src)
     assert len(req_reads) == 1, f'request-word reads: {len(req_reads)}'
     assert not re.search(r'readq\([^;]*0x111[0-9a-f]', src), 'literal request-alias read'
-    # Every store in the floor code goes through j613_floor_write().
+    # Every store in the floor code goes through pmp_floor_write().
     writes = re.findall(r'\bwrite[bwlq](?:_relaxed)?\(', floor)
-    assert writes == ['writeq('], writes
-    w = block(floor, 'static void j613_floor_write(')
-    assert 'writeq(word, f->update);' in w and 'readq' not in w
+    assert writes == ['writeq(', 'writeq('], writes
+    w = block(floor, 'static void pmp_floor_write(')
+    assert 'writeq(word, f->update);' in w and 'writeq(word, f->other[i]);' in w and 'readq' not in w
+    assert floor.count('f->other[f->others++] = ') == 1
     # The update alias is the PACC0 word only.
     assert floor.count('f->update = ') == 1
     assert 'f->update = rep->base + pmp_floor_req_update(&f->layout);' in floor
     # The request read happens before any write could have been issued: in admit,
     # which runs only before f->admitted is set.
-    admit = block(floor, 'static int j613_floor_admit(')
+    admit = block(floor, 'static int pmp_floor_admit(')
     assert 'pmp_floor_req_read(&f->layout)' in admit
-    assert 'j613_floor_write' not in admit
-    # Every exit path publishes floor 0 through j613_floor_release().
-    for fn, needle in [('static void j613_floor_stop(', 'j613_floor_release('),
-                       ('static int apple_pmp_report_suspend(', 'j613_floor_release('),
-                       ('static void j613_floor_fault(', 'j613_floor_release('),
-                       ('static ssize_t enable_store(', 'j613_floor_release(')]:
+    assert 'pmp_floor_write' not in admit
+    # Every exit path publishes floor 0 through pmp_floor_release().
+    for fn, needle in [('static void pmp_floor_stop(', 'pmp_floor_release('),
+                       ('static int apple_pmp_report_suspend(', 'pmp_floor_release('),
+                       ('static void pmp_floor_fault(', 'pmp_floor_release('),
+                       ('static ssize_t enable_store(', 'pmp_floor_release(')]:
         assert needle in block(floor, fn), fn
-    rel = block(floor, 'static void j613_floor_release(')
-    assert 'j613_floor_write(f, PMP_FLOOR_VALID);' in rel
+    rel = block(floor, 'static void pmp_floor_release(')
+    assert 'pmp_floor_write(f, PMP_FLOOR_VALID);' in rel
     assert '.shutdown = apple_pmp_report_shutdown' in src
-    assert 'devm_register_reboot_notifier' in floor and 'devm_add_action_or_reset(dev, j613_floor_remove' in floor
+    assert 'devm_register_reboot_notifier' in floor and 'devm_add_action_or_reset(dev, pmp_floor_remove' in floor
     assert 'pm_sleep_ptr(&apple_pmp_report_pm_ops)' in src
-    # Only the native J613 match opts in; all other match data stays off.
-    assert re.search(r'^static bool j613_floor = true;$', floor, re.M)
-    native = block(src, 'static const struct apple_pmp_report_offsets apple_pmp_offsets_j613_25g83 =')
-    assert '.j613_floor_default = true,' in native
-    assert src.count('.j613_floor_default =') == 1
-    probe = block(floor, 'static int j613_floor_probe(')
-    assert 'pmp_floor_enabled(of_machine_is_compatible("apple,j613"),' in probe
-    assert 'rep->offsets->j613_floor_default, j613_floor)' in probe
-    assert 'module_param(j613_floor, bool, 0444);' in floor
-    print('pmp-j613-floor: static source checks passed')
+    # Only the DT selects the floor: no machine or board match, no module
+    # parameter, and the levels come from apple,cpu-memory-floor.
+    probe = block(floor, 'static int pmp_floor_probe(')
+    assert 'of_property_present(dev->of_node, "apple,cpu-memory-floor")' in probe
+    assert 'pmp_floor_word_of(cells, n, &on)' in probe
+    assert 'of_machine_is_compatible' not in floor and 'module_param' not in floor
+    assert 'j613_floor' not in src and 'floor_default' not in src
+    # T600x floors every CPU client and never reads a request entry: the
+    # single request read sits after the all-clients return in admit.
+    assert admit.index('if (f->all) {') < admit.index('pmp_floor_req_read(&f->layout)')
+    assert 'request' not in block(floor, 'static void pmp_floor_raise(')
+    print('pmp-floor: static source checks passed')
 
 
 
@@ -385,7 +401,7 @@ def sampling_checks():
     # Failure modes: absent/removed policy, leaked reference, mask use after
     # put, hotplug during iteration, stale utilization after CPU re-online,
     # CPUFreq-disabled builds, lost iowait or changed counter/wall ordering.
-    src = block(SRC.read_text(), 'static void j613_floor_sample_cpus(')
+    src = block(SRC.read_text(), 'static void pmp_floor_sample_cpus(')
     # Exact CPUFreq io_busy=0 accounting is the reference, not a new formula.
     reference = block((ROOT / 'drivers/cpufreq/cpufreq.c').read_text(),
                       'u64 get_cpu_idle_time(')
@@ -407,7 +423,7 @@ static bool online[2] = {true, true}, locked, present = true, remove_on_get;
 static int refs, gets, puts;
 static unsigned int mask = 0;
 struct cpufreq_policy { unsigned int *related_cpus; } policy = { &mask };
-struct j613_floor { bool primed; u64 cpu_idle[2], cpu_wall[2]; unsigned int cluster_sum[2]; };
+struct pmp_floor { bool primed; u64 cpu_idle[2], cpu_wall[2]; unsigned int cluster_sum[2]; };
 static void cpus_read_lock(void) { assert(!locked); locked = true; }
 static void cpus_read_unlock(void) { assert(locked && !refs); locked = false; }
 static bool cpu_online(unsigned int cpu) { assert(locked); return online[cpu]; }
@@ -448,21 +464,21 @@ u64 get_cpu_idle_time(unsigned int cpu, u64 *wall, int io)
 """ + src + r"""
 int main(void)
 {
-    struct j613_floor f = { .primed = true, .cpu_idle = {100,100}, .cpu_wall = {1000,1000} };
+    struct pmp_floor f = { .primed = true, .cpu_idle = {100,100}, .cpu_wall = {1000,1000} };
     unsigned int pct = 0, sum = 0;
-    j613_floor_sample_cpus(&f, 30000000, &pct, &sum);
+    pmp_floor_sample_cpus(&f, 30000000, &pct, &sum);
     assert(pct == 100 && sum == 200 && gets == 2 && puts == 2 && !refs);
     present = false; pct = sum = 0; f.cpu_wall[0] = f.cpu_wall[1] = 1000;
-    j613_floor_sample_cpus(&f, 30000000, &pct, &sum);
+    pmp_floor_sample_cpus(&f, 30000000, &pct, &sum);
     assert(pct == 100 && sum == 200 && puts == 2 && !refs);
     present = remove_on_get = true; pct = sum = 0; f.cpu_wall[0] = f.cpu_wall[1] = 1000;
-    j613_floor_sample_cpus(&f, 30000000, &pct, &sum);
+    pmp_floor_sample_cpus(&f, 30000000, &pct, &sum);
     assert(pct == 100 && sum == 200 && puts == 3 && !refs);
     online[1] = false; f.cpu_wall[1] = 1000;
-    j613_floor_sample_cpus(&f, 30000000, &pct, &sum);
+    pmp_floor_sample_cpus(&f, 30000000, &pct, &sum);
     assert(f.cpu_wall[1] == 0);
     online[1] = true; pct = sum = 0;
-    j613_floor_sample_cpus(&f, 30000000, &pct, &sum);
+    pmp_floor_sample_cpus(&f, 30000000, &pct, &sum);
     assert(pct == 0 && sum == 0 && f.cpu_wall[1] == 1030 && !locked && !refs);
     const u64 vectors[][3] = {
         {0, 0, 1030}, {60, 40, 1030}, {UINT64_MAX, 0, UINT64_MAX},
@@ -477,7 +493,7 @@ int main(void)
         u64 expected = reference_cpu_idle_time(0, &wall, 0);
         cpus_read_unlock();
         f.primed = false; pct = sum = 0;
-        j613_floor_sample_cpus(&f, 30000000, &pct, &sum);
+        pmp_floor_sample_cpus(&f, 30000000, &pct, &sum);
         for (unsigned int cpu = 0; cpu < 2; cpu++)
             assert(f.cpu_idle[cpu] == expected && f.cpu_wall[cpu] == wall && !counter_phase[cpu]);
     }
@@ -493,8 +509,8 @@ int main(void)
                             '-Werror', '-fsanitize=undefined', '-fno-sanitize-recover=all',
                             *flags, str(d / 'sample.c'), '-o', str(d / 'sample')], check=True)
             subprocess.run([str(d / 'sample')], check=True)
-            print(f'pmp-j613-floor: {config} referenced sampling/counter accounting passed')
-    print('pmp-j613-floor: referenced sampling, removal and hotplug passed')
+            print(f'pmp-floor: {config} referenced sampling/counter accounting passed')
+    print('pmp-floor: referenced sampling, removal and hotplug passed')
 
 
 def main():

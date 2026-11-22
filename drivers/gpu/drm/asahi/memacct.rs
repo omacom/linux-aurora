@@ -101,6 +101,26 @@ fn pct_of(total: u64, pct: u32) -> u64 {
     }
 }
 
+fn total_ram_bytes() -> u64 {
+    // SAFETY: `struct sysinfo` is plain integers, for which all zeroes is a valid value.
+    let mut info: kernel::bindings::sysinfo = unsafe { core::mem::zeroed() };
+    // SAFETY: `si_meminfo()` only fills in the structure it is given.
+    unsafe { kernel::bindings::si_meminfo(&mut info) };
+    (info.totalram as u64).saturating_mul(u64::from(info.mem_unit))
+}
+
+/// Sets both limits from the percentage written through sysfs.
+#[no_mangle]
+pub extern "C" fn asahi_set_mem_limit_pct(pct: u32) {
+    let limits = limits_for(total_ram_bytes(), pct, pct);
+    LEDGER.set_limits(limits);
+    pr_info!(
+        "GPU memory limits set: device {} MiB, per client {} MiB (0 = none)\n",
+        limits.device >> 20,
+        limits.client >> 20
+    );
+}
+
 /// Computes the limits for `total_ram` bytes of RAM.
 ///
 /// A percentage of 0 or 100 and above disables that limit. A per-client limit
@@ -156,13 +176,8 @@ impl Ledger {
 
     /// Sets the limits from the module parameters and the amount of RAM.
     pub(crate) fn configure(&self) {
-        // SAFETY: `struct sysinfo` is plain integers, for which all zeroes is a valid value.
-        let mut info: kernel::bindings::sysinfo = unsafe { core::mem::zeroed() };
-        // SAFETY: `si_meminfo()` only fills in the structure it is given.
-        unsafe { kernel::bindings::si_meminfo(&mut info) };
-        let total = (info.totalram as u64).saturating_mul(u64::from(info.mem_unit));
         let limits = limits_for(
-            total,
+            total_ram_bytes(),
             module_parameters::mem_limit_pct.value(),
             module_parameters::client_mem_limit_pct.value(),
         );

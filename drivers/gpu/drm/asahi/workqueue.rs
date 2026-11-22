@@ -117,20 +117,23 @@ pub(crate) type RetainedObject = KBox<dyn Any + Send>;
 /// queues of the owning queue.
 const CONTEXT_RETAINED_OBJECTS: usize = 4;
 
-/// A dropped GPU context waiting for the firmware to invalidate it.
+/// A dropped GPU context waiting for invalidation. Its queue structures are then kept until the
+/// following firmware power-off boundary.
 pub(crate) struct RetiredContext {
     /// The context data named in the invalidation request.
     pub(crate) data: KBox<GpuObject<fw::workqueue::GpuContextData>>,
     /// Firmware structures of the context's queues. They must not be freed, and so must not be
-    /// reused, until the invalidation has completed.
+    /// reused, until firmware has powered off after the invalidation completed.
     pub(crate) retained: KVec<RetainedObject>,
 }
 
 /// A GPU context tracking structure, which must be explicitly invalidated when dropped.
 ///
-/// The firmware learns about the work queues of a context as they are run, and only forgets them
-/// when the context is invalidated. Their firmware structures are therefore handed to the context
-/// when their owner drops them, and freed after the invalidation.
+/// The firmware learns about the work queues of a context as they are run. Invalidation removes the
+/// context from firmware lookup, but data masters may retain queue references until they power off.
+/// The queue structures are therefore handed to the context when their owner drops them, and freed
+/// only after invalidation and a following firmware power-off report. The context data itself is
+/// freed right after the invalidation.
 pub(crate) struct GpuContext {
     dev: driver::AsahiDevice,
     data: Option<KBox<GpuObject<fw::workqueue::GpuContextData>>>,

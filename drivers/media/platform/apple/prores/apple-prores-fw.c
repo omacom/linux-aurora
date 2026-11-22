@@ -24,6 +24,15 @@ static_assert(APRI_T6050_FIRMWARE_SIZE ==
 	      APRI_HEADER_SIZE + APRI_T6050_BLOCKS * APRI_BLOCK_HEADER_SIZE +
 	      (APRI_SYSTEM_COUNT + APRI_CORE_COUNT + APRI_WRAPPER_COUNT +
 	       APRI_CONTROL_COUNT) * APRI_ENTRY_SIZE);
+static_assert(APRI_T8132_FIRMWARE_SIZE ==
+	      APRI_HEADER_SIZE + APRI_T6041_BLOCKS * APRI_BLOCK_HEADER_SIZE +
+	      (APRI_SYSTEM_COUNT + APRI_CORE_COUNT + APRI_T8132_WRAPPER_COUNT) *
+	      APRI_ENTRY_SIZE);
+
+static_assert(APRI_T8142_FIRMWARE_SIZE ==
+	      APRI_HEADER_SIZE + APRI_T8142_BLOCKS * APRI_BLOCK_HEADER_SIZE +
+	      (APRI_SYSTEM_COUNT + APRI_CORE_COUNT + APRI_T8142_WRAPPER_COUNT +
+	       APRI_CONTROL_COUNT) * APRI_ENTRY_SIZE);
 
 const struct apri_layout apri_t6041 = {
 	.soc = 0x6041,
@@ -44,6 +53,30 @@ const struct apri_layout apri_t6050 = {
 	.limits = { 0x4000, 0x4000, 0x1000000, 0x4000 },
 };
 EXPORT_SYMBOL_IF_KUNIT(apri_t6050);
+
+/* T8132 has T6041's three blocks; its wrapper table is 48 rows. */
+const struct apri_layout apri_t8132 = {
+	.soc = 0x8132,
+	.blocks = APRI_T6041_BLOCKS,
+	.size = APRI_T8132_FIRMWARE_SIZE,
+	.counts = { APRI_SYSTEM_COUNT, APRI_CORE_COUNT, APRI_T8132_WRAPPER_COUNT },
+	.limits = { 0x4000, 0x4000, 0x1000000 },
+};
+EXPORT_SYMBOL_IF_KUNIT(apri_t8132);
+
+/*
+ * T8142 has T6050's four blocks. macOS 27.2.1 on a J815 writes the same 82
+ * system, 80 core and 12 control offsets, and 38 wrapper rows.
+ */
+const struct apri_layout apri_t8142 = {
+	.soc = 0x8142,
+	.blocks = APRI_T8142_BLOCKS,
+	.size = APRI_T8142_FIRMWARE_SIZE,
+	.counts = { APRI_SYSTEM_COUNT, APRI_CORE_COUNT, APRI_T8142_WRAPPER_COUNT,
+		    APRI_CONTROL_COUNT },
+	.limits = { 0x4000, 0x4000, 0x1000000, 0x4000 },
+};
+EXPORT_SYMBOL_IF_KUNIT(apri_t8142);
 
 static bool apri_offset_seen(const struct apr_init_block *block, u32 offset)
 {
