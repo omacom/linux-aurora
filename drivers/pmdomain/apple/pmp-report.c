@@ -184,10 +184,10 @@ static void apple_pmp_report_release(void *data)
 	/* Withdraw child providers while their power callbacks can still use MMIO. */
 	of_platform_depopulate(rep->dev);
 	if (rep->offsets == &apple_pmp_offsets_t600x) {
-		apple_pmp_agx_vote_stop_new();
+		apple_pmp_agx_vote_stop_new(AGX_STOP_REPORT);
 		cancel_delayed_work_sync(&apple_pmp_agx_vote_work);
 		guard(mutex)(&apple_pmp_agx_vote_mutex);
-		apple_pmp_agx_vote_stop();
+		apple_pmp_agx_vote_stop(AGX_STOP_REPORT);
 	}
 	mutex_lock(&apple_pmp_reports_lock);
 	if (!list_empty(&rep->list))
@@ -1156,7 +1156,7 @@ static int apple_pmp_report_probe(struct platform_device *pdev)
 
 	/* A report that comes back (rebind) takes votes again; its removal refused them. */
 	if (rep->offsets == &apple_pmp_offsets_t600x)
-		apple_pmp_agx_activity_resume();
+		apple_pmp_agx_vote_resume_reason(AGX_STOP_REPORT);
 
 	if (rep->offsets->fast_die || rep->start)
 		rep->debugfs = debugfs_create_file(dev_name(dev), 0400,
@@ -1342,10 +1342,22 @@ static agx_ms_t apple_pmp_agx_now_ms(void)
 static void apple_pmp_agx_vote_kick(unsigned long delay_ms)
 {
 	struct workqueue_struct *wq = READ_ONCE(system_dfl_wq);
+	struct delayed_work *dw = &apple_pmp_agx_vote_work;
+	unsigned long expiry;
 
 	if (!wq)
 		return;
-	mod_delayed_work(wq, &apple_pmp_agx_vote_work, msecs_to_jiffies(delay_ms));
+	/* mod_delayed_work() overwrites a pending timer even with a later expiry, so every unvoted begin() would
+	 * push the owed set out another tick. A due-now kick re-arms to 0, which can only pull earlier; a later
+	 * deadline re-arms only when it shortens the pending one. A running work item is not pending: its own
+	 * agx_vote_next() call decides whether another pass is owed. */
+	if (delay_ms <= 1) {
+		mod_delayed_work(wq, dw, 0);
+		return;
+	}
+	expiry = jiffies + msecs_to_jiffies(delay_ms);
+	if (!delayed_work_pending(dw) || time_before(expiry, dw->timer.expires))
+		mod_delayed_work(wq, dw, msecs_to_jiffies(delay_ms));
 }
 
 static int apple_pmp_agx_vote_param_set(const char *val, const struct kernel_param *kp)
@@ -1388,24 +1400,24 @@ static int apple_pmp_agx_write(bool enable, bool no_ack)
 	return ret;
 }
 
-/* Refuse new votes (the stopped flag), without writing anything. */
-static void apple_pmp_agx_vote_stop_new(void)
+/* Refuse new votes for one reason (the stopped mask), without writing anything. */
+static void apple_pmp_agx_vote_stop_new(unsigned int reason)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
-	agx_vote_refuse(&apple_pmp_agx_vote_state);
+	agx_vote_refuse(&apple_pmp_agx_vote_state, reason);
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 }
 
-/* Clear a request that is still set. Caller holds apple_pmp_agx_vote_mutex. */
-static void apple_pmp_agx_vote_stop(void)
+/* Clear a request that is still set and record the stop reason. Caller holds apple_pmp_agx_vote_mutex. */
+static void apple_pmp_agx_vote_stop(unsigned int reason)
 {
 	unsigned long flags;
 	bool voted;
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
-	voted = agx_vote_release(&apple_pmp_agx_vote_state);
+	voted = agx_vote_release(&apple_pmp_agx_vote_state, reason);
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 	if (voted)
 		apple_pmp_agx_write(false, true);
@@ -1488,18 +1500,23 @@ EXPORT_SYMBOL_GPL(apple_pmp_agx_activity_end);
  * The GPU driver unbinds: clear the request now instead of waiting out the idle time, so it is never left set past the GPU's
  * power-domain release (the T6030 fix clears before it releases its vote). Process context.
  */
-void apple_pmp_agx_activity_release(void)
+static void apple_pmp_agx_vote_release_reason(unsigned int reason)
 {
 	/* Stop first so that a begin() from now on cannot queue a set, then wait out a work item that already decided, then clear what it set. */
-	apple_pmp_agx_vote_stop_new();
+	apple_pmp_agx_vote_stop_new(reason);
 	cancel_delayed_work_sync(&apple_pmp_agx_vote_work);
 	guard(mutex)(&apple_pmp_agx_vote_mutex);
-	apple_pmp_agx_vote_stop();
+	apple_pmp_agx_vote_stop(reason);
+}
+
+void apple_pmp_agx_activity_release(void)
+{
+	apple_pmp_agx_vote_release_reason(AGX_STOP_GPU);
 }
 EXPORT_SYMBOL_GPL(apple_pmp_agx_activity_release);
 
 /* The GPU probes again, the report comes back or the system resumes: allow votes, and vote now if operations are already in flight. Process context. */
-void apple_pmp_agx_activity_resume(void)
+static void apple_pmp_agx_vote_resume_reason(unsigned int reason)
 {
 	struct agx_vote *v = &apple_pmp_agx_vote_state;
 	unsigned long flags;
@@ -1507,10 +1524,15 @@ void apple_pmp_agx_activity_resume(void)
 
 	spin_lock_irqsave(&apple_pmp_agx_vote_lock, flags);
 	v->enabled = READ_ONCE(agx_vote);
-	kick = agx_vote_resume(v);
+	kick = agx_vote_resume(v, reason);
 	spin_unlock_irqrestore(&apple_pmp_agx_vote_lock, flags);
 	if (kick)
 		apple_pmp_agx_vote_kick(0);
+}
+
+void apple_pmp_agx_activity_resume(void)
+{
+	apple_pmp_agx_vote_resume_reason(AGX_STOP_GPU);
 }
 EXPORT_SYMBOL_GPL(apple_pmp_agx_activity_resume);
 
@@ -1524,11 +1546,11 @@ static int apple_pmp_agx_pm_notify(struct notifier_block *nb, unsigned long acti
 	switch (action) {
 	case PM_SUSPEND_PREPARE:
 	case PM_HIBERNATION_PREPARE:
-		apple_pmp_agx_activity_release();
+		apple_pmp_agx_vote_release_reason(AGX_STOP_SLEEP);
 		break;
 	case PM_POST_SUSPEND:
 	case PM_POST_HIBERNATION:
-		apple_pmp_agx_activity_resume();
+		apple_pmp_agx_vote_resume_reason(AGX_STOP_SLEEP);
 		break;
 	}
 	return NOTIFY_DONE;
@@ -1610,8 +1632,9 @@ EXPORT_SYMBOL_GPL(apple_pmp_report_set_t6030_gfx);
  * returned, as for a report entry.
  *
  * The caller owns the bit it requests; this function does not arbitrate between callers of the
- * same bit. On the T6001 bit 9 belongs to the AGX vote (pmp_report.agx_vote) and is refused here
- * with -EBUSY. After -ETIMEDOUT the request was written but not acknowledged and stays in the
+ * same bit. On a machine compatible with apple,t6001 bit 9 belongs to the AGX vote
+ * (pmp_report.agx_vote) and is refused here with -EBUSY; other t600x reports share the offsets but
+ * have no vote, so their bit 9 is not reserved. After -ETIMEDOUT the request was written but not acknowledged and stays in the
  * word: the caller must clear it (@enable false, @no_ack true) before giving up.
  *
  * Context: process context (the acknowledge wait is a busy poll of up to 50 ms).
@@ -1629,8 +1652,9 @@ int apple_pmp_report_set_request(const struct device_node *report_np, unsigned i
 	rcu_read_lock();
 	list_for_each_entry_rcu(rep, &apple_pmp_reports, list) {
 		if (rep->dev->of_node == report_np) {
-			if (id == APPLE_PMP_T6001_AGX_ID && rep->offsets == &apple_pmp_offsets_t600x)
-				ret = -EBUSY;	/* the AGX vote owns this bit */
+			if (id == APPLE_PMP_T6001_AGX_ID && rep->offsets == &apple_pmp_offsets_t600x &&
+			    of_machine_is_compatible("apple,t6001"))
+				ret = -EBUSY;	/* the AGX vote owns this bit on T6001 */
 			else
 				ret = apple_pmp_report_set_state(rep, id, enable, no_ack);
 			break;

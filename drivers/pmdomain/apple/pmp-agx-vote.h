@@ -22,6 +22,12 @@ typedef uint32_t agx_ms_t;
 typedef int32_t agx_sms_t;
 #endif
 
+/* Stop reasons. Each owner sets and clears only its own bit: a resume from one (PM_POST_SUSPEND after a sleep)
+ * must not re-enable votes another still refuses (a GPU unbind), and the reverse. */
+#define AGX_STOP_GPU	(1u << 0)	/* the GPU driver released (unbind) */
+#define AGX_STOP_REPORT	(1u << 1)	/* this report is being removed */
+#define AGX_STOP_SLEEP	(1u << 2)	/* the system is suspending or hibernating */
+
 /* How long the request is held after the last operation ends. w7X measured idle gaps of up to 111.5 ms inside one 9B generation, so 100 ms
  * was not enough; 250 ms is about 2.2 times the largest gap seen. The parameter pmp_report.agx_vote_idle_ms overrides it at run time. */
 #define AGX_VOTE_IDLE_MS_DEFAULT 250
@@ -32,7 +38,7 @@ typedef int32_t agx_sms_t;
 struct agx_vote {
 	bool enabled;		/* the module parameter */
 	bool voted;		/* bit 9 is set and was acknowledged */
-	bool stopped;		/* released (GPU unbind, report removal, sleep): no new vote until agx_vote_resume() */
+	unsigned int stopped;	/* AGX_STOP_* bits set by release/refuse: no new vote until every reason's resume() */
 	unsigned int users;	/* GPU operations in flight */
 	agx_ms_t idle_ms;	/* keep the vote this long after the last operation ends */
 	agx_ms_t idle_at;	/* when users last fell to 0 */
@@ -61,9 +67,9 @@ static inline bool agx_vote_retry_reached(const struct agx_vote *v, agx_ms_t now
 
 /* An operation starts. now is the operation's start time in ms (any wrapping clock; the caller reads it
  * under its lock). Returns the delay in ms until the reconcile step must run, in the same terms as
- * agx_vote_end(): 1 runs it now, 0 means nothing is pending. A begin during a failed-set backoff returns 0
- * because next() already arms the retry from the failure state, and the caller's queueing can only pull a
- * deadline earlier, never push it out; it returns 1 once the deadline has passed. */
+ * agx_vote_end(): 1 runs it now, 0 means nothing is pending. A begin during a failed-set backoff returns the
+ * remaining backoff (retry_at - now): the reconcile is already armed for the retry, so a later begin shortens
+ * the wait but never postpones it. It returns 1 once the deadline has passed. */
 static inline agx_ms_t agx_vote_begin(struct agx_vote *v, agx_ms_t now)
 {
 	v->users++;
@@ -149,26 +155,26 @@ static inline void agx_vote_applied(struct agx_vote *v, enum agx_vote_action act
  * The GPU driver unbinds, the report goes away, or the system sleeps: drop the vote now and refuse new ones. True when bit 9 is set and the caller must
  * write the clear. An operation that begins afterwards (an ioctl already past the unplug check) counts as a user but does not vote.
  */
-static inline bool agx_vote_release(struct agx_vote *v)
+static inline bool agx_vote_release(struct agx_vote *v, unsigned int reason)
 {
 	bool was_voted = v->voted;
 
 	v->voted = false;
-	v->stopped = true;
+	v->stopped |= reason;
 	return was_voted;
 }
 
 /* Refuse new votes without touching the one that is set (the first step of a release, before the work item is waited out). */
-static inline void agx_vote_refuse(struct agx_vote *v)
+static inline void agx_vote_refuse(struct agx_vote *v, unsigned int reason)
 {
-	v->stopped = true;
+	v->stopped |= reason;
 }
 
 /* The GPU probes (or the report comes back, or the system resumes): votes are allowed again. True when work is already in flight and the caller must run the reconcile step. */
-static inline bool agx_vote_resume(struct agx_vote *v)
+static inline bool agx_vote_resume(struct agx_vote *v, unsigned int reason)
 {
-	v->stopped = false;
-	return v->enabled && v->users && !v->voted;
+	v->stopped &= ~reason;
+	return v->enabled && v->users && !v->voted && !v->stopped;
 }
 
 #endif /* PMP_AGX_VOTE_H */
