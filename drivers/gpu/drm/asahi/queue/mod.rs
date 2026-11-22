@@ -697,12 +697,6 @@ impl Queue for Queue::ver {
             return Err(ENODEV);
         }
 
-        let op_guard = if in_sync_count > 0 {
-            Some(gpu.start_op()?)
-        } else {
-            None
-        };
-
         let mut events: [KVec<Option<workqueue::QueueEventInfo::ver>>; SQ_COUNT] =
             Default::default();
 
@@ -791,7 +785,10 @@ impl Queue for Queue::ver {
             QueueJob::ver {
                 dev: self.dev.clone(),
                 vm_bind,
-                op_guard,
+                // The AGX activity guard is taken where the job reaches the firmware
+                // (the deferred start_op in run_job), not at ioctl time: a job blocked on
+                // input syncs would otherwise hold bit 9 while the GPU is idle.
+                op_guard: None,
                 sj_vtx: self
                     .q_vtx
                     .as_mut()
