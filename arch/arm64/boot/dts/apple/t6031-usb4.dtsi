@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0+ OR MIT
 /*
- * T6031 (M3 Max) USB4 PCIe tunnel on ATC0, modelled on t6030-usb4.dtsi.
+ * T6031 (M3 Max) USB4 PCIe tunnels on ATC0, ATC1 and ATC2, modelled on
+ * t6030-usb4.dtsi.
  *
- * Every value is from the J516C ADT (/arm-io/apciec0, dart-apciec0,
- * apciec0-piodma, acio0). The register windows and tunables match T6030.
+ * Every value is from the J516C ADT (/arm-io/apciecN, dart-apciecN,
+ * apciecN-piodma, acioN). The register windows and tunables match T6030.
  * The AIC numbers differ, and T6031 uses the four-cell, die-numbered AIC
  * specifier. MSIs come from the ADT's shared window at AIC 1854: the
- * internal apcie0 owns its first 32 vectors (t6031-die0.dtsi) and this host
- * takes the next 32, at 0x20.
+ * internal apcie0 owns its first 32 vectors (t6031-die0.dtsi) and the tunnel
+ * hosts take the next three 32-vector slices: ATC0 0x20, ATC1 0x40, ATC2 0x60.
  *
- * m1n1 fills apple,tunable-{rc,fabric,debug} through the usb4_0_pcie alias,
+ * m1n1 fills apple,tunable-{rc,fabric,debug} through the usb4_N_pcie alias,
  * the root port's apple,tunable, and apple,tunable-pcie-adapter through
- * usb4_0_pcie_adapter. No bootloader fills the DART and OE fabric tunables,
+ * usb4_N_pcie_adapter. No bootloader fills the DART and OE fabric tunables,
  * so they are carried here.
  */
 
@@ -19,12 +20,16 @@
 	aliases {
 		usb4_0_pcie = &usb4_0_pcie;
 		usb4_0_pcie_adapter = &usb4_0_acio;
+		usb4_1_pcie = &usb4_1_pcie;
+		usb4_1_pcie_adapter = &usb4_1_acio;
+		usb4_2_pcie = &usb4_2_pcie;
+		usb4_2_pcie_adapter = &usb4_2_acio;
 	};
 };
 
 &usb4_0_acio {
 	/*
-	 * ADT acio0 reg[5] is the PCIe adapter window m1n1 tunes. Unlike
+	 * ADT acioN reg[5] is the PCIe adapter window m1n1 tunes. Unlike
 	 * T6030 there is no "cpu" window: the T6031 ACIO uses the t8103
 	 * start sequence.
 	 */
@@ -37,6 +42,40 @@
 	post-init-providers = <&ps_atc0_cio>, <&ps_atc0_cio_pcie>,
 			      <&ps_atc0_cio_usb>, <&ps_atc0_pcie>;
 	apple,pcie-tunnel = <&usb4_0_pcie_tunnel>;
+};
+
+&usb4_1_acio {
+	/*
+	 * ADT acioN reg[5] is the PCIe adapter window m1n1 tunes. Unlike
+	 * T6030 there is no "cpu" window: the T6031 ACIO uses the t8103
+	 * start sequence.
+	 */
+	reg = <0xb 0x01ac0000 0x0 0xc000>,
+	      <0xb 0x01080000 0x0 0x20000>,
+	      <0xb 0x01e44000 0x0 0x4000>;
+	reg-names = "rc", "sram", "pcie-adapter";
+	power-domains = <&ps_atc1_cio>, <&ps_atc1_cio_pcie>,
+			<&ps_atc1_cio_usb>, <&ps_atc1_pcie>;
+	post-init-providers = <&ps_atc1_cio>, <&ps_atc1_cio_pcie>,
+			      <&ps_atc1_cio_usb>, <&ps_atc1_pcie>;
+	apple,pcie-tunnel = <&usb4_1_pcie_tunnel>;
+};
+
+&usb4_2_acio {
+	/*
+	 * ADT acioN reg[5] is the PCIe adapter window m1n1 tunes. Unlike
+	 * T6030 there is no "cpu" window: the T6031 ACIO uses the t8103
+	 * start sequence.
+	 */
+	reg = <0xf 0x01ac0000 0x0 0xc000>,
+	      <0xf 0x01080000 0x0 0x20000>,
+	      <0xf 0x01e44000 0x0 0x4000>;
+	reg-names = "rc", "sram", "pcie-adapter";
+	power-domains = <&ps_atc2_cio>, <&ps_atc2_cio_pcie>,
+			<&ps_atc2_cio_usb>, <&ps_atc2_pcie>;
+	post-init-providers = <&ps_atc2_cio>, <&ps_atc2_cio_pcie>,
+			      <&ps_atc2_cio_usb>, <&ps_atc2_pcie>;
+	apple,pcie-tunnel = <&usb4_2_pcie_tunnel>;
 };
 
 / {
@@ -123,6 +162,184 @@
 						<0 0 0 2 &usb4_0_pcie_port 0 0 0 1>,
 						<0 0 0 3 &usb4_0_pcie_port 0 0 0 2>,
 						<0 0 0 4 &usb4_0_pcie_port 0 0 0 3>;
+			};
+		};
+	};
+};
+
+/ {
+	usb4_1_pcie_tunnel: usb4-pcie-tunnel-1 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		nonposted-mmio;
+		/* Preserve the SoC DMA window after moving the virtual container. */
+		dma-ranges = <0 0 0 0 0xffffffff 0xffffc000>;
+
+		usb4_1_pcie_dart: iommu@b21008000 {
+			compatible = "apple,t6031-dart", "apple,t8110-dart";
+			reg = <0xb 0x21008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 0 1376 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			/* ADT dart-apciec1 dart-tunables-instance-0 */
+			apple,tunable =
+				<0x20c 0x800001b7 0x800001b7>,
+				<0x220 0xf0f0f 0xf0f0f>,
+				<0x224 0xffffff 0x80808>,
+				<0x300 0x1f31 0x1>,
+				<0x308 0x3ffffffc 0x10000000>,
+				<0x310 0x3ffffffc 0x3ffffffc>,
+				<0x318 0x1f31 0x1>,
+				<0x320 0x3ffffffc 0x1f00000>,
+				<0x328 0x3ffffffc 0x1f0bffc>;
+		};
+
+		usb4_1_pcie: pcie@b30000000 {
+			compatible = "apple,t8122-pciec", "apple,t8103-pciec";
+			device_type = "pci";
+			reg = <0xb 0x30000000 0x0 0x10000000>,
+			      <0xb 0x20000000 0x0 0x4000>,
+			      <0xb 0x21000000 0x0 0x8000>,
+			      <0xb 0x20004000 0x0 0x4000>,
+			      <0xb 0x20200000 0x0 0x4000>,
+			      <0xb 0x21010000 0x0 0x4000>,
+			      <0xb 0x20008000 0x0 0x4000>,
+			      <0xb 0x2100c000 0x0 0x4000>;
+			reg-names = "config", "rc", "port0", "fabric",
+				    "debug", "ltssm", "oe-fabric", "intr2axi";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 0 1375 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc1_cio_pcie>;
+			apple,pciec-kernel-init;
+			/* ADT apciec1-piodma atc-apcie-oe-fabric-tunables */
+			apple,tunable-oe-fabric =
+				<0x4 0x70007 0x40004>,
+				<0x8 0x1 0x1>,
+				<0xc 0x1 0x1>,
+				<0x10 0x801f 0x4>,
+				<0x18 0x801f 0x4>,
+				<0x20 0x801f 0x4>;
+			msi-controller;
+			msi-parent = <&usb4_1_pcie>;
+			msi-ranges = <&aic AIC_IRQ 0 (1854 + 0x40) IRQ_TYPE_EDGE_RISING 32>;
+			apple,msi-vector-base = <0x40>;
+			iommu-map = <0x0 &usb4_1_pcie_dart 0x0 0x40>;
+			iommu-map-mask = <0x3f>;
+			bus-range = <0x0 0x7f>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x43000000 0xc 0x0
+				  0xc 0x0 0x2 0x0>,
+				 <0x02000000 0x0 0x100000
+				  0xe 0x100000 0x0 0x3ff00000>,
+				 <0x42000000 0x0 0x40000000
+				  0xe 0x40000000 0x0 0x40000000>;
+
+			usb4_1_pcie_port: pci@0,0 {
+				device_type = "pci";
+				reg = <0x0 0x0 0x0 0x0 0x0>;
+				external-facing;
+				/* apple,tunable is filled by the bootloader */
+				#address-cells = <3>;
+				#size-cells = <2>;
+				ranges;
+				interrupt-controller;
+				#interrupt-cells = <1>;
+				interrupt-map-mask = <0 0 0 7>;
+				interrupt-map = <0 0 0 1 &usb4_1_pcie_port 0 0 0 0>,
+						<0 0 0 2 &usb4_1_pcie_port 0 0 0 1>,
+						<0 0 0 3 &usb4_1_pcie_port 0 0 0 2>,
+						<0 0 0 4 &usb4_1_pcie_port 0 0 0 3>;
+			};
+		};
+	};
+};
+
+/ {
+	usb4_2_pcie_tunnel: usb4-pcie-tunnel-2 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		nonposted-mmio;
+		/* Preserve the SoC DMA window after moving the virtual container. */
+		dma-ranges = <0 0 0 0 0xffffffff 0xffffc000>;
+
+		usb4_2_pcie_dart: iommu@f21008000 {
+			compatible = "apple,t6031-dart", "apple,t8110-dart";
+			reg = <0xf 0x21008000 0x0 0x4000>;
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 0 1404 IRQ_TYPE_LEVEL_HIGH>;
+			#iommu-cells = <1>;
+			/* ADT dart-apciec2 dart-tunables-instance-0 */
+			apple,tunable =
+				<0x20c 0x800001b7 0x800001b7>,
+				<0x220 0xf0f0f 0xf0f0f>,
+				<0x224 0xffffff 0x80808>,
+				<0x300 0x1f31 0x1>,
+				<0x308 0x3ffffffc 0x10000000>,
+				<0x310 0x3ffffffc 0x3ffffffc>,
+				<0x318 0x1f31 0x1>,
+				<0x320 0x3ffffffc 0x1f00000>,
+				<0x328 0x3ffffffc 0x1f0bffc>;
+		};
+
+		usb4_2_pcie: pcie@f30000000 {
+			compatible = "apple,t8122-pciec", "apple,t8103-pciec";
+			device_type = "pci";
+			reg = <0xf 0x30000000 0x0 0x10000000>,
+			      <0xf 0x20000000 0x0 0x4000>,
+			      <0xf 0x21000000 0x0 0x8000>,
+			      <0xf 0x20004000 0x0 0x4000>,
+			      <0xf 0x20200000 0x0 0x4000>,
+			      <0xf 0x21010000 0x0 0x4000>,
+			      <0xf 0x20008000 0x0 0x4000>,
+			      <0xf 0x2100c000 0x0 0x4000>;
+			reg-names = "config", "rc", "port0", "fabric",
+				    "debug", "ltssm", "oe-fabric", "intr2axi";
+			interrupt-parent = <&aic>;
+			interrupts = <AIC_IRQ 0 1403 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&ps_atc2_cio_pcie>;
+			apple,pciec-kernel-init;
+			/* ADT apciec2-piodma atc-apcie-oe-fabric-tunables */
+			apple,tunable-oe-fabric =
+				<0x4 0x70007 0x40004>,
+				<0x8 0x1 0x1>,
+				<0xc 0x1 0x1>,
+				<0x10 0x801f 0x4>,
+				<0x18 0x801f 0x4>,
+				<0x20 0x801f 0x4>;
+			msi-controller;
+			msi-parent = <&usb4_2_pcie>;
+			msi-ranges = <&aic AIC_IRQ 0 (1854 + 0x60) IRQ_TYPE_EDGE_RISING 32>;
+			apple,msi-vector-base = <0x60>;
+			iommu-map = <0x0 &usb4_2_pcie_dart 0x0 0x40>;
+			iommu-map-mask = <0x3f>;
+			bus-range = <0x0 0x7f>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x43000000 0x10 0x0
+				  0x10 0x0 0x2 0x0>,
+				 <0x02000000 0x0 0x100000
+				  0x12 0x100000 0x0 0x3ff00000>,
+				 <0x42000000 0x0 0x40000000
+				  0x12 0x40000000 0x0 0x40000000>;
+
+			usb4_2_pcie_port: pci@0,0 {
+				device_type = "pci";
+				reg = <0x0 0x0 0x0 0x0 0x0>;
+				external-facing;
+				/* apple,tunable is filled by the bootloader */
+				#address-cells = <3>;
+				#size-cells = <2>;
+				ranges;
+				interrupt-controller;
+				#interrupt-cells = <1>;
+				interrupt-map-mask = <0 0 0 7>;
+				interrupt-map = <0 0 0 1 &usb4_2_pcie_port 0 0 0 0>,
+						<0 0 0 2 &usb4_2_pcie_port 0 0 0 1>,
+						<0 0 0 3 &usb4_2_pcie_port 0 0 0 2>,
+						<0 0 0 4 &usb4_2_pcie_port 0 0 0 3>;
 			};
 		};
 	};
