@@ -3219,10 +3219,14 @@ static int atc_tunnel_set_t602x(struct apple_atcphy *atcphy, unsigned int dpin,
 	return 0;
 }
 
-/* T6030 (M3 Pro) uses T8122-generation PHYs for both DP IN clock outputs. */
+/*
+ * T6030 (M3 Pro) and T6031 (M3 Max) use T8122-generation PHYs for both DP IN
+ * clock outputs.
+ */
 static bool apple_atc_tunnel_is_t6030(struct apple_atcphy *atcphy)
 {
-	return of_machine_is_compatible("apple,t6030") &&
+	return (of_machine_is_compatible("apple,t6030") ||
+		of_machine_is_compatible("apple,t6031")) &&
 	       atcphy->hw->gen == ATCPHY_GENERATION_T8122;
 }
 
@@ -3487,8 +3491,7 @@ static int atcphy_configure(struct apple_atcphy *atcphy, enum atcphy_mode mode)
 	/* Keep failed transitions retryable even when the requested mode is unchanged. */
 	atcphy->mode_dirty = true;
 	/* the mode change below may power the PHY down: stop the tunnel clock first */
-	if (of_machine_is_compatible("apple,t6030") &&
-	    atcphy->hw->gen == ATCPHY_GENERATION_T8122) {
+	if (apple_atc_tunnel_is_t6030(atcphy)) {
 		ret = atc_t8122_tunnel_stop(atcphy);
 		if (ret)
 			return ret;

@@ -1039,7 +1039,8 @@ static int tb_dp_bandwidth_alloc_mode_enable(struct tb_tunnel *tunnel)
 	u32 in_dp_cap, in_rate, in_lanes;
 	u32 rate, lanes;
 
-	if (!bw_alloc_mode)
+	if (!bw_alloc_mode ||
+	    tb_host_dp_policy(tunnel->tb->nhi, TB_HOST_DP_NO_BW_ALLOC))
 		return 0;
 
 	ret = usb4_dp_port_set_cm_bandwidth_mode_supported(in, true);

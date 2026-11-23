@@ -222,6 +222,8 @@ struct tb_nhi_ops {
 #define TB_HOST_DP_KEEP_DPRX_TIMEOUT	BIT(3)
 #define TB_HOST_DP_ADAPTER_QUIRKS		BIT(4)
 #define TB_HOST_DP_INITIAL_BW_GRANT	BIT(5)
+/* The host's DPTX never requests bandwidth: keep DP tunnels out of allocation mode. */
+#define TB_HOST_DP_NO_BW_ALLOC		BIT(6)
 
 /*
  * Minimal number of vectors when we use MSI-X. Two for control channel

@@ -110,6 +110,16 @@ bool dcp_is_usb4_output(struct apple_dcp *dcp)
 	return dcp->active_typec_route && dcp->active_typec_route->tunnel;
 }
 
+/*
+ * T6031 (M3 Max) has the T6030 (M3 Pro) DP IN clock path: the same
+ * T8122-generation ATC PHYs and T6030 external processors.
+ */
+static bool dcp_fabric_t603x(void)
+{
+	return of_machine_is_compatible("apple,t6030") ||
+	       of_machine_is_compatible("apple,t6031");
+}
+
 /* SoC flow support and board wiring are separate qualifications. */
 bool dcp_uses_t6020_tunnel_flow(struct apple_dcp *dcp)
 {
@@ -211,7 +221,7 @@ bool dcp_typec_dual_stream(void)
 bool dcp_typec_ordered_dual_stream(void)
 {
 	return dcp_fabric_ordered_dual_stream(dcp_typec_dual_stream(),
-					    of_machine_is_compatible("apple,t6030"));
+					    dcp_fabric_t603x());
 }
 
 /*
@@ -257,7 +267,7 @@ static int dcp_route_clock_rate(struct apple_dcp_typec_route *route,
 {
 	int ret;
 
-	if (of_machine_is_compatible("apple,t6030")) {
+	if (dcp_fabric_t603x()) {
 		typeof(apple_atc_dp_tunnel_rate_source) *fn;
 
 		if (dcp_fabric_t6030_pclk(route->mux_index, dpin) < 0)
@@ -902,7 +912,7 @@ static void dcp_fabric_snapshot_port(struct apple_dcp_typec_port *port,
 		route->core.tunnel = route->tunnel;
 		route->core.dpin = route->tunnel_dpin;
 		route->core.tunnel_clock_blocked = dcp_fabric_tunnel_clock_blocked(
-			of_machine_is_compatible("apple,t6030"), route->mux_index);
+			dcp_fabric_t603x(), route->mux_index);
 		*tail = &route->core;
 		tail = &route->core.next;
 	}
@@ -1750,10 +1760,11 @@ int dcp_tunnel_crossbar_down(struct apple_dcp *dcp, u32 unit)
 }
 
 /*
- * T6030 routes a direct DP PHY output of its crossbar on select and clocks
- * it only while a link runs, as it does its DP IN outputs. From DCP's link
- * configuration calls: clocks up once a link is configured at a nonzero
- * rate, down before the rate changes and when DCP deactivates the port.
+ * T6030 and T6031 route a direct DP PHY output of their crossbar on select
+ * and clock it only while a link runs, as they do their DP IN outputs. From
+ * DCP's link configuration calls: clocks up once a link is configured at a
+ * nonzero rate, down before the rate changes and when DCP deactivates the
+ * port.
  * The output is the borrowed Type-C route's, or the fixed route's. Other
  * SoCs clock it at select. Runs inside a DCP apcall: only tb_lock.
  */
@@ -1763,7 +1774,9 @@ int dcp_direct_crossbar_link(struct apple_dcp *dcp, bool up)
 	struct mux_control *xbar = NULL;
 	int ret;
 
-	if (!of_machine_is_compatible("apple,t6030"))
+	/* The crossbar driver runs both in its T6030 mode (t6030_dpin). */
+	if (!of_machine_is_compatible("apple,t6030") &&
+	    !of_machine_is_compatible("apple,t6031"))
 		return 0;
 	guard(mutex)(&dcp->tb_lock);
 	route = dcp->active_typec_route;
@@ -1805,7 +1818,7 @@ int dcp_tunnel_set_rate(struct apple_dcp *dcp, struct phy *phy, u32 unit,
 		return -ENODEV;
 	if (!dcp_fabric_callback_valid(route->tunnel_generation, dcp->tb_generation))
 		return -ESTALE;
-	if (of_machine_is_compatible("apple,t6030") &&
+	if (dcp_fabric_t603x() &&
 	    (unit || dcp->dptx_dfp_port != 1 + route->tunnel_dpin ||
 	     apple_dp_tunnel_t6030_pclk(route->mux_index,
 				      route->tunnel_dpin) < 0))
@@ -1903,7 +1916,7 @@ static struct mux_control *
 dcp_typec_tunnel_ctl(struct apple_dcp_typec_route *route, unsigned int dpin)
 {
 	if (dpin > 1 ||
-	    (dcp_fabric_tunnel_clock_blocked(of_machine_is_compatible("apple,t6030"),
+	    (dcp_fabric_tunnel_clock_blocked(dcp_fabric_t603x(),
 					     route->mux_index) & BIT(dpin)))
 		return NULL;
 	if (route->dpin[dpin])
