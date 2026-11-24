@@ -1834,11 +1834,25 @@ static const struct msi_parent_ops apple_msi_parent_ops = {
 	.init_dev_msi_info	= apple_msi_init_dev_msi_info,
 };
 
-/* T6030 has one shared AIC MSI window, partitioned by its ADT bridges. */
-static bool apple_t6030_msi_slice_valid(u32 base, u32 count, u32 aic_irq)
+/*
+ * T6030 and T6031 have one shared 512-vector AIC MSI window, partitioned by
+ * their ADT bridges. Only its first AIC number differs. Returns 0 on other
+ * SoCs.
+ */
+static u32 apple_t603x_msi_window(void)
+{
+	if (of_machine_is_compatible("apple,t6030"))
+		return 1342;
+	if (of_machine_is_compatible("apple,t6031"))
+		return 1854;
+	return 0;
+}
+
+static bool apple_t603x_msi_slice_valid(u32 window, u32 base, u32 count,
+					u32 aic_irq)
 {
 	return (base == 0x20 || base == 0x40 || base == 0x60) &&
-	       count == 32 && aic_irq == 1342 + base;
+	       count == 32 && aic_irq == window + base;
 }
 
 static int apple_msi_init(struct apple_pcie *pcie)
@@ -1872,11 +1886,13 @@ static int apple_msi_init(struct apple_pcie *pcie)
 	 * entry to the corresponding shared-window vector.
 	 */
 	if (pcie->hw == &t8122_pciec_hw) {
+		u32 window = apple_t603x_msi_window();
 		struct resource ecam;
+		unsigned int irq;
 		u32 expected_base;
 
-		/* These ECAM apertures identify the three T6030 ADT bridges. */
-		if (!of_machine_is_compatible("apple,t6030") ||
+		/* These ECAM apertures identify the three T6030/T6031 ADT bridges. */
+		if (!window ||
 		    of_address_to_resource(to_of_node(fwnode), 0, &ecam))
 			goto invalid_slice;
 		switch (ecam.start) {
@@ -1892,15 +1908,25 @@ static int apple_msi_init(struct apple_pcie *pcie)
 		default:
 			goto invalid_slice;
 		}
-		if (args.args_count != 3 || args.args[0] != 0 ||
-		    args.args[2] != IRQ_TYPE_EDGE_RISING)
+		/*
+		 * T6030's AIC takes <type irq flags>. T6031's takes
+		 * <type die irq flags>, and every tunnel host is on die 0.
+		 */
+		if (args.args_count == 3)
+			irq = 1;
+		else if (args.args_count == 4 && args.args[1] == 0)
+			irq = 2;
+		else
+			goto invalid_slice;
+		if (args.args[0] != 0 ||
+		    args.args[irq + 1] != IRQ_TYPE_EDGE_RISING)
 			goto invalid_slice;
 		ret = of_property_read_u32(to_of_node(fwnode),
 					   "apple,msi-vector-base",
 					   &pcie->msi_vector_base);
 		if (!of_find_property(to_of_node(fwnode),
 				      "apple,msi-vector-base", NULL) &&
-		    args.args[1] == 1342 && pcie->nvecs == 512) {
+		    args.args[irq] == window && pcie->nvecs == 512) {
 			/*
 			 * Old experimental boot DTs exposed the global window to
 			 * each host. Correct it here so old recovery kernels can
@@ -1908,15 +1934,15 @@ static int apple_msi_init(struct apple_pcie *pcie)
 			 */
 			pcie->msi_vector_base = expected_base;
 			pcie->nvecs = 32;
-			args.args[1] += expected_base;
+			args.args[irq] += expected_base;
 			dev_info(pcie->dev, "correcting legacy MSI window to IRQ %u count 32\n",
-				 args.args[1]);
+				 args.args[irq]);
 		} else if (ret) {
 			goto invalid_slice;
 		}
 		if (pcie->msi_vector_base != expected_base ||
-		    !apple_t6030_msi_slice_valid(pcie->msi_vector_base,
-					pcie->nvecs, args.args[1]))
+		    !apple_t603x_msi_slice_valid(window, pcie->msi_vector_base,
+					pcie->nvecs, args.args[irq]))
 			goto invalid_slice;
 	}
 
@@ -3246,9 +3272,12 @@ int apple_pcie_tunnel_prepare(struct device *dev, struct device_node *tunnel)
 
 	pcie->dev = dev;
 	pcie->hw = match->data;
-	/* Keep the previous fallback on unqualified M3-family machines. */
+	/*
+	 * Keep the previous fallback on M3-family machines other than T6030
+	 * and T6031, the two with a known MSI window.
+	 */
 	if (pcie->hw == &t8122_pciec_hw &&
-	    !of_machine_is_compatible("apple,t6030") &&
+	    !apple_t603x_msi_window() &&
 	    of_device_is_compatible(dev->of_node, "apple,t8103-pciec"))
 		pcie->hw = &t8103_pciec_hw;
 	pcie->kernel_init = kernel_init;
