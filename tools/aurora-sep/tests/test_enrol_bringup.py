@@ -14,7 +14,7 @@ class EnrolBringupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'test.rs').write_text(
-                registration_module() + HARNESS + method(source, 'power_down_enrol_sensor')
+                registration_module() + HARNESS + method(source, 'power_down_capture_sensor')
                 + method(source, 'bring_sensor_online_for_enrol') + CASES)
             subprocess.run(['rustc', '--edition=2021', str(root / 'test.rs'), '-o', str(root / 'test')], check=True)
             subprocess.run([str(root / 'test')], check=True)

@@ -1600,8 +1600,16 @@ impl SepData {
 
         self.settle_before_capture();
 
+        if !self.verify_wanted() {
+            return;
+        }
         // The enclave refuses a capture from an uncalibrated sensor (0x65 answers 1).
-        if !self.bring_sensor_online_for_verify() {
+        let online = self.bring_sensor_online_for_verify();
+        if !self.verify_wanted() {
+            self.power_down_capture_sensor();
+            return;
+        }
+        if !online {
             dev_err!(self.dev, "verify: the sensor did not come back online\n");
             self.finish_verify(bio::VerifyOutcome::Failed(ENROL_STATUS_SENSOR), token_bytes);
             let _ = sensor::idle();
@@ -1611,9 +1619,7 @@ impl SepData {
         // The match uses the plain 0x23->0x06->0x65 pipeline, with no SCRD step.
 
         let outcome = self.verify_one_image();
-        let _ = sensor::idle();
-        sensor::power(false);
-        self.note_capture_end();
+        self.power_down_capture_sensor();
 
         let definitive = matches!(
             &outcome,
@@ -1794,7 +1800,7 @@ impl SepData {
         bio::VerifyOutcome::Matched(bio::MatchEvidence::from_enclave_reply(identity))
     }
 
-    fn power_down_enrol_sensor(&self) {
+    fn power_down_capture_sensor(&self) {
         let _ = sensor::idle();
         sensor::power(false);
         self.note_capture_end();
@@ -1823,7 +1829,7 @@ impl SepData {
             self.bring_sensor_online()
         };
         if !wanted() {
-            self.power_down_enrol_sensor();
+            self.power_down_capture_sensor();
             return false;
         }
         if !online {
@@ -1956,7 +1962,7 @@ impl SepData {
             self.reconcile_identities();
         }
 
-        self.power_down_enrol_sensor();
+        self.power_down_capture_sensor();
 
         if let Some(result) = outcome {
             let filed = match (result, identity, enrolment_persisted) {

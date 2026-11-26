@@ -75,6 +75,7 @@ struct Mock {
     /// The verify stops being wanted once this many attempts have run.
     cancel_after: Option<usize>,
     captured: bool,
+    cleanup: Vec<&'static str>,
     finished: Option<bio::VerifyOutcome>,
     /// What attach reported to diag, and whether it asked for a late retry.
     attach: Option<registration::AttachState>,
@@ -122,8 +123,14 @@ mod sbio {
     impl UserId { pub fn new(_: u32) -> Option<Self> { Some(UserId) } }
 }
 mod sensor {
-    pub fn idle() -> Result<(), ()> { Ok(()) }
-    pub fn power(_: bool) -> bool { true }
+    pub fn idle() -> Result<(), ()> {
+        super::MOCK.with(|m| m.borrow_mut().cleanup.push("idle"));
+        Ok(())
+    }
+    pub fn power(on: bool) -> bool {
+        if !on { super::MOCK.with(|m| m.borrow_mut().cleanup.push("off")); }
+        true
+    }
     pub fn is_bound() -> bool { true }
 }
 mod diag {
@@ -195,7 +202,7 @@ impl Driver {
         MOCK.with(|m| m.borrow_mut().captured = true);
         bio::VerifyOutcome::Matched(1)
     }
-    fn note_capture_end(&self) {}
+    fn note_capture_end(&self) { MOCK.with(|m| m.borrow_mut().cleanup.push("settle")); }
     fn save_after_match(&self, _: sbio::UserId) -> bool { true }
     fn finish_verify(&self, outcome: bio::VerifyOutcome, _: [u8; bio::TOKEN_LEN]) {
         MOCK.with(|m| {
@@ -238,13 +245,24 @@ fn main() {
     let m = run(&[], None, NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (3, false, Some(Failed(ENROL_STATUS_SENSOR))));
 
-    // Cancelled or suspending during the first attempt: no second one.
+    // Cancellation before bring-up leaves the sensor alone.
+    let m = run(&[true], Some(0), T6000, true);
+    assert_eq!((m.attempts, m.captured, m.finished), (0, false, None));
+    assert!(m.cleanup.is_empty());
+
+    // Cancelled during the first attempt: power down without another attempt.
     let m = run(&[false, true], Some(1), NONCE, true);
-    assert_eq!((m.attempts, m.captured, m.finished), (1, false, Some(Failed(ENROL_STATUS_SENSOR))));
+    assert_eq!((m.attempts, m.captured, m.finished), (1, false, None));
+    assert_eq!(m.cleanup, ["idle", "off", "settle"]);
 
     // A first attempt that works is the only one.
     let m = run(&[true], None, NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (1, true, Some(Matched(1))));
+
+    // The successful retry may return after the original verify was cancelled.
+    let m = run(&[false, true], Some(2), T6000, true);
+    assert_eq!((m.attempts, m.captured, m.finished), (2, false, None));
+    assert_eq!(m.cleanup, ["idle", "off", "settle"]);
 
     // The M1 Pro/Max can recover on a fresh registration without a nonce.
     let m = run(&[false, false, true], None, T6000, true);
@@ -301,7 +319,7 @@ class VerifyBringupTest(unittest.TestCase):
             'run_verify', 'attach_bringup',
             'bring_sensor_online_retrying', 'bring_sensor_online_for_verify',
             'attach_bring_sensor_online', 'attach_complete', 'bringup_may_continue',
-            'verify_wanted')]
+            'verify_wanted', 'power_down_capture_sensor')]
         self.assertTrue(all(methods))
         attempts = (item(source, '#[derive(Clone, Copy, PartialEq, Eq)]\nenum Bringup {')
                     + '\n' + item(source, 'struct BringupAttempts<')
