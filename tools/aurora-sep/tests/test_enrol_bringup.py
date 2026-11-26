@@ -14,7 +14,8 @@ class EnrolBringupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'test.rs').write_text(
-                registration_module() + HARNESS + method(source, 'bring_sensor_online_for_enrol') + CASES)
+                registration_module() + HARNESS + method(source, 'power_down_enrol_sensor')
+                + method(source, 'bring_sensor_online_for_enrol') + CASES)
             subprocess.run(['rustc', '--edition=2021', str(root / 'test.rs'), '-o', str(root / 'test')], check=True)
             subprocess.run([str(root / 'test')], check=True)
 
@@ -23,6 +24,14 @@ HARNESS = r"""
 use std::cell::Cell;
 use std::ffi::CStr;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+macro_rules! dev_err { ($($args:tt)*) => {} }
+const ENROL_STATUS_SENSOR: u32 = 1;
+thread_local! { static EVENTS: std::cell::RefCell<Vec<&'static str>> = Default::default(); }
+fn event(name: &'static str) { EVENTS.with(|events| events.borrow_mut().push(name)); }
+mod sensor {
+    pub fn idle() -> bool { super::event("idle"); true }
+    pub fn power(on: bool) { assert!(!on); super::event("off"); }
+}
 struct Profile { retry_enrol_registration: bool }
 enum Bringup { Enrol }
 struct Session { epoch: u64, attempts: Cell<u32>, cancel_after: u32 }
@@ -45,6 +54,10 @@ impl<W: Fn() -> bool> registration::Attempts for Round<'_, W> {
     fn pause(&mut self, _: u32) -> bool { true }
 }
 impl Sensor {
+    fn note_capture_end(&self) { event("settle"); }
+    fn finish_enrolment(&self, result: Result<(), u32>) {
+        assert_eq!(result, Err(ENROL_STATUS_SENSOR)); event("fault");
+    }
     fn bring_sensor_online(&self) -> bool {
         let count = &self.bio_session.attempts;
         count.set(count.get() + 1);
@@ -58,21 +71,21 @@ impl Sensor {
 
 CASES = r"""
 }
-fn run(retry: bool, ready_after: u32, cancel_after: u32, epoch: u64) -> (bool, u32) {
+fn run(retry: bool, ready_after: u32, cancel_after: u32, epoch: u64) -> (bool, u32, Vec<&'static str>) {
     let sensor = Sensor {
         profile: Profile { retry_enrol_registration: retry },
         bio_session: Session { epoch: 10, attempts: Cell::new(0), cancel_after },
         suspending: false.into(), shutting_down: false.into(), ready_after,
     };
-    (sensor.bring_sensor_online_for_enrol(epoch), sensor.bio_session.attempts.get())
+    (sensor.bring_sensor_online_for_enrol(epoch), sensor.bio_session.attempts.get(), EVENTS.with(|e| e.take()))
 }
 fn main() {
-    assert_eq!(run(true, 1, 99, 10), (true, 1));
-    assert_eq!(run(true, 3, 99, 10), (true, 3));
-    assert_eq!(run(true, 4, 99, 10), (false, 3));
-    assert_eq!(run(false, 2, 99, 10), (false, 1));
-    assert_eq!(run(true, 2, 1, 10), (false, 1));
-    assert_eq!(run(true, 1, 1, 10), (false, 1)); // cancelled during a successful attempt
-    assert_eq!(run(true, 1, 99, 9), (false, 0)); // obsolete worker
+    assert_eq!(run(true, 1, 99, 10), (true, 1, vec![]));
+    assert_eq!(run(true, 3, 99, 10), (true, 3, vec![]));
+    assert_eq!(run(true, 4, 99, 10), (false, 3, vec!["fault", "idle"]));
+    assert_eq!(run(false, 2, 99, 10), (false, 1, vec!["fault", "idle"]));
+    assert_eq!(run(true, 2, 1, 10), (false, 1, vec!["idle", "off", "settle"]));
+    assert_eq!(run(true, 1, 1, 10), (false, 1, vec!["idle", "off", "settle"])); // cancelled during a successful attempt
+    assert_eq!(run(true, 1, 99, 9), (false, 0, vec![])); // obsolete worker
 }
 """

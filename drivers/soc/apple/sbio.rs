@@ -1796,6 +1796,12 @@ impl SepData {
         bio::VerifyOutcome::Matched(bio::MatchEvidence::from_enclave_reply(identity))
     }
 
+    fn power_down_enrol_sensor(&self) {
+        let _ = sensor::idle();
+        sensor::power(false);
+        self.note_capture_end();
+    }
+
     /// A T6000/T6001 can time out reading the sensor serial before the
     /// first scan. Retry only bring-up, before opening an enclave enrolment.
     fn bring_sensor_online_for_enrol(&self, epoch: u64) -> bool {
@@ -1818,16 +1824,22 @@ impl SepData {
         } else {
             self.bring_sensor_online()
         };
-        online && wanted()
+        if !wanted() {
+            self.power_down_enrol_sensor();
+            return false;
+        }
+        if !online {
+            dev_err!(self.dev, "enrol: the sensor did not come back online\n");
+            self.finish_enrolment(Err(ENROL_STATUS_SENSOR));
+            let _ = sensor::idle();
+        }
+        online
     }
 
     pub(crate) fn run_enrolment(&self) {
         self.enrol_frames_accepted.store(0, Relaxed);
 
         if !self.bring_sensor_online_for_enrol(self.capture_epoch.load(Relaxed)) {
-            dev_err!(self.dev, "enrol: the sensor did not come back online\n");
-            self.finish_enrolment(Err(ENROL_STATUS_SENSOR));
-            let _ = sensor::idle();
             return;
         }
 
@@ -1946,9 +1958,7 @@ impl SepData {
             self.reconcile_identities();
         }
 
-        let _ = sensor::idle();
-        sensor::power(false);
-        self.note_capture_end();
+        self.power_down_enrol_sensor();
 
         if let Some(result) = outcome {
             let filed = match (result, identity, enrolment_persisted) {
