@@ -2,7 +2,7 @@
 """Execute the actual verify and attach sensor bring-up code with mocks.
 
 The first verify after a system suspend re-registers the sensor, and on a
-nonce-session profile that registration can fail in a way a new attempt from
+nonce-session or T6000 profile that registration can fail in a way a new attempt from
 a power-cycled sensor recovers. A verify makes up to three attempts back to
 back and stops as soon as it is no longer wanted. Attach makes up to five,
 spaced 0.5, 1, 2 and 4 s apart, on every profile, and asks for a late retry
@@ -134,7 +134,11 @@ mod diag {
     }
 }
 struct PatchLoaded(());
-struct Profile { nonce_session: bool }
+#[derive(Clone, Copy)]
+struct Profile { nonce_session: bool, verify_registration: registration::Retry }
+const NONCE: Profile = Profile { nonce_session: true, verify_registration: registration::VERIFY };
+const T6000: Profile = Profile { nonce_session: false, verify_registration: registration::VERIFY };
+const SINGLE: Profile = Profile { nonce_session: false, verify_registration: registration::ONCE };
 // The bring-up adapter names the driver by its real type.
 type SepData = Driver;
 struct SessionLock(bio::Session);
@@ -153,10 +157,10 @@ struct Driver {
 }
 
 impl Driver {
-    fn new(nonce_session: bool) -> Self {
+    fn new(profile: Profile) -> Self {
         Driver {
             dev: (),
-            profile: Profile { nonce_session },
+            profile,
             templates_restored: AtomicBool::new(true),
             device_view_synced: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
@@ -209,9 +213,9 @@ impl Driver {
 MAIN = r'''
 }
 
-fn run(script: &[bool], cancel_after: Option<usize>, nonce: bool, verify: bool) -> Mock {
+fn run(script: &[bool], cancel_after: Option<usize>, profile: Profile, verify: bool) -> Mock {
     MOCK.with(|m| *m.borrow_mut() = Mock { script: script.to_vec(), cancel_after, ..Mock::default() });
-    let driver = Driver::new(nonce);
+    let driver = Driver::new(profile);
     if verify {
         driver.run_verify()
     } else {
@@ -225,32 +229,37 @@ fn main() {
     use bio::VerifyOutcome::*;
 
     // The case seen after a suspend: the first attempt fails, the next works.
-    let m = run(&[false, true], None, true, true);
+    let m = run(&[false, true], None, NONCE, true);
     assert!(m.captured && m.finished == Some(Matched(1)) && m.attempts == 2,
             "a verify gave up after one failed sensor bring-up (attempts {}, finished {:?})",
             m.attempts, m.finished);
 
     // A sensor that never comes up: three attempts, then a sensor failure.
-    let m = run(&[], None, true, true);
+    let m = run(&[], None, NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (3, false, Some(Failed(ENROL_STATUS_SENSOR))));
 
     // Cancelled or suspending during the first attempt: no second one.
-    let m = run(&[false, true], Some(1), true, true);
+    let m = run(&[false, true], Some(1), NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (1, false, Some(Failed(ENROL_STATUS_SENSOR))));
 
     // A first attempt that works is the only one.
-    let m = run(&[true], None, true, true);
+    let m = run(&[true], None, NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (1, true, Some(Matched(1))));
 
-    // Profiles without a nonce session keep their single attempt.
-    let m = run(&[false, true], None, false, true);
+    // The M1 Pro/Max can recover on a fresh registration without a nonce.
+    let m = run(&[false, false, true], None, T6000, true);
+    assert_eq!((m.attempts, m.captured, m.finished), (3, true, Some(Matched(1))));
+    assert_eq!(m.stages, [registration::FRESH, registration::ESTABLISHED, registration::FRESH]);
+
+    // Other single-attempt profiles keep their policy.
+    let m = run(&[false, true], None, SINGLE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (1, false, Some(Failed(ENROL_STATUS_SENSOR))));
 
     // Verify attempts follow each other at once.
-    assert_eq!(run(&[], None, true, true).clock_ms, 0);
+    assert_eq!(run(&[], None, NONCE, true).clock_ms, 0);
 
     // Attach spaces its attempts and recovers without a late retry.
-    let m = run(&[false, false, true], None, true, false);
+    let m = run(&[false, false, true], None, NONCE, false);
     assert_eq!((m.attempts, m.clock_ms, m.late), (3, 1500, false));
     assert_eq!(m.attach, Some(registration::AttachState::Attached));
     // A nonce-session profile clears instead of starting afresh.
@@ -258,27 +267,27 @@ fn main() {
 
     // An attach that never comes up: five attempts within the budget, then
     // a late retry is asked for and diag says so.
-    let m = run(&[], None, true, false);
+    let m = run(&[], None, NONCE, false);
     assert_eq!((m.attempts, m.clock_ms, m.late), (5, 7500, true));
     assert_eq!(m.attach, Some(registration::AttachState::Retrying));
 
-    let m = run(&[true], None, true, false);
+    let m = run(&[true], None, NONCE, false);
     assert_eq!((m.attempts, m.clock_ms, m.late), (1, 0, false));
     assert_eq!(m.attach, Some(registration::AttachState::Attached));
 
     // Without a nonce session: the M1 Pro's sensor did not wake at attach.
     // The same spacing; the first retry clears the registered serial (and
     // with it the enclave's session), the second starts fresh.
-    let m = run(&[false, false, true], None, false, false);
+    let m = run(&[false, false, true], None, T6000, false);
     assert_eq!((m.attempts, m.clock_ms, m.late), (3, 1500, false));
     assert_eq!(m.stages, [registration::FRESH, registration::ESTABLISHED, registration::FRESH]);
     assert_eq!(m.attach, Some(registration::AttachState::Attached));
 
-    let m = run(&[], None, false, false);
+    let m = run(&[], None, T6000, false);
     assert_eq!((m.attempts, m.clock_ms, m.late), (5, 7500, true));
     assert_eq!(m.attach, Some(registration::AttachState::Retrying));
 
-    let m = run(&[true], None, false, false);
+    let m = run(&[true], None, T6000, false);
     assert_eq!((m.attempts, m.clock_ms, m.late), (1, 0, false));
     assert_eq!(m.attach, Some(registration::AttachState::Attached));
 }
