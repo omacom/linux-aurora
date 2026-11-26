@@ -1531,6 +1531,7 @@ impl SepData {
         if self.templates_restored.load(Relaxed)
             || !self.cold_restore_candidate.load(Relaxed)
             || self.device_view_synced.load(Relaxed)
+            || !self.verify_wanted()
         {
             return;
         }
@@ -1538,7 +1539,7 @@ impl SepData {
             self.dev,
             "verify: attach-time bring-up left the device-view proof undone; retrying the sensor bring-up\n"
         );
-        if !self.bring_sensor_online() {
+        if !self.bring_sensor_online() && self.verify_wanted() {
             // After a failed first patch, the enclave can refuse the serial
             // re-registration that follows CLEAR_STATE, while a reboot's
             // fresh registration works. Retry once from the fresh stage.
@@ -1551,7 +1552,7 @@ impl SepData {
                 dev_err!(self.dev, "verify: the retried sensor bring-up failed\n");
             }
         }
-        let _ = sensor::idle();
+        self.power_down_capture_sensor();
         self.refresh_match_credential();
     }
 
@@ -1577,6 +1578,9 @@ impl SepData {
 
     pub(crate) fn run_verify(&self) {
         self.retry_restore_proof();
+        if !self.verify_wanted() {
+            return;
+        }
         if !self.templates_restored.load(Relaxed) {
             dev_err!(
                 self.dev,

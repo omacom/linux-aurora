@@ -63,6 +63,7 @@ macro_rules! dev_info { ($($args:tt)*) => {} }
 const ENROL_STATUS_SENSOR: u32 = 1;
 const ENROL_STATUS_ENCLAVE: u32 = 2;
 const SBIO_PROBE_USER_ID: u32 = 1;
+const BRINGUP_FRESH: u32 = registration::FRESH;
 
 const LATE_ATTACH_DELAY_MS: u32 = 10_000;
 const BRINGUP_PAUSE_STEP_MS: u32 = 100;
@@ -155,6 +156,7 @@ struct Driver {
     dev: (),
     profile: Profile,
     templates_restored: AtomicBool,
+    cold_restore_candidate: AtomicBool,
     device_view_synced: AtomicBool,
     shutting_down: AtomicBool,
     suspending: AtomicBool,
@@ -169,6 +171,7 @@ impl Driver {
             dev: (),
             profile,
             templates_restored: AtomicBool::new(true),
+            cold_restore_candidate: AtomicBool::new(false),
             device_view_synced: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
@@ -193,9 +196,12 @@ impl Driver {
         let ok = self.scripted_attempt();
         // A bring-up that completes proves the identity view.
         self.device_view_synced.fetch_or(ok, Relaxed);
+        if ok && self.cold_restore_candidate.load(Relaxed) {
+            self.templates_restored.store(true, Relaxed);
+        }
         ok
     }
-    fn retry_restore_proof(&self) {}
+    fn refresh_match_credential(&self) {}
     fn mint_token_bytes(&self) -> Option<[u8; bio::TOKEN_LEN]> { Some([1; bio::TOKEN_LEN]) }
     fn settle_before_capture(&self) {}
     fn verify_one_image(&self) -> bio::VerifyOutcome {
@@ -232,8 +238,33 @@ fn run(script: &[bool], cancel_after: Option<usize>, profile: Profile, verify: b
     MOCK.with(|m| std::mem::take(&mut *m.borrow_mut()))
 }
 
+fn cold_verify(script: &[bool], cancel_after: Option<usize>) -> Mock {
+    MOCK.with(|m| *m.borrow_mut() = Mock { script: script.to_vec(), cancel_after, ..Mock::default() });
+    let driver = Driver::new(T6000);
+    driver.templates_restored.store(false, Relaxed);
+    driver.cold_restore_candidate.store(true, Relaxed);
+    driver.run_verify();
+    MOCK.with(|m| std::mem::take(&mut *m.borrow_mut()))
+}
+
 fn main() {
     use bio::VerifyOutcome::*;
+
+    // A cancelled cold verify must not wake the sensor for a pending restore proof.
+    let m = cold_verify(&[true], Some(0));
+    assert_eq!((m.attempts, m.captured, m.finished), (0, false, None));
+    assert!(m.cleanup.is_empty());
+
+    // Cancellation in a successful or failed proof leaves no powered reader.
+    for proof in [true, false] {
+        let m = cold_verify(&[proof, true], Some(1));
+        assert_eq!((m.attempts, m.captured, m.finished), (1, false, None));
+        assert_eq!(m.cleanup, ["idle", "off", "settle"]);
+    }
+    // A live verify can retry its cold proof and then take a fingerprint.
+    let m = cold_verify(&[false, true, true], None);
+    assert_eq!((m.attempts, m.captured, m.finished), (3, true, Some(Matched(1))));
+
 
     // The case seen after a suspend: the first attempt fails, the next works.
     let m = run(&[false, true], None, NONCE, true);
@@ -316,7 +347,7 @@ class VerifyBringupTest(unittest.TestCase):
     def test_verify_retries_a_failed_bring_up_like_attach(self):
         source = (APPLE / 'sbio.rs').read_text()
         methods = [method(source, name) for name in (
-            'run_verify', 'attach_bringup',
+            'run_verify', 'retry_restore_proof', 'attach_bringup',
             'bring_sensor_online_retrying', 'bring_sensor_online_for_verify',
             'attach_bring_sensor_online', 'attach_complete', 'bringup_may_continue',
             'verify_wanted', 'power_down_capture_sensor')]
