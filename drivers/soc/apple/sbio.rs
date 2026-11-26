@@ -1796,10 +1796,35 @@ impl SepData {
         bio::VerifyOutcome::Matched(bio::MatchEvidence::from_enclave_reply(identity))
     }
 
+    /// A T6000/T6001 can time out reading the sensor serial before the
+    /// first scan. Retry only bring-up, before opening an enclave enrolment.
+    fn bring_sensor_online_for_enrol(&self, epoch: u64) -> bool {
+        let wanted = || {
+            !self.shutting_down.load(Relaxed)
+                && !self.suspending.load(Relaxed)
+                && bio::enrol_is_live(&self.bio_session.lock(), epoch)
+        };
+        if !wanted() {
+            return false;
+        }
+        let online = if self.profile.retry_enrol_registration {
+            self.bring_sensor_online_retrying(
+                c"enrol",
+                Bringup::Enrol,
+                &registration::VERIFY,
+                wanted,
+            )
+            .online()
+        } else {
+            self.bring_sensor_online()
+        };
+        online && wanted()
+    }
+
     pub(crate) fn run_enrolment(&self) {
         self.enrol_frames_accepted.store(0, Relaxed);
 
-        if !self.bring_sensor_online() {
+        if !self.bring_sensor_online_for_enrol(self.capture_epoch.load(Relaxed)) {
             dev_err!(self.dev, "enrol: the sensor did not come back online\n");
             self.finish_enrolment(Err(ENROL_STATUS_SENSOR));
             let _ = sensor::idle();
@@ -3899,6 +3924,8 @@ impl SepData {
 /// Which bring-up a round of attempts makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Bringup {
+    /// Before an enrolment.
+    Enrol,
     /// As Touch ID is activated.
     Attach,
     /// The late round after an attach that fell short.
