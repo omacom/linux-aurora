@@ -155,6 +155,8 @@ const DART_T8112: DartWindow = DartWindow {
 
 pub(crate) struct PlatformProfile {
     pub(crate) name: &'static str,
+    /// Retry sensor registration before opening an enrolment on the enclave.
+    pub(crate) retry_enrol_registration: bool,
     /// Capacity of the boot shared-memory window. The layout is still checked
     /// against the manifests; this only bounds the allocation.
     pub(crate) shmem_capacity: usize,
@@ -190,6 +192,7 @@ pub(crate) struct PlatformProfile {
 
 pub(crate) const T8103: PlatformProfile = PlatformProfile {
     name: "T8103/J313",
+    retry_enrol_registration: false,
     shmem_capacity: 0x3_0000,
     shmem_first_item: b"CNIP",
     bootstrap: Bootstrap::Boot,
@@ -233,6 +236,7 @@ pub(crate) const T8103: PlatformProfile = PlatformProfile {
 /// identically. Enrolment persistence is reboot-tested on J314s.
 pub(crate) const T6000: PlatformProfile = PlatformProfile {
     name: "T6000/J316s",
+    retry_enrol_registration: true,
     shmem_capacity: 0x3_0000,
     shmem_first_item: b"CNIP",
     bootstrap: Bootstrap::Boot,
@@ -271,6 +275,7 @@ pub(crate) const T6000: PlatformProfile = PlatformProfile {
 
 pub(crate) const T6020: PlatformProfile = PlatformProfile {
     name: "T6020/J414s",
+    retry_enrol_registration: false,
     shmem_capacity: 0x4_0000,
     shmem_first_item: b"CINP",
     bootstrap: Bootstrap::WarmRegister,
@@ -328,6 +333,7 @@ pub(crate) const T8140: PlatformProfile = PlatformProfile {
     key_store: KeyStore::Variant5,
     persistent_enrol: true,
     name: "T8140/J700",
+    retry_enrol_registration: false,
     shmem_capacity: 0x4_0000,
     shmem_first_item: b"CINP",
     bootstrap: Bootstrap::WarmRegister,
@@ -372,6 +378,7 @@ pub(crate) const T8140: PlatformProfile = PlatformProfile {
 /// warm-registration platforms (T6020 on current firmware, T8140).
 pub(crate) const T8112: PlatformProfile = PlatformProfile {
     name: "T8112/J415",
+    retry_enrol_registration: false,
     shmem_capacity: 0x4_0000,
     shmem_first_item: b"CINP",
     bootstrap: Bootstrap::WarmRegister,
