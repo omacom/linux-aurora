@@ -197,6 +197,13 @@ pub(crate) const ATTACH: Retry = Retry {
     budget_ms: 10_000,
 };
 
+/// A profile with no verify-time registration recovery.
+pub(crate) const ONCE: Retry = Retry {
+    attempts: 1,
+    first_pause_ms: 0,
+    budget_ms: 0,
+};
+
 /// Before a verify, which someone is waiting on: three attempts, back to
 /// back.
 pub(crate) const VERIFY: Retry = Retry {
@@ -803,6 +810,23 @@ mod tests {
         // re-registration, attempt 3 started fresh and shared again.
         assert_eq!(&e.shares[..3], &[true, false, true]);
         assert_eq!(e.stage, ESTABLISHED);
+    }
+
+    #[test]
+    fn t6000_verify_recovers_a_refused_serial_before_capture() {
+        let mut e = SessionEnclave::new(0);
+        e.stage = ESTABLISHED;
+        e.session = true;
+        e.clear_refused = true;
+        let mut round = Round {
+            enclave: &mut e,
+            retry: 0,
+        };
+        assert_eq!(
+            bring_up(&crate::profile::T6000.verify_registration, &mut round),
+            Outcome::Online(3)
+        );
+        assert_eq!(&e.shares[..3], &[false, false, true]);
     }
 
     #[test]

@@ -1562,18 +1562,16 @@ impl SepData {
             && bio::verify_is_live(&self.bio_session.lock(), self.capture_epoch.load(Relaxed))
     }
 
-    // Every verify registers the sensor again. On a profile with a nonce
-    // session that registration can fail as the attach-time one does, most
-    // often the first one after a system suspend, and a new attempt recovers
-    // it in the same way. Without one, the failure ends the user's
-    // authentication even though the sensor works.
+    // Registration can fail before capture, e.g. REGISTER_SERIAL returning
+    // 0x16 on T6000/T6001. Retry only sensor bring-up, while the original
+    // verify is still wanted. Comparison and its verdict happen afterwards.
     fn bring_sensor_online_for_verify(&self) -> bool {
-        if !self.profile.nonce_session {
-            return self.bring_sensor_online();
-        }
-        self.bring_sensor_online_retrying(c"verify", Bringup::Verify, &registration::VERIFY, || {
-            self.verify_wanted()
-        })
+        self.bring_sensor_online_retrying(
+            c"verify",
+            Bringup::Verify,
+            &self.profile.verify_registration,
+            || self.verify_wanted(),
+        )
         .online()
     }
 

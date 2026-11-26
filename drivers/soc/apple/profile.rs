@@ -29,6 +29,7 @@
 // the boot-endpoint, identity and sensor-transport paths.
 #![allow(dead_code)]
 
+use crate::registration::{self, Retry};
 use kernel::of;
 use kernel::pr_info_once;
 use kernel::prelude::*;
@@ -176,6 +177,8 @@ pub(crate) struct PlatformProfile {
     pub(crate) keybag_create: KeybagCreate,
     /// Require nonce authentication and signed sensor material before capture.
     pub(crate) nonce_session: bool,
+    /// How many attempts a verify may make to bring the sensor online before capture.
+    pub(crate) verify_registration: Retry,
     /// Key-store protocol generation (see [`KeyStore`]).
     pub(crate) key_store: KeyStore,
     /// Platforms with reboot-tested owner export and user-before-master saves.
@@ -218,6 +221,7 @@ pub(crate) const T8103: PlatformProfile = PlatformProfile {
     },
     persistent_enrol: true,
     nonce_session: false,
+    verify_registration: registration::ONCE,
     // macOS shares this enclave: keep Linux to its own xART records.
     xart_guard: 1,
 };
@@ -258,6 +262,7 @@ pub(crate) const T6000: PlatformProfile = PlatformProfile {
     },
     persistent_enrol: true,
     nonce_session: false,
+    verify_registration: registration::VERIFY,
     // As T8103. On J316s, creating the identity keybag also rewrites a
     // session record that predates Linux. The guard refuses that, so the
     // keybag can only be created there with xart_guard=0.
@@ -293,6 +298,7 @@ pub(crate) const T6020: PlatformProfile = PlatformProfile {
     key_store: KeyStore::Variant5,
     persistent_enrol: true,
     nonce_session: false,
+    verify_registration: registration::ONCE,
     // A warm-attach enclave shared with macOS, as on T8112.
     xart_guard: 1,
 };
@@ -348,6 +354,7 @@ pub(crate) const T8140: PlatformProfile = PlatformProfile {
         arg: -1,
     },
     nonce_session: true,
+    verify_registration: registration::VERIFY,
     // Linux records from before the guard's list exist here, and Linux has
     // left the macOS records unchanged on this platform.
     xart_guard: 0,
@@ -394,6 +401,7 @@ pub(crate) const T8112: PlatformProfile = PlatformProfile {
     key_store: KeyStore::Variant5,
     persistent_enrol: true,
     nonce_session: false,
+    verify_registration: registration::ONCE,
     // Guarded from its first Linux boot (2026-10-16): no record refused.
     xart_guard: 1,
 };
