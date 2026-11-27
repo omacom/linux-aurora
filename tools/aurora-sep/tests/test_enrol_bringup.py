@@ -14,7 +14,8 @@ class EnrolBringupTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / 'test.rs').write_text(
-                registration_module() + HARNESS + method(source, 'power_down_capture_sensor')
+                registration_module() + HARNESS + method(source, 'power_down_sensor')
+                + method(source, 'power_down_capture_sensor')
                 + method(source, 'bring_sensor_online_for_enrol') + CASES)
             subprocess.run(['rustc', '--edition=2021', str(root / 'test.rs'), '-o', str(root / 'test')], check=True)
             subprocess.run([str(root / 'test')], check=True)
@@ -83,8 +84,8 @@ fn main() {
     use registration::{ONCE, VERIFY};
     assert_eq!(run(VERIFY, 1, 99, 10), (true, 1, vec![]));
     assert_eq!(run(VERIFY, 3, 99, 10), (true, 3, vec![]));
-    assert_eq!(run(VERIFY, 4, 99, 10), (false, 3, vec!["fault", "idle"]));
-    assert_eq!(run(ONCE, 2, 99, 10), (false, 1, vec!["fault", "idle"]));
+    assert_eq!(run(VERIFY, 4, 99, 10), (false, 3, vec!["idle", "off", "settle", "fault"]));
+    assert_eq!(run(ONCE, 2, 99, 10), (false, 1, vec!["idle", "off", "settle", "fault"]));
     assert_eq!(run(VERIFY, 2, 1, 10), (false, 1, vec!["idle", "off", "settle"]));
     assert_eq!(run(VERIFY, 1, 1, 10), (false, 1, vec!["idle", "off", "settle"])); // cancelled during a successful attempt
     assert_eq!(run(VERIFY, 1, 99, 9), (false, 0, vec![])); // obsolete worker

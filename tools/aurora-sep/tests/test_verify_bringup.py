@@ -64,6 +64,7 @@ const ENROL_STATUS_SENSOR: u32 = 1;
 const ENROL_STATUS_ENCLAVE: u32 = 2;
 const SBIO_PROBE_USER_ID: u32 = 1;
 const BRINGUP_FRESH: u32 = registration::FRESH;
+const MATCH_SETTLE_MS: u32 = 1800;
 
 const LATE_ATTACH_DELAY_MS: u32 = 10_000;
 const BRINGUP_PAUSE_STEP_MS: u32 = 100;
@@ -77,6 +78,7 @@ struct Mock {
     cancel_after: Option<usize>,
     captured: bool,
     cleanup: Vec<&'static str>,
+    last_capture_end_ns: u64,
     finished: Option<bio::VerifyOutcome>,
     /// What attach reported to diag, and whether it asked for a late retry.
     attach: Option<registration::AttachState>,
@@ -90,7 +92,8 @@ thread_local! { static MOCK: RefCell<Mock> = RefCell::new(Mock::default()); }
 
 mod shim {
     pub fn boottime_ns() -> u64 {
-        super::MOCK.with(|m| m.borrow().clock_ms * 1_000_000)
+        // Zero is the driver's sentinel for a sensor that has never captured.
+        super::MOCK.with(|m| (1 + m.borrow().clock_ms) * 1_000_000)
     }
 }
 mod kernel {
@@ -161,6 +164,7 @@ struct Driver {
     shutting_down: AtomicBool,
     suspending: AtomicBool,
     capture_epoch: AtomicU64,
+    last_capture_end_ns: AtomicU64,
     bio_session: SessionLock,
     bringup: AtomicU32,
 }
@@ -176,6 +180,7 @@ impl Driver {
             shutting_down: AtomicBool::new(false),
             suspending: AtomicBool::new(false),
             capture_epoch: AtomicU64::new(1),
+            last_capture_end_ns: AtomicU64::new(0),
             bio_session: SessionLock(bio::Session),
             bringup: AtomicU32::new(registration::FRESH),
         }
@@ -203,12 +208,10 @@ impl Driver {
     }
     fn refresh_match_credential(&self) {}
     fn mint_token_bytes(&self) -> Option<[u8; bio::TOKEN_LEN]> { Some([1; bio::TOKEN_LEN]) }
-    fn settle_before_capture(&self) {}
     fn verify_one_image(&self) -> bio::VerifyOutcome {
         MOCK.with(|m| m.borrow_mut().captured = true);
         bio::VerifyOutcome::Matched(1)
     }
-    fn note_capture_end(&self) { MOCK.with(|m| m.borrow_mut().cleanup.push("settle")); }
     fn save_after_match(&self, _: sbio::UserId) -> bool { true }
     fn finish_verify(&self, outcome: bio::VerifyOutcome, _: [u8; bio::TOKEN_LEN]) {
         MOCK.with(|m| {
@@ -226,6 +229,12 @@ impl Driver {
 MAIN = r'''
 }
 
+fn result(driver: &Driver) -> Mock {
+    let mut m = MOCK.with(|m| m.take());
+    m.last_capture_end_ns = driver.last_capture_end_ns.load(Relaxed);
+    m
+}
+
 fn run(script: &[bool], cancel_after: Option<usize>, profile: Profile, verify: bool) -> Mock {
     MOCK.with(|m| *m.borrow_mut() = Mock { script: script.to_vec(), cancel_after, ..Mock::default() });
     let driver = Driver::new(profile);
@@ -235,36 +244,47 @@ fn run(script: &[bool], cancel_after: Option<usize>, profile: Profile, verify: b
         let late = driver.attach_bringup();
         MOCK.with(|m| m.borrow_mut().late = late);
     }
-    MOCK.with(|m| std::mem::take(&mut *m.borrow_mut()))
+    result(&driver)
 }
 
-fn cold_verify(script: &[bool], cancel_after: Option<usize>) -> Mock {
+fn cold_verify(script: &[bool], cancel_after: Option<usize>, previous_capture_ms_ago: Option<u64>) -> Mock {
     MOCK.with(|m| *m.borrow_mut() = Mock { script: script.to_vec(), cancel_after, ..Mock::default() });
     let driver = Driver::new(T6000);
     driver.templates_restored.store(false, Relaxed);
     driver.cold_restore_candidate.store(true, Relaxed);
+    if let Some(age) = previous_capture_ms_ago {
+        driver.note_capture_end();
+        MOCK.with(|m| m.borrow_mut().clock_ms += age);
+    }
     driver.run_verify();
-    MOCK.with(|m| std::mem::take(&mut *m.borrow_mut()))
+    result(&driver)
 }
 
 fn main() {
     use bio::VerifyOutcome::*;
 
     // A cancelled cold verify must not wake the sensor for a pending restore proof.
-    let m = cold_verify(&[true], Some(0));
+    let m = cold_verify(&[true], Some(0), None);
     assert_eq!((m.attempts, m.captured, m.finished), (0, false, None));
     assert!(m.cleanup.is_empty());
 
     // Cancellation in a successful or failed proof leaves no powered reader.
     for proof in [true, false] {
-        let m = cold_verify(&[proof, true], Some(1));
+        let m = cold_verify(&[proof, true], Some(1), None);
         assert_eq!((m.attempts, m.captured, m.finished), (1, false, None));
-        assert_eq!(m.cleanup, ["idle", "off", "settle"]);
+        assert_eq!(m.cleanup, ["idle", "off"]);
+        assert_eq!(m.last_capture_end_ns, 0);
     }
-    // A live verify can retry its cold proof and then take a fingerprint.
-    let m = cold_verify(&[false, true, true], None);
+    // Finishing the proof powers off the reader without delaying its first capture.
+    let m = cold_verify(&[false, true, true], None, None);
     assert_eq!((m.attempts, m.captured, m.finished), (3, true, Some(Matched(1))));
+    assert_eq!(m.cleanup, ["idle", "off", "idle", "off"]);
+    assert_eq!(m.clock_ms, 0);
 
+    // An earlier capture still gets the rest of its original settling interval.
+    let age = u64::from(MATCH_SETTLE_MS) / 2;
+    let m = cold_verify(&[true, true], None, Some(age));
+    assert_eq!((m.captured, m.clock_ms), (true, u64::from(MATCH_SETTLE_MS)));
 
     // The case seen after a suspend: the first attempt fails, the next works.
     let m = run(&[false, true], None, NONCE, true);
@@ -275,6 +295,8 @@ fn main() {
     // A sensor that never comes up: three attempts, then a sensor failure.
     let m = run(&[], None, NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (3, false, Some(Failed(ENROL_STATUS_SENSOR))));
+    assert_eq!(m.cleanup, ["idle", "off"]);
+    assert!(m.last_capture_end_ns > 0);
 
     // Cancellation before bring-up leaves the sensor alone.
     let m = run(&[true], Some(0), T6000, true);
@@ -284,7 +306,8 @@ fn main() {
     // Cancelled during the first attempt: power down without another attempt.
     let m = run(&[false, true], Some(1), NONCE, true);
     assert_eq!((m.attempts, m.captured, m.finished), (1, false, None));
-    assert_eq!(m.cleanup, ["idle", "off", "settle"]);
+    assert_eq!(m.cleanup, ["idle", "off"]);
+    assert!(m.last_capture_end_ns > 0);
 
     // A first attempt that works is the only one.
     let m = run(&[true], None, NONCE, true);
@@ -293,7 +316,8 @@ fn main() {
     // The successful retry may return after the original verify was cancelled.
     let m = run(&[false, true], Some(2), T6000, true);
     assert_eq!((m.attempts, m.captured, m.finished), (2, false, None));
-    assert_eq!(m.cleanup, ["idle", "off", "settle"]);
+    assert_eq!(m.cleanup, ["idle", "off"]);
+    assert!(m.last_capture_end_ns > 0);
 
     // The M1 Pro/Max can recover on a fresh registration without a nonce.
     let m = run(&[false, false, true], None, T6000, true);
@@ -350,7 +374,8 @@ class VerifyBringupTest(unittest.TestCase):
             'run_verify', 'retry_restore_proof', 'attach_bringup',
             'bring_sensor_online_retrying', 'bring_sensor_online_for_verify',
             'attach_bring_sensor_online', 'attach_complete', 'bringup_may_continue',
-            'verify_wanted', 'power_down_capture_sensor')]
+            'verify_wanted', 'power_down_sensor', 'power_down_capture_sensor',
+            'note_capture_end', 'settle_before_capture')]
         self.assertTrue(all(methods))
         attempts = (item(source, '#[derive(Clone, Copy, PartialEq, Eq)]\nenum Bringup {')
                     + '\n' + item(source, 'struct BringupAttempts<')

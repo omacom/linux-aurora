@@ -1552,7 +1552,9 @@ impl SepData {
                 dev_err!(self.dev, "verify: the retried sensor bring-up failed\n");
             }
         }
-        self.power_down_capture_sensor();
+        // The proof took no image. Preserve any settle time owed by an
+        // earlier capture without starting another interval before this verify.
+        Self::power_down_sensor();
         self.refresh_match_credential();
     }
 
@@ -1615,8 +1617,8 @@ impl SepData {
         }
         if !online {
             dev_err!(self.dev, "verify: the sensor did not come back online\n");
+            self.power_down_capture_sensor();
             self.finish_verify(bio::VerifyOutcome::Failed(ENROL_STATUS_SENSOR), token_bytes);
-            let _ = sensor::idle();
             return;
         }
 
@@ -1804,9 +1806,13 @@ impl SepData {
         bio::VerifyOutcome::Matched(bio::MatchEvidence::from_enclave_reply(identity))
     }
 
-    fn power_down_capture_sensor(&self) {
+    fn power_down_sensor() {
         let _ = sensor::idle();
         sensor::power(false);
+    }
+
+    fn power_down_capture_sensor(&self) {
+        Self::power_down_sensor();
         self.note_capture_end();
     }
 
@@ -1835,8 +1841,8 @@ impl SepData {
         }
         if !online {
             dev_err!(self.dev, "enrol: the sensor did not come back online\n");
+            self.power_down_capture_sensor();
             self.finish_enrolment(Err(ENROL_STATUS_SENSOR));
-            let _ = sensor::idle();
         }
         online
     }
@@ -1850,8 +1856,8 @@ impl SepData {
 
         let Some(open) = self.begin_enrolment_on_enclave() else {
             dev_err!(self.dev, "enrol: the enclave would not start an enrolment; see the preceding step\n");
+            self.power_down_capture_sensor();
             self.finish_enrolment(Err(ENROL_STATUS_ENCLAVE));
-            let _ = sensor::idle();
             return;
         };
 
