@@ -11,6 +11,7 @@
 #include <linux/gpio/machine.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/macsmc.h>
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -22,6 +23,13 @@
 #include <linux/mutex.h>
 
 #include "shim.h"
+
+/*
+ * Userspace checks this before loading the driver. T6000 retries sensor
+ * registration before both verification and enrolment. Keep the marker
+ * with both profile policies when backporting.
+ */
+MODULE_INFO(t6000_registration, "1");
 
 /* The board selects the SPI mode; an override is diagnostic only. */
 #define SEP_SENSOR_HZ		8000000

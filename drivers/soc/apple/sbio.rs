@@ -1531,6 +1531,7 @@ impl SepData {
         if self.templates_restored.load(Relaxed)
             || !self.cold_restore_candidate.load(Relaxed)
             || self.device_view_synced.load(Relaxed)
+            || !self.verify_wanted()
         {
             return;
         }
@@ -1538,7 +1539,7 @@ impl SepData {
             self.dev,
             "verify: attach-time bring-up left the device-view proof undone; retrying the sensor bring-up\n"
         );
-        if !self.bring_sensor_online() {
+        if !self.bring_sensor_online() && self.verify_wanted() {
             // After a failed first patch, the enclave can refuse the serial
             // re-registration that follows CLEAR_STATE, while a reboot's
             // fresh registration works. Retry once from the fresh stage.
@@ -1551,7 +1552,9 @@ impl SepData {
                 dev_err!(self.dev, "verify: the retried sensor bring-up failed\n");
             }
         }
-        let _ = sensor::idle();
+        // The proof took no image. Preserve any settle time owed by an
+        // earlier capture without starting another interval before this verify.
+        Self::power_down_sensor();
         self.refresh_match_credential();
     }
 
@@ -1562,23 +1565,24 @@ impl SepData {
             && bio::verify_is_live(&self.bio_session.lock(), self.capture_epoch.load(Relaxed))
     }
 
-    // Every verify registers the sensor again. On a profile with a nonce
-    // session that registration can fail as the attach-time one does, most
-    // often the first one after a system suspend, and a new attempt recovers
-    // it in the same way. Without one, the failure ends the user's
-    // authentication even though the sensor works.
+    // Registration can fail before capture, e.g. REGISTER_SERIAL returning
+    // 0x16 on T6000/T6001. Retry only sensor bring-up, while the original
+    // verify is still wanted. Comparison and its verdict happen afterwards.
     fn bring_sensor_online_for_verify(&self) -> bool {
-        if !self.profile.nonce_session {
-            return self.bring_sensor_online();
-        }
-        self.bring_sensor_online_retrying(c"verify", Bringup::Verify, &registration::VERIFY, || {
-            self.verify_wanted()
-        })
+        self.bring_sensor_online_retrying(
+            c"verify",
+            Bringup::Verify,
+            &self.profile.verify_registration,
+            || self.verify_wanted(),
+        )
         .online()
     }
 
     pub(crate) fn run_verify(&self) {
         self.retry_restore_proof();
+        if !self.verify_wanted() {
+            return;
+        }
         if !self.templates_restored.load(Relaxed) {
             dev_err!(
                 self.dev,
@@ -1602,20 +1606,26 @@ impl SepData {
 
         self.settle_before_capture();
 
+        if !self.verify_wanted() {
+            return;
+        }
         // The enclave refuses a capture from an uncalibrated sensor (0x65 answers 1).
-        if !self.bring_sensor_online_for_verify() {
+        let online = self.bring_sensor_online_for_verify();
+        if !self.verify_wanted() {
+            self.power_down_capture_sensor();
+            return;
+        }
+        if !online {
             dev_err!(self.dev, "verify: the sensor did not come back online\n");
+            self.power_down_capture_sensor();
             self.finish_verify(bio::VerifyOutcome::Failed(ENROL_STATUS_SENSOR), token_bytes);
-            let _ = sensor::idle();
             return;
         }
 
         // The match uses the plain 0x23->0x06->0x65 pipeline, with no SCRD step.
 
         let outcome = self.verify_one_image();
-        let _ = sensor::idle();
-        sensor::power(false);
-        self.note_capture_end();
+        self.power_down_capture_sensor();
 
         let definitive = matches!(
             &outcome,
@@ -1796,20 +1806,58 @@ impl SepData {
         bio::VerifyOutcome::Matched(bio::MatchEvidence::from_enclave_reply(identity))
     }
 
+    fn power_down_sensor() {
+        let _ = sensor::idle();
+        sensor::power(false);
+    }
+
+    fn power_down_capture_sensor(&self) {
+        Self::power_down_sensor();
+        self.note_capture_end();
+    }
+
+    /// A T6000/T6001 can time out reading the sensor serial before the
+    /// first scan. Retry only bring-up, before opening an enclave enrolment.
+    fn bring_sensor_online_for_enrol(&self, epoch: u64) -> bool {
+        let wanted = || {
+            !self.shutting_down.load(Relaxed)
+                && !self.suspending.load(Relaxed)
+                && bio::enrol_is_live(&self.bio_session.lock(), epoch)
+        };
+        if !wanted() {
+            return false;
+        }
+        let online = self
+            .bring_sensor_online_retrying(
+                c"enrol",
+                Bringup::Enrol,
+                &self.profile.enrol_registration,
+                wanted,
+            )
+            .online();
+        if !wanted() {
+            self.power_down_capture_sensor();
+            return false;
+        }
+        if !online {
+            dev_err!(self.dev, "enrol: the sensor did not come back online\n");
+            self.power_down_capture_sensor();
+            self.finish_enrolment(Err(ENROL_STATUS_SENSOR));
+        }
+        online
+    }
+
     pub(crate) fn run_enrolment(&self) {
         self.enrol_frames_accepted.store(0, Relaxed);
 
-        if !self.bring_sensor_online() {
-            dev_err!(self.dev, "enrol: the sensor did not come back online\n");
-            self.finish_enrolment(Err(ENROL_STATUS_SENSOR));
-            let _ = sensor::idle();
+        if !self.bring_sensor_online_for_enrol(self.capture_epoch.load(Relaxed)) {
             return;
         }
 
         let Some(open) = self.begin_enrolment_on_enclave() else {
             dev_err!(self.dev, "enrol: the enclave would not start an enrolment; see the preceding step\n");
+            self.power_down_capture_sensor();
             self.finish_enrolment(Err(ENROL_STATUS_ENCLAVE));
-            let _ = sensor::idle();
             return;
         };
 
@@ -1921,9 +1969,7 @@ impl SepData {
             self.reconcile_identities();
         }
 
-        let _ = sensor::idle();
-        sensor::power(false);
-        self.note_capture_end();
+        self.power_down_capture_sensor();
 
         if let Some(result) = outcome {
             let filed = match (result, identity, enrolment_persisted) {
@@ -3899,6 +3945,8 @@ impl SepData {
 /// Which bring-up a round of attempts makes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Bringup {
+    /// Before an enrolment.
+    Enrol,
     /// As Touch ID is activated.
     Attach,
     /// The late round after an attach that fell short.

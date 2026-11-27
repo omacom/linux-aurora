@@ -197,8 +197,14 @@ pub(crate) const ATTACH: Retry = Retry {
     budget_ms: 10_000,
 };
 
-/// Before a verify, which someone is waiting on: three attempts, back to
-/// back.
+/// A single registration attempt before an enrolment or verify.
+pub(crate) const ONCE: Retry = Retry {
+    attempts: 1,
+    first_pause_ms: 0,
+    budget_ms: 0,
+};
+
+/// Three back-to-back attempts while someone is waiting to verify or enrol.
 pub(crate) const VERIFY: Retry = Retry {
     attempts: 3,
     first_pause_ms: 0,
@@ -688,14 +694,17 @@ mod tests {
         stage: u32,
         session: bool,
         shares: [bool; 8],
+        clears: usize,
+        /// Stage at power-on and the SBIO status returned by REGISTER_SERIAL.
+        serial_replies: [Option<(u32, u16)>; 8],
         attempt: usize,
         /// The first `fail` attempts fail after the session commit, as at
         /// the sequence counter's challenge.
         fail: usize,
         /// As the J314s did after a failed sequence counter init: the
-        /// enclave refuses the serial re-registration that follows
-        /// CLEAR_STATE, and a fresh registration starts a new session.
-        clear_refused: bool,
+        /// enclave accepts CLEAR_STATE but refuses the REGISTER_SERIAL
+        /// that follows it. A fresh registration is accepted.
+        refuse_serial_after_clear: bool,
         /// Whether the system begins to sleep during this attempt, once the
         /// serial is registered and before the session share.
         suspend_at: Option<usize>,
@@ -708,9 +717,11 @@ mod tests {
                 stage: FRESH,
                 session: false,
                 shares: [false; 8],
+                clears: 0,
+                serial_replies: [None; 8],
                 attempt: 0,
                 fail,
-                clear_refused: false,
+                refuse_serial_after_clear: false,
                 suspend_at: None,
                 suspending: false,
             }
@@ -723,12 +734,18 @@ mod tests {
                 self.stage = retry_stage(self.stage, false, retry);
             }
             let clear = plan(self.stage, true, false, true).clear_state;
-            if clear && self.clear_refused {
-                // REGISTER_SERIAL after CLEAR_STATE: 0x16.
-                return false;
-            }
-            if clear || (self.clear_refused && self.stage == FRESH) {
+            if clear {
+                self.clears += 1;
                 self.session = false;
+            }
+            let status = if clear && self.refuse_serial_after_clear {
+                crate::sbio::SBIO_STATUS_16
+            } else {
+                0
+            };
+            self.serial_replies[this] = Some((self.stage, status));
+            if status != 0 {
+                return false;
             }
             self.stage = ESTABLISHED;
             if self.suspend_at == Some(this) {
@@ -793,7 +810,7 @@ mod tests {
         // The J314s: after a failed sequence counter init, the CLEAR_STATE
         // re-registration is refused for the rest of the boot.
         let mut e = SessionEnclave::new(1);
-        e.clear_refused = true;
+        e.refuse_serial_after_clear = true;
         let mut round = Round {
             enclave: &mut e,
             retry: 0,
@@ -803,6 +820,35 @@ mod tests {
         // re-registration, attempt 3 started fresh and shared again.
         assert_eq!(&e.shares[..3], &[true, false, true]);
         assert_eq!(e.stage, ESTABLISHED);
+    }
+
+    #[test]
+    fn t6000_verify_retries_register_serial_0x16_from_fresh() {
+        // On J316c an established registration cleared successfully, then
+        // REGISTER_SERIAL returned 0x16 at 26-33 ms after power-on. Keep
+        // returning that status on re-registration to exercise the fresh try.
+        let mut e = SessionEnclave::new(0);
+        e.stage = ESTABLISHED;
+        e.session = true;
+        e.refuse_serial_after_clear = true;
+        let mut round = Round {
+            enclave: &mut e,
+            retry: 0,
+        };
+        assert_eq!(
+            bring_up(&crate::profile::T6000.verify_registration, &mut round),
+            Outcome::Online(3)
+        );
+        assert_eq!(e.clears, 2);
+        assert_eq!(
+            &e.serial_replies[..3],
+            &[
+                Some((ESTABLISHED, 0x16)),
+                Some((ESTABLISHED, 0x16)),
+                Some((FRESH, 0)),
+            ]
+        );
+        assert_eq!(&e.shares[..3], &[false, false, true]);
     }
 
     #[test]
