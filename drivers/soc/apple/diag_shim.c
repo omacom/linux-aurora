@@ -17,13 +17,17 @@
 #include <linux/atomic.h>
 #include <linux/device.h>
 #include <linux/minmax.h>
+#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
 
 #include "shim.h"
 
+/* Loaders check the on-disk driver before enabling writes. */
+MODULE_INFO(xart_guard_pins_abi, "1");
+
 /* The contract version; see Documentation/ABI/testing/sysfs-driver-apple-sep. */
-#define SEP_DIAG_ABI			2
+#define SEP_DIAG_ABI			3
 
 #define SEP_DIAG_ATTACH_PENDING		0
 #define SEP_DIAG_ATTACH_ATTACHED	1
@@ -67,6 +71,7 @@ static struct {
 	/* The xART guard's effective level (0: none runs), and its list. */
 	unsigned int xart_guard;
 	bool xart_guard_list;
+	bool xart_guard_pins;
 
 	atomic_t attach;
 	atomic_t endpoints;
@@ -293,6 +298,13 @@ static ssize_t xart_guard_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(xart_guard);
 
+static ssize_t xart_guard_pins_show(struct device *dev,
+				    struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", sep_diag.xart_guard_pins);
+}
+static DEVICE_ATTR_RO(xart_guard_pins);
+
 static ssize_t xart_guard_list_show(struct device *dev,
 				    struct device_attribute *attr, char *buf)
 {
@@ -322,12 +334,19 @@ static ssize_t matching_show(struct device *dev, struct device_attribute *attr,
 {
 	const char *state;
 
+	/* Once the guard refuses, a later keybag commit cannot clear it. */
+	if (atomic_read(&sep_diag.xart_refusals))
+		return sysfs_emit(buf, "blocked\n");
+
 	switch (atomic_read(&sep_diag.matching)) {
 	case SEP_DIAG_MATCHING_USABLE:
 		state = "usable";
 		break;
 	case SEP_DIAG_MATCHING_UNVERIFIED:
 		state = "unverified";
+		break;
+	case SEP_DIAG_MATCHING_LEGACY:
+		state = "legacy";
 		break;
 	case SEP_DIAG_MATCHING_BLOCKED:
 		state = "blocked";
@@ -356,6 +375,7 @@ static struct attribute *sep_diag_attrs[] = {
 	&dev_attr_restore.attr,
 	&dev_attr_xart_guard.attr,
 	&dev_attr_xart_guard_list.attr,
+	&dev_attr_xart_guard_pins.attr,
 	&dev_attr_xart_guard_refusals.attr,
 	&dev_attr_matching.attr,
 	NULL
@@ -479,36 +499,31 @@ void sep_diag_set_restore(int state)
  * derived in xart_guard.rs (MatchFacts), which has KUnit tests for each case.
  */
 void sep_diag_set_xart_guard(unsigned int level, bool list_loaded,
-			     int matching)
+			     bool pins, int matching)
 {
 	sep_diag.xart_guard = level;
 	sep_diag.xart_guard_list = list_loaded;
+	sep_diag.xart_guard_pins = pins;
 	atomic_set(&sep_diag.xart_refusals, 0);
 	atomic_set(&sep_diag.matching, matching);
 }
 
-/*
- * After probe, when a fact matching is derived from changes without a
- * refusal: the guard recorded this install's first-setup window. The level,
- * the list and the refusals counted so far stand.
- *
- * The caller derived matching before this call, and a refusal may have
- * landed since. A refusal always leaves "blocked", so the count is read
- * after the store: either this sees the refusal and restores "blocked", or
- * the refusal's own store comes later.
- */
+/* A guarded keybag was committed after probe. */
 void sep_diag_set_matching(int matching)
 {
 	atomic_set(&sep_diag.matching, matching);
-	if (atomic_read(&sep_diag.xart_refusals))
-		atomic_set(&sep_diag.matching, SEP_DIAG_MATCHING_BLOCKED);
 }
 
-/* With matching as the refusal leaves it. */
-void sep_diag_xart_guard_refused(int matching)
+/* A legacy installation can prove present-day usability by a real verify. */
+void sep_diag_verified_match(void)
 {
-	atomic_inc(&sep_diag.xart_refusals);
-	atomic_set(&sep_diag.matching, matching);
+	atomic_cmpxchg(&sep_diag.matching, SEP_DIAG_MATCHING_LEGACY,
+		       SEP_DIAG_MATCHING_USABLE);
+}
+
+void sep_diag_xart_guard_refused(void)
+{
+	atomic_add_unless(&sep_diag.xart_refusals, 1, -1);
 }
 
 /*

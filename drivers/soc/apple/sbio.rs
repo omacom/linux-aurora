@@ -1382,7 +1382,7 @@ impl SepData {
                 bio::DEVICE_NAME,
                 e
             );
-            // No activation can follow, so a pinning first-setup window ends.
+            // Discard any dormant J313 activation allowance.
             self.with_store(|store| store.close_first_setup());
         }
     }
@@ -1394,10 +1394,7 @@ impl SepData {
         if self.touchid_failed.load(Relaxed) {
             return Err(EIO);
         }
-        // A pinning first-setup window ends when this first activation
-        // returns, on every path: on a J313 the enclave rewrites the third
-        // shared locker about 280 ms after the LOAD_KEYBAG reply, during the
-        // requests that follow it.
+        // Every exit consumes any same-boot J313 activation allowance.
         let _window = crate::sks::SetupWindow::for_activation(self);
         let mut store = store::Store::open().inspect_err(|e| {
             dev_err!(
@@ -1448,6 +1445,9 @@ impl SepData {
             );
             return Err(ENODEV);
         }
+        // J313 rewrites its third locker after LOAD_KEYBAG. Admit that one
+        // only during this activation of the identity saved by provisioning.
+        self.with_store(|store| store.begin_activation(stored.uuid()));
         let (handle, uuid) = self.sks_recover(&stored).ok_or_else(|| {
             dev_err!(
                 self.dev,
@@ -3388,10 +3388,14 @@ impl SepData {
     }
 
     fn finish_verify(&self, outcome: bio::VerifyOutcome, token_bytes: [u8; bio::TOKEN_LEN]) {
+        let matched = matches!(&outcome, bio::VerifyOutcome::Matched(_));
         let filed = bio::verify_finish(
             &mut self.bio_session.lock(), self.capture_epoch.load(Relaxed), outcome, token_bytes,
         );
         if filed {
+            if matched {
+                diag::verified_match();
+            }
             self.bio_wake();
         }
     }

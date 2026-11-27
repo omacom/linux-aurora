@@ -81,14 +81,12 @@ void *sep_store_open_trunc(const char *path)
 }
 
 /*
- * Opens an existing file read-only, NULL if absent. O_RDONLY and no O_CREAT so
- * the seed cannot be created, truncated or written by mistake.
+ * Opens an existing file read-only. Preserve errors: only -ENOENT proves
+ * that the path is absent and allows creation of a new identity keybag.
  */
 void *sep_store_open_ro(const char *path)
 {
-	struct file *f = open_as_kernel(path, O_RDONLY | O_LARGEFILE, 0);
-
-	return IS_ERR(f) ? NULL : f;
+	return open_as_kernel(path, O_RDONLY | O_LARGEFILE, 0);
 }
 
 void *sep_store_open_block(const char *path, int writable)

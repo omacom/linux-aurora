@@ -108,6 +108,19 @@ class SepReadyTest(unittest.TestCase):
         self.assertIn("level 1", log)
         self.assertIn("the enrolled fingerprints are restored", log)
 
+    def test_legacy_pins_offer_enrollment_or_verification_without_claiming_a_match(self):
+        self.attached(matching="legacy", xart="enabled", xart_guard="1",
+                      xart_guard_list="loaded", xart_guard_refusals="0", boot="cold")
+        rc, log = self.run_ready()
+        self.assertEqual(rc, 0, log)
+        self.assert_unverified(log)
+        self.assertIn("Verify an enrolled finger", log)
+        self.attached(restore="empty", matching="legacy")
+        rc, log = self.run_ready()
+        self.assertEqual(rc, 0, log)
+        self.assertIn("can enroll a fingerprint", log)
+        self.assertIn("UNVERIFIED until a live verify succeeds", log)
+
     def assert_blocked(self, log, *reasons, optout=True):
         self.assertIn("NOT ready", log)
         self.assertNotIn("is ready", log)

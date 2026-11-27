@@ -173,6 +173,7 @@ int sep_sensor_irq_wait(unsigned int timeout_ms);
 #define SEP_DIAG_MATCHING_USABLE	1
 #define SEP_DIAG_MATCHING_UNVERIFIED	2
 #define SEP_DIAG_MATCHING_BLOCKED	3
+#define SEP_DIAG_MATCHING_LEGACY	4
 
 struct device;
 
@@ -190,9 +191,10 @@ void sep_diag_set_touchid(bool started);
 void sep_diag_set_sensor_attach(int state);
 void sep_diag_set_restore(int state);
 void sep_diag_set_xart_guard(unsigned int level, bool list_loaded,
-			     int matching);
+			     bool pins, int matching);
 void sep_diag_set_matching(int matching);
-void sep_diag_xart_guard_refused(int matching);
+void sep_diag_xart_guard_refused(void);
+void sep_diag_verified_match(void);
 void sep_diag_bringup_ended(void);
 
 /* -- bio_shim.c --------------------------------------------------------- */
