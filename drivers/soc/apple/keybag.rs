@@ -178,7 +178,7 @@ pub(crate) fn read(slot: Slot) -> Result<State> {
         head[OFF_STATE + 3],
     ]);
     if state == STATE_REFUSED {
-        return Ok(State::Absent(NoStoredKeyBag { slot }));
+        return read_refusal(slot, size, &head);
     }
     let Some(provenance) = UuidProvenance::from_state(state) else {
         // Intent or unknown state: a bag may exist unnamed; creating again would
@@ -313,13 +313,12 @@ pub(crate) fn replace_wrapped(
     )
 }
 
-fn write_record(
-    slot: Slot,
+fn record_header(
     state: u32,
     wrapped: &[u8],
     uuid: &[u8; UUID_LEN],
     secret: &[u8],
-) -> Result<()> {
+) -> Result<[u8; HEADER]> {
     let crc = crc16_ccitt_false(&checksum_input(state, wrapped, uuid, secret)?);
 
     let mut head = [0u8; HEADER];
@@ -330,7 +329,25 @@ fn write_record(
     head[OFF_CRC..OFF_CRC + 2].copy_from_slice(&crc.to_le_bytes());
     head[OFF_UUID..OFF_UUID + UUID_LEN].copy_from_slice(uuid);
     head[OFF_SECRET_LEN..OFF_SECRET_LEN + 4].copy_from_slice(&(secret.len() as u32).to_le_bytes());
+    Ok(head)
+}
 
+fn read_refusal(slot: Slot, size: u64, head: &[u8; HEADER]) -> Result<State> {
+    // A damaged state field on a committed bag must never authorize a second create.
+    if size != HEADER as u64 || *head != record_header(STATE_REFUSED, &[], &[0; UUID_LEN], &[])? {
+        return Err(EINVAL);
+    }
+    Ok(State::Absent(NoStoredKeyBag { slot }))
+}
+
+fn write_record(
+    slot: Slot,
+    state: u32,
+    wrapped: &[u8],
+    uuid: &[u8; UUID_LEN],
+    secret: &[u8],
+) -> Result<()> {
+    let head = record_header(state, wrapped, uuid, secret)?;
     let file = shim::StoreFile::open_trunc(slot.path())?;
     // Body first, then the header that vouches for it: a crash between leaves a
     // bad checksum, which `read` refuses — the safe side.
@@ -348,4 +365,26 @@ fn write_record(
         file.sync_parent()?;
     }
     Ok(())
+}
+
+#[cfg(CONFIG_APPLE_SEP_KUNIT_TEST)]
+#[kernel::macros::kunit_tests(apple_sep_keybag)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_requires_the_complete_empty_refusal_record() -> Result {
+        let mut head = record_header(STATE_REFUSED, &[], &[0; UUID_LEN], &[])?;
+        assert!(matches!(
+            read_refusal(Slot::Identity, HEADER as u64, &head),
+            Ok(State::Absent(_))
+        ));
+        assert!(read_refusal(Slot::Identity, (HEADER + 1) as u64, &head).is_err());
+        for field in [OFF_LEN, OFF_CRC, OFF_CRC + 2, OFF_UUID, OFF_SECRET_LEN] {
+            head[field] ^= 1;
+            assert!(read_refusal(Slot::Identity, HEADER as u64, &head).is_err());
+            head[field] ^= 1;
+        }
+        Ok(())
+    }
 }

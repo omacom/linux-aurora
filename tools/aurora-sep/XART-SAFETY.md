@@ -290,7 +290,8 @@ A create that gets no reply, as one with a refused write does, keeps its
 intent record, so later creates fail with `EEXIST` until Touch ID is reset
 (`install-aurora-sep.sh --reset-touchid`): the enclave may have kept part of
 what it saved before the refusal. A create the enclave answers with an error
-stays retryable, as before.
+stays retryable when its complete, checksummed refusal record is present.
+A malformed refusal leaves the keybag file in place and blocks another create.
 
 ## Earlier deployment policy
 
