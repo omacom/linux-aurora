@@ -1181,6 +1181,21 @@
    ]
   },
   {
+   "name": "tools/aurora-sep/tests/test_enrol_bringup.py",
+   "group": "aurora-sep",
+   "argv": [
+    "python3",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tools/aurora-sep/tests",
+    "-p",
+    "test_enrol_bringup.py",
+    "-v"
+   ]
+  },
+  {
    "name": "tools/aurora-sep/tests/test_esp_history.py",
    "group": "aurora-sep",
    "argv": [
