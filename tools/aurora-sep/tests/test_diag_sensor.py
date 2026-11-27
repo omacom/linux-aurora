@@ -24,6 +24,7 @@ APPLE = ROOT / 'drivers/soc/apple'
 SCRIPT = Path(__file__).resolve().parents[1] / 'aurora-sep-ready'
 
 HEADERS = {
+    'linux/module.h': '#define MODULE_INFO(tag, value)\n',
     'linux/types.h': r'''
 #include <stdbool.h>
 #include <stddef.h>
@@ -52,7 +53,12 @@ static inline bool atomic_try_cmpxchg(atomic_t *v, int *old, int new_)
 	return __atomic_compare_exchange_n(&v->counter, old, new_, false,
 					   __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
 }
-#define atomic_inc(v) __atomic_add_fetch(&(v)->counter, 1, __ATOMIC_SEQ_CST)
+static inline void atomic_add_unless(atomic_t *v, int add, int unless)
+{
+	int old = atomic_read(v);
+	while (old != unless && !atomic_try_cmpxchg(v, &old, (int)((unsigned int)old + add)))
+		;
+}
 ''',
     'linux/device.h': r'''
 #include <linux/types.h>
@@ -137,7 +143,7 @@ static void dump(const char *dir)
 {
 	static const char *names[] = { "abi", "touchid", "sensor", "sensor_attach",
 				       "restore", "keybag", "keystore", "boot", "xart",
-				       "xart_guard", "xart_guard_list",
+				       "xart_guard", "xart_guard_list", "xart_guard_pins",
 				       "xart_guard_refusals", "matching", NULL };
 	char path[4096];
 
@@ -157,14 +163,15 @@ int main(int argc, char **argv)
 	unsigned int bind, stale;
 
 	/* The Neo: warm attach, xART writable, no guard. */
-	sep_diag_set_xart_guard(0, false, SEP_DIAG_MATCHING_USABLE);
+	sep_diag_set_xart_guard(0, false, false, SEP_DIAG_MATCHING_USABLE);
 	sep_diag_register(&dev, "T8140/J700", 10, false, false, true);
-	/* The guard's attributes were added within version 2. */
-	expect("probe", "abi", "2");
+	/* Version 3 distinguishes legacy pins from a recorded guarded commit. */
+	expect("probe", "abi", "3");
 	expect("probe", "sensor", "unbound");
 	expect("probe", "touchid", "unknown");
 	expect("probe", "xart_guard", "0");
 	expect("probe", "xart_guard_list", "none");
+	expect("probe", "xart_guard_pins", "0");
 	expect("probe", "xart_guard_refusals", "0");
 	expect("probe", "matching", "usable");
 
@@ -246,24 +253,26 @@ static const char *attr(const char *name)
 }
 
 /*
- * argv: level list matching-at-probe refusals matching-after-refusal
- *       [matching-after-first-setup]
+ * argv: level list pins matching-at-probe refusals [matching-after-commit]
  */
 int main(int argc, char **argv)
 {
 	struct device dev;
-	int refusals = atoi(argv[4]);
+	int refusals = atoi(argv[5]);
 
-	sep_diag_set_xart_guard(atoi(argv[1]), atoi(argv[2]), atoi(argv[3]));
+	sep_diag_set_xart_guard(atoi(argv[1]), atoi(argv[2]), atoi(argv[3]), atoi(argv[4]));
 	sep_diag_register(&dev, "TEST", 4, false, false, true);
 	while (refusals--)
-		sep_diag_xart_guard_refused(atoi(argv[5]));
-	if (argc > 6)
+		sep_diag_xart_guard_refused();
+	if (argc > 6 && atoi(argv[6]))
 		sep_diag_set_matching(atoi(argv[6]));
+	if (argc > 7 && atoi(argv[7]))
+		sep_diag_verified_match();
 	/* attr() returns one static buffer: print each before the next. */
 	printf("%s ", attr("abi"));
 	printf("%s ", attr("xart_guard"));
 	printf("%s ", attr("xart_guard_list"));
+	printf("%s ", attr("xart_guard_pins"));
 	printf("%s ", attr("xart_guard_refusals"));
 	printf("%s\n", attr("matching"));
 	return 0;
@@ -297,24 +306,24 @@ class DiagSensorTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('cc'), 'needs a C compiler')
     def test_matching_follows_the_guard(self):
-        usable, unverified, blocked = 1, 2, 3  # SEP_DIAG_MATCHING_* in shim.h
+        usable, unverified, blocked, legacy = 1, 2, 3, 4  # SEP_DIAG_MATCHING_* in shim.h
         cases = [
-            # level, list, matching at probe, refusals, matching after them
-            # and, where given, matching once the first setup is recorded
-            ((0, 0, usable, 0, 0), '2 0 none 0 usable'),            # Neo, M1 Pro (pinned 0)
-            ((1, 1, unverified, 0, 0), '2 1 loaded 0 unverified'),  # M2 under the guard
-            ((1, 1, unverified, 2, blocked), '2 1 loaded 2 blocked'),  # ... after refusals
-            ((2, 1, unverified, 0, 0), '2 2 loaded 0 unverified'),
-            ((1, 0, blocked, 0, 0), '2 1 unavailable 0 blocked'),   # no list
-            ((1, 1, blocked, 0, 0), '2 1 loaded 0 blocked'),        # cold boot, level 1
-            # ... with xart_guard_pins, once its first keybag creation is sent
-            ((1, 1, blocked, 0, 0, unverified), '2 1 loaded 0 unverified'),
-            # ... and the refusals counted before that stand, and win over a
-            # matching value that was derived before they landed
-            ((1, 1, blocked, 2, blocked, blocked), '2 1 loaded 2 blocked'),
-            ((1, 1, blocked, 2, blocked, unverified), '2 1 loaded 2 blocked'),
-            ((0, 0, 0, 0, 0), '2 0 none 0 unknown'),                # never set
-            ((0, 0, 7, 0, 0), '2 0 none 0 unknown'),                # out of range
+            # level, list, effective pin mode, base matching, refusals, optional commit
+            ((0, 0, 0, usable, 0), '3 0 none 0 0 usable'),
+            ((1, 1, 0, unverified, 0), '3 1 loaded 0 0 unverified'),
+            ((1, 1, 0, unverified, 2), '3 1 loaded 0 2 blocked'),
+            ((2, 1, 0, unverified, 0), '3 2 loaded 0 0 unverified'),
+            ((1, 0, 0, blocked, 0), '3 1 unavailable 0 0 blocked'),
+            ((1, 1, 1, blocked, 0), '3 1 loaded 1 0 blocked'),
+            ((1, 1, 1, blocked, 0, unverified), '3 1 loaded 1 0 unverified'),
+            # A commit racing or following the refusal cannot clear it.
+            ((1, 1, 1, blocked, 2, unverified), '3 1 loaded 1 2 blocked'),
+            ((1, 1, 1, legacy, 0), '3 1 loaded 1 0 legacy'),
+            ((1, 1, 1, legacy, 0, 0, 1), '3 1 loaded 1 0 usable'),
+            ((1, 1, 1, legacy, 1, 0, 1), '3 1 loaded 1 1 blocked'),
+            ((1, 1, 1, blocked, 0, 0, 1), '3 1 loaded 1 0 blocked'),
+            ((0, 0, 0, 0, 0), '3 0 none 0 0 unknown'),
+            ((0, 0, 0, 7, 0), '3 0 none 0 0 unknown'),
         ]
         with tempfile.TemporaryDirectory() as directory:
             harness = self.build(Path(directory), GUARD_HARNESS, 'guard')
@@ -324,43 +333,30 @@ class DiagSensorTest(unittest.TestCase):
                 self.assertEqual(done.stdout.strip(), want, args)
 
     def test_the_first_setup_window_brackets_the_create(self):
-        # sks.rs asks the guard for the window on every platform (the guard
-        # decides which get one), tells diag once it opens, holds it across
-        # the create and tells the guard when the create is over (the guard
-        # decides whether the window outlasts it: KUnit
-        # only_a_pinning_window_outlasts_the_create). A successful create
-        # hands it to the first activation, which releases it when it
-        # returns; any failed exit in between shuts it on drop.
+        # KUnit exercises the state machine. Check the actual SKS and SBIO
+        # callers delimit the two operations and only record a persisted bag.
         source = (APPLE / 'sks.rs').read_text()
         create = function(source, 'pub(crate) fn sks_provision_identity_keybag(&self) -> bool')
-        steps = ['store.open_first_setup()', 'crate::diag::xart_guard_setup_recorded()',
-                 'SetupWindow {', 'intent.sending()', 'self.sks_exchange(request.name',
-                 'window.end_create()', 'self.sks_req_copy_keybag(handle)',
-                 'window.leave_open_for_activation()']
-        places = [create.find(step) for step in steps]
-        self.assertNotIn(-1, places, steps)
-        self.assertEqual(places, sorted(places), steps)
-        for step in steps:
-            self.assertEqual(create.count(step), 1, step)
-        self.assertNotIn('close_first_setup', create)
-        # The holder's end_create hands the decision to the guard.
-        holder = function(source, 'fn end_create(&self)')
-        self.assertIn('store.end_create()', holder)
-        # Nothing else in the key store opens or reports the window.
-        for step in (steps[0], steps[1]):
-            self.assertEqual(source.count(step), 1, step)
-        # The bootstrap no longer decides here: xart_guard.rs (Setup) does.
-        self.assertNotIn('Bootstrap', create[:places[3]])
+        steps = ['store.open_first_setup()', 'SetupWindow {', 'intent.sending()',
+                 'self.sks_exchange(request.name', 'window.end_create()',
+                 'self.sks_req_copy_keybag(handle)', 'window.end_copy()',
+                 'let committed =', 'if let Err(e) = committed', 'window.provisioned(']
+        places = [create.index(step) for step in steps]
+        self.assertEqual(places, sorted(places))
+        finish = function(source, 'fn provisioned(mut self,')
+        self.assertLess(finish.index('store.commit_keybag(uuid)'), finish.index('diag::xart_guard_keybag_committed()'))
+        record = function((APPLE / 'keybag.rs').read_text(), 'fn write_record(')
+        syncs = ['file.write_all(0, &head)?', 'file.sync()?', 'if state == STATE_INTENT', 'file.sync_parent()?']
+        self.assertEqual([record.index(x) for x in syncs], sorted(record.index(x) for x in syncs))
+        self.assertLess(create.index('KeybagCreateIntent::new('), create.index('store.open_first_setup()'))
         sbio = (APPLE / 'sbio.rs').read_text()
+        failed_register = function(sbio, 'if let Err(e) = self.register_bio()')
+        self.assertIn('store.close_first_setup()', failed_register)
         activate = function(sbio, 'fn activate_touchid(&self) -> Result<()>')
-        # The first activation holds the window from before its first step
-        # to its return (a J313 rewrites a shared locker after LOAD_KEYBAG),
-        # and nothing releases it earlier.
-        hold = activate.find('let _window = crate::sks::SetupWindow::for_activation(self);')
-        self.assertNotEqual(hold, -1)
-        self.assertLess(hold, activate.find('store::Store::open()'))
-        self.assertNotIn('drop(_window)', activate)
-        self.assertNotIn('close_first_setup', activate)
+        steps = ['SetupWindow::for_activation(self)', 'keybag::read(keybag::Slot::Identity)',
+                 'store.begin_activation(stored.uuid())', 'self.sks_recover(&stored)']
+        places = [activate.index(step) for step in steps]
+        self.assertEqual(places, sorted(places))
 
     def test_probe_and_remove_report_the_bind(self):
         source = (APPLE / 'sensor_shim.c').read_text()

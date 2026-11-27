@@ -30,6 +30,7 @@ const MAGIC: [u8; 16] = *b"APPLE-SEP-KBAG01";
 /// v2 stores the bag secret; a v1 record is refused, not reinterpreted.
 const VERSION: u32 = 2;
 
+const STATE_INTENT: u32 = 0;
 const STATE_COMMITTED: u32 = 1;
 /// Create refused by the enclave: nothing exists, retry allowed (unlike an
 /// intent record, where a bag may exist unnamed — block retry).
@@ -237,7 +238,7 @@ pub(crate) fn read(slot: Slot) -> Result<State> {
 }
 
 pub(crate) fn write_intent(slot: Slot) -> Result<()> {
-    write_record(slot, 0, &[], &[0; UUID_LEN], &[])
+    write_record(slot, STATE_INTENT, &[], &[0; UUID_LEN], &[])
 }
 
 pub(crate) fn mark_refused(slot: Slot) -> Result<()> {
@@ -340,5 +341,11 @@ fn write_record(
         file.write_all((HEADER + wrapped.len()) as u64, secret)?;
     }
     file.write_all(0, &head)?;
-    file.sync()
+    file.sync()?;
+    if state == STATE_INTENT {
+        // CREATE_KEYBAG must not reach the enclave before the new file's
+        // name and intent survive a crash. Later commits reuse this inode.
+        file.sync_parent()?;
+    }
+    Ok(())
 }

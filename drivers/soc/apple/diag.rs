@@ -7,16 +7,12 @@
 //! can block a bring-up step, and a sysfs read never reaches back into the
 //! driver or the SEP.
 
-use kernel::{
-    device,
-    prelude::*,
-    sync::atomic::{Atomic, Relaxed}, //
-};
+use kernel::{device, prelude::*};
 
 use crate::{
     profile,
     registration,
-    xart_guard::MatchFacts, //
+    xart_guard::{KeybagEvidence, MatchFacts}, //
 };
 
 extern "C" {
@@ -40,9 +36,10 @@ extern "C" {
     fn sep_diag_set_touchid(started: bool);
     fn sep_diag_set_sensor_attach(state: c_int);
     fn sep_diag_set_restore(state: c_int);
-    fn sep_diag_set_xart_guard(level: c_uint, list_loaded: bool, matching: c_int);
+    fn sep_diag_set_xart_guard(level: c_uint, list_loaded: bool, pins: bool, matching: c_int);
     fn sep_diag_set_matching(matching: c_int);
-    fn sep_diag_xart_guard_refused(matching: c_int);
+    fn sep_diag_xart_guard_refused();
+    fn sep_diag_verified_match();
     fn sep_diag_bringup_ended();
 }
 
@@ -71,15 +68,15 @@ pub(crate) enum Restore {
 /// group goes away when the driver unbinds.
 ///
 /// `guard` is the xART guard as the store opened it: its effective level and
-/// whether Linux's list loaded, or `None` when no guard runs. `guarded_setup`
-/// is whether that list says this install's first keybag creation was sent
-/// under the guard.
+/// whether Linux's list loaded and whether its pin policy is effective, or
+/// `None` when no guard runs. `keybag` describes the guard's evidence for
+/// the validated, persisted identity bag.
 pub(crate) fn register(
     dev: &device::Device<device::Bound>,
     profile: &profile::PlatformProfile,
     xart_writable: bool,
-    guard: Option<(u8, bool)>,
-    guarded_setup: bool,
+    guard: Option<(u8, bool, bool)>,
+    keybag: KeybagEvidence,
 ) -> Result {
     // Exhaustive, so a new bootstrap or key store fails to build here until
     // the ABI has a value for it.
@@ -91,17 +88,16 @@ pub(crate) fn register(
         profile::KeyStore::Sepos13 { .. } => true,
         profile::KeyStore::Variant5 => false,
     };
-    // The facts `matching` is derived from, kept for the guard's refusals.
-    // Probe runs before the guard can refuse anything.
-    XART_WRITABLE.store(xart_writable, Relaxed);
-    COLD.store(cold, Relaxed);
-    GUARDED_SETUP.store(guarded_setup, Relaxed);
-    let (level, list_loaded) = guard.unwrap_or((0, false));
-    GUARD_LEVEL.store(u32::from(level), Relaxed);
-    GUARD_LIST.store(list_loaded, Relaxed);
-    REFUSALS.store(0, Relaxed);
-    // SAFETY: no preconditions; stores three words.
-    unsafe { sep_diag_set_xart_guard(c_uint::from(level), list_loaded, matching() as c_int) };
+    let (level, list_loaded, pins) = guard.unwrap_or((0, false, false));
+    let matching = MatchFacts {
+        xart_writable,
+        cold,
+        keybag,
+        guard: guard.map(|(level, list_loaded, _)| (level, list_loaded)),
+    }
+    .matching();
+    // SAFETY: no preconditions; caches the probe's fixed facts.
+    unsafe { sep_diag_set_xart_guard(c_uint::from(level), list_loaded, pins, matching as c_int) };
 
     // SAFETY: `dev` is bound for the duration of the call, which is what devres
     // needs. `profile.name` is a `str`, valid for reads of `profile.name.len()`
@@ -181,46 +177,22 @@ pub(crate) fn restore(state: Restore) {
     unsafe { sep_diag_set_restore(state as c_int) };
 }
 
-static XART_WRITABLE: Atomic<bool> = Atomic::new(false);
-static COLD: Atomic<bool> = Atomic::new(false);
-static GUARDED_SETUP: Atomic<bool> = Atomic::new(false);
-static GUARD_LEVEL: Atomic<u32> = Atomic::new(0);
-static GUARD_LIST: Atomic<bool> = Atomic::new(false);
-static REFUSALS: Atomic<u32> = Atomic::new(0);
-
-/// What a fingerprint match can expect of the xART guard, from the facts
-/// [`register`] stored and the refusals since.
-fn matching() -> crate::xart_guard::Matching {
-    let level = GUARD_LEVEL.load(Relaxed);
-    MatchFacts {
-        xart_writable: XART_WRITABLE.load(Relaxed),
-        cold: COLD.load(Relaxed),
-        guarded_setup: GUARDED_SETUP.load(Relaxed),
-        guard: (level != 0).then(|| {
-            (
-                u8::try_from(level).unwrap_or(u8::MAX),
-                GUARD_LIST.load(Relaxed),
-            )
-        }),
-        refusals: REFUSALS.load(Relaxed),
-    }
-    .matching()
-}
-
-/// The xART guard opened this install's first-setup window and recorded it in
-/// its list, so the keybag creation about to be sent runs under the guard.
-pub(crate) fn xart_guard_setup_recorded() {
-    GUARDED_SETUP.store(true, Relaxed);
-    // SAFETY: no preconditions; stores one word. The refusals counted since
-    // probe stand, which `sep_diag_set_xart_guard` would clear.
-    unsafe { sep_diag_set_matching(matching() as c_int) };
+/// The caller verified the guarded identity after the keybag commit.
+pub(crate) fn xart_guard_keybag_committed() {
+    // SAFETY: stores the base status. A refusal takes precedence at readout.
+    unsafe { sep_diag_set_matching(crate::xart_guard::Matching::Unverified as c_int) };
 }
 
 /// The xART guard refused one of the enclave's writes or deletes.
 pub(crate) fn xart_guard_refused() {
-    REFUSALS.fetch_add(1, Relaxed);
-    // SAFETY: no preconditions; updates two words.
-    unsafe { sep_diag_xart_guard_refused(matching() as c_int) };
+    // SAFETY: no preconditions; increments one counter.
+    unsafe { sep_diag_xart_guard_refused() };
+}
+
+/// The current userspace verification completed with a durably saved match.
+pub(crate) fn verified_match() {
+    // SAFETY: promotes the base status only for a legacy pin list.
+    unsafe { sep_diag_verified_match() };
 }
 
 /// The boot-time bring-up is over, however far it got.

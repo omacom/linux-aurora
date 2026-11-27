@@ -3,9 +3,12 @@ Date:		October 2026
 KernelVersion:	7.1
 Contact:	Chris Kearney <chris@kearneymail.com>
 Description:
-		(RO) Version of the diag interface: "2" for the attributes
-		and values described in this file. Version 2 added
-		sensor_attach and restore; version 1 had neither.
+		(RO) Version of the diag interface. Version 3 distinguishes
+		older pin lists with matching="legacy" and can report
+		"usable" after a successful, persisted guarded verification.
+		It also exposes the effective xart_guard_pins policy.
+		Version 2 added sensor_attach and restore. Version 1 had
+		neither.
 
 		Within a version, attributes are only added, and an existing
 		attribute keeps its values and their meaning. A reader tests
@@ -294,6 +297,19 @@ Description:
 			refused too.
 		==	================================================
 
+What:		/sys/bus/platform/devices/<unit>.sep/diag/xart_guard_pins
+Date:		November 2026
+KernelVersion:	7.2
+Contact:	Ryan Murray <ryan@aurorasilicon.org>
+Description:
+		(RO) The effective pin policy at probe. 1 means that xART
+		writes are enabled, the guard runs at level 1, its list
+		loaded within the board's pin limit, and xart_guard_pins=1
+		enables pin use on this board. Otherwise 0. A fresh, empty
+		list qualifies on J313, J314s, J316s and J316c. J293 only
+		qualifies with previously recorded pins. This attribute does
+		not grant a new pin or indicate a keybag was created.
+
 What:		/sys/bus/platform/devices/<unit>.sep/diag/xart_guard_list
 Date:		October 2026
 KernelVersion:	7.2
@@ -326,7 +342,7 @@ Description:
 		guard has refused since probe, as an unsigned decimal. A
 		new record that could not be added to Linux's list counts
 		too, since its write is refused. Only the first few
-		refusals are logged; this counts them all.
+		refusals are logged. The count saturates at 4294967295.
 
 What:		/sys/bus/platform/devices/<unit>.sep/diag/matching
 Date:		October 2026
@@ -340,12 +356,20 @@ Description:
 		the fingerprints were restored.
 
 		==========	==========================================
-		usable		xART writes are enabled and no guard runs.
+		usable		xART writes are enabled without a guard, or
+				this boot's legacy installation has saved
+				and returned a successful guarded match.
+		legacy		A valid persisted keybag and a complete
+				older list with its spent marker and one
+				or more usable pins exist. Their creation
+				provenance is unknown. A real verification
+				can establish usability for this boot.
 		unverified	A guard runs with its list loaded and has
 				refused nothing yet, on a warm-attach Mac
 				(boot "warm") or on a cold-boot Mac (boot
-				"cold") whose keybag was created under the
-				guard with xart_guard_pins=1. Whether every
+				"cold") whose validated keybag UUID matches
+				a guarded completion entry with pins enabled.
+				Whether every
 				record a match rewrites is on the list, or
 				is a pinned locker, is not known until a
 				match is tried.
@@ -355,12 +379,10 @@ Description:
 				(xart_guard_refusals above 0), the guard
 				has no list (xart_guard_list
 				"unavailable"), or a guard runs on a
-				cold-boot Mac (boot "cold") whose keybag
-				was not created under it. Creating the
-				keybag there needs xart_guard=0, which
-				leaves the records a match rewrites off the
-				list, or xart_guard_pins=1 (run on a J313
-				only).
+				cold-boot Mac (boot "cold") without proof
+				that its persisted keybag was committed
+				under the active pin policy. Legacy spent
+				markers alone cannot prove this.
 		==========	==========================================
 
 		For the guard cases the documented opt-out is xart_guard=0,
@@ -369,5 +391,6 @@ Description:
 		tools/aurora-sep/XART-SAFETY.md. During a boot the value
 		moves from "unverified" to "blocked" once the guard refuses
 		a write. On a cold-boot Mac with xart_guard_pins=1 it also
-		moves from "blocked" to "unverified" when the first keybag
-		creation is sent under the guard, and nowhere else.
+		moves from "blocked" to "unverified" after the guarded keybag
+		and its completion entry have been committed. A refusal
+		always takes precedence over that update or a later verify.

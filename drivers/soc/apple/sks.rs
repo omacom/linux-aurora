@@ -16,15 +16,14 @@ struct KeybagCreateIntent<'a> {
 
 impl<'a> KeybagCreateIntent<'a> {
     fn new(dev: &'a device::Device, slot: keybag::Slot) -> Option<Self> {
+        // On a failed pre-send write or directory sync the drop guard can
+        // still mark the attempt refused: no create was sent.
+        let intent = Self { dev, slot, sent: false };
         if let Err(e) = keybag::write_intent(slot) {
             dev_err!(dev, "sks: cannot persist keybag-create intent: {:?}\n", e);
             return None;
         }
-        Some(Self {
-            dev,
-            slot,
-            sent: false,
-        })
+        Some(intent)
     }
 
     fn sending(&mut self) {
@@ -55,8 +54,8 @@ pub(crate) struct SetupWindow<'a> {
 }
 
 impl<'a> SetupWindow<'a> {
-    /// The first activation's hold on a window provisioning may have left
-    /// open; closing a shut window does nothing.
+    /// Discard the one-shot activation allowance on every return, including
+    /// failures before the keybag is loaded.
     pub(crate) fn for_activation(sep: &'a SepData) -> Self {
         SetupWindow { sep, open: true }
     }
@@ -67,10 +66,28 @@ impl<'a> SetupWindow<'a> {
         }
     }
 
-    /// Hands the window to the first activation, which closes it when it
-    /// returns (`activate_touchid`). Only a pinning window is still open here.
-    fn leave_open_for_activation(mut self) {
-        self.open = false;
+    /// Stop admitting provisioning pins as soon as COPY_KEYBAG returns.
+    fn end_copy(&self) {
+        if self.open {
+            self.sep.with_store(|store| store.end_copy());
+        }
+    }
+
+    /// The keybag has been committed. Keep J313's dormant allowance for
+    /// activation of that same bag. All other boards have finished.
+    fn provisioned(mut self, uuid: &[u8; 16]) -> Result<()> {
+        if self.open {
+            if self
+                .sep
+                .with_store(|store| store.commit_keybag(uuid))
+                .transpose()?
+                == Some(true)
+            {
+                crate::diag::xart_guard_keybag_committed();
+            }
+            self.open = false;
+        }
+        Ok(())
     }
 }
 
@@ -721,10 +738,6 @@ impl SepData {
                 return false;
             }
         };
-        if first_setup {
-            // The create is sent under the guard: matching follows.
-            crate::diag::xart_guard_setup_recorded();
-        }
         let window = SetupWindow {
             sep: self,
             open: first_setup,
@@ -810,6 +823,7 @@ impl SepData {
             dev_err!(self.dev, "sks: COPY_KEYBAG of the new identity keybag got no reply\n");
             return false;
         };
+        window.end_copy();
         let Some(wrapped) = self.wrapped_from_copy_reply(&out, c"new identity keybag") else {
             dev_err!(
                 self.dev,
@@ -828,7 +842,10 @@ impl SepData {
             return false;
         }
         let _ = self.sks_send(self.sks_req_unload_keybag(handle));
-        window.leave_open_for_activation();
+        if let Err(e) = window.provisioned(bag_uuid.as_ref().unwrap_or(&uuid)) {
+            dev_err!(self.dev, "sks: could not record guarded keybag commit ({:?})\n", e);
+            return false;
+        }
         dev_info!(self.dev, "sks: identity keybag provisioned\n");
         true
     }

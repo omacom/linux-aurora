@@ -853,7 +853,11 @@ impl SepData {
             profile::Bootstrap::Boot => true,
             profile::Bootstrap::WarmRegister => false,
         };
-        let xart_setup = xart_guard::setup(cold, *module_parameters::xart_guard_pins.value());
+        let xart_setup = xart_guard::setup(
+            cold,
+            *module_parameters::xart_guard_pins.value(),
+            profile::machine_has,
+        );
         let store = match xart_store::Store::open_owner(xart_writes, xart_start) {
             Ok(mut store) => {
                 match xart_guard {
@@ -2661,16 +2665,18 @@ impl platform::Driver for SepDriver {
         // As soon as the fixed facts are known, so a tool can watch the attach
         // from "pending" on. Diagnostics are not worth failing the probe for.
         let guard = data.with_store(|store| store.guard_state()).flatten();
-        let guarded_setup = data
-            .with_store(|store| store.guarded_setup())
-            .unwrap_or(false);
-        if let Err(e) = diag::register(
-            dev,
-            data.profile,
-            data.xart_writable(),
-            guard,
-            guarded_setup,
-        ) {
+        let keybag = if matches!(guard, Some((_, _, true))) {
+            match keybag::read(keybag::Slot::Identity) {
+                Ok(keybag::State::Present(bag)) => {
+                    data.with_store(|store| store.keybag_evidence(bag.uuid()))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        }
+        .unwrap_or_default();
+        if let Err(e) = diag::register(dev, data.profile, data.xart_writable(), guard, keybag) {
             dev_warn!(dev, "diag: could not add the sysfs attributes ({:?})\n", e);
         }
 
@@ -2768,7 +2774,10 @@ module! {
         },
         xart_guard_pins: u8 {
             default: 0,
-            description: "On a Mac that cold-boots its SEP (M1 family; run on a J313 only) at xart_guard=1: 1 lets the enclave rewrite the SEP-xART lockers from before Linux (up to three, read this boot) that this install's first Touch ID setup rewrites, from the keybag creation to the first activation, then and afterwards, while every other record stays guarded; 0: that rewrite is refused",
+            description: "At xart_guard=1, allow rewrites of previously read SEP-xART lockers \
+                          pinned by this install. J314s/J316s/J316c may pin one during \
+                          provisioning. J313 may pin two during provisioning and one during its \
+                          first activation. J293 may reuse existing pins. 0 disables pins.",
         },
         os_uuid_hi: u64 {
             default: 0,

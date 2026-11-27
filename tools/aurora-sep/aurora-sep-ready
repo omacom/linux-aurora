@@ -18,9 +18,10 @@
 # and the xART guard (apple_sep xart_guard) refuses that where it is known
 # to, for instance on a cold-boot Mac whose Touch ID was set up with the
 # guard off. So, from diag "matching":
-#   usable      ready: no guard runs and xART is writable;
+#   usable      ready: writable without a guard, or a verified legacy match;
 #   blocked     NOT ready, with the reason and, for the guard, the
 #               documented xart_guard=0 opt-out and what it gives up;
+#   legacy      an existing enrollment needs a real guarded match this boot
 #   unverified  restored, but whether a match can save its state is not
 #               known (a guard that has refused nothing yet, or a kernel
 #               that does not report it). Not called ready.
@@ -112,7 +113,7 @@ blocked_reason() {
     elif [ "$(attr xart_guard_list)" = unavailable ]; then
         echo "the xART guard could not load its list of Linux's records, so it refuses every session write. $optout"
     elif [ "$(attr boot)" = cold ]; then
-        echo "on this cold-boot Mac no keybag was created under the xART guard, which takes xart_guard_pins=1, so the session records a match rewrites are not on the guard's list. $optout"
+        echo "the cold-boot guard cannot confirm the persisted keybag and its pin policy. $optout"
     else
         echo "the xART guard refuses a match's write. $optout"
     fi
@@ -123,6 +124,13 @@ blocked_reason() {
 restored() {
     case "$(attr matching)" in
     usable) ready "$1; matching is usable" ;;
+    legacy)
+        if [ "$(attr restore)" = empty ]; then
+            log "Touch ID can enroll a fingerprint after $(elapsed) s; the keybag has legacy pins, matching is UNVERIFIED until a live verify succeeds"
+            exit 0
+        fi
+        unverified "$1; this driver found legacy pins and a persisted keybag. Verify an enrolled finger to confirm matching on this boot"
+        ;;
     unverified)
         unverified "$1; the xART guard (level $(attr xart_guard)) has refused nothing yet, but whether it allows every record a match rewrites is untested on this Mac. If a verify fails with an \"xART guard: refused\" kernel message, see XART-SAFETY.md"
         ;;

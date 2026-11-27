@@ -8,7 +8,7 @@
 
 Name:           aurora-sep
 Version:        1
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        Loader and desktop integration for the Apple SEP fingerprint driver
 
 License:        GPL-2.0-only
@@ -144,6 +144,9 @@ fi
 %ghost %verify(not md5 size mode mtime) %{_sharedstatedir}/selinux/%{selinuxtype}/active/modules/200/%{modulename}
 
 %changelog
+* Fri Nov 27 2026 Adrian Rangel <adrian@acrogenesis.com> - 1-8
+- Report legacy guarded keybag verification and document board-specific pins.
+
 * Mon Oct 19 2026 Ryan Murray <ryan@aurorasilicon.org> - 1-7
 - XART-SAFETY.md: what the xART guard allows for restore, use, setup and
   recovery, per platform, and what a rollback does to its list

@@ -81,11 +81,9 @@ impl StoreFile {
     }
 
     pub(crate) fn open_readonly(path: &CStr) -> Result<StoreFile> {
-        // SAFETY: `path` is NUL-terminated; the shim returns NULL on failure.
-        let handle = unsafe { sep_store_open_ro(path.as_char_ptr()) };
-        if handle.is_null() {
-            return Err(ENOENT);
-        }
+        // SAFETY: `path` is NUL-terminated; the shim returns a live file
+        // or the original error pointer from the VFS.
+        let handle = unsafe { kernel::error::from_err_ptr(sep_store_open_ro(path.as_char_ptr()))? };
         Ok(StoreFile { handle })
     }
 

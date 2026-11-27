@@ -437,18 +437,22 @@ impl Store {
 
     /// The guard's effective level and whether its list was loaded, or
     /// `None` when no guard runs.
-    pub(crate) fn guard_state(&self) -> Option<(u8, bool)> {
-        self.guard
-            .as_ref()
-            .map(|guard| (guard.effective_level(), guard.list_loaded()))
+    pub(crate) fn guard_state(&self) -> Option<(u8, bool, bool)> {
+        self.guard.as_ref().map(|guard| {
+            (
+                guard.effective_level(),
+                guard.list_loaded(),
+                guard.pins_enabled(),
+            )
+        })
     }
 
-    /// Whether this install's first keybag creation was sent under the guard,
-    /// as far as the guard's list says; `false` when no guard runs.
-    pub(crate) fn guarded_setup(&self) -> bool {
+    /// What the guard can establish about the validated, persisted identity bag.
+    pub(crate) fn keybag_evidence(&self, uuid: &[u8; 16]) -> crate::xart_guard::KeybagEvidence {
         self.guard
             .as_ref()
-            .is_some_and(|guard| guard.guarded_setup())
+            .map(|guard| guard.keybag_evidence(uuid))
+            .unwrap_or_default()
     }
 
     /// Tells the guard that the enclave was handed the record under `key`.
@@ -471,6 +475,24 @@ impl Store {
     pub(crate) fn end_create(&mut self) {
         if let Some(guard) = self.guard.as_mut() {
             guard.end_create();
+        }
+    }
+
+    pub(crate) fn end_copy(&mut self) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.end_copy();
+        }
+    }
+
+    pub(crate) fn commit_keybag(&mut self, uuid: &[u8; 16]) -> Result<bool> {
+        self.guard
+            .as_mut()
+            .map_or(Ok(false), |guard| guard.commit_keybag(uuid))
+    }
+
+    pub(crate) fn begin_activation(&mut self, uuid: &[u8; 16]) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.begin_activation(uuid);
         }
     }
 
