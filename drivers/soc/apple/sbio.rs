@@ -1821,17 +1821,14 @@ impl SepData {
         if !wanted() {
             return false;
         }
-        let online = if self.profile.retry_enrol_registration {
-            self.bring_sensor_online_retrying(
+        let online = self
+            .bring_sensor_online_retrying(
                 c"enrol",
                 Bringup::Enrol,
-                &registration::VERIFY,
+                &self.profile.enrol_registration,
                 wanted,
             )
-            .online()
-        } else {
-            self.bring_sensor_online()
-        };
+            .online();
         if !wanted() {
             self.power_down_capture_sensor();
             return false;

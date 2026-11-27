@@ -197,15 +197,14 @@ pub(crate) const ATTACH: Retry = Retry {
     budget_ms: 10_000,
 };
 
-/// A profile with no verify-time registration recovery.
+/// A single registration attempt before an enrolment or verify.
 pub(crate) const ONCE: Retry = Retry {
     attempts: 1,
     first_pause_ms: 0,
     budget_ms: 0,
 };
 
-/// Before a verify, which someone is waiting on: three attempts, back to
-/// back.
+/// Three back-to-back attempts while someone is waiting to verify or enrol.
 pub(crate) const VERIFY: Retry = Retry {
     attempts: 3,
     first_pause_ms: 0,

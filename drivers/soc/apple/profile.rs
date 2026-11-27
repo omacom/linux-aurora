@@ -155,8 +155,6 @@ const DART_T8112: DartWindow = DartWindow {
 
 pub(crate) struct PlatformProfile {
     pub(crate) name: &'static str,
-    /// Retry sensor registration before opening an enrolment on the enclave.
-    pub(crate) retry_enrol_registration: bool,
     /// Capacity of the boot shared-memory window. The layout is still checked
     /// against the manifests; this only bounds the allocation.
     pub(crate) shmem_capacity: usize,
@@ -181,6 +179,8 @@ pub(crate) struct PlatformProfile {
     pub(crate) nonce_session: bool,
     /// How many attempts a verify may make to bring the sensor online before capture.
     pub(crate) verify_registration: Retry,
+    /// How many attempts an enrolment may make before opening an enclave session.
+    pub(crate) enrol_registration: Retry,
     /// Key-store protocol generation (see [`KeyStore`]).
     pub(crate) key_store: KeyStore,
     /// Platforms with reboot-tested owner export and user-before-master saves.
@@ -192,7 +192,6 @@ pub(crate) struct PlatformProfile {
 
 pub(crate) const T8103: PlatformProfile = PlatformProfile {
     name: "T8103/J313",
-    retry_enrol_registration: false,
     shmem_capacity: 0x3_0000,
     shmem_first_item: b"CNIP",
     bootstrap: Bootstrap::Boot,
@@ -225,6 +224,7 @@ pub(crate) const T8103: PlatformProfile = PlatformProfile {
     persistent_enrol: true,
     nonce_session: false,
     verify_registration: registration::ONCE,
+    enrol_registration: registration::ONCE,
     // macOS shares this enclave: keep Linux to its own xART records.
     xart_guard: 1,
 };
@@ -236,7 +236,6 @@ pub(crate) const T8103: PlatformProfile = PlatformProfile {
 /// identically. Enrolment persistence is reboot-tested on J314s.
 pub(crate) const T6000: PlatformProfile = PlatformProfile {
     name: "T6000/J316s",
-    retry_enrol_registration: true,
     shmem_capacity: 0x3_0000,
     shmem_first_item: b"CNIP",
     bootstrap: Bootstrap::Boot,
@@ -267,6 +266,7 @@ pub(crate) const T6000: PlatformProfile = PlatformProfile {
     persistent_enrol: true,
     nonce_session: false,
     verify_registration: registration::VERIFY,
+    enrol_registration: registration::VERIFY,
     // As T8103. On J316s, creating the identity keybag also rewrites a
     // session record that predates Linux. The guard refuses that, so the
     // keybag can only be created there with xart_guard=0.
@@ -275,7 +275,6 @@ pub(crate) const T6000: PlatformProfile = PlatformProfile {
 
 pub(crate) const T6020: PlatformProfile = PlatformProfile {
     name: "T6020/J414s",
-    retry_enrol_registration: false,
     shmem_capacity: 0x4_0000,
     shmem_first_item: b"CINP",
     bootstrap: Bootstrap::WarmRegister,
@@ -304,6 +303,7 @@ pub(crate) const T6020: PlatformProfile = PlatformProfile {
     persistent_enrol: true,
     nonce_session: false,
     verify_registration: registration::ONCE,
+    enrol_registration: registration::ONCE,
     // A warm-attach enclave shared with macOS, as on T8112.
     xart_guard: 1,
 };
@@ -333,7 +333,6 @@ pub(crate) const T8140: PlatformProfile = PlatformProfile {
     key_store: KeyStore::Variant5,
     persistent_enrol: true,
     name: "T8140/J700",
-    retry_enrol_registration: false,
     shmem_capacity: 0x4_0000,
     shmem_first_item: b"CINP",
     bootstrap: Bootstrap::WarmRegister,
@@ -361,6 +360,7 @@ pub(crate) const T8140: PlatformProfile = PlatformProfile {
     },
     nonce_session: true,
     verify_registration: registration::VERIFY,
+    enrol_registration: registration::ONCE,
     // Linux records from before the guard's list exist here, and Linux has
     // left the macOS records unchanged on this platform.
     xart_guard: 0,
@@ -378,7 +378,6 @@ pub(crate) const T8140: PlatformProfile = PlatformProfile {
 /// warm-registration platforms (T6020 on current firmware, T8140).
 pub(crate) const T8112: PlatformProfile = PlatformProfile {
     name: "T8112/J415",
-    retry_enrol_registration: false,
     shmem_capacity: 0x4_0000,
     shmem_first_item: b"CINP",
     bootstrap: Bootstrap::WarmRegister,
@@ -409,6 +408,7 @@ pub(crate) const T8112: PlatformProfile = PlatformProfile {
     persistent_enrol: true,
     nonce_session: false,
     verify_registration: registration::ONCE,
+    enrol_registration: registration::ONCE,
     // Guarded from its first Linux boot (2026-10-16): no record refused.
     xart_guard: 1,
 };

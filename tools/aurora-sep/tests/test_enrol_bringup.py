@@ -32,7 +32,7 @@ mod sensor {
     pub fn idle() -> bool { super::event("idle"); true }
     pub fn power(on: bool) { assert!(!on); super::event("off"); }
 }
-struct Profile { retry_enrol_registration: bool }
+struct Profile { enrol_registration: registration::Retry }
 enum Bringup { Enrol }
 struct Session { epoch: u64, attempts: Cell<u32>, cancel_after: u32 }
 impl Session { fn lock(&self) -> &Self { self } }
@@ -71,21 +71,22 @@ impl Sensor {
 
 CASES = r"""
 }
-fn run(retry: bool, ready_after: u32, cancel_after: u32, epoch: u64) -> (bool, u32, Vec<&'static str>) {
+fn run(policy: registration::Retry, ready_after: u32, cancel_after: u32, epoch: u64) -> (bool, u32, Vec<&'static str>) {
     let sensor = Sensor {
-        profile: Profile { retry_enrol_registration: retry },
+        profile: Profile { enrol_registration: policy },
         bio_session: Session { epoch: 10, attempts: Cell::new(0), cancel_after },
         suspending: false.into(), shutting_down: false.into(), ready_after,
     };
     (sensor.bring_sensor_online_for_enrol(epoch), sensor.bio_session.attempts.get(), EVENTS.with(|e| e.take()))
 }
 fn main() {
-    assert_eq!(run(true, 1, 99, 10), (true, 1, vec![]));
-    assert_eq!(run(true, 3, 99, 10), (true, 3, vec![]));
-    assert_eq!(run(true, 4, 99, 10), (false, 3, vec!["fault", "idle"]));
-    assert_eq!(run(false, 2, 99, 10), (false, 1, vec!["fault", "idle"]));
-    assert_eq!(run(true, 2, 1, 10), (false, 1, vec!["idle", "off", "settle"]));
-    assert_eq!(run(true, 1, 1, 10), (false, 1, vec!["idle", "off", "settle"])); // cancelled during a successful attempt
-    assert_eq!(run(true, 1, 99, 9), (false, 0, vec![])); // obsolete worker
+    use registration::{ONCE, VERIFY};
+    assert_eq!(run(VERIFY, 1, 99, 10), (true, 1, vec![]));
+    assert_eq!(run(VERIFY, 3, 99, 10), (true, 3, vec![]));
+    assert_eq!(run(VERIFY, 4, 99, 10), (false, 3, vec!["fault", "idle"]));
+    assert_eq!(run(ONCE, 2, 99, 10), (false, 1, vec!["fault", "idle"]));
+    assert_eq!(run(VERIFY, 2, 1, 10), (false, 1, vec!["idle", "off", "settle"]));
+    assert_eq!(run(VERIFY, 1, 1, 10), (false, 1, vec!["idle", "off", "settle"])); // cancelled during a successful attempt
+    assert_eq!(run(VERIFY, 1, 99, 9), (false, 0, vec![])); // obsolete worker
 }
 """
