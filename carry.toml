@@ -101,6 +101,14 @@ commit = "b96b83d10ef7e2e3405fca8517ecd084c059cee0"
 why = "cpufreq: no boost control without turbo mode"
 
 [[carry]]
+pr = "aurora-silicon/linux#3490"
+commit = "d98f2a8e20c1c1e41068b984604ae24c8a4eb8be"
+commits = ["d98f2a8e20c1c1e41068b984604ae24c8a4eb8be"]
+deps = ["aurora-silicon/linux#2147", "aurora-silicon/linux#2148"]
+why = "M3/G15 GPU: qualified agx_stats, gpu_memory sysfs, and live fdinfo frequencies (for btop)"
+note = "7.3-rebased single commit of aurora-silicon/linux#3490 (717a6ff246c5) on top of carry/aurora-7.3 (3058cc5cccb9), resolving context diffs against intake 00cbc67d1a0c"
+
+[[carry]]
 ours = "j613-touchid-data-ready"
 commit = "9d34362ed9ea45f3e6cba5c657aee1d52ff63841"
 why = "M3 Air Touch ID data-ready line (no SPI polling, works after resume)"
