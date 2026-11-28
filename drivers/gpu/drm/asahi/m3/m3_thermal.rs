@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
-//! Thermal limit of the M3 runtime backend's GPU performance cap (`asahi.m3_thermal`).
+//! Thermal limit of the M3 runtime backend's GPU performance cap (`aurora.m3_thermal`).
 //!
 //! Without it (`off`, the default with the built-in InitData image) the firmware is given a
 //! fixed highest performance state (5 of 8 with device-tree InitData: 1056 of 1380 MHz on
 //! J516S) and nothing watches temperatures. The firmware's own die temperature controller is
 //! off in the InitData this driver builds. With device-tree InitData the default is `on`;
-//! `asahi.m3_thermal=off` restores the fixed cap exactly.
+//! `aurora.m3_thermal=off` restores the fixed cap exactly.
 //!
 //! With it, the InitData gives the firmware the whole table as its highest state (the
 //! "ceiling"), and what bounds the firmware is the runtime cap: the Globals performance-state
@@ -22,7 +22,7 @@
 //!   500 ms while the GPU is busy (every 2 s when idle) from the thermal zones in [`ZONES`]
 //!   that exist: the SMC's die sensors and the PMP's CPU cluster sensors (see [`ZONES`]):
 //!   * at or above `critical` (`hot` + 8 C): the safe cap at once;
-//!   * at or above `hot` (`asahi.m3_thermal_hot`, default 80 C): one state lower, at most every
+//!   * at or above `hot` (`aurora.m3_thermal_hot`, default 80 C): one state lower, at most every
 //!     500 ms and once per reading;
 //!   * at or below `cool` (`hot` - 10 C): one state higher, at most every 2 s and once per
 //!     reading, up to the ceiling;
@@ -259,7 +259,7 @@ impl Governor {
         if clamped {
             dev_info!(
                 dev,
-                "M3: asahi.m3_thermal_hot clamped to {} C ({}..={} C)\n",
+                "M3: aurora.m3_thermal_hot clamped to {} C ({}..={} C)\n",
                 hot_c,
                 m3_params::THERMAL_HOT_MIN,
                 m3_params::THERMAL_HOT_MAX
@@ -285,7 +285,7 @@ impl Governor {
         match governor.mode {
             ThermalMode::Hold => dev_info!(
                 dev,
-                "M3: thermal limit holding (asahi.m3_thermal=hold): the firmware may use states 1..={} ({} MHz) and the runtime cap stays at {} ({} MHz) for this boot; the SoC die temperature is logged only\n",
+                "M3: thermal limit holding (aurora.m3_thermal=hold): the firmware may use states 1..={} ({} MHz) and the runtime cap stays at {} ({} MHz) for this boot; the SoC die temperature is logged only\n",
                 p.ceiling(),
                 governor.mhz(p.ceiling()),
                 p.safe(),
@@ -293,7 +293,7 @@ impl Governor {
             ),
             _ => dev_info!(
                 dev,
-                "M3: thermal limit on (asahi.m3_thermal=on): runtime cap {}..={} ({}..={} MHz) from the hottest SoC die temperature of zones macsmc_soc_die and apple_pmp_hotspot: up while at or below {}, down at or above {}, cap {} at or above {} or without a fresh reading\n",
+                "M3: thermal limit on (aurora.m3_thermal=on): runtime cap {}..={} ({}..={} MHz) from the hottest SoC die temperature of zones macsmc_soc_die and apple_pmp_hotspot: up while at or below {}, down at or above {}, cap {} at or above {} or without a fresh reading\n",
                 p.safe(),
                 p.ceiling(),
                 governor.mhz(p.safe()),

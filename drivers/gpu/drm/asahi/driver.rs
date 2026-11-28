@@ -496,7 +496,7 @@ impl AsahiPlatformDriver {
     }
 
     /// The M3 MacBook Air (T8122): the M3 runtime, started only when its identity gate, the
-    /// backend selection and the start experiment (`asahi.t8122_start=1`) admit it; otherwise
+    /// backend selection and the start experiment (`aurora.t8122_start=1`) admit it; otherwise
     /// the probe is refused as without the runtime.
     #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
     fn probe_t8122<'bound>(

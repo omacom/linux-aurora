@@ -112,7 +112,7 @@ impl Config {
         Self::initialize_records(&mut objects)?;
         // The root record carries the G15 14.8.3 InitData version, which is every T6030
         // image's. Only the T8122 start experiment gives the firmware another one
-        // (`asahi.t8122_initdata_version`).
+        // (`aurora.t8122_initdata_version`).
         if firmware.initdata_magic!=crate::m3::m3_firmware::G15_V14_8_3_INITDATA {
             objects[storage::ROOT].u64(0,firmware.initdata_magic)?;
         }
@@ -131,8 +131,8 @@ impl Config {
         // within the 64 MiB arena at HwDataB+28. Match map_timestamp().
         objects[HARDWARE_DATA].u64(0x28,agx_memory::TIMESTAMP_RANGE.start)?;
         // RTKit 2419 HwDataA follows the 0x4580-byte HwDataB. Request the
-        // boot performance state through firmware (asahi.m3_boot_pstate) and cap
-        // the states it may use (asahi.m3_max_pstate), retaining the voltage
+        // boot performance state through firmware (aurora.m3_boot_pstate) and cap
+        // the states it may use (aurora.m3_max_pstate), retaining the voltage
         // tables, power/thermal ceilings and minimum operating state.
         // The bring-up image initialized actual/target and every base to 1
         // (338 MHz), so short desktop jobs never left that startup state.

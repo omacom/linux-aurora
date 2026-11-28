@@ -101,7 +101,7 @@ config DRM_ASAHI_M3_T8122
 	  (J613, J615) on the 14.8.3 GPU firmware the boot loader leaves
 	  loaded. On the listed Air boards it starts after the boot loader
 	  handed the GPU over and resource/firmware identity checks pass.
-	  asahi.t8122_start=0 keeps startup disabled for recovery. Unknown
+	  aurora.t8122_start=0 keeps startup disabled for recovery. Unknown
 	  boards and firmware do not gain automatic admission. Other GPUs
 	  are not affected.
 

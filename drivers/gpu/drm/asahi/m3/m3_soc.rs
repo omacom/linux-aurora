@@ -53,12 +53,12 @@ pub(crate) enum PstateTable {
 
 /// Optional userspace features advertised for a SoC (`DRM_ASAHI_GET_PARAMS`). The runtime
 /// implements them the same way on every SoC; a SoC advertises one once it has been validated
-/// there. Soft faults are never advertised: the runtime does not apply `asahi.fault_control`.
+/// there. Soft faults are never advertised: the runtime does not apply `aurora.fault_control`.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Features {
     /// `DRM_ASAHI_FEATURE_COMPUTE_WIDE_VISIBILITY`.
     pub(crate) compute_wide_visibility: bool,
-    /// `DRM_ASAHI_FEATURE_FRAGMENT_DEPENDENCY`, while `asahi.m3_early_tiling` is set.
+    /// `DRM_ASAHI_FEATURE_FRAGMENT_DEPENDENCY`, while `aurora.m3_early_tiling` is set.
     pub(crate) fragment_dependency: bool,
 }
 
@@ -114,7 +114,7 @@ pub(crate) struct Soc {
     /// GPU node compatible.
     pub(crate) gpu: &'static str,
     /// Boards the runtime starts on by default and registers a render node on. On a T8122 it
-    /// starts on no other board, whatever `asahi.m3_backend` says (`m3_params::t8122_backend`).
+    /// starts on no other board, whatever `aurora.m3_backend` says (`m3_params::t8122_backend`).
     pub(crate) validated_boards: &'static [&'static [u8]],
     /// GPU clusters, and core slots per cluster.
     pub(crate) clusters: u32,
@@ -156,7 +156,7 @@ pub(crate) struct Soc {
     pub(crate) power_from_boot_loader: bool,
     /// Code the runtime runs after admission that still holds another SoC's values.
     pub(crate) unported: &'static [&'static str],
-    /// The GPU registers read after every job by default (`asahi.m3_retire_mmio` bits).
+    /// The GPU registers read after every job by default (`aurora.m3_retire_mmio` bits).
     pub(crate) retire_mmio: u64,
     /// The MTR sensor masks, when they are not the hardware configuration's.
     pub(crate) mtr_masks: Option<MtrMasks>,
@@ -166,7 +166,7 @@ pub(crate) struct Soc {
     pub(crate) registers: RegisterSet,
     /// Globals +0x7d0, which gates the firmware's frequency-feedback cap: the firmware measures
     /// the GPU clock against the requested performance state and, while this is 1, caps the
-    /// state on a shortfall (`asahi.m3_ut_engagement` overrides it).
+    /// state on a shortfall (`aurora.m3_ut_engagement` overrides it).
     pub(crate) ut_engagement: u32,
     /// The highest GPU power target, in mW, while the boot loader's power model is a stand-in:
     /// the operating points' powers are scaled down together so that the highest is this.
@@ -274,7 +274,7 @@ pub(crate) fn by_chip(chip_id: u32) -> Option<&'static Soc> {
 /// table (`hw::agx3::T8122`). The hardware configuration is `hw::t8122`; power configuration
 /// comes from the boot loader. Startup uses the guarded `t8122_start` path, which selects this
 /// table's values by default on admitted Air boards and adds a performance-state cap. Explicit
-/// `asahi.t8122_start=0` disables startup; firmware, board and resource admission still apply.
+/// `aurora.t8122_start=0` disables startup; firmware, board and resource admission still apply.
 pub(crate) static T8122: Soc = Soc {
     name: "T8122",
     gpu_name: "G15G",

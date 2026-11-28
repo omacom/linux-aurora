@@ -76,7 +76,7 @@ pub(crate) static T8122_IMAGES_26: [KnownImage; 1] = [KnownImage {
 }];
 
 /// The same T8122 image for the start experiment (`t8122_start`, only with
-/// `asahi.t8122_start=1`), where `asahi.t8122_initdata_version` may replace the version.
+/// `aurora.t8122_start=1`), where `aurora.t8122_initdata_version` may replace the version.
 pub(crate) static KNOWN_IMAGES_T8122_EXPERIMENT: [KnownImage; 1] = [KnownImage {
     name: "T8122 C0 firmware-compat 14.8.3 (start experiment)",
     uuid: Some(T8122_C0_UUID),

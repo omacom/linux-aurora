@@ -108,10 +108,10 @@ impl Backend {
         drm: &driver::AsahiDrmDevice,
         soc: &'static crate::m3::m3_soc::Soc,
     ) -> Result<Arc<Self>> {
-        // The runtime only exists to back its render node: without one (`asahi.m3_expose=0`)
+        // The runtime only exists to back its render node: without one (`aurora.m3_expose=0`)
         // nothing is started, rather than leaving a running firmware behind a failed probe.
         if !crate::m3::m3_board::expose_render_node(soc) {
-            dev_info!(pdev.as_ref(), "M3: render node not registered on this board (asahi.m3_expose=1 registers it); GPU not started\n");
+            dev_info!(pdev.as_ref(), "M3: render node not registered on this board (aurora.m3_expose=1 registers it); GPU not started\n");
             return Err(ENODEV);
         }
         let resources = crate::m3::m3_resources::from_device(pdev, soc).inspect_err(|_| {
@@ -143,7 +143,7 @@ impl Backend {
         let max_frequency_khz = 1000 * contents.pstates.reported_max_mhz();
         let mut runtime = crate::m3::m3_runtime::Runtime::new(pdev, drm, device, contents)?;
         runtime.boot(pdev)?;
-        dev_info!(pdev.as_ref(), "M3: runtime switches: asahi.m3_unlocked_wait={} asahi.m3_timeout_nohang={} resume-after-fault={}\n",
+        dev_info!(pdev.as_ref(), "M3: runtime switches: aurora.m3_unlocked_wait={} aurora.m3_timeout_nohang={} resume-after-fault={}\n",
             u8::from(crate::m3::m3_params::unlocked_wait()), u8::from(crate::m3::m3_params::timeout_nohang()),
             u8::from(crate::m3::m3_params::g15_debug(crate::m3::m3_params::G15Debug::M3ResumeAfterFault)));
         let health = runtime.health();

@@ -3,20 +3,20 @@
 //! T8122 (M3, G15G) board-default startup and bounded experiment values.
 //!
 //! The T8122 table (`m3_soc::T8122`) is complete. An omitted start parameter starts
-//! automatically only on its listed Air boards; explicit `asahi.t8122_start=0`
+//! automatically only on its listed Air boards; explicit `aurora.t8122_start=0`
 //! remains the recovery opt-out. Resource and known-firmware admission still run.
 //! The same table values can be changed for a controlled experiment by
 //! rebooting with a parameter:
 //!
 //! | Parameter | Default | Others |
 //! |---|---|---|
-//! | `asahi.t8122_initdata_version` | `0x0c08e21e83800490`, the G15 14.8.3 version | any |
-//! | `asahi.t8122_fender` | `0x104000` (`rule`) | `0x12c000` (`adt`) |
-//! | `asahi.t8122_clkgen` | `e1c`: SGX+0xe1c000, read-only | `e5c`: SGX+0xe5c000, read-only; `none` |
-//! | `asahi.t8122_sgx_setup` | `t6030`: SGX+0xd14000 = 0x70001 | `none` |
-//! | `asahi.t8122_unit_mask_a` | `0x700000003` | nonzero, within `0x700000003` |
-//! | `asahi.t8122_unit_mask_b` | `0x7` | nonzero, within `0x7` |
-//! | `asahi.t8122_pstate_cap` | `2` | 1 to 5 |
+//! | `aurora.t8122_initdata_version` | `0x0c08e21e83800490`, the G15 14.8.3 version | any |
+//! | `aurora.t8122_fender` | `0x104000` (`rule`) | `0x12c000` (`adt`) |
+//! | `aurora.t8122_clkgen` | `e1c`: SGX+0xe1c000, read-only | `e5c`: SGX+0xe5c000, read-only; `none` |
+//! | `aurora.t8122_sgx_setup` | `t6030`: SGX+0xd14000 = 0x70001 | `none` |
+//! | `aurora.t8122_unit_mask_a` | `0x700000003` | nonzero, within `0x700000003` |
+//! | `aurora.t8122_unit_mask_b` | `0x7` | nonzero, within `0x7` |
+//! | `aurora.t8122_pstate_cap` | `2` | 1 to 5 |
 //!
 //! The defaults are the T8122 table's values. A parameter given with a value it does not accept
 //! refuses the start. Unlisted boards remain refused by the existing backend admission.
@@ -168,7 +168,7 @@ impl Experiment {
         }
     }
 
-    /// The InitData version given to the firmware (`asahi.t8122_initdata_version`).
+    /// The InitData version given to the firmware (`aurora.t8122_initdata_version`).
     pub(crate) fn initdata_version(&self) -> u64 {
         self.0.initdata_version
     }
@@ -220,7 +220,7 @@ impl Experiment {
         self.0.sgx_setup
     }
 
-    /// The highest performance state the firmware may use (`asahi.t8122_pstate_cap`).
+    /// The highest performance state the firmware may use (`aurora.t8122_pstate_cap`).
     pub(crate) fn pstate_cap(&self) -> u32 {
         self.0.pstate_cap
     }
@@ -252,7 +252,7 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
             if raw.values_given() {
                 dev_info!(
                     dev,
-                    "M3 G15G start: disabled by asahi.t8122_start=0; other asahi.t8122_* values ignored\n"
+                    "M3 G15G start: disabled by aurora.t8122_start=0; other aurora.t8122_* values ignored\n"
                 );
             }
             return Ok(None);
@@ -260,7 +260,7 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
         Start::Invalid => {
             dev_err!(
                 dev,
-                "M3 G15G start: refused: asahi.t8122_start has a value it does not accept (0 or 1); GPU startup disabled\n"
+                "M3 G15G start: refused: aurora.t8122_start has a value it does not accept (0 or 1); GPU startup disabled\n"
             );
             return Err(ENODEV);
         }
@@ -274,7 +274,7 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
     let v = knobs::resolve(&raw).map_err(|refusal| {
         dev_err!(
             dev,
-            "M3 G15G start: refused: asahi.{} has a value it does not accept ({}); GPU startup disabled\n",
+            "M3 G15G start: refused: aurora.{} has a value it does not accept ({}); GPU startup disabled\n",
             refusal.name,
             refusal.accepts
         );
@@ -283,7 +283,7 @@ pub(crate) fn arm(dev: &device::Device, soc: &Soc) -> Result<Option<Experiment>>
     let e = Experiment(v);
     dev_warn!(
         dev,
-        "M3 G15G start: armed (board default or asahi.t8122_start=1, boot loader handoff admitted): initdata_version={:#018x} fender={:#x} clkgen={} sgx_setup={} unit_mask_a={:#x} unit_mask_b={:#x} pstate_cap={}\n",
+        "M3 G15G start: armed (board default or aurora.t8122_start=1, boot loader handoff admitted): initdata_version={:#018x} fender={:#x} clkgen={} sgx_setup={} unit_mask_a={:#x} unit_mask_b={:#x} pstate_cap={}\n",
         v.initdata_version,
         v.fender,
         clkgen_label(v.clock_gen, v.fender),

@@ -46,7 +46,7 @@ pub(crate) fn refuse_probe(pdev: &platform::Device<Core<'_>>, chip: Chip) -> Err
 /// Whether the M3 runtime may start on this T8122 (M3, G15G), whose GPU the boot loader handed
 /// over: its identity gate passes (only DT properties are read) and the backend selection allows
 /// the board. The runtime then admits the boot loader's description, and refuses the SoC unless
-/// `asahi.t8122_start=1` arms the start ([`t8122_start`]).
+/// `aurora.t8122_start=1` arms the start ([`t8122_start`]).
 #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
 pub(crate) fn t8122_admitted(pdev: &platform::Device<Core<'_>>) -> Result<&'static m3_soc::Soc> {
     let identity = t8122_admission::read_identity(pdev).map_err(|error| {

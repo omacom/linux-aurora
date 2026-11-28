@@ -138,7 +138,7 @@ const _: () = assert!(storage::same_iomaps(
 ));
 
 /// Highest performance state device-tree InitData may use without the driver's thermal limit
-/// (`asahi.m3_thermal=off`), and the runtime cap the thermal limit starts at and falls back to
+/// (`aurora.m3_thermal=off`), and the runtime cap the thermal limit starts at and falls back to
 /// (the "safe cap"). The InitData's fast-die temperature controller words stay 0, so the
 /// firmware does not limit the die temperature by itself.
 pub(crate) const ADT_MAX_PSTATE_LIMIT: u32 = 5;
@@ -167,7 +167,7 @@ pub(crate) struct PstatePolicy {
     pub(crate) boot_mhz: u32,
     /// Frequency of every entry of the published table, in MHz (entry 0 is the off state).
     pub(crate) freqs: [u32; 16],
-    /// `asahi.m3_thermal`.
+    /// `aurora.m3_thermal`.
     pub(crate) thermal: ThermalMode,
 }
 
@@ -181,9 +181,9 @@ impl PstatePolicy {
         }
     }
 
-    /// Clamp the `asahi.m3_max_pstate` and `asahi.m3_boot_pstate` settings to the published table
+    /// Clamp the `aurora.m3_max_pstate` and `aurora.m3_boot_pstate` settings to the published table
     /// of `hwdata` (the generated HwData object image), and to `ceiling` when given (the T8122
-    /// start experiment's `asahi.t8122_pstate_cap`).
+    /// start experiment's `aurora.t8122_pstate_cap`).
     fn new(dev: &device::Device, hwdata: &[u8], ceiling: Option<u32>) -> Result<Self> {
         let hwb_max = offset_of!(raw::HwDataBG15V14_8_3, max_pstate);
         let hwb_freq = offset_of!(raw::HwDataBG15V14_8_3, frequencies);
@@ -204,7 +204,7 @@ impl PstatePolicy {
         if u64::from(max) != requested {
             dev_info!(
                 dev,
-                "M3: asahi.m3_max_pstate={} clamped to {} (the table has states 1..={})\n",
+                "M3: aurora.m3_max_pstate={} clamped to {} (the table has states 1..={})\n",
                 requested,
                 max,
                 table_max
@@ -213,7 +213,7 @@ impl PstatePolicy {
         if thermal == ThermalMode::Off && max > ADT_MAX_PSTATE_LIMIT {
             dev_info!(
                 dev,
-                "M3: performance cap {} lowered to {}: device-tree InitData leaves the fast-die temperature controller off and the thermal limit is off (asahi.m3_thermal=off)\n",
+                "M3: performance cap {} lowered to {}: device-tree InitData leaves the fast-die temperature controller off and the thermal limit is off (aurora.m3_thermal=off)\n",
                 max,
                 ADT_MAX_PSTATE_LIMIT
             );
@@ -223,7 +223,7 @@ impl PstatePolicy {
             if max > ceiling {
                 dev_info!(
                     dev,
-                    "M3 G15G start: performance cap {} lowered to {} (asahi.t8122_pstate_cap)\n",
+                    "M3 G15G start: performance cap {} lowered to {} (aurora.t8122_pstate_cap)\n",
                     max,
                     ceiling
                 );
@@ -299,7 +299,7 @@ fn write(bytes: &mut [u8], offset: usize, data: &[u8]) -> Result {
 }
 
 impl Contents {
-    /// Build the InitData contents from this board's device tree (`asahi.m3_initdata`), before
+    /// Build the InitData contents from this board's device tree (`aurora.m3_initdata`), before
     /// any GPU register is touched.
     ///
     /// `experiment` is the T8122 start experiment's values (`t8122_start`), on an armed T8122
@@ -361,7 +361,7 @@ impl Contents {
         }
         dev_info!(
             dev,
-            "M3: InitData contents: generated from the device tree (asahi.m3_initdata={}); performance states 1..={}, cap {} ({} MHz), boot request {} ({} MHz); thermal limit {}, firmware highest state {} ({} MHz)\n",
+            "M3: InitData contents: generated from the device tree (aurora.m3_initdata={}); performance states 1..={}, cap {} ({} MHz), boot request {} ({} MHz); thermal limit {}, firmware highest state {} ({} MHz)\n",
             match param {
                 InitDataParam::Auto => "auto",
                 InitDataParam::Adt => "adt",
@@ -468,7 +468,7 @@ pub(crate) fn constructed_version() -> Result<u64> {
 
 /// Refuse to go on when the InitData root the runtime constructs carries another version than
 /// the loaded firmware expects. The T8122 start experiment gives the firmware the version of
-/// `asahi.t8122_initdata_version` instead (`m3_config::Config::new` writes it into the root).
+/// `aurora.t8122_initdata_version` instead (`m3_config::Config::new` writes it into the root).
 fn check_version(
     dev: &device::Device,
     firmware: &Firmware,
@@ -478,7 +478,7 @@ fn check_version(
     if version != firmware.initdata_magic && experiment.is_some() {
         dev_warn!(
             dev,
-            "M3 G15G start: InitData version {:#x} (asahi.t8122_initdata_version) replaces the constructed {:#x}\n",
+            "M3 G15G start: InitData version {:#x} (aurora.t8122_initdata_version) replaces the constructed {:#x}\n",
             firmware.initdata_magic,
             version
         );
@@ -496,14 +496,14 @@ fn check_version(
     Ok(())
 }
 
-/// Whether the runtime probe stops before the GPU coprocessor starts (`asahi.g15_debug` bit
+/// Whether the runtime probe stops before the GPU coprocessor starts (`aurora.g15_debug` bit
 /// 53). Logs the stop.
 pub(crate) fn stop_before_asc(dev: &device::Device) -> bool {
     let stop = m3_params::g15_debug(G15Debug::StopBeforeAsc);
     if stop {
         dev_info!(
             dev,
-            "M3: asahi.g15_debug bit 53: stopping before the GPU coprocessor starts; the firmware was not started\n"
+            "M3: aurora.g15_debug bit 53: stopping before the GPU coprocessor starts; the firmware was not started\n"
         );
     }
     stop
@@ -928,7 +928,7 @@ fn build_images(
     // HwData: HwDataB, then HwDataA.
     let mut hwdata = zeroed(HWDATA)?;
     write(&mut hwdata, 0, initdata::raw_bytes(&*c.hwdata_b))?;
-    // The T8122 start experiment's unit masks (`asahi.t8122_unit_mask_a`/`_b`).
+    // The T8122 start experiment's unit masks (`aurora.t8122_unit_mask_a`/`_b`).
     if let Some(e) = experiment {
         type B = raw::HwDataBG15V14_8_3;
         let (a, b) = e.unit_masks();
@@ -1025,7 +1025,7 @@ fn build_images(
             dev,
             "M3: Globals ut_engagement={}{}\n",
             ut,
-            if given { " (asahi.m3_ut_engagement)" } else { "" }
+            if given { " (aurora.m3_ut_engagement)" } else { "" }
         );
     }
     if crate::m3::m3_globals_debug::apply(soc.chip_id,m3_params::globals_debug_off(),&mut globals)

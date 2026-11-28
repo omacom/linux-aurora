@@ -122,9 +122,9 @@ impl Device {
             Some(e) => {
                 match e.sgx_setup() {
                     Some((offset, value)) => dev_warn!(pdev.as_ref(),
-                        "M3 G15G start: SGX setup write: SGX+{:#x} = {:#x} (asahi.t8122_sgx_setup=t6030)\n", offset, value),
+                        "M3 G15G start: SGX setup write: SGX+{:#x} = {:#x} (aurora.t8122_sgx_setup=t6030)\n", offset, value),
                     None => dev_info!(pdev.as_ref(),
-                        "M3 G15G start: no SGX setup write (asahi.t8122_sgx_setup=none)\n"),
+                        "M3 G15G start: no SGX setup write (aurora.t8122_sgx_setup=none)\n"),
                 }
                 e.sgx_setup()
             }
@@ -147,7 +147,7 @@ impl Device {
         self.check_idle_parts(true,true)
     }
     /// [`Self::check_idle`] with its engine-busy (`busy`) and fault-bank (`faults`) register
-    /// accesses selectable (`asahi.m3_retire_mmio`); with neither it touches no GPU register.
+    /// accesses selectable (`aurora.m3_retire_mmio`); with neither it touches no GPU register.
     pub(crate) fn check_idle_parts(&self,busy:bool,faults:bool)->Result {
         if !busy && !faults {return Ok(());}
         let sgx_guard=self.sgx.try_access().ok_or(ENODEV)?;

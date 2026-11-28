@@ -68,7 +68,7 @@ pub(crate) struct G15Options {
     /// Firmware VA of the timestamp arena (HwDataB+0x28); None uses the manager's kernel range.
     pub(crate) timestamp_base: Option<u64>,
     /// Manager layout: write the PPM words and the Globals power targets as the runtime layout
-    /// does (`asahi.g15_debug` bit 55). The runtime layout always does.
+    /// does (`aurora.g15_debug` bit 55). The runtime layout always does.
     pub(crate) reference_ppm: bool,
     /// Runtime layout: the SoC's HwDataB configuration words and unit masks
     /// (`m3_soc::Soc::hwdata_b`). None for the manager layout, which does not write them.

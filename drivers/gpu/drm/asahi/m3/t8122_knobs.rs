@@ -97,7 +97,7 @@ impl Raw {
         pstate_cap: UNSET,
     };
 
-    /// Whether any parameter other than `asahi.t8122_start` was given.
+    /// Whether any parameter other than `aurora.t8122_start` was given.
     pub(crate) fn values_given(&self) -> bool {
         [
             self.initdata_version,
@@ -113,7 +113,7 @@ impl Raw {
     }
 }
 
-/// What `asahi.t8122_start` asks for.
+/// What `aurora.t8122_start` asks for.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Start {
     /// Not given, or 0.

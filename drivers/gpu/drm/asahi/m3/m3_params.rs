@@ -4,7 +4,7 @@
 //!
 //! The `module!` parameter support only parses plain integers. The parameters here are declared
 //! with their own `kernel_param` entries (the same layout the `module!` macro emits), so they can
-//! take symbolic values on the kernel command line, e.g. `asahi.m3_backend=manager`, and hex or
+//! take symbolic values on the kernel command line, e.g. `aurora.m3_backend=manager`, and hex or
 //! decimal masks.
 
 use core::ffi::{
@@ -58,7 +58,7 @@ unsafe fn set_param(
     0
 }
 
-/// Declare a module parameter `asahi.<name>` stored in the static `AtomicU64` `$storage` and
+/// Declare a module parameter `aurora.<name>` stored in the static `AtomicU64` `$storage` and
 /// parsed by `$parse: fn(&str) -> Option<u64>`. Not visible in sysfs.
 macro_rules! m3_param {
     ($name:literal, $storage:ident, $parse:path) => {
@@ -89,7 +89,7 @@ macro_rules! m3_param {
                     name: kernel::str::as_char_ptr_in_const_context(if cfg!(MODULE) {
                         kernel::c_str!($name)
                     } else {
-                        kernel::c_str!(concat!("asahi.", $name))
+                        kernel::c_str!(concat!("aurora.", $name))
                     }),
                     // `__this_module` is constructed by the kernel at load time and is not
                     // freed until the module is unloaded. Take its address without creating a
@@ -205,17 +205,17 @@ pub(crate) fn render_internal_timestamps()->bool {
 // The runtime's boot-time module parameters. On 7.1.12 they were `module!` parameters; they
 // keep their names, and exist only with the T8122 runtime built in.
 
-/// `asahi.m3_render_batch_size`: bounded ordered render batch size (1..16).
+/// `aurora.m3_render_batch_size`: bounded ordered render batch size (1..16).
 static M3_RENDER_BATCH_SIZE: AtomicU64 = AtomicU64::new(1);
 m3_param!("m3_render_batch_size", M3_RENDER_BATCH_SIZE, parse_u64);
-/// `asahi.m3_compute_batch_size`: bounded ordered compute batch size (1..16).
+/// `aurora.m3_compute_batch_size`: bounded ordered compute batch size (1..16).
 static M3_COMPUTE_BATCH_SIZE: AtomicU64 = AtomicU64::new(1);
 m3_param!("m3_compute_batch_size", M3_COMPUTE_BATCH_SIZE, parse_u64);
-/// `asahi.m3_early_tiling`: opt-in fragment-only stage dependencies.
+/// `aurora.m3_early_tiling`: opt-in fragment-only stage dependencies.
 static M3_EARLY_TILING: AtomicU64 = AtomicU64::new(0);
 m3_param!("m3_early_tiling", M3_EARLY_TILING, parse_u64);
 
-/// `asahi.m3_early_tiling` is set.
+/// `aurora.m3_early_tiling` is set.
 pub(crate) fn early_tiling() -> bool {
     M3_EARLY_TILING.load(Ordering::Relaxed) != 0
 }
@@ -227,12 +227,12 @@ fn parse_expose(text: &str) -> Option<u64> {
     }
 }
 const EXPOSE_AUTO: u64 = u64::MAX;
-/// `asahi.m3_expose`: M3 render node registration: -1 = auto (on the boards where the runtime
+/// `aurora.m3_expose`: M3 render node registration: -1 = auto (on the boards where the runtime
 /// is validated), 0 = never, 1 = always.
 static M3_EXPOSE: AtomicU64 = AtomicU64::new(EXPOSE_AUTO);
 m3_param!("m3_expose", M3_EXPOSE, parse_expose);
 
-/// `asahi.m3_expose`: `None` for auto, else whether to register the render node.
+/// `aurora.m3_expose`: `None` for auto, else whether to register the render node.
 pub(crate) fn expose() -> Option<bool> {
     match M3_EXPOSE.load(Ordering::Relaxed) {
         EXPOSE_AUTO => None,
@@ -274,13 +274,13 @@ pub(crate) fn compute_batch_size() -> usize {
     size.clamp(1, crate::m3::m3_compute_storage::SLOTS)
 }
 
-/// `asahi.g15_debug`: G15 bring-up bits, see [`G15Debug`].
+/// `aurora.g15_debug`: G15 bring-up bits, see [`G15Debug`].
 static G15_DEBUG: AtomicU64 = AtomicU64::new(0);
 m3_param!("g15_debug", G15_DEBUG, parse_u64);
 
-/// Bits of `asahi.g15_debug`, the bring-up switches of the G15 manager backend.
+/// Bits of `aurora.g15_debug`, the bring-up switches of the G15 manager backend.
 ///
-/// The bit numbers are unchanged from their earlier `asahi.debug_flags` positions. Bits 49
+/// The bit numbers are unchanged from their earlier `aurora.debug_flags` positions. Bits 49
 /// and 50 are no longer switches: the HwDataB power-management flags they enabled are always
 /// set on G15.
 #[derive(Copy, Clone)]
@@ -290,7 +290,7 @@ pub(crate) enum G15Debug {
     /// G15 firmware boots and runs jobs without it.
     FenderKick = 41,
     /// Register the DRM device (card/render nodes) for the manager backend, like
-    /// `asahi.m3_expose=1`. Off by default so compositors and system Mesa never see a GPU that
+    /// `aurora.m3_expose=1`. Off by default so compositors and system Mesa never see a GPU that
     /// cannot run userspace jobs yet; the firmware bring-up runs either way.
     ExposeDrm = 42,
     /// Turn the firmware log on (RuntimePointers+0x230 = 1) before MSG_INIT. The firmware
@@ -328,17 +328,17 @@ pub(crate) enum G15Debug {
     M3ResumeAfterFault = 56,
 }
 
-/// Returns whether a `asahi.g15_debug` bit is set.
+/// Returns whether a `aurora.g15_debug` bit is set.
 pub(crate) fn g15_debug(bit: G15Debug) -> bool {
     G15_DEBUG.load(Ordering::Relaxed) & (1u64 << (bit as u32)) != 0
 }
 
-/// The raw `asahi.g15_debug` value, for logging.
+/// The raw `aurora.g15_debug` value, for logging.
 pub(crate) fn g15_debug_mask() -> u64 {
     G15_DEBUG.load(Ordering::Relaxed)
 }
 
-/// `asahi.m3_backend` values.
+/// `aurora.m3_backend` values.
 const BACKEND_AUTO: u64 = 0;
 const BACKEND_RUNTIME: u64 = 1;
 const BACKEND_MANAGER: u64 = 2;
@@ -354,12 +354,12 @@ fn parse_backend(text: &str) -> Option<u64> {
     }
 }
 
-/// `asahi.m3_backend=auto|runtime|manager|off`: which T6030 GPU backend probe starts.
+/// `aurora.m3_backend=auto|runtime|manager|off`: which T6030 GPU backend probe starts.
 static M3_BACKEND: AtomicU64 = AtomicU64::new(BACKEND_AUTO);
 m3_param!("m3_backend", M3_BACKEND, parse_backend);
 
 
-/// `asahi.m3_initdata` values.
+/// `aurora.m3_initdata` values.
 const INITDATA_AUTO: u64 = 0;
 const INITDATA_ADT: u64 = 2;
 
@@ -371,7 +371,7 @@ fn parse_initdata(text: &str) -> Option<u64> {
     }
 }
 
-/// `asahi.m3_initdata=auto|adt`: the runtime backend's InitData contents are generated from the
+/// `aurora.m3_initdata=auto|adt`: the runtime backend's InitData contents are generated from the
 /// device tree either way; the value is logged.
 static M3_INITDATA: AtomicU64 = AtomicU64::new(INITDATA_AUTO);
 m3_param!("m3_initdata", M3_INITDATA, parse_initdata);
@@ -385,7 +385,7 @@ pub(crate) enum InitDataParam {
     Adt,
 }
 
-/// The `asahi.m3_initdata` setting.
+/// The `aurora.m3_initdata` setting.
 pub(crate) fn initdata_param() -> InitDataParam {
     match M3_INITDATA.load(Ordering::Relaxed) {
         INITDATA_ADT => InitDataParam::Adt,
@@ -393,13 +393,13 @@ pub(crate) fn initdata_param() -> InitDataParam {
     }
 }
 
-/// Default of `asahi.m3_max_pstate` for device-tree InitData and the G15 manager backend: the
+/// Default of `aurora.m3_max_pstate` for device-tree InitData and the G15 manager backend: the
 /// fifth performance state (1056 MHz on J516S).
 pub(crate) const MAX_PSTATE_DEFAULT: u64 = 5;
 /// A performance-state parameter that is not given.
 const PSTATE_UNSET: u64 = u64::MAX;
 
-/// `asahi.m3_max_pstate`: the highest GPU performance state the driver lets the firmware use,
+/// `aurora.m3_max_pstate`: the highest GPU performance state the driver lets the firmware use,
 /// as an index into the voltage-sorted performance-state table (1 = lowest, 8 = highest on
 /// T6030; the G15 manager backend translates it to its device-tree ordered table). It is
 /// clamped to the device tree's highest performance state. Unset means
@@ -408,45 +408,45 @@ const PSTATE_UNSET: u64 = u64::MAX;
 static M3_MAX_PSTATE: AtomicU64 = AtomicU64::new(PSTATE_UNSET);
 m3_param!("m3_max_pstate", M3_MAX_PSTATE, parse_u64);
 
-/// `asahi.m3_boot_pstate`: the performance state the runtime backend requests at boot, clamped
+/// `aurora.m3_boot_pstate`: the performance state the runtime backend requests at boot, clamped
 /// to the cap. Unset means the cap.
 static M3_BOOT_PSTATE: AtomicU64 = AtomicU64::new(PSTATE_UNSET);
 m3_param!("m3_boot_pstate", M3_BOOT_PSTATE, parse_u64);
 
-/// The `asahi.m3_max_pstate` setting, if given, before clamping to the performance-state table.
+/// The `aurora.m3_max_pstate` setting, if given, before clamping to the performance-state table.
 pub(crate) fn max_pstate_param() -> Option<u64> {
     Some(M3_MAX_PSTATE.load(Ordering::Relaxed)).filter(|v| *v != PSTATE_UNSET)
 }
 
-/// The `asahi.m3_boot_pstate` setting, if given, before clamping.
+/// The `aurora.m3_boot_pstate` setting, if given, before clamping.
 pub(crate) fn boot_pstate_param() -> Option<u64> {
     Some(M3_BOOT_PSTATE.load(Ordering::Relaxed)).filter(|v| *v != PSTATE_UNSET)
 }
 
-/// `asahi.m3_timeout_nohang`: 1 (default) makes a scheduler timeout of a runtime-backend job
+/// `aurora.m3_timeout_nohang`: 1 (default) makes a scheduler timeout of a runtime-backend job
 /// report "no hang", because the runtime completes every packet itself and enforces its own
 /// per-batch completion limit. 0 keeps the previous handling: mark the GPU failed, fail the
 /// packet again and report the device as gone.
 static M3_TIMEOUT_NOHANG: AtomicU64 = AtomicU64::new(1);
 m3_param!("m3_timeout_nohang", M3_TIMEOUT_NOHANG, parse_u64);
 
-/// Whether `asahi.m3_timeout_nohang` is set (the default).
+/// Whether `aurora.m3_timeout_nohang` is set (the default).
 pub(crate) fn timeout_nohang() -> bool {
     M3_TIMEOUT_NOHANG.load(Ordering::Relaxed) != 0
 }
 
-/// `asahi.m3_unlocked_wait`: 1 (default) releases the runtime lock while the runtime backend
+/// `aurora.m3_unlocked_wait`: 1 (default) releases the runtime lock while the runtime backend
 /// waits for a batch to complete, so VM creation, timestamp mapping and the event worker are
 /// not held up by a running job. 0 holds the lock from preparation to retirement, as before.
 static M3_UNLOCKED_WAIT: AtomicU64 = AtomicU64::new(1);
 m3_param!("m3_unlocked_wait", M3_UNLOCKED_WAIT, parse_u64);
 
-/// Whether `asahi.m3_unlocked_wait` is set (the default).
+/// Whether `aurora.m3_unlocked_wait` is set (the default).
 pub(crate) fn unlocked_wait() -> bool {
     M3_UNLOCKED_WAIT.load(Ordering::Relaxed) != 0
 }
 
-/// `asahi.m3_ut_engagement=0|1`: Globals +0x7d0, the gate of the firmware's frequency-feedback
+/// `aurora.m3_ut_engagement=0|1`: Globals +0x7d0, the gate of the firmware's frequency-feedback
 /// cap. Unset: the SoC's default ([`crate::m3::m3_soc::Soc::ut_engagement`]).
 static M3_UT_ENGAGEMENT: AtomicU64 = AtomicU64::new(UT_ENGAGEMENT_UNSET);
 const UT_ENGAGEMENT_UNSET: u64 = u64::MAX;
@@ -455,7 +455,7 @@ fn parse_ut_engagement(text: &str) -> Option<u64> {
 }
 m3_param!("m3_ut_engagement", M3_UT_ENGAGEMENT, parse_ut_engagement);
 
-/// The frequency-feedback gate for `soc`, and whether `asahi.m3_ut_engagement` set it.
+/// The frequency-feedback gate for `soc`, and whether `aurora.m3_ut_engagement` set it.
 pub(crate) fn ut_engagement(soc: &crate::m3::m3_soc::Soc) -> (u32, bool) {
     match M3_UT_ENGAGEMENT.load(Ordering::Relaxed) {
         UT_ENGAGEMENT_UNSET => (soc.ut_engagement, false),
@@ -463,7 +463,7 @@ pub(crate) fn ut_engagement(soc: &crate::m3::m3_soc::Soc) -> (u32, bool) {
     }
 }
 
-/// `asahi.m3_pipeline_depth`: writable at runtime. How many render batches may be in flight on
+/// `aurora.m3_pipeline_depth`: writable at runtime. How many render batches may be in flight on
 /// the firmware's render queues. Zero selects the SoC default: 2 on the explicitly enabled
 /// experimental T8122 runtime, 1 on T6030. Depth 1 publishes only after the previous batch has
 /// fully retired. Larger values publish the next render batch of the same VM while earlier
@@ -483,7 +483,7 @@ pub(crate) fn pipeline_depth(soc: &crate::m3::m3_soc::Soc) -> usize {
     }
 }
 
-/// `asahi.m3_render_batch_budget_us`: writable at runtime. A render batch takes in later packets
+/// `aurora.m3_render_batch_budget_us`: writable at runtime. A render batch takes in later packets
 /// of its VM only while the VM's measured GPU time per pass, times the passes already in the
 /// batch, stays below this budget (4000 µs on experimental T8122, disabled on Pro).
 /// Coalescing a client's heavy frames
@@ -502,7 +502,7 @@ pub(crate) fn render_batch_budget_ns(soc: &crate::m3::m3_soc::Soc) -> Option<u64
     }
 }
 
-/// Bits of `asahi.m3_retire_mmio`.
+/// Bits of `aurora.m3_retire_mmio`.
 pub(crate) const RETIRE_MMIO_BUSY: u64 = 1 << 0;
 pub(crate) const RETIRE_MMIO_FAULTS: u64 = 1 << 1;
 pub(crate) const RETIRE_MMIO_PSTATE: u64 = 1 << 2;
@@ -512,14 +512,14 @@ fn parse_retire_mmio(text: &str) -> Option<u64> {
     parse_u64(text).filter(|v| *v <= 7)
 }
 
-/// `asahi.m3_retire_mmio`, writable at runtime: the GPU registers the host reads after every
+/// `aurora.m3_retire_mmio`, writable at runtime: the GPU registers the host reads after every
 /// job before retiring it. Bit 0 reads the engine-busy registers (SGX+0xc020/0xc120), bit 1
 /// selects and reads each cluster's fault bank (0xd800/0xd8c0), bit 2 reads the performance
 /// state (0xe01000). Unset: the SoC's default ([`crate::m3::m3_soc::Soc::retire_mmio`]).
 static M3_RETIRE_MMIO: AtomicU64 = AtomicU64::new(RETIRE_MMIO_UNSET);
 m3_param!("m3_retire_mmio", M3_RETIRE_MMIO, parse_retire_mmio, 0o644, Some(get_atomic_param));
 
-/// The `asahi.m3_retire_mmio` mask for `soc`.
+/// The `aurora.m3_retire_mmio` mask for `soc`.
 pub(crate) fn retire_mmio(soc: &crate::m3::m3_soc::Soc) -> u64 {
     match M3_RETIRE_MMIO.load(Ordering::Relaxed) {
         RETIRE_MMIO_UNSET => soc.retire_mmio,
@@ -527,7 +527,7 @@ pub(crate) fn retire_mmio(soc: &crate::m3::m3_soc::Soc) -> u64 {
     }
 }
 
-/// `asahi.m3_thermal` values.
+/// `aurora.m3_thermal` values.
 const THERMAL_OFF: u64 = 0;
 const THERMAL_HOLD: u64 = 1;
 const THERMAL_ON: u64 = 2;
@@ -560,7 +560,7 @@ pub(crate) enum ThermalMode {
     On,
 }
 
-/// The `asahi.m3_thermal` setting, if given.
+/// The `aurora.m3_thermal` setting, if given.
 pub(crate) fn thermal_param() -> Option<ThermalMode> {
     match M3_THERMAL.load(Ordering::Relaxed) {
         THERMAL_OFF => Some(ThermalMode::Off),
@@ -570,24 +570,24 @@ pub(crate) fn thermal_param() -> Option<ThermalMode> {
     }
 }
 
-/// Default and bounds of `asahi.m3_thermal_hot`, in degrees Celsius.
+/// Default and bounds of `aurora.m3_thermal_hot`, in degrees Celsius.
 pub(crate) const THERMAL_HOT_DEFAULT: u64 = 80;
 pub(crate) const THERMAL_HOT_MIN: u64 = 40;
 pub(crate) const THERMAL_HOT_MAX: u64 = 85;
 
-/// `asahi.m3_thermal_hot`: the SoC die temperature (degrees Celsius) at or above which the thermal
+/// `aurora.m3_thermal_hot`: the SoC die temperature (degrees Celsius) at or above which the thermal
 /// limit lowers the runtime cap, clamped to [`THERMAL_HOT_MIN`]..=[`THERMAL_HOT_MAX`].
 static M3_THERMAL_HOT: AtomicU64 = AtomicU64::new(THERMAL_HOT_DEFAULT);
 m3_param!("m3_thermal_hot", M3_THERMAL_HOT, parse_u64);
 
-/// The `asahi.m3_thermal_hot` setting and whether it was clamped.
+/// The `aurora.m3_thermal_hot` setting and whether it was clamped.
 pub(crate) fn thermal_hot_param() -> (u64, bool) {
     let value = M3_THERMAL_HOT.load(Ordering::Relaxed);
     let clamped = value.clamp(THERMAL_HOT_MIN, THERMAL_HOT_MAX);
     (clamped, clamped != value)
 }
 
-/// Whether to start the runtime backend on a T8122 (`asahi.m3_backend`), and say why not.
+/// Whether to start the runtime backend on a T8122 (`aurora.m3_backend`), and say why not.
 ///
 /// The runtime starts only on the boards the T8122 table allows (the M3 MacBook Airs and the
 /// 14" M3 MacBook Pro, `t8122_admission::T8122_BOARDS`), with `auto` and `runtime` alike:
@@ -596,13 +596,13 @@ pub(crate) fn t8122_backend(pdev: &platform::Device<Core<'_>>) -> bool {
     let dev = pdev.as_ref();
     match M3_BACKEND.load(Ordering::Relaxed) {
         BACKEND_OFF => {
-            dev_info!(dev, "M3: asahi.m3_backend=off: no GPU backend started\n");
+            dev_info!(dev, "M3: aurora.m3_backend=off: no GPU backend started\n");
             false
         }
         BACKEND_MANAGER => {
             dev_info!(
                 dev,
-                "M3: asahi.m3_backend=manager: the G15 manager backend is T6030-only; no GPU backend started\n"
+                "M3: aurora.m3_backend=manager: the G15 manager backend is T6030-only; no GPU backend started\n"
             );
             false
         }
@@ -639,29 +639,29 @@ fn parse_t8122_sgx_setup(text: &str) -> Option<u64> {
 // than fall back to a default.
 use crate::m3::t8122_knobs::UNSET as T8122_UNSET;
 
-/// `asahi.t8122_start=1`: start the M3 runtime on a T8122 with the start experiment's values.
+/// `aurora.t8122_start=1`: start the M3 runtime on a T8122 with the start experiment's values.
 /// Only with a boot loader that handed the GPU over.
 static T8122_START: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_start", T8122_START, parse_t8122_number);
-/// `asahi.t8122_initdata_version=<u64>`: the InitData version given to the T8122 firmware.
+/// `aurora.t8122_initdata_version=<u64>`: the InitData version given to the T8122 firmware.
 static T8122_INITDATA_VERSION: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_initdata_version", T8122_INITDATA_VERSION, parse_t8122_number);
-/// `asahi.t8122_fender=0x104000|0x12c000` (`rule`, `adt`): the Fender window size.
+/// `aurora.t8122_fender=0x104000|0x12c000` (`rule`, `adt`): the Fender window size.
 static T8122_FENDER: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_fender", T8122_FENDER, parse_t8122_fender);
-/// `asahi.t8122_clkgen=e1c|e5c|none`: the GPU clock-generator IO mapping.
+/// `aurora.t8122_clkgen=e1c|e5c|none`: the GPU clock-generator IO mapping.
 static T8122_CLKGEN: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_clkgen", T8122_CLKGEN, parse_t8122_clkgen);
-/// `asahi.t8122_sgx_setup=none|t6030`: the SGX write made before the firmware starts.
+/// `aurora.t8122_sgx_setup=none|t6030`: the SGX write made before the firmware starts.
 static T8122_SGX_SETUP: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_sgx_setup", T8122_SGX_SETUP, parse_t8122_sgx_setup);
-/// `asahi.t8122_unit_mask_a=<u64>`: HwDataB unit mask A (+0x17c0).
+/// `aurora.t8122_unit_mask_a=<u64>`: HwDataB unit mask A (+0x17c0).
 static T8122_UNIT_MASK_A: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_unit_mask_a", T8122_UNIT_MASK_A, parse_t8122_number);
-/// `asahi.t8122_unit_mask_b=<u32>`: HwDataB unit mask B (+0x17c8).
+/// `aurora.t8122_unit_mask_b=<u32>`: HwDataB unit mask B (+0x17c8).
 static T8122_UNIT_MASK_B: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_unit_mask_b", T8122_UNIT_MASK_B, parse_t8122_number);
-/// `asahi.t8122_pstate_cap=N`: the highest performance state the T8122 firmware may use.
+/// `aurora.t8122_pstate_cap=N`: the highest performance state the T8122 firmware may use.
 static T8122_PSTATE_CAP: AtomicU64 = AtomicU64::new(T8122_UNSET);
 m3_param!("t8122_pstate_cap", T8122_PSTATE_CAP, parse_t8122_number);
 

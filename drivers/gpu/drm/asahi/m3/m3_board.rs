@@ -24,7 +24,7 @@ pub(crate) fn board_is(compatible: &[u8]) -> bool {
 }
 
 /// Whether this is a board the M3 runtime is validated on (`soc.validated_boards`).
-/// `asahi.m3_expose=auto` registers the render node and `asahi.m3_backend=auto` starts the
+/// `aurora.m3_expose=auto` registers the render node and `aurora.m3_backend=auto` starts the
 /// runtime only on these.
 pub(crate) fn runtime_validated_board(soc: &Soc) -> bool {
     soc.validated_boards.iter().any(|board| board_is(board))
@@ -545,7 +545,7 @@ pub(crate) fn region_is_nomap(node: &of::Node, name: &CStr) -> bool {
     region.get_property::<KVec<u8>>(c_str!("no-map")).is_ok()
 }
 
-/// Whether the M3 render node is registered (`asahi.m3_expose`).
+/// Whether the M3 render node is registered (`aurora.m3_expose`).
 ///
 /// Userspace drivers pick up any registered render node. Until the M3 runtime is validated on a
 /// board, a render node there would let a stock userspace driver submit work the board may not

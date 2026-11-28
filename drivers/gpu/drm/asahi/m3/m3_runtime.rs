@@ -50,7 +50,7 @@ struct Inner {
     packets: KVec<Arc<crate::m3::m3_submit::Packet>>,
     /// Packets not yet (fully) published: (packet, next command index), most urgent first.
     pending: KVec<(Arc<crate::m3::m3_submit::Packet>,usize)>,
-    /// Published batches, oldest first. More than one only with asahi.m3_pipeline_depth > 1.
+    /// Published batches, oldest first. More than one only with aurora.m3_pipeline_depth > 1.
     active: KVec<Batch>,
     gpu_pending: bool,
     active_power_last: Option<Instant<Monotonic>>,
@@ -122,7 +122,7 @@ impl Inner {
             }
         }
     }
-    /// asahi.g15_debug bit 56. Wait up to 100 ms for the firmware to report
+    /// aurora.g15_debug bit 56. Wait up to 100 ms for the firmware to report
     /// that it halted, resume it, and log every change of the halt words,
     /// the engine state, the failed job's retirement, whether every queue
     /// message was consumed and the event count for about half a second,
@@ -317,7 +317,7 @@ impl Inner {
         Ok(true)
     }
     /// Publish pending batches while allowed: one when none is active, more behind it with
-    /// asahi.m3_pipeline_depth > 1. Returns whether anything was published or failed.
+    /// aurora.m3_pipeline_depth > 1. Returns whether anything was published or failed.
     fn publish_next(&mut self)->bool {
         let mut progress=false;
         while !self.pending.is_empty() && self.state.healthy() {
