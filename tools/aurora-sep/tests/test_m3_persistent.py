@@ -243,7 +243,7 @@ class Persistent(test_m3_handoff.M3PathTest):
         self.run_sh(f'm3_grub_fallback_off "{entry}"')
         text=entry.read_text()
         self.assertNotIn('asahi.t8122-start=1',text)
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off',text)
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off',text)
 
     def transaction_paths(self):
         defaults=self.etc/'default/limine'
@@ -281,7 +281,7 @@ m3_install_packages
         self.assertFalse((self.state/'m3-gpu-persistent').exists())
         self.assertFalse((self.state/'m3-persistent-transaction.json').exists())
         self.assertIn('/Aurora previous (GPU off)',fixture.conf.read_text())
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off',fixture.conf.read_text())
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off',fixture.conf.read_text())
 
     def test_native_marker_after_package_failure_rolls_back_before_arming(self):
         setup=self.setup_profile('j613-25g83','source-built-25')+self.transaction_paths()
@@ -329,7 +329,7 @@ m3_install_packages
         self.assertNotEqual(result.returncode,0)
         text=fixture.conf.read_text()
         self.assertIn('/Aurora previous (GPU off)',text)
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off',text)
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off',text)
         self.assertNotIn('asahi.t8122_start=1',text)
         self.assertNotIn('asahi.t8122_start=1',(self.etc/'default/limine').read_text())
         self.assertEqual((self.etc/'m1n1.conf').read_text(),'# owner setting\n')

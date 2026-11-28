@@ -224,8 +224,9 @@ class OneShotTest(unittest.TestCase):
         self.assertIn("    protocol: efi", lines)
         self.assertIn(f"    path: {self.mac.path}", lines)
         cmd = next(l for l in lines if l.startswith("    cmdline: "))[len("    cmdline: "):]
-        self.assertTrue(cmd.startswith(CMDLINE + " asahi.t8122_start=1 asahi.t8122_pstate_cap=1 "
-                                       "asahi.t8122_clkgen=e1c panic=10 air_gpu.oneshot="), cmd)
+        self.assertTrue(cmd.startswith(CMDLINE + " asahi.t8122_start=1 aurora.t8122_start=1 asahi.t8122_pstate_cap=1 "
+                                       "aurora.t8122_pstate_cap=1 asahi.t8122_clkgen=e1c aurora.t8122_clkgen=e1c "
+                                       "panic=10 air_gpu.oneshot="), cmd)
         # The normal entry, the default and everything else stay as they were.
         text = self.mac.conf.read_text()
         self.assertTrue(text.startswith(before.decode().rstrip("\n")), text)
@@ -342,13 +343,16 @@ class OneShotTest(unittest.TestCase):
         self.oneshot("start", check=True)
         cmd = re.search(r"^    cmdline: (.*)$", self.armed_block(), re.M).group(1)
         self.assertEqual([w for w in cmd.split() if w.startswith("asahi.")], ["asahi.t8122_start=1"])
+        self.assertEqual([w for w in cmd.split() if w.startswith("aurora.")], ["aurora.t8122_start=1"])
 
     def test_knobs_on_the_normal_cmdline_are_replaced(self):
-        self.mac.conf.write_text(limine_conf(self.mac.path, CMDLINE + " asahi.t8122_pstate_cap=5 asahi.m3_expose=0"))
+        self.mac.conf.write_text(limine_conf(self.mac.path, CMDLINE + " asahi.t8122_pstate_cap=5 asahi.m3_expose=0 aurora.t8122_pstate_cap=4"))
         self.oneshot("t8122_pstate_cap=1", "m3_expose=1", check=True)
         cmd = re.search(r"^    cmdline: (.*)$", self.armed_block(), re.M).group(1).split()
         self.assertEqual([w for w in cmd if w.startswith("asahi.")],
                          ["asahi.t8122_start=1", "asahi.t8122_pstate_cap=1", "asahi.m3_expose=1"])
+        self.assertEqual([w for w in cmd if w.startswith("aurora.")],
+                         ["aurora.t8122_start=1", "aurora.t8122_pstate_cap=1", "aurora.m3_expose=1"])
 
     def test_check_changes_nothing(self):
         before = self.mac.snapshot()
@@ -373,7 +377,7 @@ class OneShotTest(unittest.TestCase):
         # A kernel without the knobs (12.0 on an M3 Pro): the boot steps can still be tested.
         self.mac = FakeMac(self, board="j516s", uki_params=[b"asahi.m3_expose"])
         proc = self.oneshot("--allow-test-on-m3pro", "start", check=True)
-        self.assertIn("has no asahi.t8122_start parameter; the test boot ignores it", proc.stdout)
+        self.assertIn("has no t8122_start parameter; the test boot ignores it", proc.stdout)
 
     # Refusals: each one changes nothing
 
@@ -429,7 +433,7 @@ class OneShotTest(unittest.TestCase):
 
     def test_refuses_a_knob_the_kernel_lacks(self):
         self.mac = FakeMac(self, uki_params=[p for p in PARAMS if p != b"asahi.t8122_clkgen"])
-        self.assert_refused("has no asahi.t8122_clkgen parameter", "t8122_clkgen=none")
+        self.assert_refused("has no t8122_clkgen parameter", "t8122_clkgen=none")
 
     def test_refuses_unsafe_limine_settings(self):
         cases = [
@@ -437,8 +441,10 @@ class OneShotTest(unittest.TestCase):
                 limine_conf(self.mac.path, top="remember_last_entry: yes\n"))),
             ("2 //linux-aurora entries", lambda: self.mac.conf.write_text(
                 limine_conf(self.mac.path, extra=f"  //linux-aurora\n  protocol: efi\n  path: {self.mac.path}\n"))),
-            ("already sets asahi.t8122_start", lambda: self.mac.conf.write_text(
+            ("already sets t8122_start", lambda: self.mac.conf.write_text(
                 limine_conf(self.mac.path, CMDLINE + " asahi.t8122_start=1"))),
+            ("already sets t8122_start", lambda: self.mac.conf.write_text(
+                limine_conf(self.mac.path, CMDLINE + " aurora.t8122_start=1"))),
             ("measures BLAKE2b", lambda: self.mac.uki.write_bytes(self.mac.uki.read_bytes() + b"x")),
             ("Reboot into the installed kernel first", lambda: self.mac.conf.write_text(
                 limine_conf(self.mac.path, kver="7.1.12-2-12.0-sep-ARCH"))),
@@ -733,6 +739,8 @@ class CollectVerdictTest(unittest.TestCase):
     def test_not_armed(self):
         self.assertEqual(self.verdict(RUNNING, cmd=CMDLINE)[0], "NOT-ARMED")
         self.assertEqual(self.verdict(RUNNING, cmd=CMDLINE + " asahi.t8122_start=0")[0], "NOT-ARMED")
+        self.assertEqual(self.verdict(RUNNING, cmd=CMDLINE + " aurora.t8122_start=0")[0], "NOT-ARMED")
+        self.assertNotEqual(self.verdict(RUNNING, cmd=CMDLINE + " aurora.t8122_start=1")[0], "NOT-ARMED")
 
 
 JOURNALCTL = r"""#!/bin/bash

@@ -34,18 +34,18 @@ class BootProfile(unittest.TestCase):
     def test_retains_bytes_modules_and_gpu_off_entry(self):
         self.run_helper('retain')
         saved=json.loads((self.state/'m3-known-entry.json').read_text())
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off',saved['cmdline'])
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off',saved['cmdline'])
         path=self.esp/saved['path'].split('#')[0].removeprefix('boot():/')
         self.assertEqual(path.read_bytes(),self.uki.read_bytes())
         self.assertFalse((self.state/'modules-6.12-test/dtbs').exists())
         self.assertIn('/Aurora previous (GPU off)', self.conf.read_text())
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off', self.conf.read_text())
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off', self.conf.read_text())
         self.assertNotIn('asahi.t8122_start=1', self.conf.read_text())
         self.run_helper('publish');self.run_helper('publish')
         text=self.conf.read_text()
         self.assertEqual(text.count('/Aurora previous (GPU off)'),1)
         self.assertIn('root=UUID=abc rw asahi.t8122_start=1',text)
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off',text)
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off',text)
     def test_hash_mutation_refuses_before_configuration_change(self):
         self.uki.write_bytes(b'mutated')
         self.run_helper('retain',False)
@@ -156,7 +156,7 @@ class BootProfile(unittest.TestCase):
             self.run_helper('publish',False,timeout=0.15)
         self.assertEqual(self.conf.read_bytes(),before)
         self.assertIn('/Aurora previous (GPU off)',self.conf.read_text())
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off',self.conf.read_text())
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off',self.conf.read_text())
         self.assertNotIn('asahi.t8122_start=1',self.conf.read_text())
 
     def test_missing_custom_entry_refuses_activation(self):
@@ -169,7 +169,7 @@ class BootProfile(unittest.TestCase):
         self.run_helper('retain');self.run_helper('publish')
         self.run_helper('disarm')
         self.assertNotIn('asahi.t8122_start=1',self.conf.read_text())
-        self.assertEqual(self.conf.read_text().count('asahi.t8122_start=0 mesa_m3=off'),2)
+        self.assertEqual(self.conf.read_text().count('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off'),2)
 
     def test_remove_drops_gpu_off_entry_and_retained_uki(self):
         self.run_helper('retain')
@@ -212,7 +212,7 @@ class BootProfile(unittest.TestCase):
     def test_remove_refuses_edited_fallback_before_publication(self):
         self.run_helper('retain')
         retained,_=self.retained_path()
-        self.conf.write_text(self.conf.read_text().replace('asahi.t8122_start=0 mesa_m3=off','asahi.t8122_start=1'))
+        self.conf.write_text(self.conf.read_text().replace('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off','asahi.t8122_start=1 aurora.t8122_start=1'))
         before=self.conf.read_bytes()
         self.run_helper('remove',False)
         self.assertEqual(self.conf.read_bytes(),before)

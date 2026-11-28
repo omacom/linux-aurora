@@ -12,7 +12,7 @@
 # the tgz has lines naming a serial number dropped and MAC addresses masked.
 #
 # The last line printed is the verdict, one of:
-#   NOT-ARMED            the analysed boot did not have asahi.t8122_start=1 (no one-shot boot)
+#   NOT-ARMED            the analysed boot did not have aurora.t8122_start=1 (or asahi.t8122_start=1) (no one-shot boot)
 #   ARMED-NO-LOG         the last arming's boot left no kernel log (most likely a hang in the GPU
 #                        start, before the journal was written); no older boot's result is shown
 #   ARMED-NOT-STARTED    armed, but the driver stopped before it started the firmware
@@ -82,11 +82,11 @@ RE_KERNEL_ARMED='M3 G15G start: armed'
 # 2. Without those lines (a kernel before them, or a test run on an M3 Pro), these extended regexes
 #    decide, in this order: armed? -> firmware started? -> InitData sent? -> accepted? -> job?
 # The boot was armed: on its command line.
-RE_ARMED='(^| )asahi\.t8122_start=1( |$)'
+RE_ARMED='(^| )(asahi|aurora)\.t8122_start=1( |$)'
 # The driver refused or stopped before it started the firmware (the last such line is the reason).
-RE_REFUSED='M3 G15G start: (refused|not armed)|GPU startup disabled|identity or ABI rejected|startup refused|no GPU backend|invalid for parameter .asahi\.|InitData self-check failed'
+RE_REFUSED='M3 G15G start: (refused|not armed)|GPU startup disabled|identity or ABI rejected|startup refused|no GPU backend|invalid for parameter .(asahi|aurora)\.|InitData self-check failed'
 # The probe ended in an error (the reason when nothing more specific was logged).
-RE_PROBE_FAILED='probe with driver asahi failed'
+RE_PROBE_FAILED='probe with driver (asahi|aurora) failed'
 # The driver probed the GPU at all (without a boot-loader handoff the GPU node is disabled).
 RE_PROBED='asahi [0-9a-f]+\.gpu: Probing'
 # The GPU coprocessor's firmware was started.
@@ -105,7 +105,7 @@ RE_JOB_NOT_DISPATCHED='GPU is powered down'
 RE_JOB_FAILED='M3 scheduler: execution failed|M3 completion events=|GPU is powered down|M3 fault render|M3 bank [0-9]+ fault=0x[0-9a-f]*[1-9a-f]|M3 fault mapping'
 #
 # The GPU lines kept in gpu-log.txt, and the firmware's own log lines in firmware-log.txt.
-RE_GPU_LINES='asahi|agx|G15|M3[ _:]|t8122|gpu|RTKit|devcoredump|macsmc'
+RE_GPU_LINES='asahi|aurora|agx|G15|M3[ _:]|t8122|gpu|RTKit|devcoredump|macsmc'
 RE_FW_LOG='\.gpu: RTKit: (syslog|crashlog|co-processor|Unknown)|firmware crashed|crashlog|M3 firmware|M3 G15G (verdict|start)'
 # SMC power keys that read zero at idle on an M3 Air (J613) sample (2026-10-06): the GPU rail
 # candidates. One of them should rise the first time the GPU draws power.
@@ -376,7 +376,7 @@ classify_core() {
   last_line() { { grep -aE "$1" "$log" || true; } | tail -1 | sed -E 's/^\[[^]]*\] *//; s/^[^ ]+ kernel: //'; }
   if ! [[ " $cmd " =~ $RE_ARMED ]]; then
     VERDICT=NOT-ARMED VERDICT_SRC=cmdline
-    REASON="asahi.t8122_start=1 is not on the analysed boot's command line"
+    REASON="neither aurora.t8122_start=1 nor asahi.t8122_start=1 is on the analysed boot's command line"
     return 0
   fi
   if grep -qaE "$RE_KERNEL_VERDICT" "$log"; then
