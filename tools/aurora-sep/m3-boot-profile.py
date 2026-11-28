@@ -64,9 +64,11 @@ def locks(paths, timeout=30.0):
 def cmdline(line, armed):
     if '"' in line or "'" in line or not any(w.startswith('root=') for w in line.split()):
         raise ValueError('boot command line must contain root= and have no quotes')
-    words = [w for w in line.split() if not re.match(r'asahi\.t8122[_-]start(?:=|$)', w)
+    words = [w for w in line.split() if not re.match(r'(?:asahi|aurora)\.t8122[_-]start(?:=|$)', w)
              and not w.startswith('mesa_m3=') and not w.startswith('air_gpu.oneshot=')]
-    return ' '.join(words + ['asahi.t8122_start=' + ('1' if armed else '0')] + ([] if armed else ['mesa_m3=off']))
+    # aurora.ko reads aurora.*, the older asahi.ko asahi.*; each module ignores the other's key.
+    value = '1' if armed else '0'
+    return ' '.join(words + ['asahi.t8122_start=' + value, 'aurora.t8122_start=' + value] + ([] if armed else ['mesa_m3=off']))
 
 def without_block(text):
     if text.count(BEGIN) != text.count(END) or text.count(BEGIN) > 1:

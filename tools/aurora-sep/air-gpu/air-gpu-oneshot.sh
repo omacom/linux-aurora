@@ -1,6 +1,7 @@
 #!/bin/bash
 # air-gpu-oneshot.sh: arm ONE boot of this M3 MacBook Air with the GPU start switch
-# (asahi.t8122_start=1) and the given asahi knobs on the kernel command line.
+# (aurora.t8122_start=1, and asahi.t8122_start=1 for kernels that still build asahi.ko) and the
+# given knobs on the kernel command line.
 #
 #   sudo air-gpu-oneshot.sh start                    arm one boot with the kernel's defaults
 #   sudo air-gpu-oneshot.sh <knob>=<value> ...       arm one boot with these knobs as well
@@ -146,16 +147,17 @@ list_knobs() {
   printf '%s\n' "$KNOBS" | sed '/^$/d'
 }
 
-# Fills PARAMS ("asahi.name=value" words, t8122_start first) from the arguments, or refuses.
+# Fills PARAMS from the arguments, or refuses: each knob as asahi.name=value and aurora.name=value
+# (aurora.ko reads aurora.*, the older asahi.ko asahi.*), t8122_start first.
 PARAMS=()
 parse_knobs() {
   local arg name value line re seen=" "
-  PARAMS=("asahi.t8122_start=1")
+  PARAMS=("asahi.t8122_start=1" "aurora.t8122_start=1")
   for arg in "$@"; do
     [[ $arg == start ]] && continue
     [[ $arg == *=* ]] || refuse "\"$arg\" is not a knob=value (or start)."
     name=${arg%%=*} value=${arg#*=}
-    name=${name#asahi.}
+    name=${name#asahi.} name=${name#aurora.}
     line=$(knob_line "$name")
     [[ -n $line ]] || refuse "unknown knob \"$name\" (air-gpu-oneshot.sh --list-knobs lists them)."
     re=$(awk '{ print $2 }' <<<"$line")
@@ -165,7 +167,7 @@ parse_knobs() {
     [[ $seen != *" $name "* ]] || refuse "$name is given twice."
     seen+="$name "
     [[ $name == t8122_start ]] && continue
-    PARAMS+=("asahi.$name=$value")
+    PARAMS+=("asahi.$name=$value" "aurora.$name=$value")
   done
 }
 
@@ -428,9 +430,9 @@ preflight() {
     refuse "the //$SOURCE_ENTRY entry has no cmdline: with root= to copy."
   [[ $SRC_CMDLINE != *'"'* && $SRC_CMDLINE != *"'"* ]] ||
     refuse "the //$SOURCE_ENTRY command line has quotes, which this script does not rewrite."
-  # The kernel reads - and _ alike in a parameter name, and a bare asahi.t8122_start means =1.
-  [[ ! " $SRC_CMDLINE " =~ \ asahi\.t8122[_-]start([=\ ]) ]] ||
-    refuse "the normal //$SOURCE_ENTRY entry already sets asahi.t8122_start, so every boot would start the GPU. Remove it from /etc/default/limine first."
+  # The kernel reads - and _ alike in a parameter name, and a bare aurora.t8122_start means =1.
+  [[ ! " $SRC_CMDLINE " =~ \ (asahi|aurora)\.t8122[_-]start([=\ ]) ]] ||
+    refuse "the normal //$SOURCE_ENTRY entry already sets t8122_start, so every boot would start the GPU. Remove it from /etc/default/limine first."
   UKI=$(limine_file "$SRC_PATH")
   [[ -f $UKI ]] || refuse "the //$SOURCE_ENTRY entry's UKI $UKI does not exist."
   if [[ $SRC_PATH == *#* ]]; then
@@ -443,7 +445,8 @@ preflight() {
   fi
   grep -qaF "$KREL" "$UKI" || refuse "$UKI is not the kernel this boot runs ($KREL). Reboot into the installed kernel first."
   for p in "${PARAMS[@]}"; do
-    p=${p%%=*}
+    [[ $p == aurora.* ]] && continue
+    p=${p%%=*} p=${p#asahi.}
     if ! grep -qaF "$p" "$UKI"; then
       if is_m3pro && ((ALLOW_M3PRO)); then
         WARNINGS+=("this kernel has no $p parameter; the test boot ignores it")
@@ -511,7 +514,7 @@ new_cmdline() {
   set +f
   for w in "${words[@]}"; do
     skip=0
-    [[ $w == asahi.t8122[_-]* || $w == "$TAG"=* || $w == panic=* ]] && skip=1
+    [[ $w == asahi.t8122[_-]* || $w == aurora.t8122[_-]* || $w == "$TAG"=* || $w == panic=* ]] && skip=1
     for p in "${PARAMS[@]}"; do
       name=${p%%=*}
       [[ $w == "$name" || $w == "$name"=* ]] && skip=1

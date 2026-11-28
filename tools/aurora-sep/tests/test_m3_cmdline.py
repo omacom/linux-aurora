@@ -28,7 +28,7 @@ class Cmdline(unittest.TestCase):
 
     def test_default_encryption_preserved_without_shell_expression(self):
         self.run_cmdline()
-        self.assertEqual(self.setting(), 'KERNEL_CMDLINE[linux-aurora]="root=UUID=root rd.luks.name=crypt=root rw asahi.t8122_start=1"')
+        self.assertEqual(self.setting(), 'KERNEL_CMDLINE[linux-aurora]="root=UUID=root rd.luks.name=crypt=root rw asahi.t8122_start=1 aurora.t8122_start=1"')
         original = self.defaults.read_bytes()
         self.run_cmdline()
         self.assertEqual(self.defaults.read_bytes(), original)
@@ -50,7 +50,7 @@ class Cmdline(unittest.TestCase):
         (directory/'20-options.conf').write_text('KERNEL_CMDLINE[default]+="initramfs_async=0"\n')
         self.defaults.write_text('KERNEL_CMDLINE[default]+="rootflags=subvol=@"\n')
         self.run_cmdline()
-        self.assertEqual(self.setting(), 'KERNEL_CMDLINE[linux-aurora]="rootflags=subvol=@ initramfs_async=0 quiet rd.luks.name=crypt=root root=UUID=vendor rw asahi.t8122_start=1"')
+        self.assertEqual(self.setting(), 'KERNEL_CMDLINE[linux-aurora]="rootflags=subvol=@ initramfs_async=0 quiet rd.luks.name=crypt=root root=UUID=vendor rw asahi.t8122_start=1 aurora.t8122_start=1"')
 
     def test_old_owned_expression_is_repaired_from_literal_defaults(self):
         self.defaults.write_text(self.defaults.read_text() + '\n# >>> aurora-sep: M3 GPU cmdline\n'
@@ -59,12 +59,12 @@ class Cmdline(unittest.TestCase):
         self.run_cmdline(0)
         self.assertNotIn('${', self.defaults.read_text())
         self.assertIn('rd.luks.name=crypt=root', self.setting())
-        self.assertIn('asahi.t8122_start=0 mesa_m3=off', self.setting())
+        self.assertIn('asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off', self.setting())
 
     def test_only_gpu_and_boot_image_arguments_are_removed(self):
-        self.defaults.write_text('KERNEL_CMDLINE="root=UUID=root asahi.t8122-start=1 mesa_m3=off air_gpu.oneshot=1 BOOT_IMAGE=/old loglevel=4 usbcore.autosuspend=-1"\n')
+        self.defaults.write_text('KERNEL_CMDLINE="root=UUID=root asahi.t8122-start=1 aurora.t8122_start=0 mesa_m3=off air_gpu.oneshot=1 BOOT_IMAGE=/old loglevel=4 usbcore.autosuspend=-1"\n')
         self.run_cmdline()
-        self.assertEqual(self.setting(), 'KERNEL_CMDLINE[linux-aurora]="root=UUID=root loglevel=4 usbcore.autosuspend=-1 asahi.t8122_start=1"')
+        self.assertEqual(self.setting(), 'KERNEL_CMDLINE[linux-aurora]="root=UUID=root loglevel=4 usbcore.autosuspend=-1 asahi.t8122_start=1 aurora.t8122_start=1"')
 
     def test_empty_config_uses_etc_kernel_then_running_cmdline(self):
         self.defaults.write_text('# no configured command line\n')
@@ -96,7 +96,7 @@ M3_GPU_PERSISTENT=1
 chain=limine
 work="{work}"
 pacman() {{
-  grep -F 'root=UUID=root rd.luks.name=crypt=root rw asahi.t8122_start=0 mesa_m3=off' "$M3_LIMINE_DEFAULTS"
+  grep -F 'root=UUID=root rd.luks.name=crypt=root rw asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off' "$M3_LIMINE_DEFAULTS"
   return 23
 }}
 m3_install_packages

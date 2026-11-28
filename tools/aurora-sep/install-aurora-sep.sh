@@ -685,8 +685,8 @@ M3_PERSISTENT_TRANSACTION_ACTIVE=0
 M3_PERSISTENT_MAIN_ARMED=0
 M3_GPU_BIN=/usr/local/bin
 M3_GPU_SCRIPTS=(
-  "air-gpu-oneshot.sh d0259869b8519439a4dbcdae08ef1b0e17fdcaf84ac746fca61febf6a325f8aa"
-  "air-gpu-collect.sh face8fac811b59c31a8e98e6ca704a2cb33eceada8bc37986397cb393b050b30"
+  "air-gpu-oneshot.sh 9d41005ecd45485fd573a01237e2b8e4f4a5a4f9ecaad59ec84ca7cedbad3104"
+  "air-gpu-collect.sh 87d26091209580abadbcf128ec04a59751a2d91830d4018b2ee8506d6420151b"
   "air-gpu-job.sh 9a0eb9aab52fd099488054e4ed4846c579b19fc9f78144245242b6975a40da1d"
 )
 # The Mesa prefix air-gpu-job.sh runs with: mesa-m3's (12.4 on; it replaces the separate
@@ -1748,7 +1748,7 @@ mesa_needs_too_old() {
 # the tools of an earlier one.
 m3_gpu_notice() {
   if ((M3_GPU_PERSISTENT)); then
-    say "Experimental GPU profile $M3_GPU_PROFILE is selected for subsequent boots with the matched kernel, Mesa and bootloader. The retained previous entry uses asahi.t8122_start=0 and mesa_m3=off."
+    say "Experimental GPU profile $M3_GPU_PROFILE is selected for subsequent boots with the matched kernel, Mesa and bootloader. The retained previous entry uses aurora.t8122_start=0 (and asahi.t8122_start=0 for kernels that still build asahi.ko) and mesa_m3=off."
     say "Reboot, log into your desktop, then run: aurora-m3-gpu-check"
     [[ $M3_GPU_PROFILE != j613-25g83 ]] || say "25G83 native OpenGL is experimental; Vulkan hardware support is unavailable."
     if m3_25_j615; then m3_25_j615_warning; fi
@@ -3481,8 +3481,8 @@ EOF
   subvol=$(findmnt -no FSROOT /)
   cmdline=$(sed -e 's/BOOT_IMAGE=[^ ]*//' /proc/cmdline)
   if ((M3_GPU_PERSISTENT)); then
-    cmdline=$(sed -E 's/(^| )asahi\.t8122[_-]start(=[^ ]*)?//g; s/(^| )mesa_m3=[^ ]*//g' <<<"$cmdline")
-    cmdline+=" asahi.t8122_start=0 mesa_m3=off"
+    cmdline=$(sed -E 's/(^| )(asahi|aurora)\.t8122[_-]start(=[^ ]*)?//g; s/(^| )mesa_m3=[^ ]*//g' <<<"$cmdline")
+    cmdline+=" asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off"
   fi
   if [[ $(findmnt -no FSTYPE /boot) == vfat ]]; then
     linux=/vmlinuz-aurora-sep-previous initrd=/initramfs-aurora-sep-previous.img
@@ -7431,7 +7431,7 @@ if text.count(begin) != text.count(end) or text.count(begin) > 1:
     raise SystemExit('malformed owned M3 cmdline block')
 text = re.sub(re.escape(begin) + r'\n.*?' + re.escape(end) + r'\n?', '', text, flags=re.S)
 if chain == 'grub':
-    setting = 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} asahi.t8122_start=' + armed + '"'
+    setting = 'GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX} asahi.t8122_start=' + armed + ' aurora.t8122_start=' + armed + '"'
 else:
     # Limine reads literal assignments; it does not expand shell variables.
     values = {}
@@ -7470,9 +7470,9 @@ else:
         if not value: value = Path(sys.argv[5]).read_text().strip()
     if any(c in value for c in ('"', "'", '\n', '\r', '`', '${', '$(', '+=')) or not any(w.startswith('root=') for w in value.split()):
         raise SystemExit('Limine command line must contain literal root= arguments without quotes, shell expressions or += inside arguments; fix ' + str(path) + ' before retrying')
-    words = [w for w in value.split() if not re.match(r'asahi\.t8122[_-]start(?:=|$)', w)
+    words = [w for w in value.split() if not re.match(r'(?:asahi|aurora)\.t8122[_-]start(?:=|$)', w)
              and not w.startswith(('mesa_m3=', 'air_gpu.oneshot=', 'BOOT_IMAGE='))]
-    words += ['asahi.t8122_start=' + armed]
+    words += ['asahi.t8122_start=' + armed, 'aurora.t8122_start=' + armed]
     if armed == '0': words += ['mesa_m3=off']
     setting = 'KERNEL_CMDLINE[linux-aurora]="' + ' '.join(words) + '"'
 data = text.rstrip() + '\n\n' + begin + '\n' + setting + '\n' + end + '\n'
@@ -7565,9 +7565,11 @@ def locks(paths, timeout=30.0):
 def cmdline(line, armed):
     if '"' in line or "'" in line or not any(w.startswith('root=') for w in line.split()):
         raise ValueError('boot command line must contain root= and have no quotes')
-    words = [w for w in line.split() if not re.match(r'asahi\.t8122[_-]start(?:=|$)', w)
+    words = [w for w in line.split() if not re.match(r'(?:asahi|aurora)\.t8122[_-]start(?:=|$)', w)
              and not w.startswith('mesa_m3=') and not w.startswith('air_gpu.oneshot=')]
-    return ' '.join(words + ['asahi.t8122_start=' + ('1' if armed else '0')] + ([] if armed else ['mesa_m3=off']))
+    # aurora.ko reads aurora.*, the older asahi.ko asahi.*; each module ignores the other's key.
+    value = '1' if armed else '0'
+    return ' '.join(words + ['asahi.t8122_start=' + value, 'aurora.t8122_start=' + value] + ([] if armed else ['mesa_m3=off']))
 
 def without_block(text):
     if text.count(BEGIN) != text.count(END) or text.count(BEGIN) > 1:
@@ -7819,9 +7821,9 @@ lines=text.splitlines(keepends=True)
 indices=[i for i,l in enumerate(lines) if re.match(r'\s*linux\s+\S*vmlinuz-aurora-sep-previous\s',l)]
 if len(indices)!=1: raise SystemExit('retained GRUB entry is missing its unique previous kernel line')
 i=indices[0]
-line=re.sub(r'(^| )asahi\.t8122[_-]start(?:=[^ ]*)?(?= |$)',r'\1',lines[i].rstrip())
+line=re.sub(r'(^| )(?:asahi|aurora)\.t8122[_-]start(?:=[^ ]*)?(?= |$)',r'\1',lines[i].rstrip())
 line=re.sub(r'(^| )mesa_m3=[^ ]*',r'\1',line)
-lines[i]=line+' asahi.t8122_start=0 mesa_m3=off\n'
+lines[i]=line+' asahi.t8122_start=0 aurora.t8122_start=0 mesa_m3=off\n'
 path.write_text(''.join(lines))
 M3_GRUB_OFF
 }
