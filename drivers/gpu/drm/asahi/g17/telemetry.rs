@@ -8,12 +8,12 @@
 //! timestamps, from which busy time is integrated ([`Protocol`]). 25G83 sends neither.
 //! All state is protected by the device mutex.
 
-pub(super) const UNAVAILABLE: u32 = 0;
-pub(super) const VALID: u32 = 1;
-pub(super) const STALE: u32 = 2;
+pub(crate) const UNAVAILABLE: u32 = 0;
+pub(crate) const VALID: u32 = 1;
+pub(crate) const STALE: u32 = 2;
 /// The firmware never emits the record, so the capability cannot become
 /// valid. Chosen from the firmware match data, never from missing packets.
-pub(super) const UNSUPPORTED: u32 = 3;
+pub(crate) const UNSUPPORTED: u32 = 3;
 
 /// C read callback result; independent capabilities never imply one another.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -36,7 +36,9 @@ pub(crate) struct Readout {
     /// state ([`super::stats::Reader`]); zero for state 0 or where it is unknown.
     pub(crate) achieved_frequency_hz: u64,
     pub(crate) busy_status: u32,
-    pub(crate) _pad: u32,
+    /// Utilisation source selector for `sysfs.c`: 0 = tag 0x13 (G16S/G17P),
+    /// 1 = tag 0x04 (G15/M3 RTKit 2419), 2 = unsupported.
+    pub(crate) util_source: u32,
 }
 
 const _: () = {
@@ -524,7 +526,7 @@ mod tests {
         busy_ns: 0,
         achieved_frequency_hz: 0,
         busy_status: UNSUPPORTED,
-        _pad: 0,
+        util_source: 0,
     };
 
     fn ticks_ns(ticks: u64) -> u64 {

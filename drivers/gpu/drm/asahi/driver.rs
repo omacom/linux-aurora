@@ -466,6 +466,7 @@ impl AsahiPlatformDriver {
         pdev: &'bound platform::Device<Core<'_>>,
         cfg: &'static crate::g15::Config,
     ) -> Result<AsahiPlatformDriverData<'bound>> {
+        crate::memacct::LEDGER.configure();
         // SAFETY: Admission checks the SoC and the UAT output width before DMA starts.
         unsafe { pdev.dma_set_mask_and_coherent(DmaMask::try_new(cfg.uat_oas)?)? };
         let resources = regs::Resources::new(pdev)?;
@@ -474,6 +475,7 @@ impl AsahiPlatformDriver {
         // probe errors drop this local owner while the bound callback is live.
         let binding = unsafe { crate::binding::Owner::new(pdev.as_ref(), &drm)? };
         let gpu = crate::g15::Gpu::new(pdev, &drm, cfg)?;
+        let stats = gpu::Gpu::stats_snapshot(&*gpu);
         let data = try_pin_init!(AsahiDrmRegistrationData {
             gpu: gpu as Arc<dyn gpu::Gpu>,
             resources,
@@ -481,6 +483,13 @@ impl AsahiPlatformDriver {
         // SAFETY: The registration is stored and unregistered by platform data destruction.
         // G15 retains its firmware-visible state independently until reboot, even on error.
         let reg = unsafe { drm::Registration::new(pdev.as_ref(), drm, data, 0)? };
+        let raw_dev = pdev.as_ref().as_raw();
+        let snapshot = stats.as_ref().map_or(core::ptr::null(), Arc::as_ptr);
+        let raw_stats = crate::sysfs_exports::register_qualified(
+            raw_dev,
+            snapshot,
+            stats.is_some() && module_parameters::stats_export.value() != 0,
+        )?;
         Ok(AsahiPlatformDriverData {
             binding,
             _device: reg.device().into(),
@@ -489,9 +498,9 @@ impl AsahiPlatformDriver {
             m3: None,
             #[cfg(CONFIG_DRM_ASAHI_G16)]
             g16: None,
-            raw_dev: core::ptr::null_mut(),
-            raw_stats: core::ptr::null_mut(),
-            stats: None,
+            raw_dev,
+            raw_stats,
+            stats,
         })
     }
 
@@ -520,6 +529,20 @@ impl AsahiPlatformDriver {
                 return Err(error);
             }
         };
+        let stats = gpu::Gpu::stats_snapshot(&*backend);
+        let raw_dev = pdev.as_ref().as_raw();
+        let snapshot = stats.as_ref().map_or(core::ptr::null(), Arc::as_ptr);
+        let raw_stats = match crate::sysfs_exports::register_qualified(
+            raw_dev,
+            snapshot,
+            stats.is_some() && module_parameters::stats_export.value() != 0,
+        ) {
+            Ok(handle) => handle,
+            Err(error) => {
+                backend.stop();
+                return Err(error);
+            }
+        };
         dev_info!(pdev.as_ref(), "M3: firmware ready; common DRM GEM/VM frontend registered\n");
         Ok(AsahiPlatformDriverData {
             binding,
@@ -529,9 +552,9 @@ impl AsahiPlatformDriver {
             _reg: reg,
             g17: None,
             m3: Some(backend),
-            raw_dev: core::ptr::null_mut(),
-            raw_stats: core::ptr::null_mut(),
-            stats: None,
+            raw_dev,
+            raw_stats,
+            stats,
         })
     }
 
@@ -579,7 +602,7 @@ impl AsahiPlatformDriver {
         let stats = gpu::Gpu::stats_snapshot(&*gpu);
         let raw_dev = pdev.as_ref().as_raw();
         let snapshot = stats.as_ref().map_or(core::ptr::null(), Arc::as_ptr);
-        let raw_stats = match crate::sysfs_exports::register_g17(
+        let raw_stats = match crate::sysfs_exports::register_qualified(
             raw_dev,
             snapshot,
             module_parameters::stats_export.value() != 0,

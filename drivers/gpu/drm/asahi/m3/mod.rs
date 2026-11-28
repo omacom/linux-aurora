@@ -125,6 +125,8 @@ mod m3_rtkit;
 #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
 mod m3_runtime;
 #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+pub(crate) mod m3_stats;
+#[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
 mod m3_submit;
 #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
 mod m3_thermal;

@@ -1840,7 +1840,10 @@ impl Gpu {
         let frequencies = Self::state_frequencies(dev, cfg, variant, id.num_clusters)?;
         let stats = Arc::new(
             crate::stats::StatsSnapshot {
-                g17_reader: Some(stats::Reader(shared.clone(), frequencies)),
+                qualified_reader: Some(crate::stats::QualifiedReader::G17(stats::Reader(
+                    shared.clone(),
+                    frequencies,
+                ))),
                 ..Default::default()
             },
             GFP_KERNEL,

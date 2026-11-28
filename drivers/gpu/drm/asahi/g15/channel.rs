@@ -78,6 +78,8 @@ pub(crate) struct Channels {
     pub(crate) stats: Ring,
     /// What the stats ring carried, up to its consumer.
     pub(crate) stats_seen: StatsSeen,
+    /// Qualified telemetry accumulator fed from the stats ring.
+    pub(crate) telemetry: crate::stats_m3::Telemetry,
     /// Allocated for the firmware; the host never uses it.
     _fwctl: Ring,
     /// Host producers of channels 0 TA, 1 FS, 2 compute.
@@ -172,6 +174,7 @@ impl Channels {
                 rings::FWCTL_RING_SIZE,
             )?,
             stats_seen: StatsSeen::default(),
+            telemetry: crate::stats_m3::Telemetry::new(true),
             producer: [0; 3],
             devctl_producer: 0,
         })
@@ -319,6 +322,7 @@ pub(crate) fn devctl_submit(
     let expired = || start.elapsed() > Delta::from_millis(2000);
     let opcode = record.opcode();
     while channels.devctl.read()? != producer {
+        channels.drain_stats_only(super::engine::now_ns())?;
         channels.drain_rings(&dev, events)?;
         session.check()?;
         if init.halted()? {
@@ -349,6 +353,7 @@ pub(crate) fn devctl_submit(
         return Ok(());
     }
     loop {
+        channels.drain_stats_only(super::engine::now_ns())?;
         channels.drain_rings(&dev, events)?;
         session.check()?;
         if channels.devctl.read()? == next && channels.devctl.completion()? == next {
@@ -395,6 +400,7 @@ impl Firmware {
     /// Drains the receive rings and decodes events. Called first in every poll pass.
     pub(crate) fn drain_rings(&mut self) -> Result {
         let dev = self.session.dev.clone();
+        self.channels.drain_stats_only(super::engine::now_ns())?;
         self.channels.drain_rings(&dev, &mut self.events)
     }
 }

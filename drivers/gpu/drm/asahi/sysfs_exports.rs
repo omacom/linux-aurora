@@ -61,9 +61,9 @@ pub(crate) fn register(
     )
 }
 
-/// The caller retains the G17 snapshot Arc until unregister joins both sysfs
-/// readers and the PM notifier. The callbacks never power the GPU up.
-pub(crate) fn register_g17(
+/// The caller retains the qualified snapshot Arc until unregister joins both
+/// sysfs readers and the PM notifier. The callbacks never power the GPU up.
+pub(crate) fn register_qualified(
     dev: *mut kernel::bindings::device,
     snapshot: *const StatsSnapshot,
     export_enabled: bool,
@@ -72,8 +72,8 @@ pub(crate) fn register_g17(
         dev,
         snapshot,
         export_enabled,
-        Some(read_g17),
-        Some(suspend_g17),
+        Some(read_qualified),
+        Some(suspend_qualified),
         None,
     )
 }
@@ -100,12 +100,12 @@ unsafe extern "C" fn read_frequency(snapshot: *const c_void, pstate: u32, out: *
 ///
 /// `snapshot` must name a live StatsSnapshot retained by the registration.
 /// `out` must be aligned and writable for one Readout for this call.
-unsafe extern "C" fn read_g17(snapshot: *const c_void, out: *mut Readout) {
+unsafe extern "C" fn read_qualified(snapshot: *const c_void, out: *mut Readout) {
     // SAFETY: C calls only while registration retains the snapshot Arc, and
     // supplies a writable, aligned output for this call.
     let snapshot = unsafe { &*snapshot.cast::<StatsSnapshot>() };
     let view = snapshot
-        .g17_reader
+        .qualified_reader
         .as_ref()
         .map_or_else(Readout::default, |reader| reader.read());
     // SAFETY: As above; the C output is initialized in one locked read.
@@ -118,10 +118,10 @@ unsafe extern "C" fn read_g17(snapshot: *const c_void, out: *mut Readout) {
 ///
 /// `snapshot` must name a live StatsSnapshot. The caller must join this
 /// callback before releasing the registration's owning Arc.
-unsafe extern "C" fn suspend_g17(snapshot: *const c_void, suspended: bool) {
+unsafe extern "C" fn suspend_qualified(snapshot: *const c_void, suspended: bool) {
     // SAFETY: The notifier is unregistered and joined before the Arc is dropped.
     if let Some(reader) = unsafe { &*snapshot.cast::<StatsSnapshot>() }
-        .g17_reader
+        .qualified_reader
         .as_ref()
     {
         reader.suspend(suspended);

@@ -70,6 +70,7 @@ mod queue;
 mod recovery;
 pub(crate) mod regs;
 mod slots;
+pub(crate) mod stats;
 mod timestamp;
 pub(crate) mod uat;
 mod vm;
@@ -412,6 +413,7 @@ pub(crate) struct Gpu {
     pub(crate) shared: Arc<Shared>,
     /// The adopted UAT, for creating and binding user VMs without the device lock.
     pub(crate) uat: Arc<mmu::Uat>,
+    stats: Arc<crate::stats::StatsSnapshot>,
 }
 
 impl Gpu {
@@ -459,11 +461,24 @@ impl Gpu {
         let (id, max_frequency_khz) = (booted.id, booted.max_frequency_khz);
         // The backend: graphs, slots, pools, engine, recovery and VM registry.
         let firmware = Firmware::start_backend(dev, cfg, booted, &shared)?;
+        let table_a = board::table_a_mhz(&firmware.session.adt);
+        let freq_table =
+            crate::stats_m3::FreqTable::from_slice(&table_a, (board::DVFS_STATES - 1) as u32);
         *shared.state.lock() = Some(firmware);
         // The engine's statistics file (a debugfs failure does not fail the probe).
         if let Err(error) = shared.start_engine() {
             dev_warn!(dev.as_ref(), "G15: no aurora-g15 debugfs ({:?})\n", error);
         }
+        let stats = Arc::new(
+            crate::stats::StatsSnapshot {
+                qualified_reader: Some(crate::stats::QualifiedReader::G15(stats::Reader(
+                    shared.clone(),
+                    freq_table,
+                ))),
+                ..Default::default()
+            },
+            GFP_KERNEL,
+        )?;
         let gpu = Arc::new(
             Gpu {
                 cfg,
@@ -472,6 +487,7 @@ impl Gpu {
                 ids: Default::default(),
                 shared,
                 uat,
+                stats,
             },
             GFP_KERNEL,
         )?;
@@ -592,7 +608,7 @@ impl Firmware {
 
 impl gpu::Gpu for Gpu {
     fn stats_snapshot(&self) -> Option<Arc<crate::stats::StatsSnapshot>> {
-        None
+        Some(self.stats.clone())
     }
 
     fn as_any(&self) -> &dyn Any {

@@ -87,6 +87,7 @@ pub(crate) struct Backend {
     max_frequency_khz: u32,
     soc: &'static crate::m3::m3_soc::Soc,
     profile: super::m3_profile::Profile,
+    stats: Arc<crate::stats::StatsSnapshot>,
     _progress: Pin<KBox<kernel::debugfs::File<ProgressView>>>,
     _activity: Pin<KBox<kernel::debugfs::File<ActivityView>>>,
     _memory: Pin<KBox<kernel::debugfs::File<crate::m3::agx_memory_stats::View>>>,
@@ -163,13 +164,28 @@ impl Backend {
             CompletionView(runtime.completion_wait())), GFP_KERNEL)?;
         let overlap = KBox::pin_init(directory.read_write_file(c"submit_overlap",
             SubmitOverlapView(runtime.completion_wait())), GFP_KERNEL)?;
+        let freq_table = runtime.freq_table();
+        let util_source = if profile == super::m3_profile::Profile::Legacy {
+            crate::stats_m3::UTIL_SOURCE_TAG_04
+        } else {
+            crate::stats_m3::UTIL_SOURCE_UNSUPPORTED
+        };
         let scheduler = Arc::new(drm::sched::Scheduler::new(drm.as_ref().as_ref(), 4, 8, 0, 3000,
             kernel::c_str!("asahi_m3_sched"))?, GFP_KERNEL)?;
         let shared: Shared = Arc::pin_init(new_mutex!(Some(runtime)), GFP_KERNEL)?;
+        let stats = Arc::new(
+            crate::stats::StatsSnapshot {
+                qualified_reader: Some(crate::stats::QualifiedReader::M3(
+                    crate::m3::m3_stats::Reader(shared.clone(), freq_table, util_source),
+                )),
+                ..Default::default()
+            },
+            GFP_KERNEL,
+        )?;
         let completion_work = crate::m3::m3_completion::Completion::new(shared.clone())?;
         // From here on every failure drops the backend, which stops the runtime.
         let backend = Arc::new(Self { shared, health, ids: gpu::SequenceIDs::default(),
-            scheduler, core_mask, max_frequency_khz, soc, profile,
+            scheduler, core_mask, max_frequency_khz, soc, profile, stats,
             _progress: progress, _activity: activity, _memory: memory, _timing: timing,
             _completion: completion, _overlap: overlap }, GFP_KERNEL)?;
         // The completion worker services this runtime from now on; the RTKit callbacks and
@@ -195,7 +211,9 @@ impl Drop for Backend {
 }
 
 impl gpu::Gpu for Backend {
-    fn stats_snapshot(&self) -> Option<Arc<crate::stats::StatsSnapshot>> { None }
+    fn stats_snapshot(&self) -> Option<Arc<crate::stats::StatsSnapshot>> {
+        Some(self.stats.clone())
+    }
     fn as_any(&self) -> &dyn Any { self }
     fn arc_as_any(self: Arc<Self>) -> Arc<dyn Any + Sync + Send> { self as Arc<dyn Any + Sync + Send> }
     fn manager(&self) -> Option<&dyn gpu::GpuManager> { None }

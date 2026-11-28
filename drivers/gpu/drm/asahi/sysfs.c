@@ -122,9 +122,12 @@ static ssize_t agx_qualified_stats_show(struct asahi_stats_attribute *stats, cha
 		n += sysfs_emit_at(buf, n, "busy_ns unsupported\n");
 	n += sysfs_emit_at(buf, n, "power_mw unsupported\n"
 			   "temperature_raw unsupported\n");
-	n += sysfs_emit_at(buf, n, "utilisation_source firmware-statistics-tag-0x13\n"
+	n += sysfs_emit_at(buf, n, "utilisation_source %s\n"
 			   "utilisation_samples %llu\n"
 			   "utilisation_host_ns %llu\n",
+			   snap.util_source == 1 ? "firmware-statistics-tag-0x04" :
+			   snap.util_source == 2 ? "unsupported" :
+			   "firmware-statistics-tag-0x13",
 			   (unsigned long long)snap.util_samples,
 			   (unsigned long long)snap.util_host_ns);
 	return n;

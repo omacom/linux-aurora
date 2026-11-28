@@ -25,7 +25,7 @@ struct asahi_qualified_stats {
 	u64 busy_ns;
 	u64 achieved_frequency_hz;
 	u32 busy_status;
-	u32 pad;
+	u32 util_source;
 };
 
 typedef void (*asahi_stats_read_fn)(const void *snapshot, struct asahi_qualified_stats *out);

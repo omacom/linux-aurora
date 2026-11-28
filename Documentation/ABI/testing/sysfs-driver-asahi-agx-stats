@@ -223,3 +223,30 @@ Description:
 		and shows suspension, queued-record discard and quarantine state.
 		Transport admission does not imply semantic validity: the decoder
 		still checks each percentage, selector and timestamp.
+
+		M3 GPUs (T8122 via the `m3/` backend and T6030/T6031/T6034 via
+		the `g15/` backend) also export `agx_stats`, `gpu_memory` and
+		`gpu_mem_limit_pct` using the qualified schema above:
+
+		- On RTKit 2419 (`m3/` legacy profile and `g15/`), the 256-slot
+		  statistics ring emits 0x40-byte records using tags `0x02`
+		  (PowerOn), `0x03` (PowerOff), `0x04` (Utilization) and `0x0b`
+		  (PowerState). `utilisation_source` is
+		  `firmware-statistics-tag-0x04`. `util_tiler_percent`,
+		  `util_renderer_percent`, `util_device_percent` and cumulative
+		  `busy_ns` are decoded from tag `0x04` (invalidated if any
+		  field exceeds 100%, marked `stale` after 2.5 s without a new
+		  sample while active, and `valid` 0% while power-gated).
+		  `pstate` and `achieved_frequency_hz` come from tag `0x0b` or
+		  `HardwareDataA` against the board's DVFS table (0 Hz while
+		  power-gated). `requested_frequency_hz`, `power_mw` and
+		  `temperature_raw` are `unsupported`.
+		- On the extended M3 profile (`m3/` macOS 26 firmware), `pstate`
+		  and `achieved_frequency_hz` are reported from `PerformanceControl`
+		  and the board's DVFS table, while `utilisation_status`,
+		  `busy_ns` and `utilisation_source` report `unsupported` until
+		  its statistics ring tags are qualified.
+		- Reads acquire the backend's device mutex, drain only the
+		  statistics ring without waking the GPU, and respect
+		  `asahi.stats_export=0`, fault/crash states and system suspend
+		  boundaries.

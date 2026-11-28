@@ -56,6 +56,8 @@ pub(crate) struct Config {
     pub(crate) completed_events: u64,
     pstates: crate::m3::m3_adt_config::PstateWatch,
     thermal: crate::m3::m3_thermal::Governor,
+    freq_table: crate::stats_m3::FreqTable,
+    telemetry: crate::stats_m3::Telemetry,
     request_top: u32,
     request_value: u32,
     request_checked: bool,
@@ -68,6 +70,10 @@ impl Config {
     pub(crate) fn new(dev: &driver::AsahiDrmDevice, uat: &mmu::Uat, firmware: &crate::m3::m3_firmware::Firmware,
         contents: &crate::m3::m3_adt_config::Contents) -> Result<Self> {
         contents.check_for_upload()?;
+        let freq_table = crate::stats_m3::FreqTable::from_slice(
+            &contents.pstates.freqs,
+            contents.pstates.table_max,
+        );
         if let Some(inputs) = &contents.extended {
             if firmware.profile() != super::m3_profile::Profile::Extended { return Err(EINVAL); }
             let owners = ExtendedStorage::new(dev, uat, &inputs.power, &inputs.sram_uv, inputs.bases)?;
@@ -76,6 +82,7 @@ impl Config {
                 profile: firmware.profile(), control_generation: 0, completed_events: 0,
                 io_descriptors: Some(owners.descriptors),
                 pstates: crate::m3::m3_adt_config::PstateWatch::new(contents.pstates), thermal,
+                freq_table, telemetry: crate::stats_m3::Telemetry::new(false),
                 request_top: 8, request_value: 0, request_checked: false, request_check_at: None,
                 request_writes: 0, request_observed: 0 });
         }
@@ -157,6 +164,7 @@ impl Config {
         Ok(Self { objects, profile: firmware.profile(), control_generation: 0, io_descriptors: None,
             _iomaps: iomaps, completed_events: 0,
             pstates: crate::m3::m3_adt_config::PstateWatch::new(contents.pstates), thermal,
+            freq_table, telemetry: crate::stats_m3::Telemetry::new(true),
             request_top:contents.table.0,request_value:0,request_checked:false,
             request_check_at:None,request_writes:0,request_observed:0 })
     }
@@ -475,6 +483,12 @@ impl Config {
                 let w = self.objects[state].read_u32(base+0x20)? as usize;
                 if r >= count || w >= count { return Err(EIO); }
                 let previous_read = r;
+                let now_ns = if state == storage::STATS * 2 && r != w {
+                    agx_memory::publish();
+                    <kernel::time::Monotonic as kernel::time::ClockSource>::ktime_get() as u64
+                } else {
+                    0
+                };
                 while r != w {
                     if (state==storage::TRACE*2 && self.completed_events<4) || state==storage::FIRMWARE_LOG*2 {
                         let mut raw=[0u8;0xd8];
@@ -487,6 +501,12 @@ impl Config {
                             self.objects[FWLOG_PAYLOAD].read(offset,&mut payload)?;
                             dev_info!(dev.as_ref(),"M3 fwlog payload {} {:02x?}\n",channel,payload);
                         }
+                    }
+                    if state == storage::STATS * 2 {
+                        let mut raw = [0u8; crate::stats_m3::STATS_RECORD_BYTES];
+                        self.objects[ring].read(r * size, &mut raw)?;
+                        self.telemetry
+                            .record_bytes(&raw, now_ns, self.freq_table.max_state());
                     }
                     if state == storage::EVENT*2 {
                         let kind = self.objects[ring].read_u32(r*size)?;
@@ -504,10 +524,99 @@ impl Config {
                 }
                 // Publish actual consumption only, as RxChannel::get does.
                 // Empty polls need no write to firmware's shared state line.
-                if r != previous_read { self.objects[state].u32(base, r as u32)?; }
+                if r != previous_read {
+                    agx_memory::publish();
+                    self.objects[state].u32(base, r as u32)?;
+                    agx_memory::publish();
+                }
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn freq_table(&self) -> crate::stats_m3::FreqTable {
+        self.freq_table
+    }
+
+    pub(crate) fn suspend_stats(&mut self, suspended: bool) {
+        self.telemetry.suspend(suspended);
+    }
+
+    /// Drain only the legacy RTKit 2419 statistics ring without touching event,
+    /// trace or firmware-log rings and without waking the GPU.
+    fn drain_stats_only(&mut self, now_ns: u64) -> Result {
+        if self.profile != super::m3_profile::Profile::Legacy {
+            return Ok(());
+        }
+        const COUNT: usize = 256;
+        const SIZE: usize = crate::stats_m3::STATS_RECORD_BYTES;
+        let state = storage::STATS * 2;
+        let ring = state + 1;
+        let mut r = self.objects[state].read_u32(0)? as usize;
+        let w = self.objects[state].read_u32(0x20)? as usize;
+        if r >= COUNT || w >= COUNT {
+            self.telemetry.invalidate();
+            return Err(EIO);
+        }
+        if r == w {
+            return Ok(());
+        }
+        agx_memory::publish();
+        while r != w {
+            let mut raw = [0u8; SIZE];
+            self.objects[ring].read(r * SIZE, &mut raw)?;
+            self.telemetry
+                .record_bytes(&raw, now_ns, self.freq_table.max_state());
+            r = (r + 1) % COUNT;
+        }
+        agx_memory::publish();
+        self.objects[state].u32(0, r as u32)?;
+        agx_memory::publish();
+        Ok(())
+    }
+
+    pub(crate) fn read_qualified_stats(
+        &mut self,
+        device: &crate::m3::m3_device::Device,
+        healthy: bool,
+        now_ns: u64,
+    ) -> crate::g17::telemetry::Readout {
+        if !healthy {
+            self.telemetry.invalidate();
+            return self.telemetry.read(now_ns, None, &self.freq_table);
+        }
+        if self.drain_stats_only(now_ns).is_err() {
+            self.telemetry.invalidate();
+            return self.telemetry.read(now_ns, None, &self.freq_table);
+        }
+        let sgx_pstate = device.pstate_register().ok().map(|r| r & 0xf);
+        let hw = if self.profile == super::m3_profile::Profile::Extended {
+            let perf = &mut self.objects[super::m3_init_26::PERFORMANCE_CONTROL];
+            match (perf.read_u32(0x2c), perf.read_u32(0x38)) {
+                (Ok(actual), Ok(current)) => Some(crate::stats_m3::HwPstateSnapshot {
+                    actual,
+                    current,
+                    freq_mhz_bits: 0,
+                    sgx_pstate,
+                }),
+                _ => sgx_pstate.map(|s| crate::stats_m3::HwPstateSnapshot {
+                    actual: s,
+                    current: s,
+                    freq_mhz_bits: 0,
+                    sgx_pstate: Some(s),
+                }),
+            }
+        } else {
+            crate::m3::m3_adt_config::read_hw_pstate(&mut self.objects[HARDWARE_DATA])
+                .ok()
+                .map(|(actual, current, freq_mhz_bits)| crate::stats_m3::HwPstateSnapshot {
+                    actual,
+                    current,
+                    freq_mhz_bits,
+                    sgx_pstate,
+                })
+        };
+        self.telemetry.read(now_ns, hw, &self.freq_table)
     }
     fn drain_extended(&mut self, dev: &driver::AsahiDrmDevice) -> Result {
         use super::m3_channel_format as format;

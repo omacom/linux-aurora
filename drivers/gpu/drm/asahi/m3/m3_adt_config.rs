@@ -1279,6 +1279,16 @@ pub(crate) struct PstateWatch {
     excused_noted: bool,
 }
 
+/// Read the firmware's live performance-state and frequency words from `HardwareDataA`.
+pub(crate) fn read_hw_pstate(hwdata: &mut Buffer) -> Result<(u32, u32, u32)> {
+    type A = raw::HwDataAG15V14_8_3;
+    Ok((
+        hwdata.read_u32(HWDATA_A + offset_of!(A, actual_pstate))?,
+        hwdata.read_u32(HWDATA_A + offset_of!(A, cur_pstate))?,
+        hwdata.read_u32(HWDATA_A + offset_of!(A, freq_mhz))?,
+    ))
+}
+
 impl PstateWatch {
     pub(crate) fn new(policy: PstatePolicy) -> Self {
         PstateWatch {

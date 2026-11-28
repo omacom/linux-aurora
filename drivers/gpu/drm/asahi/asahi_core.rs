@@ -48,6 +48,7 @@ mod retain;
 mod slotalloc;
 mod stats;
 mod stats_busy;
+mod stats_m3;
 mod stats_raw;
 mod sysfs_exports;
 mod timestamp;

@@ -1127,6 +1127,16 @@ impl Runtime {
     pub(crate) fn health(&self) -> Arc<m3_rtkit::Health> { self.inner.state.health.clone() }
     /// The RTKit callbacks' state, which owns the completion worker.
     pub(crate) fn rtkit_state(&self) -> Arc<m3_rtkit::State> { self.inner.state.clone() }
+    pub(crate) fn freq_table(&self) -> crate::stats_m3::FreqTable { self.inner.config.freq_table() }
+    pub(crate) fn read_qualified_stats(&mut self) -> crate::g17::telemetry::Readout {
+        let inner: &mut Inner = &mut *self.inner;
+        let now_ns = <Monotonic as kernel::time::ClockSource>::ktime_get() as u64;
+        let healthy = !inner.fault_captured && inner.state.healthy();
+        inner.config.read_qualified_stats(&inner.device, healthy, now_ns)
+    }
+    pub(crate) fn suspend_stats(&mut self, suspended: bool) {
+        self.inner.config.suspend_stats(suspended);
+    }
     pub(crate) fn new_vm(&mut self, id: u64, range: core::ops::Range<u64>) -> Result<mmu::Vm> {
         use crate::util::RangeExt;
         let reserved_range=0x70_0000_0000..0x80_0000_0000;

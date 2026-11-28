@@ -39,7 +39,7 @@ static_assert!(pstate::STATS_SLOTS == super::fw::channels::RING_SLOTS);
 
 impl Firmware {
     /// HardwareDataA's state words, as the firmware last wrote them.
-    fn pstate_words(&self) -> Result<pstate::HwWords> {
+    pub(crate) fn pstate_words(&self) -> Result<pstate::HwWords> {
         let hw = self.init.hwdata.as_ref().ok_or(ENODEV)?;
         let word = |offset: usize| hw.r32(hwdata::HWDATA_A + offset);
         Ok(pstate::HwWords {

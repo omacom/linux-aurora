@@ -41,6 +41,47 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use kernel::prelude::*;
 
+/// Backend-owned qualified statistics reader for G17, G15 and M3 GPUs.
+pub(crate) enum QualifiedReader {
+    G17(crate::g17::stats::Reader),
+    #[cfg(CONFIG_DRM_ASAHI_G15)]
+    G15(crate::g15::stats::Reader),
+    #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+    M3(crate::m3::m3_stats::Reader),
+}
+
+impl QualifiedReader {
+    pub(crate) fn read(&self) -> crate::g17::telemetry::Readout {
+        match self {
+            Self::G17(reader) => reader.read(),
+            #[cfg(CONFIG_DRM_ASAHI_G15)]
+            Self::G15(reader) => reader.read(),
+            #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+            Self::M3(reader) => reader.read(),
+        }
+    }
+
+    pub(crate) fn suspend(&self, suspended: bool) {
+        match self {
+            Self::G17(reader) => reader.suspend(suspended),
+            #[cfg(CONFIG_DRM_ASAHI_G15)]
+            Self::G15(reader) => reader.suspend(suspended),
+            #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+            Self::M3(reader) => reader.suspend(suspended),
+        }
+    }
+
+    pub(crate) fn frequency(&self) -> Option<(Option<u64>, u64)> {
+        match self {
+            Self::G17(reader) => reader.frequency(),
+            #[cfg(CONFIG_DRM_ASAHI_G15)]
+            Self::G15(reader) => reader.frequency(),
+            #[cfg(CONFIG_DRM_ASAHI_M3_T8122)]
+            Self::M3(reader) => reader.frequency(),
+        }
+    }
+}
+
 /// Per-device snapshot of AGX firmware stats.
 ///
 /// The manager and bound driver retain Arcs. The driver's Arc outlives the
@@ -66,7 +107,7 @@ pub(crate) struct StatsSnapshot {
     pub(crate) jobs: AtomicU64,
     /// Optional qualified reader. The legacy C layout above remains a prefix;
     /// C accesses this extension only through the registered Rust callbacks.
-    pub(crate) g17_reader: Option<crate::g17::stats::Reader>,
+    pub(crate) qualified_reader: Option<QualifiedReader>,
     /// Frequencies in the same DT order used to build the legacy firmware table.
     pub(crate) frequencies_hz: KVec<u64>,
 }
@@ -76,7 +117,7 @@ const _: () = {
     assert!(core::mem::offset_of!(StatsSnapshot, pstate) == 16);
     assert!(core::mem::offset_of!(StatsSnapshot, busy_ns) == 40);
     assert!(core::mem::offset_of!(StatsSnapshot, jobs) == 48);
-    assert!(core::mem::offset_of!(StatsSnapshot, g17_reader) == 56);
+    assert!(core::mem::offset_of!(StatsSnapshot, qualified_reader) == 56);
 };
 
 impl StatsSnapshot {
@@ -85,9 +126,9 @@ impl StatsSnapshot {
     }
 
     /// The frequency the GPU runs at now, if the firmware reports it, and its highest, in
-    /// Hz, for fdinfo (`drm-curfreq-*`, `drm-maxfreq-*`): V26A428 (A18 Pro and M5) only.
+    /// Hz, for fdinfo (`drm-curfreq-*`, `drm-maxfreq-*`): qualified backends (G17, G15, M3).
     pub(crate) fn engine_frequency(&self) -> Option<(Option<u64>, u64)> {
-        self.g17_reader.as_ref()?.frequency()
+        self.qualified_reader.as_ref()?.frequency()
     }
 
     /// Bump the completed-submission counter (called from the queue
