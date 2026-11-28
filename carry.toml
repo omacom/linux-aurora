@@ -124,3 +124,11 @@ commit = "0c6da3e726fb0ef1b886f39a2c5329a6eadabd06"
 after = "3058cc5cccb9764f7c1a664e1a3b3ae8920d23b9"
 why = "J514S (14-inch M3 Pro): CPU energy model, cooling cells, die sensors, critical CPU thermal zones and measured SoC die keys"
 upstream = "7.3 port of omacom/linux-aurora#481 (7.2 line, open); its hwmon board-table commit is reworked as a t6030-j514s.dts override. Drops when it lands upstream"
+
+[[carry]]
+ours = "omacom/linux-aurora#488"
+commit = "5dc044dee9417f27cf73d33fd4cb1297cf34da14"
+after = "0c6da3e726fb0ef1b886f39a2c5329a6eadabd06"
+deps = ["omacom/linux-aurora#481"]
+why = "J514S (14-inch M3 Pro): airflow, battery gas gauge and GPU temperatures"
+upstream = "7.3 port of omacom/linux-aurora#488 (7.2 line, open), stacked on the #481 port. Drops when it lands upstream"
