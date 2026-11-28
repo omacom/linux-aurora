@@ -101,6 +101,13 @@ commit = "b96b83d10ef7e2e3405fca8517ecd084c059cee0"
 why = "cpufreq: no boost control without turbo mode"
 
 [[carry]]
+pr = "aurora-silicon/linux#3513"
+commit = "95aed99c3cc371de8cceac74cc39e62ce69d9973"
+commits = ["95aed99c3cc371de8cceac74cc39e62ce69d9973"]
+why = "M3 GPU parameters reach the module only as aurora.*: asahi.t8122_pstate_cap, asahi.t8122_start=0 and the other documented asahi.* keys are silently ignored"
+note = "7.3 port of aurora-silicon/linux#3513 (ad7ed17d4ceb) on top of carry/aurora-7.3 (3058cc5cccb9): the same mechanical rename, applied to the 7.3 files, whose context differs from main"
+
+[[carry]]
 ours = "j613-touchid-data-ready"
 commit = "9d34362ed9ea45f3e6cba5c657aee1d52ff63841"
 why = "M3 Air Touch ID data-ready line (no SPI polling, works after resume)"
