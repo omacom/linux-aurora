@@ -117,3 +117,10 @@ ours = "xart-pin-7.3"
 commit = "7d15e097880b49a4f07fa203b6bae0fd5c3a189f"
 why = "M1 Air (J313) Touch ID: the owner can pin the shared xART lockers setup rewrites (7.3 port, Naeem's J313 stage C/D pass)"
 upstream = "port of omacom/linux-aurora#486 and #506 (7.2 line, open); drops when they land upstream"
+
+[[carry]]
+pr = "aurora-silicon/linux#3522"
+commit = "d15ee51da8dda2985a1b4624a678d9f1e0eb65fe"
+commits = ["d15ee51da8dda2985a1b4624a678d9f1e0eb65fe"]
+why = "aurora-sep writes the M3 GPU switches as aurora.* too: its asahi.t8122_start=0 GPU-off entries and the one-shot's knobs are ignored by aurora.ko"
+note = "7.3 port of aurora-silicon/linux#3522 (7cfca48bf5f1) on top of carry/aurora-7.3 (3058cc5cccb9): the same change, applied to the 7.3 copies of install-aurora-sep.sh and its tests, whose context differs from main"
