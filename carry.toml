@@ -117,3 +117,10 @@ ours = "xart-pin-7.3"
 commit = "7d15e097880b49a4f07fa203b6bae0fd5c3a189f"
 why = "M1 Air (J313) Touch ID: the owner can pin the shared xART lockers setup rewrites (7.3 port, Naeem's J313 stage C/D pass)"
 upstream = "port of omacom/linux-aurora#486 and #506 (7.2 line, open); drops when they land upstream"
+
+[[carry]]
+ours = "omacom/linux-aurora#490"
+commit = "1e6b33dbaeebde6128db96cf63140702c4b6c090"
+after = "3058cc5cccb9764f7c1a664e1a3b3ae8920d23b9"
+why = "M3 Pro (T6030): withdraw an unused external display processor's PMP request until a display is attached"
+upstream = "7.3 port of omacom/linux-aurora#490 (7.2 line, open). Drops when it lands upstream"
